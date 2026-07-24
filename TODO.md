@@ -46,12 +46,17 @@ Open — minor / deferred:
 
 ## Packaging
 
-- [ ] Prebuilt binaries (Linux + macOS, amd64/arm64) — may slip to a later release
-- [ ] GitHub-source marketplace edit — paired with prebuilt binaries
+- [x] Prebuilt binaries — `make dist` / `.github/workflows/release.yml` cross-compile all
+      six targets (linux, darwin, windows × amd64, arm64) into checksummed tarballs on a
+      `v*` tag. Verified locally end-to-end: 6/6 tarballs + `SHA256SUMS`, checksums
+      re-verified, and a tarball extracted and run outside the source tree reports its
+      injected version. The assets themselves only exist once the tag is pushed.
+- [ ] GitHub-source marketplace edit — paired with the first published release
 - [x] Auto-update system: always-on status-line update notice + `/c3:update` / `c3-broker update` (checksum-verified atomic swap) + opt-in `auto_update` toggle (broker self-updates and restartlessly bounces). Binaries carry a build version via `-ldflags -X`. Needs one live end-to-end verify once the first GitHub release exists.
 
 ## Ship
 
-- [ ] Final PII audit before push (standing rule)
+- [ ] Final PII audit immediately before the push (standing rule — re-run on the exact tree
+      being pushed, not on an earlier one)
 - [ ] Ship WITH the documented `--dangerously-load-development-channels` flag
 - [ ] Every release bumps `plugin.json` `version` — a fixed version string pins the plugin, and Claude Code's auto-update won't ship it to existing users until it's bumped
