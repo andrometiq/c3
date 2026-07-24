@@ -1329,6 +1329,14 @@ func (a *adapter) registerTools(srv *mcp.Server) {
 					},
 					"required": []string{"text"},
 				},
+				// App-callable so the C3 Inbox panel's reply composer can send in-panel
+				// via the host bridge (a host MUST reject tools/call from an app for
+				// tools whose visibility omits "app" — apps.mdx:399-401). The default is
+				// ["model","app"] (apps.mdx:397), but we set it explicitly to de-risk
+				// hosts that don't apply the default. Outbound reply is broker-forwarded
+				// and NOT subject to the pull-only inbound limitation, so the panel calls
+				// it directly. No resourceUri: reply renders as text, not a panel.
+				Meta: mcp.Meta{"ui": map[string]any{"visibility": []string{"model", "app"}}},
 			},
 			handler: a.toolForward("reply"),
 		},
@@ -1699,6 +1707,13 @@ const inboxHTML = `<!DOCTYPE html>
   .hint { color: var(--c3-muted); font-size: 12px; margin: -2px 0 12px; white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; }
   .note { color: var(--c3-muted); font-size: 12px; margin: -2px 0 12px; font-style: italic; }
   label.auto { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--c3-fg); cursor: pointer; user-select: none; }
+  /* Bounded scroll container: without a cap the panel reports full max-content
+     height and the host grows the iframe unbounded, so the newest message can
+     never come back into view. max-height + overflow-y:auto make #list a
+     self-scrolling chat pane (see reportSize + the stickToBottom tail). */
+  #list { max-height: 46vh; overflow-y: auto; overflow-x: hidden; }
+  .composer { display: flex; align-items: flex-end; gap: 8px; margin-top: 12px; }
+  textarea.replytext { font: inherit; font-size: 13px; line-height: 1.4; padding: 8px 10px; border-radius: var(--c3-radius); border: 1px solid var(--c3-border); background: var(--c3-bg); color: var(--c3-fg); flex: 1 1 auto; min-width: 120px; min-height: 42px; max-height: 30vh; resize: vertical; }
 </style>
 </head>
 <body>
@@ -1714,13 +1729,18 @@ const inboxHTML = `<!DOCTYPE html>
   <div class="bar">
     <button id="refresh" disabled>Refresh</button>
     <button id="hand" hidden>Hand to Claude</button>
-    <label class="auto" id="autolabel" hidden><input type="checkbox" id="auto"> Auto</label>
+    <label class="auto" id="autolabel" hidden><input type="checkbox" id="auto"> Auto-forward</label>
     <button id="popout" hidden>Pop out</button>
     <span class="status" id="status">Connecting to host&hellip;</span>
   </div>
   <div class="note" id="composernote" hidden>Handed messages land in the composer &mdash; press <b>Enter</b> to send. On the Code tab that&rsquo;s a review step; the host drafts, it can&rsquo;t auto-send.</div>
-  <div class="note" id="autonote" hidden>Auto: each new Telegram message is fed into the composer as you clear the last &mdash; works only while this panel is open.</div>
+  <div class="note" id="autonote" hidden>Auto-forward: each new Telegram message is fed into the composer as you clear the last &mdash; works only while this panel is open.</div>
   <div id="list"><div class="empty">Enter a topic name above and click <b>Watch</b> to see its inbox (read-only &mdash; no stealing).</div></div>
+  <div class="composer" id="composer" hidden>
+    <textarea id="replytext" class="replytext" rows="2" placeholder="Reply to Telegram&hellip; (Ctrl/Cmd+Enter to send)" autocomplete="off" spellcheck="false"></textarea>
+    <button id="send">Send</button>
+  </div>
+  <div class="note" id="replynote" hidden></div>
 <script>
 (function () {
   "use strict";
@@ -1746,7 +1766,14 @@ const inboxHTML = `<!DOCTYPE html>
   var autoSkipCycles = 0;   // skip this many auto-poll cycles after a failed hand
   var autoFailStreak = 0;   // consecutive auto-hand failures; trips the breaker
   var AUTO_BACKOFF = 2;     // polls to skip after a failed auto-hand (~10s)
-  var AUTO_FAIL_LIMIT = 5;  // disarm Auto after this many consecutive failures
+  var AUTO_FAIL_LIMIT = 5;  // disarm Auto-forward after this many consecutive failures
+  var MAX_PANEL_H = 680;    // ceiling for the reported iframe height (px); past this
+                            // the list scrolls internally instead of stretching the
+                            // panel (fixes "scroll never comes down")
+  var stickToBottom = true; // chat-tail: auto-scroll #list to the newest row unless
+                            // the user has scrolled up to read
+  var lastMsgId = 0;        // newest observed Telegram message id, for reply_to threading
+  var sending = false;      // a reply-send round-trip is in flight
 
   var elHost = document.getElementById("host");
   var elStatus = document.getElementById("status");
@@ -1764,6 +1791,10 @@ const inboxHTML = `<!DOCTYPE html>
   var elAutoNote = document.getElementById("autonote");
   var elComposerNote = document.getElementById("composernote");
   var elPopout = document.getElementById("popout");
+  var elComposer = document.getElementById("composer");
+  var elReplyText = document.getElementById("replytext");
+  var elSend = document.getElementById("send");
+  var elReplyNote = document.getElementById("replynote");
 
   function send(obj) { parentWin.postMessage(obj, "*"); }
 
@@ -1794,6 +1825,12 @@ const inboxHTML = `<!DOCTYPE html>
     html.style.height = "max-content";
     var h = Math.ceil(html.getBoundingClientRect().height);
     html.style.height = prev;
+    // Cap the reported height so a flexible-height host can't grow the iframe
+    // without bound. #list is its own bounded scroll container (max-height +
+    // overflow-y:auto), so past this ceiling new messages scroll INSIDE the list
+    // instead of stretching the panel — which is what lets the tail return to the
+    // newest message (fixes "scroll never comes down").
+    if (h > MAX_PANEL_H) { h = MAX_PANEL_H; }
     var w = Math.ceil(window.innerWidth);
     if (w === lastW && h === lastH) { return; }
     lastW = w; lastH = h;
@@ -1864,10 +1901,11 @@ const inboxHTML = `<!DOCTYPE html>
     show(elHand, owned);
     show(elAutoLabel, owned);
     show(elComposerNote, owned);
+    show(elComposer, owned);   // reply composer is owner-only (a non-owner can't send)
     show(elAutoNote, owned && elAuto.checked);
     var hl = "";
     if (watchName) {
-      if (owned) { hl = "👀 Watching «" + watchName + "» · you own it — Hand/Auto enabled"; }
+      if (owned) { hl = "👀 Watching «" + watchName + "» · you own it — Hand/Auto-forward enabled"; }
       else if (ownerState === "other") { hl = "👀 Watching «" + watchName + "» · held by " + (holderLabel || "another session") + " — read-only"; }
       else if (ownerState === "none") { hl = "👀 Watching «" + watchName + "» · unclaimed — take over to receive/reply"; }
       else if (ownerState === "not_found") { hl = "«" + watchName + "» doesn't exist yet — take over to create it"; }
@@ -2021,10 +2059,10 @@ const inboxHTML = `<!DOCTYPE html>
         elAuto.checked = false;
         autoFailStreak = 0;
         updateControls();
-        elStatus.textContent = "Auto off — handing kept failing (" + reason + "). Clear the composer and re-arm.";
+        elStatus.textContent = "Auto-forward off — handing kept failing (" + reason + "). Clear the composer and re-arm.";
         return;
       }
-      elStatus.textContent = "Left in queue (" + reason + ") — Auto will retry when the composer clears";
+      elStatus.textContent = "Left in queue (" + reason + ") — Auto-forward will retry when the composer clears";
       return;
     }
     elStatus.textContent = "Not handed (" + reason + "). Press Enter to send any waiting draft, then try again.";
@@ -2074,6 +2112,18 @@ const inboxHTML = `<!DOCTYPE html>
     return out;
   }
 
+  // newestMsgId scans a rendered observe body for the largest "msg N" id (the
+  // trailer renderQueuedInbound emits) so a panel reply can thread reply_to to the
+  // newest inbound message. Best-effort — no id found → 0 (reply goes unthreaded).
+  function newestMsgId(body) {
+    var re = /\bmsg (\d+)\b/g, m, max = 0;
+    while ((m = re.exec(body || "")) !== null) {
+      var n = parseInt(m[1], 10);
+      if (n > max) { max = n; }
+    }
+    return max;
+  }
+
   // renderBody renders the message body (the observe result with the sentinel
   // stripped) into the list. Owner state is applied by loadQueue via updateControls.
   function renderBody(body, isError) {
@@ -2094,6 +2144,10 @@ const inboxHTML = `<!DOCTYPE html>
       box.appendChild(pre);
     }
     elList.appendChild(box);
+    // Chat-tail: after re-rendering, scroll to the newest content — but ONLY when
+    // the user is already at/near the bottom (stickToBottom). If they've scrolled
+    // up to read older messages, leave their position alone.
+    if (stickToBottom) { elList.scrollTop = elList.scrollHeight; }
   }
 
   // loadQueue OBSERVES the watched topic — a READ-ONLY peek (never claims, never
@@ -2125,6 +2179,7 @@ const inboxHTML = `<!DOCTYPE html>
       holderLabel = parsed.holderLabel;
       takeoverTopicId = parsed.topicId;
       takeoverGroup = parsed.group;
+      lastMsgId = newestMsgId(parsed.body);
       renderBody(parsed.body, isErr);
       updateControls();
       elStatus.textContent = "🟢 live · updated " + new Date().toLocaleTimeString();
@@ -2140,11 +2195,60 @@ const inboxHTML = `<!DOCTYPE html>
     return inFlightP;
   }
 
+  // sendReply sends the composer text to the attached topic via the reply tool.
+  // Outbound reply is broker-forwarded (NOT subject to the pull-only inbound limit),
+  // so this is a plain tools/call — no special plumbing. Owner-only (the composer is
+  // hidden unless owned; the guard is belt-and-suspenders). reply_to threads to the
+  // newest observed message id when one is available. On success the textarea is
+  // cleared; on failure the reason is surfaced inline via the reply note.
+  function sendReply() {
+    if (sending || !owned) { return; }
+    var text = (elReplyText.value || "").replace(/^\s+|\s+$/g, "");
+    if (!text) { return; }
+    sending = true;
+    elSend.disabled = true;
+    elReplyText.disabled = true;
+    elReplyNote.hidden = true; elReplyNote.textContent = "";
+    var args = { text: text };
+    if (lastMsgId) { args.reply_to = lastMsgId; }
+    request("tools/call", { name: "reply", arguments: args }).then(function (result) {
+      // A tool result may carry isError (host accepted the RPC but the send
+      // failed) — treat that as not-sent and keep the text so nothing is lost.
+      if (result && result.isError) {
+        elReplyNote.textContent = "Reply failed: " + (extractText(result) || "host error");
+        elReplyNote.hidden = false;
+        return;
+      }
+      elReplyText.value = "";
+      elStatus.textContent = "📨 replied to Telegram · " + new Date().toLocaleTimeString();
+      loadQueue();
+    }).catch(function (err) {
+      elReplyNote.textContent = "Reply failed: " + (err && err.message ? err.message : "error");
+      elReplyNote.hidden = false;
+    }).then(function () {
+      sending = false;
+      elSend.disabled = false;
+      elReplyText.disabled = false;
+      reportSize();
+    });
+  }
+
   elRefresh.addEventListener("click", loadQueue);
   elWatch.addEventListener("click", watchTopic);
   elTopic.addEventListener("keydown", function (e) { if (e.key === "Enter") { watchTopic(); } });
   if (elTakeover) { elTakeover.addEventListener("click", doTakeOver); }
   elHand.addEventListener("click", function () { handToClaude(false); });
+  elSend.addEventListener("click", sendReply);
+  // Ctrl/Cmd+Enter sends (plain Enter inserts a newline in the textarea).
+  elReplyText.addEventListener("keydown", function (e) {
+    if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); sendReply(); }
+  });
+  // Chat-tail flag: only auto-scroll to the newest row when the user is already
+  // at/near the bottom; a 24px slack absorbs sub-pixel rounding.
+  elList.addEventListener("scroll", function () {
+    var dist = elList.scrollHeight - elList.scrollTop - elList.clientHeight;
+    stickToBottom = dist <= 24;
+  });
   elAuto.addEventListener("change", function () {
     updateControls();
     reportSize();

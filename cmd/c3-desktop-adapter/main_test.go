@@ -210,10 +210,11 @@ func TestServerInfoAndTools(t *testing.T) {
 		t.Errorf("open_inbox deprecated _meta[ui/resourceUri] = %v; want %q (host back-compat)", openInbox.Meta["ui/resourceUri"], uiInboxURI)
 	}
 
-	// attach, topics, and observe are marked app-callable (visibility
+	// attach, topics, observe, and reply are marked app-callable (visibility
 	// ["model","app"]) so the C3 Inbox panel can call them through the host bridge
-	// (apps.mdx:399-401). observe is the panel's read-only Watch peek.
-	for _, name := range []string{"attach", "topics", "observe"} {
+	// (apps.mdx:399-401). observe is the panel's read-only Watch peek; reply is the
+	// owner-only composer's Send.
+	for _, name := range []string{"attach", "topics", "observe", "reply"} {
 		var tool *mcp.Tool
 		for _, tl := range listResult.Tools {
 			if tl.Name == name {
@@ -253,7 +254,7 @@ func TestServerInfoAndTools(t *testing.T) {
 	// turn-start call remain; the take-over still carries args.steal/args.create
 	// selected by the observed owner state. All must be present in the served HTML.
 	for _, want := range []string{
-		"ui/message", "Hand to Claude", "Auto",
+		"ui/message", "Hand to Claude", "Auto-forward",
 		"placeholder=\"topic to watch\"", "name: \"observe\"", "name: \"attach\"",
 		"parseObserve", "⟦c3", "watchTopic", "doTakeOver",
 		"Watch", "Take over here", "Create & take over",
@@ -286,6 +287,57 @@ func TestServerInfoAndTools(t *testing.T) {
 	// a persistent streak (the circuit breaker), and a failed hand backs off.
 	if !strings.Contains(rc.Text, "autoFailStreak") || !strings.Contains(rc.Text, "AUTO_FAIL_LIMIT") || !strings.Contains(rc.Text, "autoSkipCycles") {
 		t.Error("inbox HTML hand flow missing the keep-Auto-armed backoff / circuit-breaker (composer-busy must not disarm Auto)")
+	}
+}
+
+// TestInboxComposerScrollAndRename asserts the 2026-07-24 panel rework directly
+// against the inboxHTML const (task #59):
+//
+//	(A) a reply composer — textarea + Send — that calls the `reply` tool, is
+//	    owner-gated the same way Hand/Auto-forward are, and sends on Ctrl/Cmd+Enter.
+//	(B) a bounded, self-scrolling message list plus a capped reportSize and a
+//	    stick-to-bottom chat tail, so the iframe can't grow unbounded and the
+//	    newest message can always come back into view.
+//	(C) the auto-forward rename — the visible "Auto" control/help copy became
+//	    "Auto-forward"; "Hand to Claude" is untouched.
+func TestInboxComposerScrollAndRename(t *testing.T) {
+	// (A) reply composer + Send wiring, owner-gated, direct reply tool call.
+	for _, want := range []string{
+		"id=\"composer\"", "id=\"replytext\"", "id=\"send\"", ">Send<",
+		"function sendReply", "name: \"reply\"",
+		"show(elComposer, owned)",   // owner-only, same gating as Hand/Auto-forward
+		"e.ctrlKey || e.metaKey",    // Ctrl/Cmd+Enter sends
+		"args.reply_to = lastMsgId", // threads reply_to when available
+		"function newestMsgId",      // newest observed message id extraction
+	} {
+		if !strings.Contains(inboxHTML, want) {
+			t.Errorf("inboxHTML missing reply-composer piece %q", want)
+		}
+	}
+
+	// (B) bounded scroll container + capped reportSize + chat-tail.
+	for _, want := range []string{
+		"overflow-y: auto", // #list is a scroll container
+		"max-height: 46vh", // and bounded
+		"MAX_PANEL_H",      // reportSize caps the reported height
+		"if (h > MAX_PANEL_H) { h = MAX_PANEL_H; }", // ...and enforces it
+		"elList.scrollTop = elList.scrollHeight",    // auto-tail to newest
+		"stickToBottom",                             // ...only when the user is at the bottom
+	} {
+		if !strings.Contains(inboxHTML, want) {
+			t.Errorf("inboxHTML missing scroll-fix piece %q", want)
+		}
+	}
+
+	// (C) Auto -> Auto-forward rename; "Hand to Claude" unchanged.
+	if !strings.Contains(inboxHTML, "> Auto-forward</label>") {
+		t.Error("inboxHTML auto-mode label was not renamed to \"Auto-forward\"")
+	}
+	if strings.Contains(inboxHTML, "> Auto</label>") {
+		t.Error("inboxHTML still carries the bare \"Auto\" label (should be \"Auto-forward\")")
+	}
+	if !strings.Contains(inboxHTML, "Hand to Claude") {
+		t.Error("inboxHTML \"Hand to Claude\" button must stay exactly as-is")
 	}
 }
 
