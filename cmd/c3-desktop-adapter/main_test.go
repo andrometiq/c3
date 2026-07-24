@@ -408,15 +408,15 @@ func keys(m map[string]bool) []string {
 	return out
 }
 
-// TestRenderQueuedInbound_CleanShape locks the human-facing render (2026-07-17,
-// Karthi): the message TEXT stands alone at the top, then a blank line, then a
+// TestRenderQueuedInbound_CleanShape locks the human-facing render (2026-07-17):
+// the message TEXT stands alone at the top, then a blank line, then a
 // compact "↳ from … · reply to … · msg N" trailer — NOT the old one-line
 // `from=@u message_id=N text=%q` clutter. Attachment file_id/mime stay present
 // (load-bearing for download_attachment) but on their own line under the trailer.
 func TestRenderQueuedInbound_CleanShape(t *testing.T) {
 	in := c3types.Inbound{
 		MessageID: 5738,
-		Sender:    c3types.Sender{Username: "skarthi"},
+		Sender:    c3types.Sender{Username: "user"},
 		Text:      "hey, check the queue",
 		ReplyTo:   &c3types.ReplyContext{MessageID: 900, User: c3types.Sender{Username: "bot"}},
 	}
@@ -427,7 +427,7 @@ func TestRenderQueuedInbound_CleanShape(t *testing.T) {
 		t.Errorf("text is not alone-at-top with a blank line after; got:\n%s", got)
 	}
 	// Metadata rides in a compact trailer, not inline with the text.
-	for _, want := range []string{"↳ ", "from @skarthi", "reply to @bot", "msg 5738"} {
+	for _, want := range []string{"↳ ", "from @user", "reply to @bot", "msg 5738"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("render missing trailer part %q; got:\n%s", want, got)
 		}
@@ -442,14 +442,14 @@ func TestRenderQueuedInbound_CleanShape(t *testing.T) {
 	// An attachment keeps its full metadata (file_id load-bearing) on its own line.
 	in2 := c3types.Inbound{
 		MessageID:   42,
-		Sender:      c3types.Sender{Username: "skarthi"},
+		Sender:      c3types.Sender{Username: "user"},
 		Attachments: []c3types.Attachment{{Kind: "photo", FileID: "ABC123", MIME: "image/jpeg", Size: 88352}},
 	}
 	got2 := renderQueuedInbound(&in2)
 	if !strings.Contains(got2, "file_id=\"ABC123\"") {
 		t.Errorf("attachment render dropped the load-bearing file_id; got:\n%s", got2)
 	}
-	if !strings.Contains(got2, "from @skarthi") {
+	if !strings.Contains(got2, "from @user") {
 		t.Errorf("attachment-only render missing sender trailer; got:\n%s", got2)
 	}
 }

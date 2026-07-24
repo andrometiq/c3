@@ -51,3 +51,5 @@ mappings.json.bak
 # NEVER commit (would leak keep-out infra/personal paths to the public repo).
 docs/DEPLOY-telegram-proxy.md
 MORNING-REVIEW-*.md
+# Internal session/run log — personal working context, not for the public tree.
+session-logs.md

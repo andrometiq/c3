@@ -51,7 +51,7 @@ type DrainSpec struct {
 	Source RouteKey
 	Target RouteKey
 	// SourceName / TargetName are human display names for the reply and the
-	// provenance banner (e.g. "genie"). Empty falls back to the canonical
+	// provenance banner (e.g. "project"). Empty falls back to the canonical
 	// numeric route key so a nameless route still renders unambiguously.
 	SourceName string
 	TargetName string
@@ -539,7 +539,7 @@ func applyDrainSelector(pending []c3types.Inbound, sel DrainSelector) (captured 
 }
 
 // drainBanner renders the human provenance prefix baked into a moved line's
-// Text (§4 Step B): "↩︎ from «genie» · @karthi · Jul 8 14:22\n". Computed from
+// Text (§4 Step B): "↩︎ from «project» · @user · Jul 8 14:22\n". Computed from
 // the ORIGINAL fields BEFORE the routing rewrite. Baking (vs render-time)
 // covers every consumer — live push, fetch_queue, all adapters — with zero
 // adapter changes, and survives the unattached-transfer-then-later-fetch path;

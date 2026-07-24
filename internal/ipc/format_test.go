@@ -114,7 +114,7 @@ func TestFormatAttached_ProposalParity(t *testing.T) {
 				NeedsConfirmation: true,
 				Proposal: &Proposal{
 					Action: "force_steal", Name: "tg-mux",
-					Holder: &Holder{CLI: "desktop", PID: 2600598, CWD: "/home/karthi"},
+					Holder: &Holder{CLI: "desktop", PID: 2600598, CWD: "/home/user"},
 				},
 			},
 			// A Desktop holder must read as the user's OWN other Desktop chat, with

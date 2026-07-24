@@ -1485,7 +1485,7 @@ func renderFetchedMessages(msgs []c3types.Inbound, remaining int, route string) 
 }
 
 // renderQueuedInbound renders one queued message as a human-facing block for the
-// Desktop chat surface. Karthi (2026-07-17): the old one-line
+// Desktop chat surface. The maintainer (2026-07-17): the old one-line
 // `from=@u message_id=N text=%q reply_to=N` render buried the message in metadata
 // and read as clutter when handed into the composer. New shape: the message TEXT
 // stands alone and prominent, followed by a blank line and a compact
@@ -1996,7 +1996,7 @@ const inboxHTML = `<!DOCTYPE html>
   // hand therefore never drops messages from the durable queue — they stay queued
   // and re-appear on the next peek (C3's whole contract is a no-loss queue).
   //
-  // FAILURE HANDLING (revised 2026-07-17, after Karthi's on-device tests + a
+  // FAILURE HANDLING (revised 2026-07-17, after the maintainer's on-device tests + a
   // Desktop-internals probe): on the Code tab ui/message DRAFTS into the
   // composer rather than sending — an empty composer accepts the draft, a
   // non-empty one (a prior unsent draft) makes the host REJECT the call. The old
