@@ -177,6 +177,29 @@ type RouteWorker struct {
 	// (delivered path + dispatchOutbound + pulseTyping), so it needs no lock.
 	pendingAck []*c3types.Inbound
 
+	// coveredByPush records, per live push, the durable queue lines that push
+	// actually covered — keyed by the pushed message's MessageID, which every
+	// adapter echoes back verbatim as InboundDeliveredMsg.UpdateID. handleConsume
+	// uses it to remove EXACTLY those lines (Queue.RemoveIDs) instead of dropping
+	// Covered lines off the queue HEAD.
+	//
+	// Head-drop is only equivalent to "the lines this push covered" when the queue
+	// was EMPTY before flushInbounds appended them. It is not: the push path right
+	// below computes `pending = n - covered` precisely to tell the agent how much
+	// OLDER backlog is still queued, so a push while n > covered is an expected
+	// state (a session that reattaches, or reconnects after a BOUNCE, with held
+	// lines still pending). In that state the head lines are the OLD undelivered
+	// backlog, so acking the new push destroyed a message nobody ever saw and left
+	// the delivered one queued to be re-delivered. Found and reproduced during the
+	// v0.1.0 release audit, 2026-07-25.
+	//
+	// Worker-goroutine-only (recorded in forwardOrFallback, read+cleared in
+	// handleConsume), so it needs no lock. Bounded by maxCoveredByPush: an entry is
+	// only removed by its ack, and a holder that dies mid-flight never acks.
+	coveredByPush map[int64][]int64
+	// coveredOrder is coveredByPush's insertion order, for bounded FIFO eviction.
+	coveredOrder []int64
+
 	// prevEchoDone chains the per-topic voice-readback echoes so they post in
 	// strict arrival order (spec Phase 3 — the maintainer: "processed one by one"). The
 	// echo is dispatched off the critical path (a retrying send can back off for
@@ -214,6 +237,13 @@ const (
 	// are dropped (logged) — a holder this far behind still gets the newest N
 	// re-queued on death, the recoverable-and-visible tail that matters.
 	maxPendingAck = 32
+
+	// maxCoveredByPush bounds the per-push covered-line records a route retains
+	// while waiting for delivered-acks. An entry is dropped by its own ack; a
+	// holder that dies mid-flight never acks, so the map needs a ceiling. Past it
+	// the oldest record is evicted and that push's ack falls back to the legacy
+	// head-consume (logged), which is no worse than the pre-fix behaviour.
+	maxCoveredByPush = 64
 )
 
 // newRouteWorker starts a worker that runs until ctx is canceled OR no jobs
@@ -516,6 +546,11 @@ func (w *RouteWorker) flushInbounds(ctx context.Context, batch []*c3types.Inboun
 	// so the Claude delivered-ack Consumes exactly the lines this push added — not
 	// len(batch), which would over-consume and eat later backlog (I5).
 	appended := 0
+	// appendedIDs are the MessageIDs of the lines this batch actually persisted,
+	// in append order — the exact set the live push below covers. Threaded to the
+	// push so its delivered-ack can remove THESE lines instead of the queue head
+	// (see RouteWorker.coveredByPush).
+	var appendedIDs []int64
 	if w.broker != nil && w.broker.Queue != nil {
 		qrk := queueRouteKey(w.key)
 		for _, in := range batch {
@@ -562,6 +597,7 @@ func (w *RouteWorker) flushInbounds(ctx context.Context, batch []*c3types.Inboun
 				w.dedup.record(in.MessageID)
 			}
 			appended++
+			appendedIDs = append(appendedIDs, in.MessageID)
 			w.markPersisted(in)
 			w.evictIfOverCap(qrk)
 		}
@@ -594,7 +630,8 @@ func (w *RouteWorker) flushInbounds(ctx context.Context, batch []*c3types.Inboun
 
 	// Covered = lines ACTUALLY appended by this push (I5), not len(batch). When no
 	// queue is wired (unit tests) appended stays 0 and covEffective normalizes to 1.
-	w.forwardOrFallback(ctx, merged, appended)
+	// appendedIDs names those same lines so the ack removes them by identity.
+	w.forwardOrFallbackCovering(ctx, merged, appended, appendedIDs)
 }
 
 // sttFailureText renders the agent-facing STT-failure recovery message. It is
@@ -815,7 +852,19 @@ func mergeBatch(batch []*c3types.Inbound) *c3types.Inbound {
 // holder-conn-bad, write-error, fallback-cooldown-drop, fallback-send-fail,
 // AND fallback-sent (the user's message was bounced back to Telegram with a
 // boilerplate; no CLI processed it).
-func (w *RouteWorker) forwardOrFallback(_ context.Context, in *c3types.Inbound, covered int) {
+// forwardOrFallback is the covered-count-only form, kept for callers that do not
+// know WHICH stored lines the push covered (direct-call paths and tests). Their
+// acks fall back to the legacy head-consume, which is correct whenever the queue
+// held nothing but this push's own lines. Production inbound goes through
+// flushInbounds, which knows the ids and calls forwardOrFallbackCovering.
+func (w *RouteWorker) forwardOrFallback(ctx context.Context, in *c3types.Inbound, covered int) {
+	w.forwardOrFallbackCovering(ctx, in, covered, nil)
+}
+
+// forwardOrFallbackCovering additionally records which durable queue lines this
+// push covered, so the delivered-ack removes exactly those lines rather than
+// dropping `covered` lines off the queue head. See RouteWorker.coveredByPush.
+func (w *RouteWorker) forwardOrFallbackCovering(_ context.Context, in *c3types.Inbound, covered int, coveredIDs []int64) {
 	holder, claimed := w.broker.Routes.Holder(w.key)
 
 	// Liveness sweep: if the holder's PID is dead (e.g. Claude Code killed
@@ -913,6 +962,14 @@ func (w *RouteWorker) forwardOrFallback(_ context.Context, in *c3types.Inbound, 
 				w.key.Channel, w.key.ChatID, TopicKeyStr(w.key), in.MessageID,
 				holder.CLI, holder.PID, err, fallbackSummary(in))
 			return
+		}
+		// Record the exact lines this push covered so the delivered-ack removes
+		// THOSE lines, not the queue head (see RouteWorker.coveredByPush). Only
+		// meaningful for a non-event push that actually covered stored lines and
+		// whose caller knew their ids; otherwise the ack keeps the legacy
+		// head-consume path.
+		if !in.IsEvent() && covered > 0 && len(coveredIDs) > 0 {
+			w.recordCoveredByPush(in.MessageID, coveredIDs)
 		}
 		// Live delivery: the message stays queued until the adapter sends
 		// OpInboundDelivered{ok:true}, which Consumes it (queue dispatch task).
@@ -1250,10 +1307,91 @@ func (w *RouteWorker) handleConsume(_ context.Context, job *ConsumeJob) {
 		return
 	}
 	qrk := queueRouteKey(w.key)
+
+	// Preferred path: remove the lines this push ACTUALLY covered, by identity.
+	// Dropping n lines off the head is only equivalent when the queue held nothing
+	// but this push's own lines; when older undelivered backlog sits ahead of them
+	// the head-drop destroys messages nobody ever saw AND leaves the delivered one
+	// queued for re-delivery. RemoveIDs snapshots to .trash before rewriting and is
+	// idempotent, so an id already evicted/consumed simply matches nothing.
+	if ids := w.takeCoveredByPush(job.MessageID); len(ids) > 0 {
+		// 1-based occurrence ordinals per id. A queue can legitimately hold two
+		// pending lines with one MessageID (an edited message re-dispatches with
+		// the same id), in which case this selects the OLDEST occurrence rather
+		// than strictly this push's line — same id, same message, and still a
+		// targeted removal rather than an unrelated head line.
+		sel := make(map[int64][]int, len(ids))
+		for _, id := range ids {
+			sel[id] = append(sel[id], len(sel[id])+1)
+		}
+		removed, err := w.broker.Queue.RemoveIDs(qrk, sel)
+		if err != nil {
+			log.Printf("queue consume(live-ack, by-id) FAIL chan=%s chat=%d topic=%s msg=%d ids=%d: %v",
+				w.key.Channel, w.key.ChatID, TopicKeyStr(w.key), job.MessageID, len(ids), err)
+			return
+		}
+		if len(removed) != len(ids) {
+			// Not an error: a covered line can legitimately have been evicted by the
+			// retention cap or drained away between push and ack. Logged so a
+			// systematic mismatch is visible rather than silent.
+			log.Printf("queue consume(live-ack, by-id) chan=%s chat=%d topic=%s msg=%d: covered=%d removed=%d (rest already gone)",
+				w.key.Channel, w.key.ChatID, TopicKeyStr(w.key), job.MessageID, len(ids), len(removed))
+		}
+		return
+	}
+
+	// Fallback: no covered-id record for this push (a direct-call/test path, or a
+	// record aged out past maxCoveredByPush). Legacy head-consume — correct
+	// whenever the queue holds only this push's lines.
 	if _, err := w.broker.Queue.Consume(qrk, n); err != nil {
 		log.Printf("queue consume(live-ack) FAIL chan=%s chat=%d topic=%s msg=%d count=%d: %v",
 			w.key.Channel, w.key.ChatID, TopicKeyStr(w.key), job.MessageID, n, err)
 	}
+}
+
+// recordCoveredByPush remembers which durable lines a live push covered, keyed by
+// the pushed MessageID the adapter echoes back on its delivered-ack. Bounded FIFO;
+// worker-goroutine-only, so no lock. See RouteWorker.coveredByPush.
+func (w *RouteWorker) recordCoveredByPush(pushID int64, ids []int64) {
+	if pushID == 0 || len(ids) == 0 {
+		return
+	}
+	if w.coveredByPush == nil {
+		w.coveredByPush = make(map[int64][]int64, maxCoveredByPush)
+	}
+	if _, dup := w.coveredByPush[pushID]; !dup {
+		w.coveredOrder = append(w.coveredOrder, pushID)
+	}
+	// Copy: the caller's slice is flushInbounds' batch-local buffer.
+	w.coveredByPush[pushID] = append([]int64(nil), ids...)
+
+	for len(w.coveredOrder) > maxCoveredByPush {
+		oldest := w.coveredOrder[0]
+		w.coveredOrder = w.coveredOrder[1:]
+		delete(w.coveredByPush, oldest)
+		log.Printf("coveredByPush chan=%s chat=%d topic=%s: over cap, dropped record for push msg=%d (its ack falls back to head-consume)",
+			w.key.Channel, w.key.ChatID, TopicKeyStr(w.key), oldest)
+	}
+}
+
+// takeCoveredByPush returns and clears the covered-line record for a push, or nil
+// when there is none. Worker-goroutine-only.
+func (w *RouteWorker) takeCoveredByPush(pushID int64) []int64 {
+	if w.coveredByPush == nil {
+		return nil
+	}
+	ids, ok := w.coveredByPush[pushID]
+	if !ok {
+		return nil
+	}
+	delete(w.coveredByPush, pushID)
+	for i, id := range w.coveredOrder {
+		if id == pushID {
+			w.coveredOrder = append(w.coveredOrder[:i], w.coveredOrder[i+1:]...)
+			break
+		}
+	}
+	return ids
 }
 
 // handleRefreshText rewrites, in place, the stored Text of the still-queued line
@@ -1458,6 +1596,11 @@ func (w *RouteWorker) flushPendingAck(reason string) {
 	}
 	lost := w.pendingAck
 	w.pendingAck = nil
+	// The holder is confirmed dead, so no outstanding push will ever be acked.
+	// Drop their covered-line records rather than leave them to age out: their
+	// lines were never consumed and remain correctly queued.
+	w.coveredByPush = nil
+	w.coveredOrder = nil
 	requeued := 0
 	if w.broker != nil && w.broker.Queue != nil {
 		for _, in := range lost {
