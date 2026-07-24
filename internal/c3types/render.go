@@ -77,8 +77,45 @@ func InboundsHaveAttachment(msgs []Inbound) bool {
 // whose verbose attachment block was the token noise the maintainer flagged
 // (msg 6069). It stays a shared c3types function so every adapter's live-forward
 // and fetch_queue readback render identically and can't drift.
+// metaPrefixes are the tokens the trailing metadata line can begin with. A body
+// line that starts with one of them is indistinguishable from that metadata line
+// once the body is rendered bare, which is what makes attribution forgeable.
+var metaPrefixes = []string{"from=", "message_id=", "reply_to", "attachment=", "event="}
+
+// bodyCouldForgeMeta reports whether any line of a message body could be read as
+// the metadata line RenderQueuedInbound appends.
+//
+// The compact form (approved 2026-07-24) puts the body bare on its own lines and
+// the metadata last. The form it replaced rendered the body through %q, which
+// escaped newlines and therefore made this impossible. Without that escaping a
+// sender can embed a line like "from=@operator message_id=999" in their own
+// message and the readback presents it as a SECOND message from someone else —
+// attribution forgery into the agent's context, from any member of an allowlisted
+// group. (v0.1.0 release audit, 2026-07-25.)
+func bodyCouldForgeMeta(text string) bool {
+	if !strings.ContainsAny(text, "\r\n") {
+		return false // a single-line body can never produce a second line
+	}
+	for _, line := range strings.FieldsFunc(text, func(r rune) bool { return r == '\n' || r == '\r' }) {
+		s := strings.TrimSpace(line)
+		for _, p := range metaPrefixes {
+			if strings.HasPrefix(s, p) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func RenderQueuedInbound(in *Inbound) string {
 	text := in.Text
+	// Only a body that could actually forge the metadata line is escaped, so the
+	// approved bare-text form is preserved for every ordinary message. Escaping
+	// collapses it to one %q-quoted line, exactly the unambiguous representation
+	// this format replaced.
+	if bodyCouldForgeMeta(text) {
+		text = fmt.Sprintf("%q", text)
+	}
 	if text == "" {
 		switch {
 		case len(in.Attachments) > 0:
