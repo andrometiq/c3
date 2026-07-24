@@ -255,7 +255,7 @@ c3-broker install-codex-shim
 
 This is a Go subcommand that idempotently:
 
-1. Symlinks `~/.local/bin/codex` to `$GOBIN/codex`.
+1. Symlinks `~/.local/bin/codex` to the C3 `codex` launcher — **skipped on the prebuilt install**, where the launcher already *is* `~/.local/bin/codex` and there is nothing to shim.
 2. Walks `~/.nvm/versions/node/*/bin/` and creates the same symlink in each version's bin dir. **This is required, not optional** — long-running shells hash `codex` to the NVM path; without these symlinks, your existing terminals bypass the C3 bridge entirely.
 3. Verifies `~/.config/c3/mappings.json` exists (it does if you ran `/c3:setup`).
 4. Verifies the broker is reachable.

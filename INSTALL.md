@@ -401,7 +401,13 @@ This symlinks the C3 `codex` launcher into `~/.local/bin/codex` and into
 every `~/.nvm/versions/node/*/bin/` so existing shells (which hash `codex`
 to the NVM path) bypass NVM in favor of the launcher. It's idempotent;
 re-running is safe. Tell the user to open a fresh terminal and verify with
-`readlink $(which codex)` — it should point at `$GOBIN/codex`.
+`readlink $(which codex)` — it should point at the C3 `codex` launcher.
+
+On the **prebuilt** install the launcher already lives at
+`~/.local/bin/codex`, so that entry is skipped (there is nothing to shim) and
+only the NVM directories get symlinks. If a target is a regular file rather
+than a symlink — i.e. it may be a real `codex` binary — the command refuses
+rather than delete it; pass `--force` to replace it deliberately.
 
 If they don't have Codex installed yet, skip — they can run this later
 after `npm install -g @openai/codex` (or however they get Codex).

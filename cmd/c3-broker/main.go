@@ -91,7 +91,7 @@ func main() {
 			}
 			return
 		case "install-codex-shim":
-			if err := runInstallCodexShim(); err != nil {
+			if err := runInstallCodexShim(os.Args[2:]); err != nil {
 				fmt.Fprintf(os.Stderr, "c3-broker install-codex-shim: %v\n", err)
 				os.Exit(exitConfig)
 			}
