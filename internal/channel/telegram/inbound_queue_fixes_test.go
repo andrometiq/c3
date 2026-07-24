@@ -192,6 +192,64 @@ func TestDedupForget_AppendFailureReDispatchesAndHoldsOffset(t *testing.T) {
 	}
 }
 
+// Convergence guard for the Windows "spam loop" class (Bug B): a persist FAILURE
+// holds the offset and re-dispatches, and then the retry's persist SUCCESS
+// advances the committed offset OVER that update — so the loss-free retry is
+// BOUNDED, not a permanent live-lock. On Windows a directory-fsync that always
+// failed made queue Append() never succeed, so the offset never advanced and
+// Telegram redelivered the same updates ~434x each. That syscall trigger is
+// Windows-only (and now guarded), but this locks the platform-agnostic
+// invariant it violated: one successful persist terminates the retry loop.
+func TestPersistFailThenSuccess_ConvergesAndAdvancesOffset(t *testing.T) {
+	c := &Channel{}
+	c.offTrk = newOffsetTracker(600)
+	c.dedup = newUpdateDedup(2000, 5*time.Minute)
+	c.msgToUpdate = map[int64][]int64{}
+
+	// First dispatch of update 601 (message_id 42): poll loop records + registers
+	// + stages the seam.
+	u := gotgbot.Update{UpdateId: 601, Message: textMsg("hi", 42)}
+	if c.dedup.SeenOrAdd(&u) {
+		t.Fatal("first SeenOrAdd of a fresh update must be false (recorded, dispatched)")
+	}
+	c.offTrk.Register(601)
+	c.mu.Lock()
+	c.seamStageLocked(u.Message.MessageId, 601)
+	c.mu.Unlock()
+
+	// Append FAILS → offset HELD at 600 (loss-free), dedup evicted, seam popped.
+	c.onPersistFailed(&c3types.Inbound{MessageID: u.Message.MessageId})
+	if got := c.offTrk.Committed(); got != 600 {
+		t.Fatalf("after Append failure committed=%d, want 600 (held, loss-free)", got)
+	}
+
+	// Telegram redelivers the SAME update: not dedup-skipped (genuine
+	// re-dispatch), and the poll loop re-registers + re-stages it.
+	u2 := gotgbot.Update{UpdateId: 601, Message: textMsg("hi", 42)}
+	if c.dedup.SeenOrAdd(&u2) {
+		t.Fatal("redelivery of the same update must re-dispatch (dedup evicted), not skip")
+	}
+	c.offTrk.Register(601)
+	c.mu.Lock()
+	c.seamStageLocked(u2.Message.MessageId, 601)
+	c.mu.Unlock()
+
+	// This time Append SUCCEEDS → onPersisted MarkDone's 601 and the committed
+	// offset advances OVER it. The retry loop terminates here; without a
+	// terminating success this is the Windows spam loop.
+	c.onPersisted(&c3types.Inbound{MessageID: u2.Message.MessageId})
+	if got := c.offTrk.Committed(); got != 601 {
+		t.Fatalf("after recovery committed=%d, want 601 (converged — offset advanced)", got)
+	}
+	// Seam fully drained after the success — no leak.
+	c.mu.Lock()
+	_, leaked := c.msgToUpdate[u2.Message.MessageId]
+	c.mu.Unlock()
+	if leaked {
+		t.Fatal("seam entry must be drained after onPersisted")
+	}
+}
+
 // Item 1 (dedup unit): forget(update_id) evicts exactly that update's entry and
 // leaves others intact.
 func TestUpdateDedup_ForgetEvictsOnlyThatUpdate(t *testing.T) {
