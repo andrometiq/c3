@@ -60,7 +60,7 @@ The agent runs the playbook end-to-end. You'll be asked for a Telegram bot token
 
 See [`INSTALL.md`](INSTALL.md) for the agent script and [`docs/INSTALL.md`](docs/INSTALL.md) for the human-readable walkthrough.
 
-> **Platform support:** Linux is the primary, fully-supported platform. Windows (Claude Desktop + Claude Code) is **beta** — it works and the known Windows bugs are fixed, but inbound is poll-only there (`/c3:fetch-queue`) and it builds from source (no prebuilt Windows release yet).
+> **Platform support:** Linux is the primary, fully-supported platform, and macOS is supported with prebuilt binaries. Windows (Claude Desktop + Claude Code) is **beta** — it works and the known Windows bugs are fixed, and prebuilt Windows tarballs are published, but inbound is poll-only there (`/c3:fetch-queue`) and the Windows binaries are cross-compiled without a clean-room CI pass.
 
 ### The `--dangerously-load-development-channels` flag
 

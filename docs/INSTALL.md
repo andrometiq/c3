@@ -23,9 +23,9 @@ Codex is an optional add-on to any of these (Step 5).
 **Platform support.** **Linux is primary and fully supported.** **macOS** is
 supported (prebuilt binaries; `launchd` instead of systemd). **Windows (Claude
 Desktop + the bundled Claude Code) is beta for v0.1.0** — it works and the known
-Windows bugs are fixed, but inbound is poll-only (`/c3:fetch-queue`), it builds
-from source (no prebuilt Windows release yet, so you need Go), and it hasn't had
-a clean-room CI pass. Windows-specific deltas are collected in the **Windows
+Windows bugs are fixed, and the release does publish prebuilt Windows tarballs,
+but inbound is poll-only (`/c3:fetch-queue`) and the Windows binaries are
+cross-compiled without a clean-room CI pass. Windows-specific deltas are collected in the **Windows
 (beta)** section below; skip the Linux-only steps (systemd, shell-rc `PATH`)
 there.
 
@@ -104,21 +104,31 @@ verify it, and install the binaries into a directory on your `PATH`:
 VERSION=v0.1.0
 OS=$(uname -s | tr '[:upper:]' '[:lower:]')
 ARCH=$(uname -m); [ "$ARCH" = x86_64 ] && ARCH=amd64; [ "$ARCH" = aarch64 ] && ARCH=arm64
+pkg="c3_${VERSION}_${OS}_${ARCH}"
 base="https://github.com/karthikeyan5/c3/releases/download/$VERSION"
-curl -fsSL -O "$base/c3_${VERSION}_${OS}_${ARCH}.tar.gz"
+curl -fsSL -O "$base/${pkg}.tar.gz"
 curl -fsSL -O "$base/SHA256SUMS"
-sha256sum --ignore-missing -c SHA256SUMS      # macOS: shasum -a 256 -c SHA256SUMS
+
+# Verify ONLY the tarball you downloaded. SHA256SUMS lists every platform, so
+# checking the whole file would report the five you don't have as failures.
+grep " ${pkg}.tar.gz$" SHA256SUMS > SHA256SUMS.this
+sha256sum -c SHA256SUMS.this || shasum -a 256 -c SHA256SUMS.this
+
+# The tarball unpacks into a ${pkg}/ directory — install the binaries out of it.
+tar xzf "${pkg}.tar.gz"
 mkdir -p ~/.local/bin
-tar xzf "c3_${VERSION}_${OS}_${ARCH}.tar.gz" -C ~/.local/bin \
-  c3-broker c3-claude-adapter c3-codex-adapter c3-grok-adapter c3-agy-adapter c3-desktop-adapter claude-shim codex migrate-legacy
+for b in c3-broker c3-claude-adapter c3-codex-adapter c3-grok-adapter \
+         c3-agy-adapter c3-desktop-adapter claude-shim codex migrate-legacy; do
+  install -m 0755 "${pkg}/${b}" ~/.local/bin/
+done
 ```
 
-Confirm the install dir (`~/.local/bin` here) is on your `PATH`. (**Windows:**
-there is no prebuilt tarball yet — build from source below; PATH is set with
-`setx`, not a shell rc. See the **Windows (beta)** section.)
+Confirm the install dir (`~/.local/bin` here) is on your `PATH`. (**Windows:** a
+prebuilt tarball *is* published — its binaries carry the `.exe` suffix — but
+PATH is set with `setx`, not a shell rc. See the **Windows (beta)** section.)
 
-**From source (contributors, or a platform without a prebuilt tarball — always
-on Windows today).** With the repo cloned and added as a local marketplace
+**From source (contributors, or a platform without a prebuilt tarball).**
+With the repo cloned and added as a local marketplace
 (Step 1's contributor path), run `/c3:build` inside Claude Code — a slash
 command that runs `go install ./cmd/...` and drops the nine binaries in `$GOBIN`
 (default `~/go/bin`). Needs Go ≥1.25. Confirm `$GOBIN` (or `$(go env GOPATH)/bin`)
@@ -300,9 +310,11 @@ that polls on a timer. Full walkthrough, the MSIX config trap, and caveats:
 Windows is **beta for v0.1.0**. The known Windows bugs are fixed, but apply
 these deltas instead of the Linux-only steps above:
 
-- **No prebuilt release yet → build from source.** Install **Go ≥1.25** (the
-  portable zip needs no admin), clone the repo into a durable dir, and
-  `go install ./cmd/...`. Binaries are `.exe`.
+- **Binaries — prebuilt tarball or source.** The release publishes
+  `c3_<version>_windows_amd64.tar.gz` and `..._windows_arm64.tar.gz`, whose
+  binaries carry the `.exe` suffix; they are cross-compiled and have not had a
+  clean-room CI pass. To build instead, install **Go ≥1.25** (the portable zip
+  needs no admin), clone the repo into a durable dir, and `go install ./cmd/...`.
 - **PATH via `setx`, not a shell rc.** `setx PATH "%PATH%;%USERPROFILE%\.local\bin"`
   (or System Properties → Environment Variables), then **open a new terminal** —
   an already-open shell keeps the stale PATH.
@@ -356,7 +368,19 @@ find ~/.nvm/versions/node -name codex -type l -delete 2>/dev/null   # remove NVM
 rm -f "${XDG_RUNTIME_DIR:-/tmp}/c3.sock" /tmp/c3-$UID.sock "${XDG_RUNTIME_DIR:-/run/user/$UID}/c3-broker.pid" "${XDG_RUNTIME_DIR:-/run/user/$UID}/c3-broker.caps"   # broker scratch files
 rm -f "/tmp/c3-codex-app-server-$UID.json"       # codex launcher scratch (per-uid path)
 rm -rf ~/.config/c3                              # CONFIG; remove only if you don't want to keep mappings/topics
-rm -f $(go env GOBIN)/c3-* $(go env GOBIN)/codex $(go env GOBIN)/migrate-legacy 2>/dev/null   # binaries
+# binaries — remove them from wherever you installed them. The prebuilt path
+# (Step 2) puts them in ~/.local/bin; `go install` puts them in $GOBIN, which is
+# UNSET by default and then falls back to $(go env GOPATH)/bin.
+bindir="$(go env GOBIN)"; [ -n "$bindir" ] || bindir="$(go env GOPATH)/bin"
+for d in "$HOME/.local/bin" "$bindir"; do
+  [ -d "$d" ] || continue
+  rm -f "$d"/c3-broker "$d"/c3-claude-adapter "$d"/c3-codex-adapter \
+        "$d"/c3-grok-adapter "$d"/c3-agy-adapter "$d"/c3-desktop-adapter \
+        "$d"/claude-shim "$d"/migrate-legacy
+  # "$d"/codex is C3's launcher shim shadowing your real codex — the line above
+  # already restores it for ~/.local/bin; delete it here only if you installed
+  # the shim into $bindir as well.
+done
 ```
 
 Optionally also remove the source clone (`rm -rf ~/.local/share/c3` or

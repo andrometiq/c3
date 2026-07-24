@@ -59,8 +59,9 @@ C3 runs under three host environments. **Ask the user which one they want**
 C3 ships nine binaries: `c3-broker`, `c3-claude-adapter`, `c3-codex-adapter`,
 `c3-grok-adapter`, `c3-agy-adapter`, `c3-desktop-adapter`, `claude-shim`,
 `codex`, `migrate-legacy`. Prefer the prebuilt release tarball; build from
-source only if there's no tarball for the user's platform (**Windows has no
-tarball yet — go straight to source; see §7 for the Windows specifics**).
+source only if there's no tarball for the user's platform. (**Windows:** a
+prebuilt tarball *is* published, but Windows is **beta** — see §7 for the
+Windows-specific steps and caveats.)
 
 **Prebuilt (default — Linux / macOS).** Download, verify, and install into
 `~/.local/bin`:
@@ -69,19 +70,29 @@ tarball yet — go straight to source; see §7 for the Windows specifics**).
 VERSION=v0.1.0
 OS=$(uname -s | tr '[:upper:]' '[:lower:]')
 ARCH=$(uname -m); [ "$ARCH" = x86_64 ] && ARCH=amd64; [ "$ARCH" = aarch64 ] && ARCH=arm64
+pkg="c3_${VERSION}_${OS}_${ARCH}"
 base="https://github.com/karthikeyan5/c3/releases/download/$VERSION"
-curl -fsSL -O "$base/c3_${VERSION}_${OS}_${ARCH}.tar.gz"
+curl -fsSL -O "$base/${pkg}.tar.gz"
 curl -fsSL -O "$base/SHA256SUMS"
-{ sha256sum --ignore-missing -c SHA256SUMS || shasum -a 256 -c SHA256SUMS; }
+
+# Verify ONLY the tarball you downloaded. SHA256SUMS lists every platform, so
+# checking the whole file would report the five you don't have as failures.
+grep " ${pkg}.tar.gz$" SHA256SUMS > SHA256SUMS.this
+sha256sum -c SHA256SUMS.this || shasum -a 256 -c SHA256SUMS.this
+
+# The tarball unpacks into a ${pkg}/ directory — install the binaries out of it.
+tar xzf "${pkg}.tar.gz"
 mkdir -p ~/.local/bin
-tar xzf "c3_${VERSION}_${OS}_${ARCH}.tar.gz" -C ~/.local/bin \
-  c3-broker c3-claude-adapter c3-codex-adapter c3-grok-adapter c3-agy-adapter c3-desktop-adapter claude-shim codex migrate-legacy
+for b in c3-broker c3-claude-adapter c3-codex-adapter c3-grok-adapter \
+         c3-agy-adapter c3-desktop-adapter claude-shim codex migrate-legacy; do
+  install -m 0755 "${pkg}/${b}" ~/.local/bin/
+done
 ```
 
-If the download 404s (no tarball for this platform — e.g. Windows), fall
-through to the from-source path.
+If the download 404s (no tarball published for this platform), fall through to
+the from-source path.
 
-**From source (fallback — the only path on Windows today).** Requires Go ≥1.25
+**From source (fallback, and the path contributors use).** Requires Go ≥1.25
 — run `go version`; if it's missing or older than 1.25, tell the user to
 install/upgrade from https://go.dev/dl/ (on Windows the portable zip needs no
 admin) and stop. Clone the repo into a **durable** directory (this same clone
@@ -442,11 +453,16 @@ Details in `docs/systemd/README.md`.
 
 Apply these instead of the Linux-only steps referenced above:
 
-- **§1 binaries — build from source.** There is no prebuilt Windows release
-  yet, so the tarball 404s: install **Go ≥1.25** (the portable zip needs no
-  admin), then `git clone https://github.com/karthikeyan5/c3` (or `git pull` if
-  you already have it) into a durable dir and `go install ./cmd/...`. The binaries are `.exe` (the verify loop and
-  every `c3-broker …` command work the same under Git Bash / PowerShell).
+- **§1 binaries — prebuilt tarball or source.** The release publishes
+  `c3_<version>_windows_amd64.tar.gz` and `..._windows_arm64.tar.gz`; the
+  binaries inside carry the `.exe` suffix. Extract it and put the nine `.exe`
+  files on your PATH (the §1 verify loop and every `c3-broker …` command work
+  the same under Git Bash / PowerShell). These Windows binaries are
+  cross-compiled and have **not** had a clean-room CI pass — that is what
+  "beta" means here. To build them yourself instead, install **Go ≥1.25** (the
+  portable zip needs no admin), then `git clone https://github.com/karthikeyan5/c3`
+  (or `git pull` if you already have it) into a durable dir and
+  `go install ./cmd/...`.
 - **§1 PATH — use `setx`, not a shell rc.** Add the install dir to PATH via
   `setx PATH "%PATH%;%USERPROFILE%\.local\bin"` (or System Properties →
   Environment Variables), then **open a NEW terminal** — an already-open shell
