@@ -25,7 +25,11 @@ What's next for C3 after v0.1. Everything here is future or unbuilt; shipped wor
 
 ## More channels
 
-- Web-chat and voice-mode channels via the `Channel` interface.
+- Web-chat and voice-mode channels via the `Channel` interface. See
+  [On-the-go / voice-channel design capture](future/on-the-go-voice-channel.md)
+  for the full on-the-go voice vision — web + native-app surfaces, magic-link /
+  Telegram-login auth, agent-aware TTS (C3-owned, the STT plugin in reverse) vs.
+  a live bidirectional "narrator" mode, and VoIP / phone-call reach.
 - Other transports the interface already admits (Slack, Matrix, …).
 
 ## Telegram completeness

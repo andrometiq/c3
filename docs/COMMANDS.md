@@ -25,6 +25,7 @@ support.
 | `sessions`      | `c3-broker sessions` (CLI)        | pure shell    | List every live Claude Code / Codex session the broker tracks — CWD, attached topic, and a "you are here" marker for the calling terminal. |
 | `attach`        | `attach(expr=…)` (MCP tool)       | LLM dispatch  | Attach this session's adapter to a Telegram topic. Broker parses `expr` and either claims an explicit target, resumes the session's own topic, or proposes a picker/confirmation. |
 | `detach`        | `detach()` (MCP tool)             | LLM dispatch  | Release the session's current claim (sends `OpRelease`). Claude + Codex + Grok. |
+| `fetch-queue`   | `fetch_queue(limit=…)` (MCP tool) | LLM dispatch  | Drain held inbound for this session's topic. Bare = all; optional count fetches the oldest N. Claude Code slash wrapper (`/c3:fetch-queue`) over the `fetch_queue` tool — the everyday "I just resumed, show my backlog" verb; Claude Desktop has its own `/fetch-queue`. |
 | `release`       | `c3-broker release <cwd>` (CLI)   | pure shell    | **Stubbed in v1** — intended to drop a route claim by cwd without restarting the broker; returns 'not yet implemented' today; workaround is `/exit` the holding session. |
 
 ## MCP tools (agent-invoked)
