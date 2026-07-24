@@ -491,7 +491,14 @@ func TestDrain_NoDedupSeed_OrganicSameIDStillDelivers(t *testing.T) {
 	b := brokerWithChannel(t, mf, fc)
 	defer b.Shutdown()
 
-	drainSeed(t, b, drainSrc(), drainSrcMsg(7, "moved"))
+	// Fresh timestamp so the drained line isn't age-evicted by the 14-day cap.
+	// drainSrcMsg hardcodes 2026-07-08 for banner determinism (other tests rely on
+	// that), but this test asserts pending COUNT and appends an organic same-id
+	// inbound that triggers evictIfOverCap — a stale drained ts would be silently
+	// age-dropped, masking INV-8 and making the test a date-triggered time-bomb.
+	moved := drainSrcMsg(7, "moved")
+	moved.Timestamp = time.Now()
+	drainSeed(t, b, drainSrc(), moved)
 	if _, err := b.Drain(drainSpec()); err != nil {
 		t.Fatalf("Drain: %v", err)
 	}
