@@ -48,12 +48,32 @@ const (
 // restarted via /c3:pair.
 const PairTTL = 10 * time.Minute
 
+// pairMaxWrongCodes is how many wrong 4-digit candidates a single pairing window
+// tolerates before it closes and a fresh /c3:pair is required.
+//
+// Without a limit the 10^4 code space is exhaustible inside one 10-minute window:
+// wrong guesses were silently dropped and left the window live, so an attacker
+// could spray the whole space for free — and `/status` answers only allowlisted
+// senders, giving a clean success oracle. The prize is not read access: a paired
+// user is written into allowlist.Users, which is exactly the operator set that may
+// tap Allow on a relayed tool-use prompt and make the coding agent execute tools on
+// the operator's machine.
+//
+// This is the same defence the setup-side pairing poller already had
+// (cmd/c3-broker/setup.go), which was never ported to the broker's own gate.
+// Ten attempts leaves a 0.1% chance per window instead of a certainty.
+// (v0.1.0 release audit, 2026-07-25.)
+const pairMaxWrongCodes = 10
+
 // PairWindow describes one active pairing session.
 type PairWindow struct {
 	Target   PairTargetType
 	ChatID   int64 // populated for PairTargetGroup; zero for DM
 	Code     string
 	ExpireAt time.Time
+	// Wrong counts rejected 4-digit candidates seen by this window. At
+	// pairMaxWrongCodes the window is closed — see pairMaxWrongCodes.
+	Wrong int
 }
 
 // IsActive reports whether the window has not yet expired.
@@ -175,6 +195,41 @@ func (p *pairingState) ClearGroup(chatID int64) {
 	delete(p.groups, chatID)
 }
 
+// RecordWrongDM counts one wrong code against the DM window and reports whether
+// that exhausted it. An exhausted window is closed here, so the caller only has
+// to decide what to log.
+func (p *pairingState) RecordWrongDM() (attempts int, exhausted bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.dm == nil || !p.dm.IsActive(p.now()) {
+		return 0, false
+	}
+	p.dm.Wrong++
+	attempts = p.dm.Wrong
+	if attempts >= pairMaxWrongCodes {
+		p.dm = nil
+		return attempts, true
+	}
+	return attempts, false
+}
+
+// RecordWrongGroup is RecordWrongDM for one group's window.
+func (p *pairingState) RecordWrongGroup(chatID int64) (attempts int, exhausted bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	w, ok := p.groups[chatID]
+	if !ok || !w.IsActive(p.now()) {
+		return 0, false
+	}
+	w.Wrong++
+	attempts = w.Wrong
+	if attempts >= pairMaxWrongCodes {
+		delete(p.groups, chatID)
+		return attempts, true
+	}
+	return attempts, false
+}
+
 // AnyActive reports whether any pairing window is currently live.
 // Used by tests / diagnostics; not on the hot path.
 func (p *pairingState) AnyActive() bool {
@@ -285,7 +340,12 @@ func (b *Broker) Gate(in *c3types.Inbound) GateDecision {
 			return GateDrop
 		}
 		if body != w.Code {
-			// Wrong code during active pairing → silent drop, window stays.
+			// Wrong code during active pairing → silent drop to the sender, but the
+			// window is NOT free to guess at: count the attempt and close it once
+			// exhausted (see pairMaxWrongCodes).
+			if n, exhausted := b.Pairing.RecordWrongDM(); exhausted {
+				log.Printf("pairing: DM window CLOSED after %d wrong codes — possible brute-force; run /c3:pair again to re-arm", n)
+			}
 			return GateDrop
 		}
 		// Match. Add user to allowlist, persist, clear window.
@@ -299,6 +359,9 @@ func (b *Broker) Gate(in *c3types.Inbound) GateDecision {
 		return GateDrop
 	}
 	if body != w.Code {
+		if n, exhausted := b.Pairing.RecordWrongGroup(in.ChatID); exhausted {
+			log.Printf("pairing: group %d window CLOSED after %d wrong codes — possible brute-force; run /c3:pair again to re-arm", in.ChatID, n)
+		}
 		return GateDrop
 	}
 	b.acceptGroupPair(in.ChatID, w.Code)

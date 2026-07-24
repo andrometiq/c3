@@ -208,9 +208,11 @@ func TestGate_WrongCodeDuringPairing_DropsAndKeepsWindow(t *testing.T) {
 	if got := b.Gate(in); got != GateDrop {
 		t.Errorf("wrong code: got %v, want GateDrop", got)
 	}
-	// Window must still be active — wrong codes don't burn the window.
+	// A single wrong code must not burn the window — the operator mistyping once
+	// should not force a fresh /c3:pair. (Sustained guessing does close it; see
+	// TestGate_WrongCodes_ExhaustWindow.)
 	if b.Pairing.DMWindow() == nil {
-		t.Errorf("window should still be active after a wrong-code attempt")
+		t.Errorf("window should still be active after a single wrong-code attempt")
 	}
 	// User must NOT have been added.
 	if b.Mappings().IsUserAllowed(42) {
@@ -435,5 +437,86 @@ func TestGate_NoWorkerInvocation_WhenDropped(t *testing.T) {
 	}
 	if active := b.Workers.Active(); active != 0 {
 		t.Errorf("worker pool has %d active workers after dropped inbound — gate did not prevent dispatch", active)
+	}
+}
+
+// v0.1.0 release audit: wrong codes used to be dropped silently while leaving the
+// window live, so the 10^4 space was exhaustible inside one 10-minute window — and
+// a successful guess writes the sender into allowlist.Users, which is exactly the
+// operator set allowed to tap Allow on a relayed tool-use prompt. A window must
+// now close after pairMaxWrongCodes attempts.
+func TestGate_WrongCodes_ExhaustWindow(t *testing.T) {
+	b := pairingTestBroker(t)
+	code, err := b.Pairing.StartDM()
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrong := "0000"
+	if wrong == code {
+		wrong = "1234"
+	}
+	guess := func() GateDecision {
+		return b.Gate(&c3types.Inbound{
+			Channel: "telegram", ChatID: 42,
+			Sender: c3types.Sender{UserID: 42}, Text: wrong,
+		})
+	}
+
+	for i := 1; i < pairMaxWrongCodes; i++ {
+		if got := guess(); got != GateDrop {
+			t.Fatalf("attempt %d: got %v, want GateDrop", i, got)
+		}
+		if b.Pairing.DMWindow() == nil {
+			t.Fatalf("window closed early, after %d of %d attempts", i, pairMaxWrongCodes)
+		}
+	}
+
+	// The pairMaxWrongCodes'th wrong code closes it.
+	if got := guess(); got != GateDrop {
+		t.Fatalf("final attempt: got %v, want GateDrop", got)
+	}
+	if b.Pairing.DMWindow() != nil {
+		t.Errorf("BRUTE FORCE: the window survived %d wrong codes; the 10^4 code space is exhaustible within one %v window", pairMaxWrongCodes, PairTTL)
+	}
+
+	// And the now-closed window must not accept even the CORRECT code.
+	got := b.Gate(&c3types.Inbound{
+		Channel: "telegram", ChatID: 42,
+		Sender: c3types.Sender{UserID: 42}, Text: code,
+	})
+	if got == GatePairConsumed {
+		t.Errorf("a closed window must not pair; got %v", got)
+	}
+	if b.Mappings().IsUserAllowed(42) {
+		t.Errorf("no sender may be allowlisted through an exhausted window")
+	}
+}
+
+// A group window is limited independently of the DM window.
+func TestGate_WrongCodes_ExhaustGroupWindowIndependently(t *testing.T) {
+	b := pairingTestBroker(t)
+	if _, err := b.Pairing.StartDM(); err != nil {
+		t.Fatal(err)
+	}
+	const gid = int64(-100200300)
+	gcode, err := b.Pairing.StartGroup(gid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrong := "0000"
+	if wrong == gcode {
+		wrong = "1234"
+	}
+	for i := 0; i < pairMaxWrongCodes; i++ {
+		b.Gate(&c3types.Inbound{
+			Channel: "telegram", ChatID: gid,
+			Sender: c3types.Sender{UserID: 77}, Text: wrong,
+		})
+	}
+	if b.Pairing.GroupWindow(gid) != nil {
+		t.Errorf("group window survived %d wrong codes", pairMaxWrongCodes)
+	}
+	if b.Pairing.DMWindow() == nil {
+		t.Errorf("exhausting a GROUP window must not close the DM window")
 	}
 }
