@@ -209,6 +209,11 @@ Usage:
                         Configure Grok Build for C3: enable leader mode,
                         pin mcp_servers.c3 → c3-grok-adapter, print plugin
                         install steps. Live Telegram inject requires leader.
+  c3-broker install-desktop [--config PATH]
+                        Register the C3 adapter with Claude Desktop: merge an
+                        mcpServers.c3 entry into claude_desktop_config.json at
+                        the per-OS default path (or --config PATH, e.g. an MSIX
+                        install). Poll-only bridge; every other server is kept.
   c3-broker pair [dm|group <chat_id>]
                         Arm a pairing window on the running broker and print
                         the generated 4-digit code. Default target is "dm".

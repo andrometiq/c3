@@ -56,6 +56,8 @@ follow https://github.com/karthikeyan5/c3/blob/master/INSTALL.md to install c3
 
 The agent runs the playbook end-to-end. You'll be asked for a Telegram bot token (from `@BotFather`) and two short pairing codes — one sent to the bot in a DM, one in your group — which discover your user id and the group's chat id automatically, no id hunting. About five minutes.
 
+**Pick your environment first.** C3 runs under three hosts — **Claude Code (CLI)**, **Claude Desktop** (Chat / Code tabs), or **CoWork** (Desktop's Cowork tab). The install shares its binary + Telegram-config steps; only the host-integration wiring differs (the dev-channels flag for Claude Code, `c3-broker install-desktop` for Desktop/CoWork). [`INSTALL.md`](INSTALL.md) §0 has the routing table and the Linux/Windows split.
+
 See [`INSTALL.md`](INSTALL.md) for the agent script and [`docs/INSTALL.md`](docs/INSTALL.md) for the human-readable walkthrough.
 
 > **Platform support:** Linux is the primary, fully-supported platform. Windows (Claude Desktop + Claude Code) is **beta** — it works and the known Windows bugs are fixed, but inbound is poll-only there (`/c3:fetch-queue`) and it builds from source (no prebuilt Windows release yet).

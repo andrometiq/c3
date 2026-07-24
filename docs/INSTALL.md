@@ -2,6 +2,38 @@
 
 Set-up steps for someone who has never run C3 before. Five minutes if everything goes well. If you've already used C3 and you're upgrading, skip to the bottom.
 
+> This is the verbose human walkthrough. The agent-driven playbook (paste one
+> `follow …` line and let Claude Code run it) lives in the top-level
+> [`INSTALL.md`](../INSTALL.md), which also has the environment/platform routing
+> table in its §0.
+
+## Choose your environment and platform
+
+C3 runs under three host environments. Pick yours — the binary install and
+Telegram config are shared; only the host-integration wiring differs.
+
+| Environment | What it is | Host integration | Inbound |
+|---|---|---|---|
+| **Claude Code (CLI)** | the `claude` terminal CLI (on Windows, the `claude.exe` bundled inside Claude Desktop) | plugin marketplace + dev-channels flag (Steps 1, 4, 4.5) | live push on Linux/macOS; **poll-only** on Windows (beta) |
+| **Claude Desktop** | the desktop app's **Chat / Code** tabs | `c3-broker install-desktop` (see [`DESKTOP.md`](DESKTOP.md)) | **poll-only** — `fetch_queue` |
+| **CoWork** | Claude Desktop's **Cowork** tab (± hourly poll task) | same `install-desktop` | **poll-only** + optional scheduled poll |
+
+Codex is an optional add-on to any of these (Step 5).
+
+**Platform support.** **Linux is primary and fully supported.** **macOS** is
+supported (prebuilt binaries; `launchd` instead of systemd). **Windows (Claude
+Desktop + the bundled Claude Code) is beta for v0.1.0** — it works and the known
+Windows bugs are fixed, but inbound is poll-only (`/c3:fetch-queue`), it builds
+from source (no prebuilt Windows release yet, so you need Go), and it hasn't had
+a clean-room CI pass. Windows-specific deltas are collected in the **Windows
+(beta)** section below; skip the Linux-only steps (systemd, shell-rc `PATH`)
+there.
+
+The steps below are the **Claude Code (CLI)** path. For **Claude Desktop /
+CoWork**, do the shared Prerequisites + Steps 2–3 (binaries + config), then
+follow **[`DESKTOP.md`](DESKTOP.md)** for the `install-desktop` wiring instead
+of Steps 1, 4, and 4.5.
+
 ## Prerequisites
 
 You need:
@@ -53,12 +85,14 @@ project.
 
 ## Step 2: Get the binaries onto your PATH
 
-C3 ships seven Go binaries:
+C3 ships nine Go binaries:
 
 - `c3-broker` — the daemon
 - `c3-claude-adapter` — Claude Code MCP server
 - `c3-codex-adapter` — Codex MCP server
 - `c3-grok-adapter` — Grok Build MCP server
+- `c3-agy-adapter` — Agy MCP server
+- `c3-desktop-adapter` — Claude Desktop MCP server (the `install-desktop` target)
 - `claude-shim` — the `claude` wrapper that auto-injects the dev-channels flag (symlinked into PATH by `install-claude-shim`; see Step 4.5)
 - `codex` — the C3 launcher (will replace `which codex`)
 - `migrate-legacy` — one-shot migrator from a legacy Python-prototype config layout (only relevant if you have such a config)
@@ -76,17 +110,19 @@ curl -fsSL -O "$base/SHA256SUMS"
 sha256sum --ignore-missing -c SHA256SUMS      # macOS: shasum -a 256 -c SHA256SUMS
 mkdir -p ~/.local/bin
 tar xzf "c3_${VERSION}_${OS}_${ARCH}.tar.gz" -C ~/.local/bin \
-  c3-broker c3-claude-adapter c3-codex-adapter c3-grok-adapter claude-shim codex migrate-legacy
+  c3-broker c3-claude-adapter c3-codex-adapter c3-grok-adapter c3-agy-adapter c3-desktop-adapter claude-shim codex migrate-legacy
 ```
 
-Confirm the install dir (`~/.local/bin` here) is on your `PATH`.
+Confirm the install dir (`~/.local/bin` here) is on your `PATH`. (**Windows:**
+there is no prebuilt tarball yet — build from source below; PATH is set with
+`setx`, not a shell rc. See the **Windows (beta)** section.)
 
-**From source (contributors, or a platform without a prebuilt tarball).** With
-the repo cloned and added as a local marketplace (Step 1's contributor path),
-run `/c3:build` inside Claude Code — a slash command that runs
-`go install ./cmd/...` and drops the seven binaries in `$GOBIN` (default
-`~/go/bin`). Needs Go ≥1.25. Confirm `$GOBIN` (or `$(go env GOPATH)/bin`) is on
-your `PATH`:
+**From source (contributors, or a platform without a prebuilt tarball — always
+on Windows today).** With the repo cloned and added as a local marketplace
+(Step 1's contributor path), run `/c3:build` inside Claude Code — a slash
+command that runs `go install ./cmd/...` and drops the nine binaries in `$GOBIN`
+(default `~/go/bin`). Needs Go ≥1.25. Confirm `$GOBIN` (or `$(go env GOPATH)/bin`)
+is on your `PATH`:
 
 ```bash
 export PATH="$(go env GOPATH)/bin:$PATH"
@@ -231,6 +267,69 @@ The agent should respond with a proposal: "I'd create a topic '<dirname>' in gro
 Confirm. The topic appears in your Telegram supergroup. Send a message into it from your phone. It should appear in the CLI as a `<channel>` block. Reply via the agent's `reply` tool. The reply lands in the topic.
 
 If voice messages are working: send a voice note from your phone. After a couple of seconds it should arrive in the CLI as `[Transcribed voice]: <text>`. STT can take 1-3 seconds depending on length.
+
+## Claude Desktop / CoWork (instead of Steps 1, 4, 4.5)
+
+If your environment is **Claude Desktop** (the app's Chat / Code tabs) or
+**CoWork** (its Cowork tab) rather than the `claude` CLI, you still do the
+shared **Prerequisites**, **Step 2** (binaries — including `c3-desktop-adapter`)
+and **Step 3** (config). You **skip** the Claude-Code-only steps — the plugin
+marketplace (Step 1), the `settings.json` channel opt-in (Step 4), and the
+dev-channels flag / `claude-shim` (Step 4.5) — and instead register the adapter
+with Claude Desktop:
+
+```bash
+c3-broker install-desktop
+```
+
+It merges an `mcpServers.c3` entry into Claude Desktop's per-OS config
+(Windows `%APPDATA%\Claude\claude_desktop_config.json`, macOS
+`~/Library/Application Support/Claude/...`, Linux `~/.config/Claude/...`),
+preserving every other server. Then **fully quit and restart Claude Desktop**
+(tray → Quit) so it reloads the config.
+
+Claude Desktop is **poll-only** — inbound sits in the durable queue and you pull
+it with `fetch_queue` (or the `/fetch-queue` slash command, or the "open the c3
+inbox" live panel). There is no Telegram permission relay here. **CoWork** is
+the same install; its only extra is an optional hourly **Cowork Scheduled Task**
+that polls on a timer. Full walkthrough, the MSIX config trap, and caveats:
+**[`DESKTOP.md`](DESKTOP.md)**.
+
+## Windows (beta)
+
+Windows is **beta for v0.1.0**. The known Windows bugs are fixed, but apply
+these deltas instead of the Linux-only steps above:
+
+- **No prebuilt release yet → build from source.** Install **Go ≥1.25** (the
+  portable zip needs no admin), clone the repo into a durable dir, and
+  `go install ./cmd/...`. Binaries are `.exe`.
+- **PATH via `setx`, not a shell rc.** `setx PATH "%PATH%;%USERPROFILE%\.local\bin"`
+  (or System Properties → Environment Variables), then **open a new terminal** —
+  an already-open shell keeps the stale PATH.
+- **`claude` isn't on PATH** — it's bundled inside the Claude Desktop app
+  (`%APPDATA%\Claude\claude-code\<ver>\claude.exe`); run the Step 1 `/plugin`
+  commands from that bundled Claude Code.
+- **Config path** is `%USERPROFILE%\.config\c3\mappings.json`.
+- **Inbound is poll-only** (both Claude Code and Desktop): the render-detector
+  fails safe and holds inbound in the durable queue, so pull with
+  `/c3:fetch-queue` (CLI) or `fetch_queue` / `/fetch-queue` (Desktop). Nothing
+  is lost.
+- **One bot token per machine** — a Windows box sharing a Linux box's token
+  breaks both with `409 Conflict`; get a second bot from `@BotFather`.
+- **STT needs a real Python + ffmpeg.** The Store `python3`/`python` alias is a
+  no-op stub. `winget install Python.Python.3.12` + `winget install Gyan.FFmpeg`,
+  then set `plugins.stt.handler_path` **and** `plugins.stt.python` (absolute
+  `python.exe`) in `mappings.json` and restart the broker.
+- **MSIX Desktop config trap** — Store-installed Claude Desktop loads its config
+  from `...\Packages\Claude_*\LocalCache\Roaming\Claude\claude_desktop_config.json`;
+  run `c3-broker install-desktop --config "<that path>"`.
+- **Updates rebuild from source** — the auto-updater can't replace a running
+  `.exe` on Windows. `git pull` → `go install ./cmd/...` → restart.
+- **No systemd** — the default on-demand broker spawn is what you get
+  (systemd supervision is Linux-only — see the top-level `INSTALL.md` §6).
+
+See [`DESKTOP.md`](DESKTOP.md) for the remaining Windows caveats (broker
+singleton, per-tab Desktop identity).
 
 ## Upgrading
 
