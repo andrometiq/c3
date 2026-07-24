@@ -1,6 +1,9 @@
 package c3types
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 // ReplyContextFields renders the reply-context metadata fields shared by the
 // queued (fetch_queue) renderer in both adapters and the Codex live-forward turn
@@ -35,4 +38,76 @@ func ReplyContextFields(rc *ReplyContext) []string {
 func AttachmentField(att Attachment) string {
 	return fmt.Sprintf("attachment{kind=%s file_id=%q mime=%s size=%d name=%q}",
 		att.Kind, att.FileID, att.MIME, att.Size, att.Name)
+}
+
+// AttachmentCompact renders one attachment in the trimmed inbound-readback form
+// approved 2026-07-24 (task #55): only the kind + file_id, which is the bare
+// minimum the agent needs to open it (download_attachment requires file_id;
+// kind tells it whether to retranscribe). The verbose mime/size/name that
+// AttachmentField carries are dropped — they were the bulk of the per-message
+// noise the maintainer flagged. The one-time AttachmentFetchHint explains how to
+// use the file_id, so it isn't repeated on every line.
+func AttachmentCompact(att Attachment) string {
+	return fmt.Sprintf("attachment=%s file_id=%s", att.Kind, att.FileID)
+}
+
+// AttachmentFetchHint is the single thin, one-time note the batch renderers
+// prepend to a fetch_queue/drain readback that contains at least one attachment.
+// It replaces the old per-message attachment block's implicit "here's the
+// metadata" contract with one explicit instruction shown once (task #55).
+const AttachmentFetchHint = "Attachments below show `attachment=<kind> file_id=<id>`; call download_attachment with a file_id to open it (retranscribe re-runs speech-to-text on a voice note)."
+
+// InboundsHaveAttachment reports whether any of msgs carries an attachment, so a
+// batch renderer knows whether to emit the one-time AttachmentFetchHint.
+func InboundsHaveAttachment(msgs []Inbound) bool {
+	for i := range msgs {
+		if len(msgs[i].Attachments) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// RenderQueuedInbound renders one inbound message for the fetch_queue / drain
+// readback in the compact form approved 2026-07-24 (task #55, proposed in the
+// maintainer thread as msg 6579). The message text stands bare on the first
+// line; a single compact metadata line follows with only the sender, message_id,
+// reply context, and a compact attachment reference (kind + file_id). This
+// replaces the old one-line "from=@u message_id=N text=\"…\" attachment{…}" dump
+// whose verbose attachment block was the token noise the maintainer flagged
+// (msg 6069). It stays a shared c3types function so every adapter's live-forward
+// and fetch_queue readback render identically and can't drift.
+func RenderQueuedInbound(in *Inbound) string {
+	text := in.Text
+	if text == "" {
+		switch {
+		case len(in.Attachments) > 0:
+			text = "(" + in.Attachments[0].Kind + " message)"
+		case in.IsEvent():
+			text = "(" + string(in.Kind) + " event)"
+		default:
+			text = "(no content)"
+		}
+	}
+	var meta []string
+	switch {
+	case in.Sender.Username != "":
+		meta = append(meta, "from=@"+in.Sender.Username)
+	case in.Sender.UserID != 0:
+		meta = append(meta, fmt.Sprintf("from=uid=%d", in.Sender.UserID))
+	}
+	if in.MessageID != 0 {
+		meta = append(meta, fmt.Sprintf("message_id=%d", in.MessageID))
+	}
+	meta = append(meta, ReplyContextFields(in.ReplyTo)...)
+	for _, att := range in.Attachments {
+		meta = append(meta, AttachmentCompact(att))
+	}
+	if in.IsEvent() {
+		meta = append(meta, "event="+string(in.Kind))
+	}
+	if len(meta) == 0 {
+		return text
+	}
+	return text + "\n" + strings.Join(meta, " ")
 }

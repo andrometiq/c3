@@ -6,8 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"strconv"
-	"strings"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -195,35 +193,15 @@ func (c *codexWSClient) notify(method string, params map[string]any) error {
 	return nil
 }
 
-// formatInboundTurnText renders one inbound as a Codex turn. It carries the same
-// information density as the queued (fetch_queue) renderQueuedInbound — message_id,
-// the full reply context, and an attachment summary — so a message forwarded live
-// loses none of the metadata a message read via fetch_queue would carry (D-RC1).
-// The reply/attachment formatting is shared with renderQueuedInbound via the
-// c3types helpers so the two can't drift.
+// formatInboundTurnText renders one inbound as a Codex turn. It delegates to the
+// shared c3types.RenderQueuedInbound so the LIVE-forward turn is byte-identical to
+// what the SAME message would render as via fetch_queue (D-RC1 + task #55,
+// 2026-07-24): live push and the queued readback must produce the same trimmed
+// format. The trimmed form keeps message_id + full reply context (the metadata the
+// agent needs to thread a reply) and a compact kind+file_id attachment reference,
+// while dropping the verbose per-message attachment block the maintainer flagged.
 func formatInboundTurnText(in *c3types.Inbound) string {
-	thread := "0"
-	if in.TopicID != nil {
-		thread = strconv.FormatInt(*in.TopicID, 10)
-	}
-	sender := in.Sender.Username
-	if sender == "" {
-		sender = strconv.FormatInt(in.Sender.UserID, 10)
-	}
-	header := []string{fmt.Sprintf("chat=%d", in.ChatID), "thread=" + thread}
-	if in.MessageID != 0 {
-		header = append(header, fmt.Sprintf("message_id=%d", in.MessageID))
-	}
-	header = append(header, c3types.ReplyContextFields(in.ReplyTo)...)
-	out := fmt.Sprintf("Telegram message from %s (%s)\n%s", sender, strings.Join(header, " "), in.Text)
-	if len(in.Attachments) > 0 {
-		atts := make([]string, 0, len(in.Attachments))
-		for _, att := range in.Attachments {
-			atts = append(atts, c3types.AttachmentField(att))
-		}
-		out += "\n" + strings.Join(atts, " ")
-	}
-	return out
+	return c3types.RenderQueuedInbound(in)
 }
 
 func stringSlice(v any) []string {

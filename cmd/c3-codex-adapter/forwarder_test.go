@@ -92,7 +92,11 @@ func TestForwardInboundToCodexAppServerStartsTurn(t *testing.T) {
 	input := params["input"].([]any)
 	item := input[0].(map[string]any)
 	text := item["text"].(string)
-	if text != "Telegram message from alice (chat=12345678 thread=0 message_id=1491)\n[Transcribed voice]: Hello my testing 1 2 3" {
+	// #55 (2026-07-24): the live-forward turn now renders in the SAME trimmed form
+	// as the fetch_queue readback — bare message text first, then a compact
+	// metadata line — instead of the old "Telegram message from … (chat=… thread=…)"
+	// header. formatInboundTurnText delegates to c3types.RenderQueuedInbound.
+	if text != "[Transcribed voice]: Hello my testing 1 2 3\nfrom=@alice message_id=1491" {
 		t.Fatalf("turn text = %q", text)
 	}
 }

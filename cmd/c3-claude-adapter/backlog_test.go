@@ -91,10 +91,21 @@ func TestRenderFetchedMessages_ExposesAttachmentFileID(t *testing.T) {
 		Channel: "telegram", ChatID: -100, MessageID: 7,
 		Attachments: []c3types.Attachment{{Kind: "voice", FileID: "VOICE123", MIME: "audio/ogg", Size: 2048, Name: "note.ogg"}},
 	}}, 0, "myproject")
-	for _, want := range []string{"VOICE123", "audio/ogg", "message_id=7"} {
+	// #55: kind + file_id are kept (download_attachment/retranscribe still work),
+	// and the one-time fetch hint is prepended once.
+	for _, want := range []string{"VOICE123", "attachment=voice", "message_id=7", "download_attachment"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("fetch_queue render missing %q; got %q", want, got)
 		}
+	}
+	// The verbose per-message mime/size/name block is dropped.
+	for _, gone := range []string{"audio/ogg", "note.ogg", "size=2048"} {
+		if strings.Contains(got, gone) {
+			t.Errorf("fetch_queue render still carries trimmed field %q; got %q", gone, got)
+		}
+	}
+	if n := strings.Count(got, "call download_attachment"); n != 1 {
+		t.Errorf("fetch hint should appear once; appeared %d times in %q", n, got)
 	}
 }
 

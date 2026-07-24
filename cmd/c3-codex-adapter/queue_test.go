@@ -19,17 +19,30 @@ func TestRenderFetchedMessages_Codex(t *testing.T) {
 	}
 }
 
-// renderFetchedMessages must expose attachment file_id/mime so the agent can
-// recover backlog voice via download_attachment/retranscribe (spec Component 4).
+// renderFetchedMessages must still expose the attachment's kind + file_id so the
+// agent can recover backlog voice via download_attachment/retranscribe (spec
+// Component 4), and it must prepend the one-time fetch hint exactly once (#55:
+// the verbose per-message mime/size/name block is dropped, but functionality is
+// preserved — the file_id is kept and the "how to open it" note is shown once).
 func TestRenderFetchedMessages_Codex_ExposesAttachmentFileID(t *testing.T) {
 	got := renderFetchedMessages([]c3types.Inbound{{
 		Channel: "telegram", ChatID: -100, MessageID: 7,
 		Attachments: []c3types.Attachment{{Kind: "voice", FileID: "VOICE123", MIME: "audio/ogg", Size: 2048, Name: "note.ogg"}},
 	}}, 0, "myproject")
-	for _, want := range []string{"VOICE123", "audio/ogg", "message_id=7"} {
+	for _, want := range []string{"VOICE123", "attachment=voice", "message_id=7", "download_attachment"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("fetch_queue render missing %q; got %q", want, got)
 		}
+	}
+	// #55: the trimmed per-message block no longer carries mime/size/name.
+	for _, gone := range []string{"audio/ogg", "note.ogg", "size=2048"} {
+		if strings.Contains(got, gone) {
+			t.Errorf("fetch_queue render still carries trimmed field %q; got %q", gone, got)
+		}
+	}
+	// The one-time fetch hint appears exactly once, not per message.
+	if n := strings.Count(got, "call download_attachment"); n != 1 {
+		t.Errorf("fetch hint should appear once; appeared %d times in %q", n, got)
 	}
 }
 

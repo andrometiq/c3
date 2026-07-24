@@ -900,43 +900,27 @@ func renderFetchedMessages(msgs []c3types.Inbound, remaining int, route string) 
 		blocks = append(blocks, renderQueuedInbound(&msgs[i]))
 	}
 	out := strings.Join(blocks, "\n\n")
+	// #55 (2026-07-24): the per-message attachment block is trimmed to kind +
+	// file_id; the "how to open it" instruction is shown ONCE per batch instead
+	// of being implied on every line.
+	if c3types.InboundsHaveAttachment(msgs) {
+		out = c3types.AttachmentFetchHint + "\n\n" + out
+	}
 	if remaining > 0 {
 		out += "\n\n" + pendingNudge(remaining, route)
 	}
 	return out
 }
 
-// renderQueuedInbound renders one queued message for fetch_queue output. Unlike
-// inboundContentSummary (notify-FAIL log line), this exposes the full attachment
-// metadata the agent needs to recover backlog media: file_id, mime, size, name
-// (spec Component 4 — load-bearing for the STT-failure recovery of backlog items,
-// Component 6c: the agent must be able to call download_attachment/retranscribe
-// on a queued voice/media message).
+// renderQueuedInbound renders one queued message for fetch_queue output in the
+// trimmed form approved 2026-07-24 (task #55): the message text stands bare,
+// followed by a compact metadata line (sender, message_id, reply context, and a
+// kind+file_id attachment reference — enough for download_attachment/retranscribe
+// on a queued voice/media message, spec Component 4/6c). The shared c3types
+// renderer keeps this byte-identical across every adapter and the codex
+// live-forward turn.
 func renderQueuedInbound(in *c3types.Inbound) string {
-	var parts []string
-	switch {
-	case in.Sender.Username != "":
-		parts = append(parts, "from=@"+in.Sender.Username)
-	case in.Sender.UserID != 0:
-		parts = append(parts, fmt.Sprintf("from=uid=%d", in.Sender.UserID))
-	}
-	if in.MessageID != 0 {
-		parts = append(parts, fmt.Sprintf("message_id=%d", in.MessageID))
-	}
-	if in.Text != "" {
-		parts = append(parts, fmt.Sprintf("text=%q", in.Text))
-	}
-	parts = append(parts, c3types.ReplyContextFields(in.ReplyTo)...)
-	for _, att := range in.Attachments {
-		parts = append(parts, c3types.AttachmentField(att))
-	}
-	if in.IsEvent() {
-		parts = append(parts, fmt.Sprintf("event=%s", in.Kind))
-	}
-	if len(parts) == 0 {
-		return "(no content)"
-	}
-	return strings.Join(parts, " ")
+	return c3types.RenderQueuedInbound(in)
 }
 
 // capRunes truncates s to at most n runes (rune-safe, so the log can't emit a

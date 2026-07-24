@@ -1182,37 +1182,24 @@ func renderFetchedMessages(msgs []c3types.Inbound, remaining int, route string) 
 		blocks = append(blocks, renderQueuedInbound(&msgs[i]))
 	}
 	out := strings.Join(blocks, "\n\n")
+	// #55 (2026-07-24): the per-message attachment block is trimmed to kind +
+	// file_id; the "how to open it" instruction is shown ONCE per batch.
+	if c3types.InboundsHaveAttachment(msgs) {
+		out = c3types.AttachmentFetchHint + "\n\n" + out
+	}
 	if remaining > 0 {
 		out += "\n\n" + pendingNudge(remaining, route)
 	}
 	return out
 }
 
+// renderQueuedInbound renders one queued message for fetch_queue output in the
+// trimmed form approved 2026-07-24 (task #55): bare message text, then a compact
+// metadata line (sender, message_id, reply context, kind+file_id attachment
+// reference). The shared c3types renderer keeps this byte-identical across every
+// adapter.
 func renderQueuedInbound(in *c3types.Inbound) string {
-	var parts []string
-	switch {
-	case in.Sender.Username != "":
-		parts = append(parts, "from=@"+in.Sender.Username)
-	case in.Sender.UserID != 0:
-		parts = append(parts, fmt.Sprintf("from=uid=%d", in.Sender.UserID))
-	}
-	if in.MessageID != 0 {
-		parts = append(parts, fmt.Sprintf("message_id=%d", in.MessageID))
-	}
-	if in.Text != "" {
-		parts = append(parts, fmt.Sprintf("text=%q", in.Text))
-	}
-	parts = append(parts, c3types.ReplyContextFields(in.ReplyTo)...)
-	for _, att := range in.Attachments {
-		parts = append(parts, c3types.AttachmentField(att))
-	}
-	if in.IsEvent() {
-		parts = append(parts, fmt.Sprintf("event=%s", in.Kind))
-	}
-	if len(parts) == 0 {
-		return "(no content)"
-	}
-	return strings.Join(parts, " ")
+	return c3types.RenderQueuedInbound(in)
 }
 
 func decodeArgs(raw json.RawMessage) (map[string]any, error) {
