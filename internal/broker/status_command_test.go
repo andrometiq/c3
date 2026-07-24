@@ -55,7 +55,7 @@ func TestHandleCommand_GlobalInDM(t *testing.T) {
 }
 
 // TestStatusForTopic_LiveHolderReadsAttached: a connected, PID-alive holder must
-// render "CLI attached".
+// render the surface name (not a generic "CLI") + " attached".
 func TestStatusForTopic_LiveHolderReadsAttached(t *testing.T) {
 	t.Setenv("C3_QUEUE_DIR", t.TempDir())
 	b := brokerWithChannel(t, mfWithTelegram(), &fakeChannel{})
@@ -68,15 +68,38 @@ func TestStatusForTopic_LiveHolderReadsAttached(t *testing.T) {
 		t.Fatal("claim should succeed")
 	}
 	got := b.statusForTopic("telegram", -1001234567890, &tid)
-	if !strings.Contains(got, "· CLI attached · broker up") {
-		t.Fatalf("live holder should read 'CLI attached', got %q", got)
+	if !strings.Contains(got, "· Claude Code attached · broker up") {
+		t.Fatalf("live claude holder should read 'Claude Code attached', got %q", got)
+	}
+}
+
+// TestStatusForTopic_NamesTheSurface: /status names the ACTUAL attached surface,
+// not a generic "CLI" — a Desktop/cowork session (adapter CLI id "desktop") must
+// read "Claude Desktop attached", not "CLI attached" (operator report 2026-07-24).
+func TestStatusForTopic_NamesTheSurface(t *testing.T) {
+	t.Setenv("C3_QUEUE_DIR", t.TempDir())
+	b := brokerWithChannel(t, mfWithTelegram(), &fakeChannel{})
+	defer b.Shutdown()
+
+	tid := int64(915)
+	key := MakeRouteKey("telegram", -1001234567890, &tid)
+	live := &Stub{CLI: "desktop", PID: os.Getpid(), ConnID: 1, Conn: struct{}{}}
+	if _, ok := b.Routes.Claim(key, live); !ok {
+		t.Fatal("claim should succeed")
+	}
+	got := b.statusForTopic("telegram", -1001234567890, &tid)
+	if !strings.Contains(got, "· Claude Desktop attached · broker up") {
+		t.Fatalf("desktop holder should read 'Claude Desktop attached', got %q", got)
+	}
+	if strings.Contains(got, "CLI attached") {
+		t.Fatalf("must not render a generic 'CLI attached' for a desktop session, got %q", got)
 	}
 }
 
 // TestStatusForTopic_ReapsDeadHolderAtReadTime: a dead reference (disconnected +
-// PID gone) must render "no CLI attached" AND be reaped from the routes map at
+// PID gone) must render "nothing attached" AND be reaped from the routes map at
 // read time — not linger until the next inbound sweeps it. This is the exact bug
-// the operator hit: /status reported "CLI attached" for a CLI that had exited.
+// the operator hit: /status reported "attached" for a session that had exited.
 func TestStatusForTopic_ReapsDeadHolderAtReadTime(t *testing.T) {
 	t.Setenv("C3_QUEUE_DIR", t.TempDir())
 	b := brokerWithChannel(t, mfWithTelegram(), &fakeChannel{})
@@ -90,8 +113,8 @@ func TestStatusForTopic_ReapsDeadHolderAtReadTime(t *testing.T) {
 		t.Fatal("claim should succeed")
 	}
 	got := b.statusForTopic("telegram", -1001234567890, &tid)
-	if !strings.Contains(got, "· no CLI attached · broker up") {
-		t.Fatalf("dead holder must read 'no CLI attached', got %q", got)
+	if !strings.Contains(got, "· nothing attached · broker up") {
+		t.Fatalf("dead holder must read 'nothing attached', got %q", got)
 	}
 	if _, held := b.Routes.Holder(key); held {
 		t.Fatal("dead holder must be reaped from the routes map at read time")

@@ -85,10 +85,10 @@ func (b *Broker) statusForTopic(channelName string, chatID int64, topicID *int64
 			oldest = time.Unix(st.OldestUnix, 0)
 		}
 	}
-	attached := "no CLI attached"
+	attached := "nothing attached"
 	if h, held := b.Routes.Holder(key); held {
 		if h.IsAlive() {
-			attached = "CLI attached"
+			attached = surfaceLabel(h.CLI) + " attached"
 		} else {
 			// Dead reference: the holder's adapter is gone (disconnected AND its
 			// PID is no longer in the OS process table). Verify liveness at READ
@@ -168,6 +168,29 @@ func (b *Broker) sessionCounts() (attached, idle int) {
 		}
 	}
 	return attached, idle
+}
+
+// surfaceLabel maps an adapter's self-reported CLI id (Stub.CLI, set on hello)
+// to a human surface name, so /status names what is ACTUALLY attached — Claude
+// Desktop, Codex, … — instead of a generic "CLI" that misreads a Desktop/cowork
+// session as a terminal CLI. Unknown ids fall back to the raw value.
+func surfaceLabel(cli string) string {
+	switch cli {
+	case "claude":
+		return "Claude Code"
+	case "desktop":
+		return "Claude Desktop"
+	case "codex":
+		return "Codex"
+	case "grok":
+		return "Grok"
+	case "agy":
+		return "Antigravity"
+	case "", "c3-broker-cli":
+		return "a session"
+	default:
+		return cli
+	}
 }
 
 // oldestSuffix renders " (oldest 2h)" or "" when there is nothing queued.
