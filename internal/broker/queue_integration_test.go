@@ -45,11 +45,13 @@ func TestForwardOrFallback_NoSession_QueuesAndHeldReply(t *testing.T) {
 	}
 }
 
-// The maintainer wants a re-notification for every newly-queued message, so on
-// an edit-capable channel each hold sends a FRESH held-notice — never an
-// in-place edit. Two unattached inbounds for ONE route → two SendReply calls
-// (no edits), each carrying the running queued count.
-func TestForwardOrFallback_NoSession_EditCapable_SendsFreshEachHold(t *testing.T) {
+// Debounce (msg 6083): on an edit-capable channel a BURST of holds coalesces
+// into ONE held-notice per route per the HeldNotices window — not a fresh notice
+// per message (which flooded, esp. under the Windows offset-loop). Both messages
+// still queue; the second notice is suppressed within the window; never an
+// in-place edit. After the window elapses a new hold re-alerts (leading-edge),
+// preserving #36's per-message re-alert intent, just rate-limited.
+func TestForwardOrFallback_NoSession_EditCapable_DebouncesHeldNotices(t *testing.T) {
 	t.Setenv("C3_QUEUE_DIR", t.TempDir())
 	mf := mfWithTelegram()
 	fc := &fakeChannel{editMessages: true, replyReturnID: 7001}
@@ -61,7 +63,7 @@ func TestForwardOrFallback_NoSession_EditCapable_SendsFreshEachHold(t *testing.T
 	w := newRouteWorker(context.Background(), key, time.Hour, b)
 	defer w.Stop()
 
-	// Two unattached inbounds for the SAME route, back to back.
+	// Two unattached inbounds for the SAME route, back to back (within the window).
 	for i := 1; i <= 2; i++ {
 		in := &c3types.Inbound{Channel: "telegram", ChatID: -1001234567890, TopicID: &tid, MessageID: int64(i), Text: "hi", Timestamp: time.Now()}
 		w.forwardOrFallback(context.Background(), in, 1)
@@ -71,21 +73,28 @@ func TestForwardOrFallback_NoSession_EditCapable_SendsFreshEachHold(t *testing.T
 	if n, _ := b.Queue.Pending(qrk); n != 2 {
 		t.Fatalf("both inbounds should be queued; pending=%d, want 2", n)
 	}
-	// Every hold SENDS a fresh held-notice: two holds → two SendReply calls...
+	// The burst coalesces to exactly ONE held-notice (the second is within the
+	// debounce window) — never an in-place edit.
 	sends := fc.sendRepliesSnapshot()
-	if len(sends) != 2 {
-		t.Fatalf("expected two fresh held-reply SENDs (one per hold), got %d", len(sends))
+	if len(sends) != 1 {
+		t.Fatalf("a back-to-back burst must coalesce to ONE held-notice; got %d sends", len(sends))
 	}
-	// ...and never an in-place edit.
 	if edits := fc.editCallsSnapshot(); len(edits) != 0 {
 		t.Fatalf("edit-capable held path must not edit in place; got %d edits", len(edits))
 	}
-	// Each notice carries the running count: first "1 message queued", then "2".
-	if !strings.Contains(sends[0].Text, "1 message queued") {
-		t.Fatalf("first held-notice should carry count 1; got %q", sends[0].Text)
+	if !strings.Contains(sends[0].Text, "message") || !strings.Contains(sends[0].Text, "queued") {
+		t.Fatalf("held-notice should carry a queued-count line; got %q", sends[0].Text)
 	}
-	if !strings.Contains(sends[1].Text, "2 messages queued") {
-		t.Fatalf("second held-notice should carry count 2; got %q", sends[1].Text)
+
+	// After the debounce window elapses, a new hold re-alerts. Backdate the
+	// tracker's last-notice timestamp instead of sleeping the full window.
+	b.HeldNotices.mu.Lock()
+	b.HeldNotices.lastByKey[key] = time.Now().Add(-defaultHeldNoticeCooldown - time.Second)
+	b.HeldNotices.mu.Unlock()
+	in3 := &c3types.Inbound{Channel: "telegram", ChatID: -1001234567890, TopicID: &tid, MessageID: 3, Text: "hi", Timestamp: time.Now()}
+	w.forwardOrFallback(context.Background(), in3, 1)
+	if got := len(fc.sendRepliesSnapshot()); got != 2 {
+		t.Fatalf("a hold after the debounce window must re-alert; got %d sends, want 2", got)
 	}
 }
 

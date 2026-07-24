@@ -989,12 +989,21 @@ func (w *RouteWorker) forwardOrFallback(_ context.Context, in *c3types.Inbound, 
 	args := c3types.ReplyArgs{Channel: in.Channel, ChatID: in.ChatID, TopicID: in.TopicID, Text: heldReplyText(count)}
 
 	if ch.Capabilities().EditMessages {
-		// Send a FRESH held-notice on every hold — never edit in place. The
-		// maintainer wants a re-notification for each newly-queued message: a
-		// silent in-place edit bumps the count but fires no notification, so it
-		// gives no signal that a new message actually got queued. Sending fresh
-		// each hold re-alerts the operator per message (reverses the earlier
-		// edit-in-place behavior). Prior notices are intentionally left in place.
+		// Debounce (msg 6083): coalesce a burst of holds into ONE notice per route
+		// per HeldNotices window. The message is already durably queued above; only
+		// the re-notification is throttled. Without this a flood — the Windows
+		// offset-loop, or many messages arriving fast — fired a fresh held-notice
+		// per message. Leading-edge: the first hold in a window alerts immediately
+		// (with the current queued count); further holds within the window are
+		// silent; a hold after a quiet gap re-alerts — preserving #36's per-message
+		// re-alert intent, just rate-limited so it can't flood.
+		if w.broker.HeldNotices != nil && !w.broker.HeldNotices.ShouldSend(w.key) {
+			log.Printf("hold chan=%s chat=%d topic=%s msg=%d: no claim, queued + held-reply COALESCED (count=%d, within %s debounce) — %s",
+				w.key.Channel, w.key.ChatID, TopicKeyStr(w.key), in.MessageID, count, defaultHeldNoticeCooldown, fallbackSummary(in))
+			return
+		}
+		// Send a FRESH held-notice (never edit in place); the leading-edge throttle
+		// above prevents a per-message flood. Prior notices are left in place.
 		if _, serr := ch.SendReply(args); serr != nil {
 			log.Printf("hold FAIL chan=%s chat=%d topic=%s msg=%d: send held-reply: %v — %s",
 				w.key.Channel, w.key.ChatID, TopicKeyStr(w.key), in.MessageID, serr, fallbackSummary(in))

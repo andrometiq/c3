@@ -44,6 +44,13 @@ func (f *fallbackTracker) ShouldSend(key RouteKey) bool {
 
 const defaultFallbackCooldown = 300 * time.Second
 
+// defaultHeldNoticeCooldown throttles the edit-capable "held — nothing lost"
+// auto-reply: at most one held-notice per route per this window, so a burst of
+// held messages coalesces into a single notice instead of a per-message flood
+// (msg 6083). Short (unlike the 5-min fallback) so a genuinely new message after
+// a quiet gap still re-alerts promptly.
+const defaultHeldNoticeCooldown = 10 * time.Second
+
 // fallbackText is the boilerplate reply sent on a no-claim inbound.
 const fallbackText = "No CLI is currently attached to this topic. Run `c3-broker status` to see attached terminals, or open a CLI in the project directory and `attach`."
 

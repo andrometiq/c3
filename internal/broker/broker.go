@@ -38,8 +38,12 @@ type Broker struct {
 	Routes    *Routes
 	Workers   *WorkerPool
 	Fallbacks *fallbackTracker
-	Plugins   *PluginHost
-	Pairing   *pairingState
+	// HeldNotices throttles the "held — nothing lost" auto-reply on edit-capable
+	// channels to one per route per short window (defaultHeldNoticeCooldown) so a
+	// burst of holds coalesces into a single notice instead of a flood (msg 6083).
+	HeldNotices *fallbackTracker
+	Plugins     *PluginHost
+	Pairing     *pairingState
 
 	// Asks is the registry of in-flight `ask` round-trips (blocking,
 	// correlated question→answer over an inline keyboard). Registered before the
@@ -126,6 +130,7 @@ func New(mf *mappings.MappingsFile) *Broker {
 		Stubs:              NewStubRegistry(),
 		Routes:             NewRoutes(),
 		Fallbacks:          newFallbackTracker(defaultFallbackCooldown),
+		HeldNotices:        newFallbackTracker(defaultHeldNoticeCooldown),
 		Pairing:            newPairingState(),
 		Asks:               newAskRegistry(),
 		Perms:              newPermRegistry(),
