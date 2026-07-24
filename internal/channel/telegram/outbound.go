@@ -392,11 +392,14 @@ func (c *Channel) DownloadAttachment(fileID string) (string, error) {
 	dlURL := c.fileDownloadURL(filePath)
 	req, err := http.NewRequestWithContext(c.ctx, http.MethodGet, dlURL, nil)
 	if err != nil {
-		return "", fmt.Errorf("telegram: build download request for %q: %w", filePath, err)
+		// net/url errors quote the offending URL, which carries the token.
+		return "", c.scrubTokenf("telegram: build download request for %q: %w", filePath, err)
 	}
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("telegram: download %q: %w", filePath, err)
+		// *url.Error prints the FULL request URL — token and all — and this error
+		// is handed straight back to the agent as a tool result. Scrub it.
+		return "", c.scrubTokenf("telegram: download %q: %w", filePath, err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
