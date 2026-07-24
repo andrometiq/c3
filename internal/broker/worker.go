@@ -631,7 +631,7 @@ func (w *RouteWorker) flushInbounds(ctx context.Context, batch []*c3types.Inboun
 	// Covered = lines ACTUALLY appended by this push (I5), not len(batch). When no
 	// queue is wired (unit tests) appended stays 0 and covEffective normalizes to 1.
 	// appendedIDs names those same lines so the ack removes them by identity.
-	w.forwardOrFallbackCovering(ctx, merged, appended, appendedIDs)
+	w.forwardOrFallbackCovering(ctx, merged, appended, appendedIDs, true)
 }
 
 // sttFailureText renders the agent-facing STT-failure recovery message. It is
@@ -858,13 +858,16 @@ func mergeBatch(batch []*c3types.Inbound) *c3types.Inbound {
 // held nothing but this push's own lines. Production inbound goes through
 // flushInbounds, which knows the ids and calls forwardOrFallbackCovering.
 func (w *RouteWorker) forwardOrFallback(ctx context.Context, in *c3types.Inbound, covered int) {
-	w.forwardOrFallbackCovering(ctx, in, covered, nil)
+	w.forwardOrFallbackCovering(ctx, in, covered, nil, false)
 }
 
 // forwardOrFallbackCovering additionally records which durable queue lines this
 // push covered, so the delivered-ack removes exactly those lines rather than
 // dropping `covered` lines off the queue head. See RouteWorker.coveredByPush.
-func (w *RouteWorker) forwardOrFallbackCovering(_ context.Context, in *c3types.Inbound, covered int, coveredIDs []int64) {
+//
+// idsKnown says the caller enumerated the appended lines exactly, so
+// len(coveredIDs) — including ZERO — is authoritative for this push.
+func (w *RouteWorker) forwardOrFallbackCovering(_ context.Context, in *c3types.Inbound, covered int, coveredIDs []int64, idsKnown bool) {
 	holder, claimed := w.broker.Routes.Holder(w.key)
 
 	// Liveness sweep: if the holder's PID is dead (e.g. Claude Code killed
@@ -948,6 +951,16 @@ func (w *RouteWorker) forwardOrFallbackCovering(_ context.Context, in *c3types.I
 		// older adapter that acked an event push would Consume 0 (handleConsume
 		// skips Count<=0), so a live event can never over-consume real backlog.
 		covered := covEffective(covered) // >=1
+		if idsKnown {
+			// The caller enumerated exactly which lines it appended, so that count
+			// is authoritative — including ZERO. A batch whose messages were all
+			// dedup-suppressed, or whose every Append failed, stored nothing and
+			// therefore covers nothing; covEffective's 0→1 normalisation exists
+			// only for callers with no queue wired (unit tests), and applying it
+			// here would make the ack consume an unrelated queued line that this
+			// push never delivered. (v0.1.0 release audit, 2026-07-25.)
+			covered = len(coveredIDs)
+		}
 		if in.IsEvent() {
 			covered = 0
 		}

@@ -2,9 +2,47 @@ package broker
 
 import (
 	"context"
+	"encoding/json"
+	"net"
+	"os"
 	"testing"
 	"time"
+
+	"github.com/karthikeyan5/c3/internal/ipc"
 )
+
+// capturingHolder claims the route with a live stub and returns a channel of the
+// decoded OpInbound pushes the broker writes to it, so a test can assert the
+// values that actually go over the wire.
+func capturingHolder(t *testing.T, b *Broker, key RouteKey) <-chan ipc.InboundMsg {
+	t.Helper()
+	adapterEnd, holderEnd := net.Pipe()
+	t.Cleanup(func() { adapterEnd.Close(); holderEnd.Close() })
+	adapterConn := ipc.NewConn(adapterEnd)
+	pushes := make(chan ipc.InboundMsg, 8)
+	go func() {
+		for {
+			raw, err := adapterConn.ReadFrame()
+			if err != nil {
+				return
+			}
+			if op, _ := ipc.PeekOp(raw); op != ipc.OpInbound {
+				continue
+			}
+			var m ipc.InboundMsg
+			if json.Unmarshal(raw, &m) == nil {
+				select {
+				case pushes <- m:
+				default:
+				}
+			}
+		}
+	}()
+	stub := &Stub{CLI: "claude", PID: os.Getpid(), CWD: "/work", ConnID: 1}
+	stub.Reattach(ipc.NewConn(holderEnd), 1)
+	b.Routes.Claim(key, stub)
+	return pushes
+}
 
 // Release audit 2026-07-25 — data loss on the live-push delivered-ack.
 //
@@ -57,7 +95,7 @@ func TestLiveAck_ConsumesCoveredLines_NotQueueHead(t *testing.T) {
 	if err := b.Queue.Append(qrk, third); err != nil {
 		t.Fatalf("append third: %v", err)
 	}
-	w.forwardOrFallbackCovering(ctx, third, 1, []int64{third.MessageID})
+	w.forwardOrFallbackCovering(ctx, third, 1, []int64{third.MessageID}, true)
 
 	if n, _ := b.Queue.Pending(qrk); n != 3 {
 		t.Fatalf("all three should still be queued until the ack; got %d", n)
@@ -106,7 +144,7 @@ func TestLiveAck_NoBacklog_ConsumesThePushedLine(t *testing.T) {
 	if err := b.Queue.Append(qrk, only); err != nil {
 		t.Fatalf("append: %v", err)
 	}
-	w.forwardOrFallbackCovering(ctx, only, 1, []int64{only.MessageID})
+	w.forwardOrFallbackCovering(ctx, only, 1, []int64{only.MessageID}, true)
 	w.handleConsume(ctx, &ConsumeJob{MessageID: only.MessageID, Count: 1})
 
 	if n, _ := b.Queue.Pending(qrk); n != 0 {
@@ -142,7 +180,7 @@ func TestLiveAck_MergedPush_ConsumesEveryCoveredLine(t *testing.T) {
 	}
 	// The merged push presents as the last message of the batch.
 	merged := inbound(tid, 12, "batch-merged")
-	w.forwardOrFallbackCovering(ctx, merged, len(ids), ids)
+	w.forwardOrFallbackCovering(ctx, merged, len(ids), ids, true)
 	w.handleConsume(ctx, &ConsumeJob{MessageID: merged.MessageID, Count: len(ids)})
 
 	left, err := b.Queue.Peek(qrk, 10)
@@ -210,5 +248,51 @@ func TestCoveredByPush_BoundedEviction(t *testing.T) {
 	}
 	if w.takeCoveredByPush(int64(maxCoveredByPush+10)) != nil {
 		t.Error("take must clear the record")
+	}
+}
+
+// A batch that persisted NOTHING — every message dedup-suppressed, or every
+// Append failed — covers zero stored lines, so its push must advertise
+// Covered=0 and its ack must consume nothing.
+//
+// covEffective normalises a covered count of 0 up to 1 for callers that have no
+// queue wired (unit tests). Applying that to a real batch made a push which
+// stored nothing still claim one line, and the ack then ate an unrelated queued
+// message. This is the second trigger of the same data-loss class as
+// TestLiveAck_ConsumesCoveredLines_NotQueueHead.
+func TestLivePush_ZeroAppended_AdvertisesZeroCovered(t *testing.T) {
+	t.Setenv("C3_QUEUE_DIR", t.TempDir())
+	b := brokerWithChannel(t, mfWithTelegram(), &fakeChannel{})
+	defer b.Shutdown()
+
+	tid := int64(914)
+	key := MakeRouteKey("telegram", -1001234567890, &tid)
+	qrk := queueRouteKey(key)
+	w := newRouteWorker(context.Background(), key, time.Hour, b)
+	defer w.Stop()
+	ctx := context.Background()
+
+	// One real held line the push must not touch.
+	if err := b.Queue.Append(qrk, inbound(tid, 1, "innocent-bystander")); err != nil {
+		t.Fatalf("append: %v", err)
+	}
+
+	pushes := capturingHolder(t, b, key)
+
+	// A push whose caller knows it appended nothing.
+	w.forwardOrFallbackCovering(ctx, inbound(tid, 2, "stored-nothing"), 0, nil, true)
+
+	select {
+	case m := <-pushes:
+		if m.Covered != 0 {
+			t.Errorf("a push that stored no lines must advertise Covered=0; got %d — its ack would consume a queued message it never delivered", m.Covered)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("no push observed")
+	}
+
+	// And the bystander is still there.
+	if n, _ := b.Queue.Pending(qrk); n != 1 {
+		t.Errorf("the unrelated held line must survive; pending=%d, want 1", n)
 	}
 }
