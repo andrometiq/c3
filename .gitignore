@@ -53,3 +53,5 @@ docs/DEPLOY-telegram-proxy.md
 MORNING-REVIEW-*.md
 # Internal session/run log — personal working context, not for the public tree.
 session-logs.md
+# Local Claude<->Codex collaboration workspace (talking-stick + logs; never committed).
+local-notes/

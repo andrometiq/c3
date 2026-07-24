@@ -6,6 +6,7 @@
 2. Read `ROADMAP.md` — future/unbuilt work (what's next after v1).
 3. Read `TODO.md` — the v0.1 finish-line checklist.
 4. Read `DECISIONS.md` — all decisions made so far.
+5. Read `AGENTS.md` — build/test commands + conventions (shared with Codex and other agents).
 
 ## The Short Version
 
