@@ -4,7 +4,7 @@ description: Update C3 to the latest GitHub release — checksum-verified atomic
 
 !c3-broker update
 
-Display the output verbatim. `c3-broker update` checks the latest GitHub release, downloads the tarball for this platform, verifies it against `SHA256SUMS`, and atomically swaps the six installed binaries in place. It does **not** touch the running broker — the swap is on disk only.
+Display the output verbatim. `c3-broker update` checks the latest GitHub release, downloads the tarball for this platform, verifies it against `SHA256SUMS`, and atomically swaps the nine installed binaries in place. It does **not** touch the running broker — the swap is on disk only.
 
 After a successful update the binaries are new but the **running broker is still the old version**. To load the new broker code, the safe path inside Claude Code is: quit Claude Code (Ctrl-D or `/exit`) and relaunch with `claude --dangerously-load-development-channels plugin:c3@c3` (append `--resume` to pick your session back up) — the next adapter spawn auto-spawns a fresh broker on the new binary. Do **not** `kill -TERM` the broker from inside Claude Code (killing it recycles this session's MCP adapter). From a **separate** terminal, `kill -TERM <pid>` (the command prints the pid) bounces it cleanly — adapters reconnect and re-spawn the new broker on their own.
 

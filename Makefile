@@ -24,6 +24,7 @@ build:
 	go build -ldflags "$(VERSION_LDFLAGS)" -o $(BIN_DIR)/c3-agy-adapter ./cmd/c3-agy-adapter
 	go build -ldflags "$(VERSION_LDFLAGS)" -o $(BIN_DIR)/c3-desktop-adapter ./cmd/c3-desktop-adapter
 	go build -ldflags "$(VERSION_LDFLAGS)" -o $(BIN_DIR)/codex ./cmd/codex
+	go build -ldflags "$(VERSION_LDFLAGS)" -o $(BIN_DIR)/claude-shim ./cmd/claude-shim
 	go build -ldflags "$(VERSION_LDFLAGS)" -o $(BIN_DIR)/migrate-legacy ./cmd/migrate-legacy
 
 test:

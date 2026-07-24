@@ -249,7 +249,7 @@ has no release identity to compare against.)
 **Manual update (one command).** Run `/c3:update` in Claude Code, or `c3-broker
 update` from any shell. It queries the latest release, downloads the tarball for
 your platform, verifies it against the release's `SHA256SUMS`, and atomically
-swaps the seven binaries in place — the running binaries are never touched until
+swaps the nine binaries in place — the running binaries are never touched until
 the download is verified, and on any failure the old binaries are left exactly as
 they were. `c3-broker update --check` reports current-vs-latest without installing.
 

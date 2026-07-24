@@ -21,7 +21,7 @@ type Options struct {
 	// Client is used for the release-API check. Downloads use their own
 	// longer-timeout, proxy-aware client. nil ⇒ DefaultClient().
 	Client *http.Client
-	// DestDir is where the six binaries are installed. Empty ⇒ ExecutableDir()
+	// DestDir is where the BinaryNames binaries are installed. Empty ⇒ ExecutableDir()
 	// (the directory the running binary lives in).
 	DestDir string
 	// WorkDir is a scratch directory for the download + extraction. Empty ⇒ a
