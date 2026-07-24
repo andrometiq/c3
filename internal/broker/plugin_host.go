@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
 
 	"github.com/karthikeyan5/c3/internal/c3types"
@@ -274,6 +275,12 @@ func atomicWriteFile(tmp, final string, data []byte, mode os.FileMode) error {
 	if err := os.Rename(tmp, final); err != nil {
 		cleanup()
 		return err
+	}
+	// Windows disallows fsync on a directory handle (ERROR_ACCESS_DENIED); the
+	// file bytes were already fsync'd before the rename, so skip the dir-fsync
+	// there rather than fail the whole write. (Mirrors queue/store.go.)
+	if runtime.GOOS == "windows" {
+		return nil
 	}
 	d, err := os.Open(filepath.Dir(final))
 	if err != nil {

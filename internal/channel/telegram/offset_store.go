@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
 )
 
@@ -96,6 +97,13 @@ func (s *offsetStore) Save(offset int64) error {
 	if err := os.Rename(tmp, s.path); err != nil {
 		_ = os.Remove(tmp)
 		return fmt.Errorf("offsetStore: rename %s → %s: %w", tmp, s.path, err)
+	}
+	// Windows disallows fsync on a directory handle (ERROR_ACCESS_DENIED). This
+	// is REQUIRED, not durability polish: a returned error here fails Save, so
+	// the offset never persists and every restart re-processes ~24h of updates.
+	// The data file was already fsync'd and the rename succeeded.
+	if runtime.GOOS == "windows" {
+		return nil
 	}
 	d, err := os.Open(filepath.Dir(s.path))
 	if err != nil {

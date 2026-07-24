@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 )
 
 // Read parses the mappings.json file at path. Returns os.IsNotExist-friendly
@@ -130,6 +131,13 @@ func Write(path string, mf *MappingsFile) error {
 // Per POSIX/Linux this is a no-op for some filesystems but mandatory for
 // ext4/xfs/btrfs guarantees.
 func syncDir(dir string) error {
+	// Windows disallows fsync on a directory handle (FlushFileBuffers on a
+	// directory returns ERROR_ACCESS_DENIED). Directory-entry durability there
+	// is the filesystem's (NTFS journal) responsibility, so skip it rather than
+	// abort an otherwise-successful atomic write.
+	if runtime.GOOS == "windows" {
+		return nil
+	}
 	d, err := os.Open(dir)
 	if err != nil {
 		return err

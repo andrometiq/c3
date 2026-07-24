@@ -6,6 +6,7 @@ import (
 	"log"
 	"net"
 	"os"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -61,9 +62,16 @@ func Listen(path string, br *Broker) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := os.Chmod(path, 0600); err != nil {
-		_ = ln.Close()
-		return nil, err
+	// Windows can't chmod an AF_UNIX socket file (os.Chmod returns "cannot be
+	// accessed by the system"), and 0600 socket perms aren't the access-control
+	// mechanism there anyway — the parent dir's NTFS ACL is. Skip the chmod on
+	// Windows so it doesn't turn an otherwise-good listen into a FATAL; keep the
+	// owner-only hardening on Unix.
+	if runtime.GOOS != "windows" {
+		if err := os.Chmod(path, 0600); err != nil {
+			_ = ln.Close()
+			return nil, err
+		}
 	}
 
 	s := &Server{ln: ln, br: br}

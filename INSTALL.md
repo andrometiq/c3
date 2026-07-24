@@ -2,7 +2,7 @@
 
 > **For human users:** open a Claude Code session in any directory and paste:
 >
->     follow https://github.com/karthikeyan5/c3/blob/main/INSTALL.md to install c3
+>     follow https://github.com/karthikeyan5/c3/blob/master/INSTALL.md to install c3
 >
 > (or `follow /path/to/local/c3/INSTALL.md` if you've cloned locally)
 >
@@ -13,6 +13,13 @@
 > the user. Execute the numbered steps in order. Surface errors verbatim and
 > stop on first failure. Don't paraphrase commands — run them exactly. Every
 > step is idempotent (safe to re-run).
+
+> **Platform support:** **Linux is the primary, fully-supported platform.**
+> **Windows (Claude Desktop + Claude Code) is _beta_** — the install works and
+> the known Windows-specific bugs are fixed, but inbound is **poll-only** there
+> (pull messages with `/c3:fetch-queue`) and it hasn't yet had a full clean-room
+> install pass. There's no prebuilt Windows release yet, so Windows installs
+> build from source (needs Go).
 
 ---
 
@@ -36,8 +43,9 @@ the clone path; you'll need it for the from-source fallback in step 2.)
 
 ## 2. Install the binaries
 
-C3 ships seven binaries: `c3-broker`, `c3-claude-adapter`, `c3-codex-adapter`,
-`c3-grok-adapter`, `claude-shim`, `codex`, `migrate-legacy`. Prefer the prebuilt release
+C3 ships nine binaries: `c3-broker`, `c3-claude-adapter`, `c3-codex-adapter`,
+`c3-grok-adapter`, `c3-agy-adapter`, `c3-desktop-adapter`, `claude-shim`, `codex`,
+`migrate-legacy`. Prefer the prebuilt release
 tarball; fall back to building from source only if there's no tarball for
 the user's platform.
 
@@ -53,7 +61,7 @@ curl -fsSL -O "$base/SHA256SUMS"
 { sha256sum --ignore-missing -c SHA256SUMS || shasum -a 256 -c SHA256SUMS; }
 mkdir -p ~/.local/bin
 tar xzf "c3_${VERSION}_${OS}_${ARCH}.tar.gz" -C ~/.local/bin \
-  c3-broker c3-claude-adapter c3-codex-adapter c3-grok-adapter claude-shim codex migrate-legacy
+  c3-broker c3-claude-adapter c3-codex-adapter c3-grok-adapter c3-agy-adapter c3-desktop-adapter claude-shim codex migrate-legacy
 ```
 
 If the download 404s (no tarball for this platform), fall through to the
@@ -80,7 +88,7 @@ Go installs to `$GOBIN` (default `$(go env GOPATH)/bin`).
 ## 3. Verify the binaries are installed
 
 ```bash
-for bin in c3-broker c3-claude-adapter c3-codex-adapter c3-grok-adapter claude-shim codex migrate-legacy; do
+for bin in c3-broker c3-claude-adapter c3-codex-adapter c3-grok-adapter c3-agy-adapter c3-desktop-adapter claude-shim codex migrate-legacy; do
   command -v "$bin" >/dev/null && echo "  ✓ $bin" || echo "  ✗ $bin (missing)"
 done
 command -v c3-broker >/dev/null || echo "WARNING: the install dir is not on \$PATH"
@@ -239,7 +247,7 @@ mkdir -p ~/.config/systemd/user
 # from a clone:  cp docs/systemd/c3-broker.service ~/.config/systemd/user/
 # prebuilt (no clone):
 curl -fsSL -o ~/.config/systemd/user/c3-broker.service \
-  https://raw.githubusercontent.com/karthikeyan5/c3/main/docs/systemd/c3-broker.service
+  https://raw.githubusercontent.com/karthikeyan5/c3/master/docs/systemd/c3-broker.service
 # Edit ExecStart= to your c3-broker path (e.g. ~/.local/bin/c3-broker) before enabling.
 systemctl --user daemon-reload
 systemctl --user enable --now c3-broker.service

@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -121,6 +122,15 @@ func (s *Store) Append(rk RouteKey, in *c3types.Inbound) error {
 // .jsonl on first Append, renamed .cur/.jsonl on writeCursor/rewrite) are
 // durable across a crash. Mirrors offset_store.go's dir-fsync.
 func (s *Store) syncDir() error {
+	// Windows disallows fsync on a directory handle (FlushFileBuffers returns
+	// ERROR_ACCESS_DENIED). Skipping it here is REQUIRED for correctness, not
+	// just durability polish: Append() propagates this error, the poll loop
+	// treats it as "not persisted" and never advances the Telegram offset —
+	// Telegram then redelivers the same updates forever (infinite re-queue +
+	// re-notify loop, the Windows spam). Do not "optimize" this guard away.
+	if runtime.GOOS == "windows" {
+		return nil
+	}
 	d, err := os.Open(s.dir)
 	if err != nil {
 		return fmt.Errorf("queue: open dir for fsync: %w", err)
@@ -814,6 +824,10 @@ func (s *Store) snapshotDropped(rk RouteKey, dropped []c3types.Inbound) error {
 // fsyncDir fsyncs a directory so newly-created or renamed entries in it are
 // durable across a crash. Mirrors syncDir (which fsyncs the queue dir).
 func fsyncDir(path string) error {
+	// Windows disallows fsync on a directory handle; skip it there (see syncDir).
+	if runtime.GOOS == "windows" {
+		return nil
+	}
 	d, err := os.Open(path)
 	if err != nil {
 		return fmt.Errorf("queue: open dir for fsync: %w", err)

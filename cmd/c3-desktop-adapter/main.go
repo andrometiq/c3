@@ -1019,6 +1019,13 @@ func (a *adapter) doFetchQueue(ctx context.Context, ack bool, limit int, all boo
 		if resp.Err != "" {
 			return resp.Err, true
 		}
+		// Disambiguate "attached, nothing queued" from "not attached to
+		// anything": the broker returns an empty queue for BOTH, so a bare
+		// "queue is empty" misleads. When this session holds no topic, say so
+		// and point at attach.
+		if len(resp.Messages) == 0 && a.currentTopicName() == "" {
+			return "⟦c3 not-attached⟧ This session isn't attached to any topic, so there's nowhere to look — an empty result here means \"not attached\", not \"no new mail\". Call `attach` (no args) to pick a topic this session used before.", false
+		}
 		return renderFetchedMessages(resp.Messages, resp.Remaining, a.currentTopicName()), false
 	}
 }

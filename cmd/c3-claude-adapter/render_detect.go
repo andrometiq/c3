@@ -21,6 +21,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 )
@@ -44,11 +45,26 @@ type procReaders struct {
 // this adapter can render channel push notifications. Computed once at startup
 // (the process tree is fixed for the session).
 //
-// Returns TRUE (capable) on ANY uncertainty — non-Linux (/proc absent),
-// unreadable ancestors, or no identifiable Claude Code host in the chain — so an
-// unknown environment never regresses the normal fast path. Returns FALSE only
-// when it positively identifies a Claude Code host launched WITHOUT the flag.
+// Windows is a special case: there is no /proc, so the ancestor-cmdline walk
+// can't run and would fall through to "capable" for EVERY session — dangerous,
+// because the Claude Desktop app launches Claude Code WITHOUT the dev-channels
+// flag, so the host silently drops the channel frame and a false "capable"
+// makes the broker deliver+RETIRE the durable copy → the message is LOST (not
+// even fetch_queue-recoverable). So on Windows we fail SAFE: report NOT capable
+// so inbound is HELD in the durable queue (recoverable via fetch_queue). Worst
+// case is a needless fetch, never silent loss. (Windows is beta / poll-only
+// until a real Windows render detector exists.)
+//
+// On Linux it returns TRUE (capable) on ANY uncertainty — unreadable ancestors
+// or no identifiable Claude Code host in the chain — so an unknown environment
+// never regresses the normal fast path. Returns FALSE only when it positively
+// identifies a Claude Code host launched WITHOUT the flag.
 func hostCanRenderChannels() bool {
+	// Windows has no /proc; fail safe to not-renderable so inbound is HELD, not
+	// silently lost (see the doc comment above). Windows delivery is poll-only.
+	if runtime.GOOS == "windows" {
+		return false
+	}
 	return detectRenderCapable(os.Getpid(), procReaders{cmdline: readProcCmdline, ppid: readProcPPID})
 }
 
