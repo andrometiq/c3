@@ -1,76 +1,160 @@
-# C3 — command every coding agent you run, from one chat
+# C3 — your coding agents, one Telegram inbox
 
-**C³** is the old military/NATO doctrine term **Command, Control, and Communications** — and the triad maps 1:1 to what this does:
+C3 turns one Telegram bot into a **topic-per-project remote control** for the Claude Code
+and Codex sessions already running on your machine.
 
-- **Command** — issue intent: send work to any agent, text or voice, from anywhere.
-- **Control** — supervise execution: Allow/Deny its tool calls, steer it mid-run.
-- **Communications** — the link you own: one self-hosted broker multiplexing every session, with a durable queue so no message you send is ever lost.
+Send text, voice notes, files, or decisions from your phone. C3 routes each message to the
+CLI attached to that project, sends the agent's replies back to the same topic, and holds
+inbound messages on disk when no session is attached. It's a self-hosted bridge to your real
+coding CLIs — not another agent runtime.
 
-C3 multiplexes every Claude Code and Codex session onto one Telegram bot — a thread per project, tap-to-approve, and no message you send is ever lost.
+```text
+Telegram topic "api"  ⇄  c3-broker  ⇄  attached Claude Code / Codex session
+                              │
+                    no session attached?
+                              │
+                              ▼
+                     durable inbound queue
+```
 
-> One bot. Every project its own thread. Claude Code and Codex on one self-hosted broker — however you run your agents.
+## What it looks like
 
----
+You send a voice note to the Telegram topic for a project:
 
-## The moment
+> Run the tests, fix the flaky one, and tell me what changed.
 
-You've got six agents going across six projects. Your phone buzzes. **Which one was that?**
+Claude Code receives a native `<channel>` turn whose content is:
 
-C3 is a **multiplexer, not a wrapper**: one broker daemon owns a single Telegram bot token, and every CLI session — Claude Code or Codex — connects to it over a unix socket as a thin MCP adapter. One broker, one bot, N sessions, a Telegram **forum topic per project**. Each project gets its own thread on your phone.
+```text
+[Transcribed voice]: Run the tests, fix the flaky one, and tell me what changed.
+```
 
-Three things a per-session bridge structurally can't match:
+When a tool call needs approval, the topic shows the literal command and a real inline
+keyboard:
 
-1. **Many agents, one place.** Every session is its own topic on one bot. Not a poller per session, not another app — one thread per project, on the messenger you already use.
-2. **A message you send to a sleeping session is never lost.** Fire a note (or a voice memo) at a project whose session is down; it's held in a durable on-disk queue and delivered the moment a session attaches there. *(The queue is inbound — messages you send in. See the honest scoping in "How is this different?" below.)*
-3. **Works however you run your agents.** API key, Bedrock, Vertex, a gateway, a proxy — the setups a first-party phone bridge refuses. If your CLI runs, C3 reaches it.
+```text
+🔐 Permission: Bash
 
-Works great with one agent; scales to ten.
+git push origin fix/flaky-test
 
-## What you get today
+[✅ Allow] [❌ Deny]
+```
 
-Differentiators first:
+The agent's reply comes back to that same topic. If the session is down when you send the
+next message, C3 stores it and tells you so:
 
-- **One bot, a topic per project** — multiplex any number of Claude Code and Codex sessions. Run `claude` (or `codex`) in a project, `attach` once to pick or create its topic, and every resume of that session silently re-attaches its own topic. Two sessions never fight over one topic.
-- **Durable inbound queue** — once C3 has *received* a Telegram message it never drops it: messages that arrive while a session is down (or before you attach) are held on disk and delivered on attach, with a per-message backlog preview. You never re-forward a voice note.
-- **Cross-CLI on one broker** — Claude Code and Codex on the same project coordinate through the broker, so only one holds the topic claim at a time; no double-replies.
-- **Rich two-way Telegram** — markdown in both directions (bold/italic, lists, code blocks, tables, blockquotes), quote-replies with the quoted text in context, attachments, message edits, reactions, and polls, all surfaced to the CLI as structured channel events.
-- **Self-hosted, one Go binary set, MIT** — the broker runs on your machine and holds your bot token in a mode-0600 config file. No vendor cloud relay.
-- **Keeps itself current** — an update notice in your status line when a newer release ships, and a checksum-verified `/c3:update` one-command install (or fully automatic, opt-in) that stages and replaces the binaries and lets sessions reconnect on their own. Windows updates are manual: fully quit C3, then re-extract the release tarball.
+```text
+📨 Held — nothing lost.
+1 message queued.
 
-Delighters — the demo magic, not the headline:
 
-- **Tap-to-approve** — when a Claude Code tool call needs permission, C3 relays *the CLI's own prompt* to the topic as an inline Allow/Deny keyboard, and only an allowlisted operator's tap authorizes it. (Claude Code only today.)
-- **Voice notes → transcript** — record on your phone; a pluggable speech-to-text chain transcribes it and the CLI sees `[Transcribed voice]: …`, with the original audio kept so you can re-transcribe if a provider was flaky.
+Send /status to check.
+```
+
+Attach a session to that topic and the queued message is waiting for it. You don't re-record
+the voice note.
+
+*(Those are the strings C3 actually renders. Claude Code owns the surrounding `<channel>`
+envelope, so C3 doesn't invent or promise its host-controlled attributes.)*
+
+## Is C3 for you?
+
+C3 fits when:
+
+- you run coding agents across **several projects** and want one phone inbox without losing
+  track of which project a message belongs to;
+- you want to steer the **actual** Claude Code or Codex process on your machine — including
+  setups behind Bedrock, Vertex, an API gateway, or a proxy;
+- you want a **self-hosted** bridge whose bot token and message queue stay on your hardware.
+
+It works fine with a single session. The architecture starts to matter once you have
+several.
+
+## Why C3
+
+1. **One bot, many sessions.** A single broker owns the Telegram bot token. Every project
+   gets a forum topic, and only the CLI session holding that topic's claim receives its
+   messages.
+2. **Inbound survives sleeping sessions.** When no render-capable session owns a topic, C3
+   keeps received messages in a durable on-disk queue for later readback instead of making
+   you resend them.
+3. **Your CLIs, your auth, your machine.** C3 is a local multiplexer, not a hosted agent
+   service. Claude Code and Codex keep their normal models, credentials, tools, sandboxes,
+   and project directories.
+
+## What ships today
+
+- **Topic routing and session resume** — attach a session to a topic once; a resumed session
+  silently re-attaches only to its own recorded topic. A fresh session asks before claiming
+  anything.
+- **Rich two-way Telegram** — markdown, quote-replies, attachments, edits, reactions, polls,
+  and inline buttons.
+- **Voice notes** — a pluggable speech-to-text chain turns phone audio into
+  `[Transcribed voice]: …`; the original attachment stays available for re-transcription.
+- **Remote permission decisions** — Claude Code can relay its permission prompt as an
+  Allow/Deny keyboard. Only an allowlisted operator's tap becomes a verdict, and command
+  previews render literally rather than as markdown.
+- **One broker across CLIs** — Claude Code and Codex coordinate claims through the same
+  daemon, so two sessions never answer one topic.
+- **Local, inspectable state** — Go binaries, MIT licence, a mode-0600 config file, and a
+  durable queue on disk. No C3 cloud relay.
+- **Release updates** — a status-line notice when a new release ships, plus a
+  checksum-verified updater on Linux/macOS. Windows updates are manual.
 
 **Codex parity, stated plainly.** Codex sessions get topic routing, the durable queue, `reply`, reactions, edits, polls, and attachments. They do **not** get `ask`, `detach`, or the permission relay — those are Claude Code-only today — and the Codex bridge is heavier (a 4-process launcher → app-server → adapter → TUI chain, with an NVM symlink step). See [`docs/ADAPTERS.md`](docs/ADAPTERS.md) and [`ROADMAP.md`](ROADMAP.md).
 
-**Claude Desktop (Windows), stated plainly.** There's a `c3-desktop-adapter` for Claude Desktop, but it's a **pull bridge, not a push one**: Claude Desktop can't surface a Telegram message on its own, so inbound waits in the durable queue and you pull it by asking Claude to check (it calls `fetch_queue`); replies go out on request. No live `<channel>` rendering and no permission relay — those stay Claude Code-only. Install with `c3-broker install-desktop`; see [`docs/DESKTOP.md`](docs/DESKTOP.md).
+**Claude Desktop, stated plainly.** There's a `c3-desktop-adapter` for Claude Desktop, but it's a **pull bridge, not a push one**: Claude Desktop can't surface a Telegram message on its own, so inbound waits in the durable queue and you pull it by asking Claude to check (it calls `fetch_queue`); replies go out on request. No live `<channel>` rendering and no permission relay — those stay Claude Code-only. Install with `c3-broker install-desktop`; see [`docs/DESKTOP.md`](docs/DESKTOP.md).
+
+The Desktop adapter also ships an inbox panel: watch a topic read-only, take it over
+explicitly, hand queued messages to Claude, opt into auto-forwarding while the panel is
+open, and reply to Telegram. Desktop stays pull-based — the panel doesn't turn it into push.
+
+## Before you install — the trust model
+
+Two things worth knowing up front, because they're easy to miss:
+
+- **Anyone in the paired Telegram group can drive the agent.** C3 pipes chat messages into a
+  coding CLI that holds tool access on your machine. Message content is trusted about as far
+  as you trust the group. Approving a *tool call* is stricter — only a DM-paired operator's
+  tap counts — but sending messages into the agent's context is group-wide. Pair a group
+  you'd hand a shell to.
+- **Your bot token is a password.** It lives in `~/.config/c3/mappings.json` (mode 0600) on
+  your machine. Anyone holding it can read every message in that group and post as the bot.
 
 ## Install
 
-C3 installs as a Claude Code plugin (marketplace add straight from GitHub) with prebuilt binaries — no toolchain needed; a build-from-source path stays for contributors. In any Claude Code session, paste:
+Linux is the primary, fully supported platform. macOS has prebuilt binaries. Windows is
+**beta**: prebuilt binaries are published, but inbound is poll-only and self-update is
+refused while the `.exe` files may be live (quit C3 and re-extract the tarball instead).
 
-```
+In any Claude Code session, paste:
+
+```text
 follow https://github.com/karthikeyan5/c3/blob/master/INSTALL.md to install c3
 ```
 
-The agent runs the playbook end-to-end. You'll be asked for a Telegram bot token (from `@BotFather`) and two short pairing codes — one sent to the bot in a DM, one in your group — which discover your user id and the group's chat id automatically, no id hunting. About five minutes.
+The playbook asks which host you want — Claude Code, Claude Desktop, or CoWork — then
+installs the matching path. You provide a Telegram bot token and send two short pairing
+codes; setup discovers your user id and the group's chat id without an id hunt. Codex
+integration is a deliberate opt-in step, because C3's launcher is *also* named `codex` and
+takes the real command's place on `PATH`.
 
-**Pick your environment first.** C3 runs under three hosts — **Claude Code (CLI)**, **Claude Desktop** (Chat / Code tabs), or **CoWork** (Desktop's Cowork tab). The install shares its binary + Telegram-config steps; only the host-integration wiring differs (the dev-channels flag for Claude Code, `c3-broker install-desktop` for Desktop/CoWork). [`INSTALL.md`](INSTALL.md) §0 has the routing table and the Linux/Windows split.
+See [`INSTALL.md`](INSTALL.md) for the agent-driven playbook and
+[`docs/INSTALL.md`](docs/INSTALL.md) for the human walkthrough.
 
-See [`INSTALL.md`](INSTALL.md) for the agent script and [`docs/INSTALL.md`](docs/INSTALL.md) for the human-readable walkthrough.
+### Why Claude Code needs a development-channels flag
 
-> **Platform support:** Linux is the primary, fully-supported platform, and macOS is supported with prebuilt binaries. Windows (Claude Desktop + Claude Code) is **beta** — it works and the known Windows bugs are fixed, and prebuilt Windows tarballs are published, but inbound is poll-only there (`/c3:fetch-queue`) and the Windows binaries are cross-compiled without a clean-room CI pass.
+Live inbound to Claude Code currently starts with:
 
-### The `--dangerously-load-development-channels` flag
-
-To surface inbound Telegram messages, you start Claude Code with a flag:
-
-```
+```text
 claude --dangerously-load-development-channels plugin:c3@c3
 ```
 
-This isn't a C3 hack. Claude Code gates inbound channel notifications from **every** locally-installed channel plugin behind this development flag — it's [Anthropic's own documented preview guardrail](https://code.claude.com/docs/en/channels) for third-party channels that haven't shipped through their marketplace. Without it, a session can't render inbound live — but it isn't lost either: C3 detects a host that can't render and holds those messages in the durable queue, so they're recoverable once you relaunch with the flag. The install can also drop in a tiny `claude` shim so you never type the flag by hand.
+Claude Code applies that preview guardrail to every locally-installed channel plugin — it
+isn't a C3 hack. Without the flag, C3 detects that the host can't render live channel turns
+and keeps inbound in the queue for `fetch_queue` rather than dropping it; the installer can
+also drop in a small `claude` shim so the flag is automatic. See Anthropic's
+[Channels documentation](https://code.claude.com/docs/en/channels).
 
 ## How is this different from X?
 
@@ -85,48 +169,76 @@ The unduplicated cut: self-hosted single-binary + CLI-agnostic + one-token multi
 
 ## Architecture
 
-```
+```text
    Telegram Bot API
           │
    ┌──────┴───────┐
-   │  c3-broker   │   single daemon, owns bot token, polls Telegram,
-   │  (Go)        │   runs plugin host (STT), holds routing table,
-   └──────┬───────┘   listens on $XDG_RUNTIME_DIR/c3.sock
+   │  c3-broker   │   one poller, routing + claims, durable queue,
+   │  (Go)        │   plugin host, local IPC socket
+   └──────┬───────┘
           │
    ┌──────┼──────────────────┐
    │      │                  │
    ▼      ▼                  ▼
- adapter  adapter            adapter
- (Claude) (Claude)           (Codex)
+ Claude  Claude             Codex
+ adapter adapter            adapter
    │      │                  │
    ▼      ▼                  ▼
-  CLI-1  CLI-2              codex
+ CLI-1   CLI-2              TUI
 ```
 
-**Broker.** Single long-running Go process. One Telegram poller (a Bot API constraint), N MCP adapters connected over a unix socket. A per-route serial executor (one goroutine per `RouteKey = {channel, chat_id, topic_id?}`) owns the inbound pipeline, outbound calls, typing indicator (relayed automatically by the route worker — not an agent tool), and debounce/merge. `flock` singleton with stale-pid recovery.
+**Broker.** One long-running Go process owns the Telegram poller, per-route workers, topic
+claims, durable queues, outbound rate limits, and plugin hooks. Adapters connect over a
+local Unix socket. A singleton lock stops two brokers polling one token on the same machine.
 
-**Adapters.** Thin MCP stdio servers, one per CLI process. Each looks like a normal MCP server to its CLI and receives only messages routed to its attached topics. Tools: `attach`, `detach`, `topics`, `reply`, `react`, `edit_message`, `poll`, `stop_poll`, `download_attachment`, `fetch_queue`, `retranscribe`, plus `ask` on Claude Code. Codex's adapter omits `detach` and `ask` and adds an env-gated `codex_forward` debug tool — see [`docs/ADAPTERS.md`](docs/ADAPTERS.md). Survives a broker bounce via exponential-backoff reconnect plus replay of the last successful attach.
+**Adapters.** Thin MCP stdio servers connecting each host process to the broker. They expose
+only the capabilities that host can actually support, and reconnect after a broker bounce.
+Codex's live path adds its launcher and app-server because the app-server — not the TUI —
+owns MCP startup.
 
-**Channels.** The transport layer. v0.1 ships Telegram only (`internal/channel/telegram`, cleanroom Go via `gotgbot/v2`) with resilience hardening: 401 circuit-breaker, 429 retry-after, 409 conflict detection, a persisted update-id watermark, outbound rate-limiting, and per-update semantic dedup. The `Channel` interface (`internal/channel/channel.go`) is the seam for a future Slack/web/voice transport — see [`docs/CHANNELS.md`](docs/CHANNELS.md).
+**Channels.** v0.1 ships Telegram. The channel interface is the seam for future transports,
+but adding one is Go work today, not a config-only plugin.
 
-**Plugins.** Compiled-in Go extensions that subscribe to broker hooks. The one shipped plugin is STT — a Go shim under `internal/plugin/builtins/stt/` driving a bundled Python provider-chain pipeline at `plugins/c3/stt/`. See [`docs/PLUGINS.md`](docs/PLUGINS.md).
+**Plugins.** Built-in Go plugins subscribe to broker hooks. The shipped STT plugin drives a
+bundled Python provider chain; external loadable plugins remain roadmap work.
 
-**Config.** `~/.config/c3/mappings.json` (mode 0600, atomic-rewrite with one `.bak`). The bot token lives here; treat it like a password.
+**Config.** `~/.config/c3/mappings.json`, written mode 0600 with an atomic rewrite and one
+backup. It contains the bot token — treat it like a password.
 
 ## Routing
 
-- **Topic-based** (primary) — a Telegram supergroup with topics enabled; each topic binds to one CLI session. The natural start is `cd <project-dir> && claude`, then `attach`: a session that has attached before silently re-claims its own topic, and a first-time session gets a picker (seeded from the project dir) to choose or create one. C3 never binds a topic the session didn't choose.
-- **DM-based** — your personal DMs with the bot route to whichever CLI claims `dm`. Works anywhere, no project binding.
-- **Group-based** — a whole group without topics maps to one CLI. Useful for shared rooms.
+- **Telegram topics** are the primary path. A topic maps to at most one live session claim;
+  a fresh session asks before creating, claiming, or stealing.
+- **Bot DMs** route to whichever CLI explicitly claims `dm`.
+- **Groups without topics** can map a whole group to one CLI.
 
 ## Extending C3
 
-Honest about today's seams:
+- Add a built-in broker plugin under `internal/plugin/builtins/<name>/`; STT is the worked
+  example.
+- Implement a new channel behind `internal/channel/channel.go` and wire it into the broker.
+- Build a new CLI adapter as an MCP + C3 IPC client with reconnect and capability reporting.
 
-- **Plugins are compiled-in Go.** You add a package under `internal/plugin/builtins/<name>/`, register it in the `builtinPlugins` slice in `cmd/c3-broker/main.go`, and rebuild the broker. **STT is the worked example** — and the only plugin that uses a non-Go runtime, because a swappable provider chain is worth more there than language purity ([`plugins/c3/stt/stt-pkg/README.md`](plugins/c3/stt/stt-pkg/README.md) is the "add a provider" how-to).
-- **A new channel or CLI adapter is real Go work**, not a drop-in: a channel implements the `Channel` interface and is hand-wired into the broker; an adapter is a from-scratch MCP + IPC + reconnect job (each existing adapter is 1.5–2.3k LOC). [`docs/CHANNELS.md`](docs/CHANNELS.md) and [`docs/ADAPTERS.md`](docs/ADAPTERS.md) document them as they actually are.
+The real contracts and the honest effort involved are in
+[`docs/PLUGINS.md`](docs/PLUGINS.md), [`docs/CHANNELS.md`](docs/CHANNELS.md), and
+[`docs/ADAPTERS.md`](docs/ADAPTERS.md).
 
-External (non-Go, loadable) plugins and more channels are on the [roadmap](ROADMAP.md), not shipped.
+## Building and contributing
+
+Go ≥1.25. `go build ./...`, `go test ./...` (hermetic — no network needed), `go vet ./...`,
+and `gofmt -l .` should print nothing. [`AGENTS.md`](AGENTS.md) is the operating doc for
+contributors and AI coding agents alike; [`DECISIONS.md`](DECISIONS.md) records why things
+are the way they are.
+
+## Why the name?
+
+**C³** is the old military/NATO doctrine term — **Command, Control, and Communications**:
+
+- **Command** — send intent to an agent.
+- **Control** — supervise execution and answer its decisions.
+- **Communications** — keep a reliable link between the phone and the local CLI.
+
+The name describes the job. The product definition comes first.
 
 ## Roadmap
 
