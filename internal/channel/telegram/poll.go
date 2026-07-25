@@ -276,7 +276,7 @@ func (c *Channel) pollLoop() {
 				consecConflict++
 				c.conflictActive.Store(true)
 				c.reportHealth(c.health.RecordFailure("409 conflict (another getUpdates active)"))
-				c.host.Logf("telegram: 409 CONFLICT (consec=%d) — another getUpdates is active for this bot token; backing off %v and retrying. Self-heals once the other poll ends; no kill/restart needed. Error: %v",
+				c.logf("telegram: 409 CONFLICT (consec=%d) — another getUpdates is active for this bot token; backing off %v and retrying. Self-heals once the other poll ends; no kill/restart needed. Error: %v",
 					consecConflict, conflictBackoff, err)
 				select {
 				case <-c.ctx.Done():
@@ -297,7 +297,7 @@ func (c *Channel) pollLoop() {
 				// reason to fail over. Reset the transient streak.
 				consecTransient = 0
 				tripped := c.authBrk.RecordFail()
-				c.host.Logf("telegram: GetUpdates permanent error (consec=%d, tripped=%v): %v",
+				c.logf("telegram: GetUpdates permanent error (consec=%d, tripped=%v): %v",
 					c.authBrk.Consec(), tripped, err)
 				if tripped {
 					c.reportHealth(c.health.RecordFailure("token revoked / persistent 401"))
@@ -345,7 +345,7 @@ func (c *Channel) pollLoop() {
 				// signature. Feed the health machine; it flips DOWN after
 				// downAfterFails consecutive transient failures and the edge
 				// fans out the out-of-band alert.
-				c.host.Logf("telegram: GetUpdates transient error (backoff %v): %v", backoff, err)
+				c.logf("telegram: GetUpdates transient error (backoff %v): %v", backoff, err)
 				c.reportHealth(c.health.RecordFailure("transient (network/timeout/5xx)"))
 				consecTransient++
 				c.maybeFailover(&consecTransient)
@@ -364,7 +364,7 @@ func (c *Channel) pollLoop() {
 				// drive the health machine the same way, INCLUDING the failover
 				// counter (an unreachable host can surface as an unclassified
 				// network error).
-				c.host.Logf("telegram: GetUpdates unclassified error (treating as transient, backoff %v): %v", backoff, err)
+				c.logf("telegram: GetUpdates unclassified error (treating as transient, backoff %v): %v", backoff, err)
 				c.reportHealth(c.health.RecordFailure("unclassified (treated as transient)"))
 				consecTransient++
 				c.maybeFailover(&consecTransient)
@@ -679,7 +679,7 @@ func (c *Channel) dispatchCallback(updateID int64, cq *gotgbot.CallbackQuery) {
 	if cq.Data == callbackChosenData {
 		if c.bot != nil {
 			if _, err := c.bot.AnswerCallbackQuery(cq.Id, &gotgbot.AnswerCallbackQueryOpts{}); err != nil {
-				c.host.Logf("telegram: callback update=%d indicator ack failed: %v", updateID, err)
+				c.logf("telegram: callback update=%d indicator ack failed: %v", updateID, err)
 			}
 		}
 		return
@@ -695,7 +695,7 @@ func (c *Channel) dispatchCallback(updateID int64, cq *gotgbot.CallbackQuery) {
 		// immediate feedback. ShowAlert stays false — a lightweight toast, not a
 		// modal (see callbackAckToastText).
 		if _, err := c.bot.AnswerCallbackQuery(cq.Id, &gotgbot.AnswerCallbackQueryOpts{Text: callbackAckToastText}); err != nil {
-			c.host.Logf("telegram: callback update=%d answerCallbackQuery failed: %v", updateID, err)
+			c.logf("telegram: callback update=%d answerCallbackQuery failed: %v", updateID, err)
 		}
 	}
 
@@ -774,7 +774,7 @@ func (c *Channel) collapseCallbackKeyboard(updateID int64, msg *gotgbot.Message,
 		MessageId:   msg.MessageId,
 		ReplyMarkup: collapsed,
 	}); err != nil {
-		c.host.Logf("telegram: callback update=%d collapse keyboard failed: %v", updateID, err)
+		c.logf("telegram: callback update=%d collapse keyboard failed: %v", updateID, err)
 	}
 }
 
@@ -821,7 +821,7 @@ func (c *Channel) emitPermTap(updateID int64, in *c3types.Inbound, callbackID st
 // spinner on its own.
 func (c *Channel) answerPermTap(updateID int64, callbackID, text string, showAlert bool) {
 	if err := c.AnswerCallback(callbackID, text, showAlert); err != nil {
-		c.host.Logf("telegram: perm-tap update=%d answerCallbackQuery failed: %v", updateID, err)
+		c.logf("telegram: perm-tap update=%d answerCallbackQuery failed: %v", updateID, err)
 	}
 }
 
@@ -839,7 +839,7 @@ func (c *Channel) AnswerCallback(callbackID, text string, showAlert bool) error 
 		Text:      text,
 		ShowAlert: showAlert,
 	})
-	return err
+	return c.scrubToken(err)
 }
 
 // resolveCallbackMessage extracts the accessible *gotgbot.Message from a
@@ -1180,7 +1180,7 @@ func (c *Channel) dispatchMessage(updateID int64, msg *gotgbot.Message, edited b
 				// rendering as live Telegram markdown from the trusted bot.
 				Markup: c3types.MarkupNone,
 			}); err != nil {
-				c.host.Logf("telegram: command reply send failed update=%d chat=%d: %v", updateID, in.ChatID, err)
+				c.logf("telegram: command reply send failed update=%d chat=%d: %v", updateID, in.ChatID, err)
 			} else {
 				c.host.Logf("telegram: command reply sent update=%d chat=%d thread=%d (not routed)", updateID, in.ChatID, msg.MessageThreadId)
 			}

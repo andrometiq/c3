@@ -318,7 +318,7 @@ func (c *Channel) Start(ctx context.Context, host channel.Host) error {
 		RequestOpts:       c.requestOptsFor("getMe"),
 	})
 	if err != nil {
-		return fmt.Errorf("telegram: NewBot: %w", err)
+		return c.scrubTokenf("telegram: NewBot: %w", err)
 	}
 	c.bot = bot
 	c.host = host
@@ -385,7 +385,7 @@ func (c *Channel) Start(ctx context.Context, host channel.Host) error {
 			},
 			nil,
 		); err != nil {
-			c.host.Logf("telegram: setMyCommands(/status,/queue,/drain) failed (non-fatal): %v", err)
+			c.logf("telegram: setMyCommands(/status,/queue,/drain) failed (non-fatal): %v", err)
 		}
 	}()
 
@@ -712,10 +712,10 @@ func (c *Channel) heartbeat() {
 			// other class (transient/permanent/conflict) means we couldn't
 			// complete a control call, which feeds the health machine.
 			if class != errClassRateLimited {
-				c.host.Logf("telegram: heartbeat getMe failed (class=%s): %v", class, err)
+				c.logf("telegram: heartbeat getMe failed (class=%s): %v", class, err)
 				c.reportHealth(c.health.RecordFailure("heartbeat getMe " + class.String()))
 			} else {
-				c.host.Logf("telegram: heartbeat getMe 429 rate-limited (reachable; not counted as down): %v", err)
+				c.logf("telegram: heartbeat getMe 429 rate-limited (reachable; not counted as down): %v", err)
 			}
 		} else {
 			c.recordHeartbeatSuccess()

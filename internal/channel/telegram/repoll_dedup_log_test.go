@@ -5,9 +5,7 @@ import (
 	"testing"
 )
 
-// countLogsContaining returns how many recorded log lines contain sub. fakeHost
-// records the format string (see its Logf), which is enough to distinguish the
-// two dedup-skip log shapes by a stable substring.
+// countLogsContaining returns how many rendered log lines contain sub.
 func (h *fakeHost) countLogsContaining(sub string) int {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -44,7 +42,7 @@ func TestLogDedupSkip_InFlightRefetch_ThrottledToOncePerFrontier(t *testing.T) {
 	if last != 101 {
 		t.Fatalf("throttle cursor = %d, want 101", last)
 	}
-	if n := h.countLogsContaining("re-poll skip update=%d"); n != 1 {
+	if n := h.countLogsContaining("re-poll skip update="); n != 1 {
 		t.Fatalf("in-flight re-fetch logged %d times, want exactly 1 (must not spam every poll)", n)
 	}
 	if n := h.countLogsContaining("recent duplicate"); n != 0 {
@@ -66,7 +64,7 @@ func TestLogDedupSkip_InFlightRefetch_ThrottledToOncePerFrontier(t *testing.T) {
 	if last != 102 {
 		t.Fatalf("throttle cursor after new frontier = %d, want 102", last)
 	}
-	if n := h.countLogsContaining("re-poll skip update=%d"); n != 2 {
+	if n := h.countLogsContaining("re-poll skip update="); n != 2 {
 		t.Fatalf("new frontier id must log once more; got %d re-poll lines, want 2", n)
 	}
 }

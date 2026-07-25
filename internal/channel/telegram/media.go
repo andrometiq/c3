@@ -203,7 +203,7 @@ func (c *Channel) sendMedia(args c3types.ReplyArgs, item c3types.MediaItem) (int
 
 	if err != nil {
 		c.recordOutboundErr(err)
-		return 0, fmt.Errorf("telegram: send %s: %w", string(item.Kind), err)
+		return 0, c.scrubTokenf("telegram: send %s: %w", string(item.Kind), err)
 	}
 	c.recordOutboundSuccess()
 	return msg.MessageId, nil

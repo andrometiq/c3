@@ -349,12 +349,12 @@ func (c *Channel) recordOutboundErr(err error) {
 	switch class {
 	case errClassPermanent:
 		tripped := c.authBrk.RecordFail()
-		c.host.Logf("telegram: outbound permanent error (consec=%d, tripped=%v): %v",
+		c.logf("telegram: outbound permanent error (consec=%d, tripped=%v): %v",
 			c.authBrk.Consec(), tripped, err)
 	case errClassRateLimited:
 		c.host.Logf("telegram: outbound 429 rate-limited; retry_after=%ds", retryAfter)
 	case errClassConflict:
-		c.host.Logf("telegram: outbound 409 CONFLICT (unexpected on outbound): %v", err)
+		c.logf("telegram: outbound 409 CONFLICT (unexpected on outbound): %v", err)
 	}
 }
 

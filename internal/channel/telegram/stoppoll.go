@@ -31,7 +31,7 @@ func (c *Channel) StopPoll(chatID, messageID int64) (*c3types.PollResult, error)
 	poll, err := c.bot.StopPoll(chatID, messageID, &gotgbot.StopPollOpts{})
 	if err != nil {
 		c.recordOutboundErr(err)
-		return nil, fmt.Errorf("telegram: StopPoll: %w", err)
+		return nil, c.scrubTokenf("telegram: StopPoll: %w", err)
 	}
 	c.recordOutboundSuccess()
 	if poll == nil {

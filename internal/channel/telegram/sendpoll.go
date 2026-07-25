@@ -92,7 +92,7 @@ func (c *Channel) sendPoll(args c3types.ReplyArgs) (int64, error) {
 	msg, err := c.bot.SendPoll(args.ChatID, spec.Question, options, opts)
 	if err != nil {
 		c.recordOutboundErr(err)
-		return 0, fmt.Errorf("telegram: SendPoll: %w", err)
+		return 0, c.scrubTokenf("telegram: SendPoll: %w", err)
 	}
 	c.recordOutboundSuccess()
 

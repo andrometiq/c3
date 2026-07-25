@@ -1,6 +1,7 @@
 package telegram
 
 import (
+	"fmt"
 	"sync"
 	"testing"
 
@@ -52,7 +53,7 @@ func (h *fakeHost) Emit(in *c3types.Inbound) bool {
 func (h *fakeHost) Logf(format string, args ...any) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	h.logs = append(h.logs, format)
+	h.logs = append(h.logs, fmt.Sprintf(format, args...))
 }
 
 func (h *fakeHost) Done() <-chan struct{} { return nil }

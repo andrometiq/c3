@@ -65,7 +65,7 @@ func (c *Channel) SendReply(args c3types.ReplyArgs) (int64, error) {
 		if id, err := c.sendRich(args); err == nil {
 			return id, nil
 		} else {
-			c.host.Logf("telegram: sendRichMessage failed, falling back to monospace path: %v", err)
+			c.logf("telegram: sendRichMessage failed, falling back to monospace path: %v", err)
 		}
 	}
 
@@ -112,7 +112,7 @@ func (c *Channel) SendReply(args c3types.ReplyArgs) (int64, error) {
 		// markdown converter occasionally produces malformed HTML for
 		// pathological input; re-send the ORIGINAL text as plain text rather
 		// than dropping the message.
-		c.host.Logf("telegram: HTML parse error, retrying as plaintext: %v", err)
+		c.logf("telegram: HTML parse error, retrying as plaintext: %v", err)
 		plainOpts := *opts
 		plainOpts.ParseMode = ""
 		msg, err = c.bot.SendMessage(args.ChatID, args.Text, &plainOpts)
@@ -124,7 +124,7 @@ func (c *Channel) SendReply(args c3types.ReplyArgs) (int64, error) {
 		// transient (not permanent / format / 429). This is NOT inside the shared
 		// recordOutboundErr, which fires per-attempt and would multi-count.
 		c.feedOutboundFailure(err, "SendReply transient send error")
-		return 0, fmt.Errorf("telegram: SendMessage: %w", err)
+		return 0, c.scrubTokenf("telegram: SendMessage: %w", err)
 	}
 	c.recordOutboundSuccess()
 	return msg.MessageId, nil
@@ -214,7 +214,7 @@ func (c *Channel) SendTyping(chatID int64, threadID *int64) error {
 	}
 	if _, err := c.bot.SendChatAction(chatID, "typing", opts); err != nil {
 		c.recordOutboundErr(err)
-		return fmt.Errorf("telegram: SendChatAction: %w", err)
+		return c.scrubTokenf("telegram: SendChatAction: %w", err)
 	}
 	c.recordOutboundSuccess()
 	return nil
@@ -277,14 +277,14 @@ func (c *Channel) EditMessage(args c3types.EditArgs) (*c3types.EditResult, error
 	}
 	_, _, err := c.bot.EditMessageText(text, opts)
 	if err != nil && convertMd && isParseEntityError(err) {
-		c.host.Logf("telegram: HTML parse error on edit, retrying as plaintext: %v", err)
+		c.logf("telegram: HTML parse error on edit, retrying as plaintext: %v", err)
 		plainOpts := *opts
 		plainOpts.ParseMode = ""
 		_, _, err = c.bot.EditMessageText(args.Text, &plainOpts)
 	}
 	if err != nil {
 		c.recordOutboundErr(err)
-		return nil, fmt.Errorf("telegram: EditMessageText: %w", err)
+		return nil, c.scrubTokenf("telegram: EditMessageText: %w", err)
 	}
 	c.recordOutboundSuccess()
 	return &c3types.EditResult{MessageID: args.MessageID}, nil
@@ -328,7 +328,7 @@ func (c *Channel) React(args c3types.ReactArgs) error {
 	}
 	if _, err := c.bot.SetMessageReaction(args.ChatID, args.MessageID, opts); err != nil {
 		c.recordOutboundErr(err)
-		return fmt.Errorf("telegram: SetMessageReaction: %w", err)
+		return c.scrubTokenf("telegram: SetMessageReaction: %w", err)
 	}
 	c.recordOutboundSuccess()
 	return nil
@@ -350,7 +350,7 @@ func (c *Channel) DownloadAttachment(fileID string) (string, error) {
 	})
 	if err != nil {
 		c.recordOutboundErr(err)
-		return "", fmt.Errorf("telegram: GetFile: %w", err)
+		return "", c.scrubTokenf("telegram: GetFile: %w", err)
 	}
 	if f.FilePath == "" {
 		return "", errors.New("telegram: GetFile returned empty file_path (file may be too large or expired)")
@@ -448,7 +448,7 @@ func (c *Channel) CreateTopic(chatID int64, name string) (int64, error) {
 	})
 	if err != nil {
 		c.recordOutboundErr(err)
-		return 0, fmt.Errorf("telegram: CreateForumTopic %q: %w", name, err)
+		return 0, c.scrubTokenf("telegram: CreateForumTopic %q: %w", name, err)
 	}
 	c.recordOutboundSuccess()
 	return t.MessageThreadId, nil

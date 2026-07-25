@@ -56,3 +56,20 @@ func (c *Channel) scrubToken(err error) error {
 func (c *Channel) scrubTokenf(format string, args ...any) error {
 	return c.scrubToken(fmt.Errorf(format, args...))
 }
+
+// logf is the only safe way to log an error that may have crossed gotgbot.
+// Classification happens before this call; here we replace credential-bearing
+// error/string arguments so Bot-API URLs cannot escape through broker.log.
+func (c *Channel) logf(format string, args ...any) {
+	safe := make([]any, len(args))
+	copy(safe, args)
+	for i, arg := range safe {
+		switch v := arg.(type) {
+		case error:
+			safe[i] = c.scrubToken(v)
+		case string:
+			safe[i] = redactToken(v, c.cfg.BotToken)
+		}
+	}
+	c.host.Logf(format, safe...)
+}

@@ -424,7 +424,8 @@ func (c *Channel) SendReadback(args c3types.ReadbackArgs) (int64, error) {
 	if c.bot == nil {
 		return 0, errors.New("telegram: channel not started")
 	}
-	return c.retryReadbackSend(func() (int64, error) { return c.sendReadbackOnce(args) })
+	id, err := c.retryReadbackSend(func() (int64, error) { return c.sendReadbackOnce(args) })
+	return id, c.scrubToken(err)
 }
 
 // retryReadbackSend runs send with bounded exponential backoff, retrying ONLY
@@ -455,7 +456,7 @@ func (c *Channel) retryReadbackSend(send func() (int64, error)) (int64, error) {
 		if wait > readbackRetryMaxBackoff {
 			wait = readbackRetryMaxBackoff
 		}
-		c.host.Logf("telegram: readback attempt %d/%d failed, retrying in %v: %v",
+		c.logf("telegram: readback attempt %d/%d failed, retrying in %v: %v",
 			attempt, readbackRetryMaxAttempts, wait, err)
 		select {
 		case <-time.After(wait):
@@ -464,7 +465,7 @@ func (c *Channel) retryReadbackSend(send func() (int64, error)) (int64, error) {
 		}
 		backoff *= 2
 	}
-	c.host.Logf("telegram: readback PERMANENTLY dropped after %d transient-failed attempts "+
+	c.logf("telegram: readback PERMANENTLY dropped after %d transient-failed attempts "+
 		"(transcript echo lost; agent already has the text): %v", readbackRetryMaxAttempts, lastErr)
 	// Outbound-health feed site #2 (CRITIQUE FOLD #2 + #4): a readback give-up is
 	// ONE failure event (already 3 retried attempts). feedOutboundFailure counts
@@ -493,7 +494,7 @@ func (c *Channel) sendReadbackOnce(args c3types.ReadbackArgs) (int64, error) {
 		if isRetryableSendErr(err) {
 			return 0, err
 		}
-		c.host.Logf("telegram: readback %s (%s) format error, falling back to .txt document: %v", band, method, err)
+		c.logf("telegram: readback %s (%s) format error, falling back to .txt document: %v", band, method, err)
 	case bandLong, bandDeadzone:
 		id, err := c.sendRichHTML(args.ChatID, payload, args.TopicID, args.ReplyTo)
 		if err == nil {
@@ -502,7 +503,7 @@ func (c *Channel) sendReadbackOnce(args c3types.ReadbackArgs) (int64, error) {
 		if isRetryableSendErr(err) {
 			return 0, err
 		}
-		c.host.Logf("telegram: readback %s (%s) format error, falling back to .txt document: %v", band, method, err)
+		c.logf("telegram: readback %s (%s) format error, falling back to .txt document: %v", band, method, err)
 	case bandHuge:
 		// Falls straight through to the document path below.
 	}
@@ -516,12 +517,12 @@ func (c *Channel) sendReadbackOnce(args c3types.ReadbackArgs) (int64, error) {
 	if isRetryableSendErr(err) {
 		return 0, err
 	}
-	c.host.Logf("telegram: readback .txt document format error, falling back to a short notice: %v", err)
+	c.logf("telegram: readback .txt document format error, falling back to a short notice: %v", err)
 
 	// Document failed on format too → a short plain notice (last best-effort).
 	id, err = c.sendReadbackNotice(args)
 	if err != nil {
-		c.host.Logf("telegram: readback short notice failed (giving up, non-fatal upstream): %v", err)
+		c.logf("telegram: readback short notice failed (giving up, non-fatal upstream): %v", err)
 		return 0, err
 	}
 	return id, nil
@@ -546,7 +547,7 @@ func (c *Channel) sendReadbackMessage(args c3types.ReadbackArgs, htmlText string
 	if err != nil && isParseEntityError(err) {
 		// Mirror SendReply: a malformed-HTML readback retries as the plain
 		// transcript rather than dropping the message.
-		c.host.Logf("telegram: readback HTML parse error, retrying as plaintext: %v", err)
+		c.logf("telegram: readback HTML parse error, retrying as plaintext: %v", err)
 		plainOpts := *opts
 		plainOpts.ParseMode = ""
 		msg, err = c.bot.SendMessage(args.ChatID, args.Transcript, &plainOpts)
