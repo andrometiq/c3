@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"runtime"
 
+	"github.com/karthikeyan5/c3/internal/codexlauncher"
 	"github.com/karthikeyan5/c3/internal/version"
 )
 
@@ -22,8 +23,9 @@ type Options struct {
 	// Client is used for the release-API check. Downloads use their own
 	// longer-timeout, proxy-aware client. nil ⇒ DefaultClient().
 	Client *http.Client
-	// DestDir is where the BinaryNames binaries are installed. Empty ⇒ ExecutableDir()
-	// (the directory the running binary lives in).
+	// DestDir is where the core binaries (plus a verified, already-present C3
+	// Codex launcher) are installed. Empty ⇒ ExecutableDir() (the directory the
+	// running binary lives in).
 	DestDir string
 	// WorkDir is a scratch directory for the download + extraction. Empty ⇒ a
 	// fresh os.MkdirTemp that Update removes before returning. When set, the
@@ -66,8 +68,11 @@ func CheckOnly(ctx context.Context, current string, client *http.Client) (*Resul
 // (Installed=false, error=nil) when the current build is dev, when the latest
 // release is not strictly newer, or when the latest is a prerelease/draft. On a
 // real update it downloads the platform tarball + SHA256SUMS, verifies the
-// checksum BEFORE touching anything, extracts, stages all nine binaries, then
-// replaces them in place. Windows is refused before network or file work because
+// checksum BEFORE touching anything, validates all nine shipped binaries, then
+// replaces the eight core binaries in place. The optional cmd/codex launcher is
+// replaced only when the existing destination is positively identified as C3's
+// launcher; an absent or unrelated `codex` is never created or overwritten.
+// Windows is refused before network or file work because
 // replacing live .exe images can otherwise leave a mixed-version install.
 func Update(ctx context.Context, opts Options) (*Result, error) {
 	return updateForOS(ctx, opts, runtime.GOOS)
@@ -172,6 +177,10 @@ func updateForOS(ctx context.Context, opts Options, goos string) (*Result, error
 		if err != nil {
 			return res, err
 		}
+	}
+	codexName := BinaryFileName("codex")
+	if !codexlauncher.IsC3(filepath.Join(dest, codexName)) {
+		delete(srcPaths, codexName)
 	}
 	if err := InstallBinaries(dest, srcPaths); err != nil {
 		return res, err

@@ -146,7 +146,7 @@ func runSetupWithArgs(args []string) error {
 //  2. Educational preamble + consent gate (C3_NO_PROMPT-aware).
 //  3. Bot token — keep a still-valid existing token on enter, else collect
 //     + validate via getMe (with inline @BotFather guidance).
-//  4. Kick off `go install ./cmd/...` in the background.
+//  4. Kick off the core-binary `go install` in the background.
 //  5. DM pairing (#5) — a 4-digit code sent to the bot discovers and
 //     records the user id; no @userinfobot hunt. Manual id entry survives
 //     only as a last-resort line inside the pairing prompt.
@@ -208,7 +208,9 @@ func runSetupInteractive() error {
 		return err
 	}
 
-	// Kick off background `go install ./cmd/...`. The pairing waits and the
+	// Kick off the core-binary `go install`. The opt-in cmd/codex launcher is
+	// deliberately excluded so setup cannot replace the user's real Codex CLI.
+	// The pairing waits and the
 	// group checklist (minutes of user activity) cover this comfortably;
 	// cold rebuild of C3 is ~30s, warm ~5s. Cancellable via ctx so a Ctrl-C
 	// during the interactive walk doesn't leave a dangling go subprocess.
@@ -315,9 +317,9 @@ func runSetupInteractive() error {
 	if err := joinBackgroundInstall(installCh); err != nil {
 		// Non-fatal for the rest of the flow — mappings.json is already
 		// written, the user can manually run `/c3:build` or
-		// `go install ./cmd/...` after. Surface the error and continue.
+		// the core package set after. Surface the error and continue.
 		fmt.Fprintf(os.Stderr, "warning: background `go install` failed: %v\n", err)
-		fmt.Fprintln(os.Stderr, "  Run `/c3:build` (Claude) or `go install ./cmd/...` (Codex / plain shell) to retry.")
+		fmt.Fprintln(os.Stderr, "  Run `/c3:build` to retry the core binaries; the Codex launcher remains opt-in via INSTALL.md §5.")
 	}
 
 	host := DetectHostCLI()
@@ -1470,8 +1472,23 @@ type installResult struct {
 // the user's GOBIN. Same pattern as installClaudeShimFn.
 var installRunFn = defaultInstallRun
 
+// defaultInstallPackages are the C3 binaries installed by setup and /c3:build.
+// cmd/codex is intentionally absent: it is an opt-in launcher named exactly
+// like the user's real CLI, and INSTALL.md §5 is the only path that may install
+// it onto PATH.
+var defaultInstallPackages = []string{
+	"./cmd/c3-broker",
+	"./cmd/c3-claude-adapter",
+	"./cmd/c3-codex-adapter",
+	"./cmd/c3-grok-adapter",
+	"./cmd/c3-agy-adapter",
+	"./cmd/c3-desktop-adapter",
+	"./cmd/claude-shim",
+	"./cmd/migrate-legacy",
+}
+
 // defaultInstallRun is the production implementation: locate the
-// source dir, run `go install ./cmd/...` from it. Skipped (not an
+// source dir, install the core binary package set from it. Skipped (not an
 // error) if the source dir can't be discovered — the user can
 // rebuild manually after setup completes.
 func defaultInstallRun(ctx context.Context) installResult {
@@ -1480,7 +1497,8 @@ func defaultInstallRun(ctx context.Context) installResult {
 		return installResult{skipped: true}
 	}
 	start := time.Now()
-	cmd := exec.CommandContext(ctx, "go", "install", "./cmd/...")
+	args := append([]string{"install"}, defaultInstallPackages...)
+	cmd := exec.CommandContext(ctx, "go", args...)
 	cmd.Dir = srcDir
 	cmd.Env = os.Environ()
 	out, err := cmd.CombinedOutput()
@@ -1516,11 +1534,11 @@ func joinBackgroundInstall(ch <-chan installResult) error {
 	case result = <-ch:
 		// instant — let defer Stop() reclaim the timer
 	case <-timer.C:
-		fmt.Println("Waiting for `go install ./cmd/...` to finish in the background...")
+		fmt.Println("Waiting for the core C3 binaries to finish building in the background...")
 		result = <-ch
 	}
 	if result.skipped {
-		fmt.Println("(skipped background build — source dir not found near c3-broker; run `/c3:build` or `go install ./cmd/...` manually if you need fresh binaries)")
+		fmt.Println("(skipped background build — source dir not found near c3-broker; run `/c3:build` manually if you need fresh core binaries)")
 		return nil
 	}
 	if result.err != nil {
@@ -1532,12 +1550,12 @@ func joinBackgroundInstall(ch <-chan installResult) error {
 		fmt.Fprintf(os.Stderr, "go install failed after %s:\n%s\n", result.duration.Round(time.Millisecond), tail)
 		return result.err
 	}
-	fmt.Printf("✓ binaries built (`go install ./cmd/...`, %s)\n", result.duration.Round(time.Millisecond))
+	fmt.Printf("✓ core binaries built (`go install`, %s)\n", result.duration.Round(time.Millisecond))
 	return nil
 }
 
 // discoverSourceDir locates the C3 source tree (one with go.mod
-// module = github.com/karthikeyan5/c3) so `go install ./cmd/...` has
+// module = github.com/karthikeyan5/c3) so the core `go install` has
 // a working directory.
 //
 // Resolution order:

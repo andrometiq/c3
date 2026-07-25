@@ -1,4 +1,4 @@
-.PHONY: build test clean install dist
+.PHONY: build test clean install install-codex dist
 
 BIN_DIR := bin
 DIST_DIR := dist
@@ -34,7 +34,15 @@ clean:
 	rm -rf $(BIN_DIR)
 
 install:
-	go install -ldflags "$(VERSION_LDFLAGS)" ./cmd/...
+	go install -ldflags "$(VERSION_LDFLAGS)" \
+		./cmd/c3-broker ./cmd/c3-claude-adapter ./cmd/c3-codex-adapter \
+		./cmd/c3-grok-adapter ./cmd/c3-agy-adapter ./cmd/c3-desktop-adapter \
+		./cmd/claude-shim ./cmd/migrate-legacy
+
+# Opt-in: this binary is named `codex` so putting it in GOBIN shadows the real
+# Codex CLI. The guarded end-user path is INSTALL.md §5.
+install-codex:
+	go install -ldflags "$(VERSION_LDFLAGS)" ./cmd/codex
 
 # Cross-compile every platform into $(DIST_DIR)/ as release tarballs + SHA256SUMS.
 # Mirrors what .github/workflows/release.yml runs on a v* tag, for local testing.

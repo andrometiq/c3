@@ -6,8 +6,10 @@ import (
 	"strings"
 )
 
-// BinaryNames are the nine runnable binaries a release tarball carries and
-// the updater installs, WITHOUT a platform extension. MUST stay in sync with
+// BinaryNames are the nine runnable binaries a release tarball carries,
+// WITHOUT a platform extension. Update validates all nine, but only installs
+// the opt-in `codex` launcher when a verified C3 launcher is already present at
+// the destination. MUST stay in sync with
 // scripts/package.sh's BINS list — if package.sh adds/removes a binary, update
 // this too or an install will fail looking for a binary the tarball doesn't
 // contain (or silently skip a new one). Resolve the on-disk filename via

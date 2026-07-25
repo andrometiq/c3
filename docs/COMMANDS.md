@@ -17,7 +17,7 @@ support.
 |-----------------|-----------------------------------|---------------|-----------------------------------------------------------------------------------------------------------------------|
 | `status`        | `c3-broker status` (CLI)          | pure shell    | Daemon liveness, socket reachability, mappings.json validation, channel state, **live route claims** (via OpListClaims). |
 | `topics`        | `c3-broker topics` (CLI)          | pure shell    | List every topic in mappings.json + which session (if any) currently claims it.                                       |
-| `build`         | `go install ./cmd/...` (shell)    | pure shell    | Rebuild C3 binaries from the plugin source dir.                                                                       |
+| `build`         | core `go install` package set (shell) | pure shell | Rebuild C3's eight core binaries; the PATH-shadowing Codex launcher remains opt-in. |
 | `setup`         | `c3-broker setup …` (CLI)         | agent-guided / interactive | Configure C3. Primary path: the `/c3:setup` slash command drives the phased subcommands one step at a time — `setup token` (validate via getMe + record), `setup pair dm` / `setup pair group` (code-based id discovery: a 4-digit code sent in Telegram discovers the user id / group chat id — no id hunting), `setup stt`, `setup finish` (host integrations + broker restart). Bare `c3-broker setup` is the full interactive TTY flow (fallback for a plain terminal). Writes mappings.json (mode 0600). |
 | `reload-config` | `pkill -HUP c3-broker`            | pure shell    | Signal the broker to re-read mappings.json. Non-disruptive — no process restart, in-memory pointer swap, live claims preserved. For binary updates, restart Claude Code instead. |
 | `pair`          | `c3-broker pair …` (CLI)          | pure shell    | Arm a Telegram pairing window. A 4-digit code sent from Telegram allowlists the DM `user_id` (`pair dm`) or a group `chat_id` (`pair group <chat_id>`). The setup flow uses this under the hood for id-free discovery. |
@@ -155,7 +155,7 @@ from any shell — the shared broker logic is identical either way.
 |-----------------|-------------------------------------------------|-----------------------------------------|
 | `status`        | `/c3:status` (`commands/status.md`)             | `c3-broker status` (shell)              |
 | `topics`        | `/c3:topics` + `topics` MCP tool                | `topics` MCP tool · `c3-broker topics`  |
-| `build`         | `/c3:build` (`commands/build.md`)               | `go install ./cmd/...` (shell)          |
+| `build`         | `/c3:build` (`commands/build.md`)               | core `go install` package set (shell)   |
 | `setup`         | `/c3:setup` (`commands/setup.md`)               | `c3-broker setup` (TTY)                 |
 | `reload-config` | `/c3:reload-config`                             | `pkill -HUP c3-broker`                  |
 | `pair`          | `/c3:pair` (`commands/pair.md`)                 | `c3-broker pair …` (shell)              |

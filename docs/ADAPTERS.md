@@ -105,7 +105,10 @@ If you write a new CLI adapter, look at how that CLI handles MCP servers under a
 
 ## Distribution
 
-A CLI adapter binary is built from `cmd/<cli>-adapter/main.go`, installed via the same `go install ./cmd/...` that builds the broker. The Claude Code plugin's `.mcp.json` points at `c3-claude-adapter` by name; Codex's `mcp_servers.c3_codex.command` points at `c3-codex-adapter`.
+A CLI adapter binary is built from `cmd/<cli>-adapter/main.go` and installed
+alongside the broker by `/c3:build`'s explicit core package set. The Claude Code
+plugin's `.mcp.json` points at `c3-claude-adapter` by name; Codex's
+`mcp_servers.c3_codex.command` points at `c3-codex-adapter`.
 
 If your target CLI has a plugin marketplace, your adapter ships as a thin marketplace plugin manifest that references the binary. If it doesn't, document the manual MCP server registration steps in your adapter's `SETUP.md`.
 

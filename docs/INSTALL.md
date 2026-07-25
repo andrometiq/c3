@@ -114,13 +114,15 @@ curl -fsSL -O "$base/SHA256SUMS"
 grep " ${pkg}.tar.gz$" SHA256SUMS > SHA256SUMS.this
 sha256sum -c SHA256SUMS.this || shasum -a 256 -c SHA256SUMS.this
 
-# The tarball unpacks into a ${pkg}/ directory — install the binaries out of it.
+# The tarball unpacks into a ${pkg}/ directory — install the core binaries and
+# stage the optional Codex launcher off PATH for Step 5.
 tar xzf "${pkg}.tar.gz"
-mkdir -p ~/.local/bin
+mkdir -p ~/.local/bin ~/.local/libexec/c3
 for b in c3-broker c3-claude-adapter c3-codex-adapter c3-grok-adapter \
          c3-agy-adapter c3-desktop-adapter claude-shim migrate-legacy; do
   install -m 0755 "${pkg}/${b}" ~/.local/bin/
 done
+install -m 0755 "${pkg}/codex" ~/.local/libexec/c3/codex
 ```
 
 Confirm the install dir (`~/.local/bin` here) is on your `PATH`. (**Windows:** a
@@ -130,9 +132,9 @@ PATH is set with `setx`, not a shell rc. See the **Windows (beta)** section.)
 **From source (contributors, or a platform without a prebuilt tarball).**
 With the repo cloned and added as a local marketplace
 (Step 1's contributor path), run `/c3:build` inside Claude Code — a slash
-command that runs `go install ./cmd/...` and drops the nine binaries in `$GOBIN`
-(default `~/go/bin`). Needs Go ≥1.25. Confirm `$GOBIN` (or `$(go env GOPATH)/bin`)
-is on your `PATH`:
+command that installs the eight core binaries in `$GOBIN` (default `~/go/bin`).
+The PATH-shadowing Codex launcher remains opt-in until Step 5. Needs Go ≥1.25.
+Confirm `$GOBIN` (or `$(go env GOPATH)/bin`) is on your `PATH`:
 
 ```bash
 export PATH="$(go env GOPATH)/bin:$PATH"
@@ -250,22 +252,23 @@ already wrote that config or you know the real-claude target by hand.
 If you also use the Codex CLI, run:
 
 ```
-# Step 4 deliberately did not install the launcher — this is the step that puts
-# C3's `codex` in place of the real one. Prebuilt: take it from the tarball you
-# extracted (re-extract if it's gone). From source, `go install ./cmd/...`
-# already placed it.
-install -m 0755 "${pkg}/codex" ~/.local/bin/
+# The prebuilt path staged this file off PATH in Step 2. Source installs build
+# the same staged copy now.
+if [ ! -x "$HOME/.local/libexec/c3/codex" ]; then
+  mkdir -p "$HOME/.local/libexec/c3"
+  (cd "$HOME/.local/share/c3" &&
+    go build -o "$HOME/.local/libexec/c3/codex" ./cmd/codex)
+fi
 
 c3-broker install-codex-shim
 ```
 
 This is a Go subcommand that idempotently:
 
-1. Symlinks `~/.local/bin/codex` to the C3 `codex` launcher — **skipped on the prebuilt install**, where the launcher already *is* `~/.local/bin/codex` and there is nothing to shim.
-2. Walks `~/.nvm/versions/node/*/bin/` and creates the same symlink in each version's bin dir. **This is required, not optional** — long-running shells hash `codex` to the NVM path; without these symlinks, your existing terminals bypass the C3 bridge entirely.
-3. Verifies `~/.config/c3/mappings.json` exists (it does if you ran `/c3:setup`).
-4. Verifies the broker is reachable.
-5. Prints a one-line audit of every symlink it created or confirmed.
+1. Verifies the staged executable is C3's launcher, copies it next to `c3-broker`, and refuses to replace an unrelated regular file unless you pass `--force`.
+2. Symlinks `~/.local/bin/codex` to the C3 `codex` launcher — **skipped on the prebuilt install**, where the launcher already *is* `~/.local/bin/codex` and there is nothing to shim.
+3. Walks `~/.nvm/versions/node/*/bin/` and creates the same symlink in each version's bin dir. **This is required, not optional** — long-running shells hash `codex` to the NVM path; without these symlinks, your existing terminals bypass the C3 bridge entirely.
+4. Prints a one-line audit of every symlink it created or confirmed.
 
 Open a fresh terminal (or `hash -r` your existing one) and run `which codex`. It should resolve to `~/.local/bin/codex`. From now on every `codex` invocation goes through the C3 launcher → app-server → adapter chain. Use Codex normally.
 
@@ -320,7 +323,8 @@ these deltas instead of the Linux-only steps above:
   `c3_<version>_windows_amd64.tar.gz` and `..._windows_arm64.tar.gz`, whose
   binaries carry the `.exe` suffix; they are cross-compiled and have not had a
   clean-room CI pass. To build instead, install **Go ≥1.25** (the portable zip
-  needs no admin), clone the repo into a durable dir, and `go install ./cmd/...`.
+  needs no admin), clone the repo into a durable dir, and run the eight core
+  package installs used by `/c3:build`.
 - **PATH via `setx`, not a shell rc.** `setx PATH "%PATH%;%USERPROFILE%\.local\bin"`
   (or System Properties → Environment Variables), then **open a new terminal** —
   an already-open shell keeps the stale PATH.
@@ -342,7 +346,7 @@ these deltas instead of the Linux-only steps above:
   from `...\Packages\Claude_*\LocalCache\Roaming\Claude\claude_desktop_config.json`;
   run `c3-broker install-desktop --config "<that path>"`.
 - **Updates rebuild from source** — the auto-updater can't replace a running
-  `.exe` on Windows. `git pull` → `go install ./cmd/...` → restart.
+  `.exe` on Windows. `git pull` → `/c3:build` → restart.
 - **No systemd** — the default on-demand broker spawn is what you get
   (systemd supervision is Linux-only — see the top-level `INSTALL.md` §6).
 
@@ -370,6 +374,7 @@ For the Codex side, re-run `c3-broker install-codex-shim` after updating the bin
 /plugin uninstall c3@c3                          # removes the plugin from Claude Code
 pkill c3-broker                                  # stop the daemon
 rm ~/.local/bin/codex 2>/dev/null                # restore your real codex (if you'd installed the shim)
+rm ~/.local/libexec/c3/codex 2>/dev/null         # remove the off-PATH staged launcher
 find ~/.nvm/versions/node -name codex -type l -delete 2>/dev/null   # remove NVM-side symlinks (CAUTION: only if they pointed at the C3 launcher)
 rm -f "${XDG_RUNTIME_DIR:-/tmp}/c3.sock" /tmp/c3-$UID.sock "${XDG_RUNTIME_DIR:-/run/user/$UID}/c3-broker.pid" "${XDG_RUNTIME_DIR:-/run/user/$UID}/c3-broker.caps"   # broker scratch files
 rm -f "/tmp/c3-codex-app-server-$UID.json"       # codex launcher scratch (per-uid path)

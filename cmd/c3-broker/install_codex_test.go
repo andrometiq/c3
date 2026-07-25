@@ -18,6 +18,69 @@ func writeLauncher(t *testing.T, path string) {
 	}
 }
 
+func launcherBodyIsC3(path string) bool {
+	body, err := os.ReadFile(path)
+	return err == nil && strings.Contains(string(body), "C3 LAUNCHER")
+}
+
+func TestEnsureCodexLauncher_InstallsStagedCopyWithoutClobberingRealCodex(t *testing.T) {
+	dir := t.TempDir()
+	launcher := filepath.Join(dir, "bin", "codex")
+	staged := filepath.Join(dir, "libexec", "codex")
+	if err := os.MkdirAll(filepath.Dir(staged), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(staged, []byte("C3 LAUNCHER v2"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := ensureCodexLauncher(launcher, staged, false, launcherBodyIsC3); err != nil {
+		t.Fatalf("install staged launcher: %v", err)
+	}
+	if body, err := os.ReadFile(launcher); err != nil || string(body) != "C3 LAUNCHER v2" {
+		t.Fatalf("launcher body=%q err=%v", body, err)
+	}
+
+	if err := os.WriteFile(launcher, []byte("REAL CODEX"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureCodexLauncher(launcher, staged, false, launcherBodyIsC3); err == nil {
+		t.Fatal("non-C3 launcher must be refused without --force")
+	}
+	if body, err := os.ReadFile(launcher); err != nil || string(body) != "REAL CODEX" {
+		t.Fatalf("real Codex changed on refusal: body=%q err=%v", body, err)
+	}
+	if err := ensureCodexLauncher(launcher, staged, true, launcherBodyIsC3); err != nil {
+		t.Fatalf("--force refresh: %v", err)
+	}
+	if body, err := os.ReadFile(launcher); err != nil || string(body) != "C3 LAUNCHER v2" {
+		t.Fatalf("forced launcher body=%q err=%v", body, err)
+	}
+}
+
+func TestEnsureCodexLauncher_RefreshesKnownC3Launcher(t *testing.T) {
+	dir := t.TempDir()
+	launcher := filepath.Join(dir, "bin", "codex")
+	staged := filepath.Join(dir, "libexec", "codex")
+	for path, body := range map[string]string{
+		launcher: "C3 LAUNCHER v1",
+		staged:   "C3 LAUNCHER v2",
+	} {
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(body), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := ensureCodexLauncher(launcher, staged, false, launcherBodyIsC3); err != nil {
+		t.Fatal(err)
+	}
+	if body, err := os.ReadFile(launcher); err != nil || string(body) != "C3 LAUNCHER v2" {
+		t.Fatalf("launcher was not refreshed: body=%q err=%v", body, err)
+	}
+}
+
 // Source install (GOBIN=~/go/bin): the launcher lives outside ~/.local/bin, so
 // both targets get a symlink.
 func TestInstallCodexShimsCreatesLocalAndNVMSymlinks(t *testing.T) {

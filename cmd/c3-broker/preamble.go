@@ -60,7 +60,7 @@ What we're about to set up
      so multiple projects don't collide in one chat.
   3. ~/.config/c3/mappings.json — a 600-mode config file with your bot
      token and chat ids. Stays on this machine.
-  4. C3 binaries — built from source via ` + "`go install ./cmd/...`" + `.
+  4. C3 core binaries — built from source (the PATH-shadowing Codex launcher remains opt-in).
      I'll kick this off in the background while you wire up Telegram.
 
 What you'll need handy

@@ -3,8 +3,11 @@ package main
 import (
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+
+	"github.com/karthikeyan5/c3/internal/codexlauncher"
 )
 
 func runInstallCodexShim(args []string) error {
@@ -23,8 +26,9 @@ func runInstallCodexShim(args []string) error {
 		return err
 	}
 	launcher := filepath.Join(filepath.Dir(exe), "codex")
-	if _, err := os.Stat(launcher); err != nil {
-		return fmt.Errorf("codex launcher not found next to c3-broker at %s; install the release tarball's binaries or run `go install ./cmd/...` first", launcher)
+	staged := filepath.Join(home, ".local", "libexec", "c3", "codex")
+	if err := ensureCodexLauncher(launcher, staged, *force, codexlauncher.IsC3); err != nil {
+		return err
 	}
 	installed, err := installCodexShims(home, launcher, *force)
 	if err != nil {
@@ -38,6 +42,63 @@ func runInstallCodexShim(args []string) error {
 		fmt.Printf("%s -> %s\n", path, launcher)
 	}
 	return nil
+}
+
+// ensureCodexLauncher materializes the opt-in launcher next to c3-broker from
+// the off-PATH staging location used by the install guide. A file that is not
+// positively identified as C3's launcher is never replaced without --force.
+// If both paths are C3 launchers, the staged copy refreshes the live one.
+func ensureCodexLauncher(launcher, staged string, force bool, isC3 func(string) bool) error {
+	liveIsC3 := isC3(launcher)
+	stagedIsC3 := isC3(staged)
+
+	if liveIsC3 && !stagedIsC3 {
+		// Legacy/source installs may already have a valid launcher but no staged
+		// copy. Keep using it.
+		return nil
+	}
+	if !stagedIsC3 {
+		return fmt.Errorf("C3 codex launcher is not staged at %s; re-run install §1 (prebuilt) or build it with `go build -o %s ./cmd/codex` from the C3 source tree", staged, staged)
+	}
+
+	if _, err := os.Lstat(launcher); err == nil && !liveIsC3 && !force {
+		return fmt.Errorf("refusing to replace %s: it is not C3's codex launcher, so it may be your real Codex binary; pass --force to override", launcher)
+	} else if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return replaceExecutable(staged, launcher)
+}
+
+// replaceExecutable copies src to a temporary sibling, then renames it over
+// dst. The rename keeps a refresh atomic on Unix and never writes through a
+// pre-existing symlink.
+func replaceExecutable(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(dst), ".c3-codex-*")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath)
+	if _, err := io.Copy(tmp, in); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Chmod(0o755); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpPath, dst)
 }
 
 func absClean(p string) string {

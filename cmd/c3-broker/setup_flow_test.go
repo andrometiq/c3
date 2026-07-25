@@ -214,6 +214,20 @@ func TestDefaultInstallRun_SkippedWhenNoSourceDir(t *testing.T) {
 	}
 }
 
+func TestDefaultInstallPackages_ExcludeOptInCodexLauncher(t *testing.T) {
+	var hasBroker, hasCodexAdapter bool
+	for _, pkg := range defaultInstallPackages {
+		if pkg == "./cmd/codex" {
+			t.Fatal("default setup/build package set must not install the PATH-shadowing Codex launcher")
+		}
+		hasBroker = hasBroker || pkg == "./cmd/c3-broker"
+		hasCodexAdapter = hasCodexAdapter || pkg == "./cmd/c3-codex-adapter"
+	}
+	if !hasBroker || !hasCodexAdapter {
+		t.Fatalf("core package set lost required binaries: broker=%v codex-adapter=%v", hasBroker, hasCodexAdapter)
+	}
+}
+
 // TestInstallRunFn_ConcurrentSafety — multiple concurrent
 // startBackgroundInstall calls don't race on installRunFn. Belt-
 // and-braces — production only calls it once per setup, but TDD

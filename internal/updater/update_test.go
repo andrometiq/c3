@@ -99,9 +99,41 @@ func TestUpdate_InstallsNewerRelease(t *testing.T) {
 	}
 	for _, name := range BinaryNames {
 		got, _ := os.ReadFile(filepath.Join(dest, name))
-		if string(got) != "NEW-"+name+"-v9.9.9" {
-			t.Errorf("%s = %q, want NEW", name, got)
+		want := "NEW-" + name + "-v9.9.9"
+		if name == "codex" {
+			// The stand-in is not a verified C3 launcher. Updating C3 must not
+			// overwrite an unrelated regular file merely because it is named
+			// codex and happens to sit next to c3-broker.
+			want = "OLD-codex"
 		}
+		if string(got) != want {
+			t.Errorf("%s = %q, want %q", name, got, want)
+		}
+	}
+}
+
+func TestUpdate_DoesNotInstallAbsentCodexLauncher(t *testing.T) {
+	updateTestServer(t, "v9.9.9", false, false)
+	dest := t.TempDir()
+	seedOldBinaries(t, dest)
+	if err := os.Remove(filepath.Join(dest, "codex")); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := Update(context.Background(), Options{
+		CurrentVersion: "v1.0.0",
+		Client:         trustingClient(t),
+		DestDir:        dest,
+		WorkDir:        t.TempDir(),
+	})
+	if err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	if !res.Installed {
+		t.Fatalf("expected core binaries to install, got %+v", res)
+	}
+	if _, err := os.Lstat(filepath.Join(dest, "codex")); !os.IsNotExist(err) {
+		t.Fatalf("update created the opt-in codex launcher: %v", err)
 	}
 }
 

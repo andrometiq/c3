@@ -82,22 +82,24 @@ curl -fsSL -O "$base/SHA256SUMS"
 grep " ${pkg}.tar.gz$" SHA256SUMS > SHA256SUMS.this
 sha256sum -c SHA256SUMS.this || shasum -a 256 -c SHA256SUMS.this
 
-# The tarball unpacks into a ${pkg}/ directory — install the binaries out of it.
+# The tarball unpacks into a ${pkg}/ directory — install the core binaries out
+# of it. Stage the optional Codex launcher OFF PATH for §5.
 # NOTE: `codex` is deliberately NOT installed here. It is C3's Codex *launcher*,
 # and installing it onto PATH would SHADOW the user's real `codex` (this guide
 # puts ~/.local/bin FIRST on PATH) for someone who never asked for Codex support.
 # §5 installs it, and only if the user wants Codex integration.
 tar xzf "${pkg}.tar.gz"
-mkdir -p ~/.local/bin
+mkdir -p ~/.local/bin ~/.local/libexec/c3
 for b in c3-broker c3-claude-adapter c3-codex-adapter c3-grok-adapter \
          c3-agy-adapter c3-desktop-adapter claude-shim migrate-legacy; do
   install -m 0755 "${pkg}/${b}" ~/.local/bin/
 done
+install -m 0755 "${pkg}/codex" ~/.local/libexec/c3/codex
 ```
 
-Keep the extracted `${pkg}/` directory around if the user might want Codex
-support — §5 installs `codex` out of it. (If it's gone by then, re-download and
-re-extract the same tarball.)
+The staged `~/.local/libexec/c3/codex` is not on `PATH`; it cannot shadow the
+user's real Codex CLI. §5 materializes it next to `c3-broker` only after the
+user opts in.
 
 If the download 404s (no tarball published for this platform), fall through to
 the from-source path.
@@ -113,7 +115,10 @@ build:
 ```bash
 # idempotent: pull if already cloned, else clone fresh
 [ -d ~/.local/share/c3/.git ] && git -C ~/.local/share/c3 pull || git clone https://github.com/karthikeyan5/c3 ~/.local/share/c3
-cd ~/.local/share/c3 && go install ./cmd/...
+cd ~/.local/share/c3 && go install \
+  ./cmd/c3-broker ./cmd/c3-claude-adapter ./cmd/c3-codex-adapter \
+  ./cmd/c3-grok-adapter ./cmd/c3-agy-adapter ./cmd/c3-desktop-adapter \
+  ./cmd/claude-shim ./cmd/migrate-legacy
 ```
 
 Go installs to `$GOBIN` (default `$(go env GOPATH)/bin`). (If the user already
@@ -408,21 +413,29 @@ Skip this step if the user doesn't use Codex. **This is the step that puts C3's
 `codex` launcher on their PATH in place of the real Codex — don't run it for a
 user who only wants Claude Code.**
 
-First install the launcher (§1 deliberately left it out), then wire it up:
+Prebuilt installs already staged the launcher off `PATH` in §1. Source installs
+must build that staged copy first. Then let the guarded installer materialize it
+next to `c3-broker` and wire the PATH/NVM shims:
 
 ```bash
-# Prebuilt: out of the tarball you extracted in §1. Re-download and re-extract
-# if ${pkg}/ is gone. From source, `go install ./cmd/...` already placed it.
-install -m 0755 "${pkg}/codex" ~/.local/bin/
+# Source only; skip when §1's prebuilt path already staged this file.
+if [ ! -x "$HOME/.local/libexec/c3/codex" ]; then
+  mkdir -p "$HOME/.local/libexec/c3"
+  (cd "$HOME/.local/share/c3" &&
+    go build -o "$HOME/.local/libexec/c3/codex" ./cmd/codex)
+fi
 
 c3-broker install-codex-shim
 ```
 
-This symlinks the C3 `codex` launcher into `~/.local/bin/codex` and into
-every `~/.nvm/versions/node/*/bin/` so existing shells (which hash `codex`
-to the NVM path) bypass NVM in favor of the launcher. It's idempotent;
-re-running is safe. Tell the user to open a fresh terminal and verify with
-`readlink $(which codex)` — it should point at the C3 `codex` launcher.
+The installer verifies the staged executable is C3's launcher, copies it next
+to `c3-broker`, then symlinks it into `~/.local/bin/codex` and every
+`~/.nvm/versions/node/*/bin/` so existing shells (which hash `codex` to the NVM
+path) bypass NVM in favor of the launcher. It refuses to replace an unrelated
+regular file without `--force`. It's idempotent; re-running is safe. Tell the
+user to open a fresh terminal and verify with `readlink $(which codex)` — on a
+source install it should point at the C3 launcher next to `c3-broker`; on the
+prebuilt `~/.local/bin` layout, that path is the launcher itself.
 
 On the **prebuilt** install the launcher already lives at
 `~/.local/bin/codex`, so that entry is skipped (there is nothing to shim) and
@@ -482,14 +495,16 @@ Apply these instead of the Linux-only steps referenced above:
 
 - **§1 binaries — prebuilt tarball or source.** The release publishes
   `c3_<version>_windows_amd64.tar.gz` and `..._windows_arm64.tar.gz`; the
-  binaries inside carry the `.exe` suffix. Extract it and put the nine `.exe`
-  files on your PATH (the §1 verify loop and every `c3-broker …` command work
-  the same under Git Bash / PowerShell). These Windows binaries are
+  binaries inside carry the `.exe` suffix. Extract it and put the eight core
+  `.exe` files from §1 on your PATH; leave `codex.exe` out unless and until the
+  Windows Codex integration graduates from its current beta limitation (the §1
+  verify loop and every `c3-broker …` command work the same under Git Bash /
+  PowerShell). These Windows binaries are
   cross-compiled and have **not** had a clean-room CI pass — that is what
   "beta" means here. To build them yourself instead, install **Go ≥1.25** (the
   portable zip needs no admin), then `git clone https://github.com/karthikeyan5/c3`
-  (or `git pull` if you already have it) into a durable dir and
-  `go install ./cmd/...`.
+  (or `git pull` if you already have it) into a durable dir and run §1's same
+  eight-package `go install` command.
 - **§1 PATH — use `setx`, not a shell rc.** Add the install dir to PATH via
   `setx PATH "%PATH%;%USERPROFILE%\.local\bin"` (or System Properties →
   Environment Variables), then **open a NEW terminal** — an already-open shell
@@ -515,7 +530,7 @@ Apply these instead of the Linux-only steps referenced above:
   Windows: replacing some live `.exe` files can leave a mixed-version install.
   Fully quit C3 / Claude Desktop / the coding CLI, then re-extract the newer
   release tarball over the installed binaries. A source install can instead use
-  `git pull` → `go install ./cmd/...`, followed by a full restart.
+  `git pull` → §1's eight-package `go install`, followed by a full restart.
 - **Skip §6 (systemd).** There is no systemd on Windows; the default on-demand
   broker spawn is what you get.
 

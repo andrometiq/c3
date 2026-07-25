@@ -41,7 +41,7 @@ func runInstallClaudeShim(args []string) error {
 	}
 	launcher := filepath.Join(filepath.Dir(exe), "claude-shim")
 	if _, err := os.Stat(launcher); err != nil {
-		return fmt.Errorf("claude-shim launcher not found next to c3-broker at %s; run `go install ./cmd/...` first", launcher)
+		return fmt.Errorf("claude-shim launcher not found next to c3-broker at %s; run `/c3:build` or install `./cmd/c3-broker ./cmd/claude-shim` first", launcher)
 	}
 
 	installPath := *target
