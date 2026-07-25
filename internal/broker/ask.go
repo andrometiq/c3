@@ -463,7 +463,11 @@ func (b *Broker) deliverAskResult(route RouteKey, askID string, answer ipc.AskAn
 // editAskMessage behavior); found=true with a non-nil err is a real edit failure
 // the caller should log with its own feature-flavored context. Shared by the ask
 // and permission keyboard flows so the channel-edit plumbing has a single home.
-func (b *Broker) editKeyboardMessage(route RouteKey, messageID int64, text string, buttons [][]c3types.Button) (found bool, err error) {
+// markup selects how the edited body is rendered. Callers whose body embeds
+// attacker- or agent-supplied text that must be read literally (the permission
+// prompt's command preview) pass c3types.MarkupNone; the empty value keeps the
+// channel default (markdown).
+func (b *Broker) editKeyboardMessage(route RouteKey, messageID int64, text string, buttons [][]c3types.Button, markup c3types.Markup) (found bool, err error) {
 	ch, cerr := b.Channel(route.Channel)
 	if cerr != nil {
 		return false, cerr
@@ -473,6 +477,7 @@ func (b *Broker) editKeyboardMessage(route RouteKey, messageID int64, text strin
 		ChatID:    route.ChatID,
 		MessageID: messageID,
 		Text:      text,
+		Markup:    markup,
 		Buttons:   buttons,
 	})
 	return true, err
@@ -483,7 +488,7 @@ func (b *Broker) editKeyboardMessage(route RouteKey, messageID int64, text strin
 // EMPTY buttons slice clears the inline keyboard (see EditMessage); a non-empty
 // slice re-renders it (multi-select toggle).
 func (b *Broker) editAskMessage(route RouteKey, askID string, messageID int64, text string, buttons [][]c3types.Button) {
-	if found, err := b.editKeyboardMessage(route, messageID, text, buttons); found && err != nil {
+	if found, err := b.editKeyboardMessage(route, messageID, text, buttons, ""); found && err != nil {
 		log.Printf("ask edit FAIL chan=%s chat=%d topic=%s ask=%s msg=%d: %v",
 			route.Channel, route.ChatID, TopicKeyStr(route), askID, messageID, err)
 	}

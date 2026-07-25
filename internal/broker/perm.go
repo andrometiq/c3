@@ -347,7 +347,8 @@ func (b *Broker) deliverPermVerdict(route RouteKey, requestID, behavior string) 
 // A non-nil EMPTY buttons slice clears the inline keyboard. Reuses the shared
 // editKeyboardMessage core (see ask.go) so the channel-edit plumbing has one home.
 func (b *Broker) editPermMessage(route RouteKey, requestID string, messageID int64, text string, buttons [][]c3types.Button) {
-	if found, err := b.editKeyboardMessage(route, messageID, text, buttons); found && err != nil {
+	// Same reason as the initial send: this body re-renders the command preview.
+	if found, err := b.editKeyboardMessage(route, messageID, text, buttons, c3types.MarkupNone); found && err != nil {
 		log.Printf("perm edit FAIL chan=%s chat=%d topic=%s id=%s msg=%d: %v",
 			route.Channel, route.ChatID, TopicKeyStr(route), requestID, messageID, err)
 	}

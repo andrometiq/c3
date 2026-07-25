@@ -524,6 +524,16 @@ func (b *Broker) handlePermissionRequest(_ *ipc.Conn, stub *Stub, raw []byte) {
 		ChatID:  route.ChatID,
 		TopicID: topicID,
 		Text:    text,
+		// MarkupNone is load-bearing, not cosmetic. The body carries req.Preview —
+		// the literal command the agent wants to run — and the zero Markup value
+		// means MARKDOWN: the renderer turns *x* and _x_ into italics (eating the
+		// characters, so a path or flag containing them displays differently from
+		// what executes) and ||x|| into a Telegram spoiler that HIDES part of the
+		// command behind a tap-to-reveal. The operator would be authorising a
+		// string they were never shown. This prompt is the one control that turns
+		// an untrusted tap into code execution on their machine, so it must render
+		// verbatim. (v0.1.0 release audit, 2026-07-25.)
+		Markup:  c3types.MarkupNone,
 		Buttons: permKeyboard(req.RequestID),
 	})
 	if err != nil {

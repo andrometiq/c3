@@ -94,7 +94,7 @@ C3 ships nine Go binaries:
 - `c3-agy-adapter` — Agy MCP server
 - `c3-desktop-adapter` — Claude Desktop MCP server (the `install-desktop` target)
 - `claude-shim` — the `claude` wrapper that auto-injects the dev-channels flag (symlinked into PATH by `install-claude-shim`; see Step 4.5)
-- `codex` — the C3 launcher (will replace `which codex`)
+- `codex` — the C3 Codex **launcher**. Deliberately NOT installed by the step below: it is named `codex` so it can take the place of the real one, and this guide puts `~/.local/bin` first on `PATH`, so installing it would silently reroute every `codex` invocation on your machine through C3. Step 5 installs it, and only if you want Codex integration.
 - `migrate-legacy` — one-shot migrator from a legacy Python-prototype config layout (only relevant if you have such a config)
 
 **Prebuilt (recommended).** Download the release tarball for your platform,
@@ -118,7 +118,7 @@ sha256sum -c SHA256SUMS.this || shasum -a 256 -c SHA256SUMS.this
 tar xzf "${pkg}.tar.gz"
 mkdir -p ~/.local/bin
 for b in c3-broker c3-claude-adapter c3-codex-adapter c3-grok-adapter \
-         c3-agy-adapter c3-desktop-adapter claude-shim codex migrate-legacy; do
+         c3-agy-adapter c3-desktop-adapter claude-shim migrate-legacy; do
   install -m 0755 "${pkg}/${b}" ~/.local/bin/
 done
 ```
@@ -250,6 +250,12 @@ already wrote that config or you know the real-claude target by hand.
 If you also use the Codex CLI, run:
 
 ```
+# Step 4 deliberately did not install the launcher — this is the step that puts
+# C3's `codex` in place of the real one. Prebuilt: take it from the tarball you
+# extracted (re-extract if it's gone). From source, `go install ./cmd/...`
+# already placed it.
+install -m 0755 "${pkg}/codex" ~/.local/bin/
+
 c3-broker install-codex-shim
 ```
 

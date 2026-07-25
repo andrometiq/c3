@@ -39,10 +39,12 @@ C3 runs under three host environments. **Ask the user which one they want**
 > **macOS** is supported — prebuilt binaries; use `launchd` where the Linux
 > steps say `systemd`.
 > **Windows (Claude Desktop + the bundled Claude Code) is _beta_ for v0.1.0.**
-> The install works and the known Windows-specific bugs are fixed, but: inbound
-> is **poll-only** (pull with `/c3:fetch-queue` / `fetch_queue`), there is **no
-> prebuilt Windows release yet** so it **builds from source** (needs Go), and it
-> hasn't had a full clean-room CI pass. All Windows specifics are collected in
+> The install works and the known Windows-specific bugs are fixed, and prebuilt
+> Windows tarballs **are** published — but: inbound is **poll-only** (pull with
+> `/c3:fetch-queue` / `fetch_queue`), the Windows binaries are cross-compiled
+> without a clean-room CI pass, and **`c3-broker update` refuses to self-update
+> on Windows** (a running `.exe` cannot be replaced in place — quit C3 and
+> re-extract the tarball instead). All Windows specifics are collected in
 > **§7 — apply those deltas instead of the Linux-only steps** (skip systemd and
 > the shell-rc `PATH` edit; use `.exe` binaries and `setx`).
 
@@ -81,13 +83,21 @@ grep " ${pkg}.tar.gz$" SHA256SUMS > SHA256SUMS.this
 sha256sum -c SHA256SUMS.this || shasum -a 256 -c SHA256SUMS.this
 
 # The tarball unpacks into a ${pkg}/ directory — install the binaries out of it.
+# NOTE: `codex` is deliberately NOT installed here. It is C3's Codex *launcher*,
+# and installing it onto PATH would SHADOW the user's real `codex` (this guide
+# puts ~/.local/bin FIRST on PATH) for someone who never asked for Codex support.
+# §5 installs it, and only if the user wants Codex integration.
 tar xzf "${pkg}.tar.gz"
 mkdir -p ~/.local/bin
 for b in c3-broker c3-claude-adapter c3-codex-adapter c3-grok-adapter \
-         c3-agy-adapter c3-desktop-adapter claude-shim codex migrate-legacy; do
+         c3-agy-adapter c3-desktop-adapter claude-shim migrate-legacy; do
   install -m 0755 "${pkg}/${b}" ~/.local/bin/
 done
 ```
+
+Keep the extracted `${pkg}/` directory around if the user might want Codex
+support — §5 installs `codex` out of it. (If it's gone by then, re-download and
+re-extract the same tarball.)
 
 If the download 404s (no tarball published for this platform), fall through to
 the from-source path.
@@ -114,15 +124,18 @@ above, or the prebuilt tarball.)
 ### Verify the binaries are installed
 
 ```bash
-for bin in c3-broker c3-claude-adapter c3-codex-adapter c3-grok-adapter c3-agy-adapter c3-desktop-adapter claude-shim codex migrate-legacy; do
+for bin in c3-broker c3-claude-adapter c3-codex-adapter c3-grok-adapter c3-agy-adapter c3-desktop-adapter claude-shim migrate-legacy; do
   command -v "$bin" >/dev/null && echo "  ✓ $bin" || echo "  ✗ $bin (missing)"
 done
 command -v c3-broker >/dev/null || echo "WARNING: the install dir is not on \$PATH"
 ```
 
-The `codex` binary is the C3 launcher (only used if the user wants Codex
-integration — §5; a separate real Codex on PATH may shadow it). `migrate-legacy`
-is a one-shot config migrator most users never run.
+`codex` is intentionally absent from that list: it is C3's Codex **launcher**,
+not a C3 command, and it is named `codex` precisely so it can take the place of
+the real one. Installing it for a user who only wants Claude Code would silently
+reroute every `codex` invocation on their machine through C3. §5 installs it —
+and only if they want Codex integration. `migrate-legacy` is a one-shot config
+migrator most users never run.
 
 If `c3-broker` isn't found, the install dir isn't on `PATH` (`~/.local/bin` for
 prebuilt, `$(go env GOPATH)/bin` for source). Tell the user:
@@ -391,9 +404,17 @@ Continue to §4 to verify.
 
 ## 5. (Optional) Enable Codex integration
 
-Skip this step if the user doesn't use Codex. If they do, run:
+Skip this step if the user doesn't use Codex. **This is the step that puts C3's
+`codex` launcher on their PATH in place of the real Codex — don't run it for a
+user who only wants Claude Code.**
+
+First install the launcher (§1 deliberately left it out), then wire it up:
 
 ```bash
+# Prebuilt: out of the tarball you extracted in §1. Re-download and re-extract
+# if ${pkg}/ is gone. From source, `go install ./cmd/...` already placed it.
+install -m 0755 "${pkg}/codex" ~/.local/bin/
+
 c3-broker install-codex-shim
 ```
 
