@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/karthikeyan5/c3/internal/c3types"
 	"github.com/karthikeyan5/c3/internal/ipc"
 )
 
@@ -192,10 +193,12 @@ func TestLiveAck_MergedPush_ConsumesEveryCoveredLine(t *testing.T) {
 	}
 }
 
-// Callers that do not know the covered ids (direct-call paths, older records
-// aged out past maxCoveredByPush) must still fall back to the head-consume
-// rather than silently consuming nothing.
-func TestLiveAck_NoCoveredRecord_FallsBackToHeadConsume(t *testing.T) {
+// A missing identity record must fail toward keeping the queue. Falling back to
+// head-consume is the original data-loss bug under a different trigger: the
+// missing record may have hit the tracking cap while older, undelivered backlog
+// still sits at the head. A duplicate delivery is recoverable; destroying an
+// unrelated message is not.
+func TestLiveAck_NoCoveredRecord_KeepsQueue(t *testing.T) {
 	t.Setenv("C3_QUEUE_DIR", t.TempDir())
 	b := brokerWithChannel(t, mfWithTelegram(), &fakeChannel{})
 	defer b.Shutdown()
@@ -207,21 +210,30 @@ func TestLiveAck_NoCoveredRecord_FallsBackToHeadConsume(t *testing.T) {
 	defer w.Stop()
 	ctx := context.Background()
 
-	in := inbound(tid, 5, "one")
-	if err := b.Queue.Append(qrk, in); err != nil {
-		t.Fatalf("append: %v", err)
+	for _, in := range []*c3types.Inbound{
+		inbound(tid, 4, "older-undelivered"),
+		inbound(tid, 5, "delivered-but-untracked"),
+	} {
+		if err := b.Queue.Append(qrk, in); err != nil {
+			t.Fatalf("append: %v", err)
+		}
 	}
 	// No recordCoveredByPush for this push id.
 	w.handleConsume(ctx, &ConsumeJob{MessageID: 5, Count: 1})
 
-	if n, _ := b.Queue.Pending(qrk); n != 0 {
-		t.Errorf("with no covered-id record the legacy head-consume must still run; pending=%d, want 0", n)
+	left, err := b.Queue.Peek(qrk, -1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(left) != 2 || left[0].MessageID != 4 || left[1].MessageID != 5 {
+		t.Errorf("missing identity must consume nothing; got %+v", left)
 	}
 }
 
-// The record map is bounded, and eviction degrades to the legacy path rather
-// than growing without limit when a holder never acks.
-func TestCoveredByPush_BoundedEviction(t *testing.T) {
+// The record map is bounded. Once full it retains the oldest outstanding
+// records and declines to track newer pushes; their acks then fail toward a
+// recoverable duplicate rather than a destructive head-consume.
+func TestCoveredByPush_BoundedFailTowardKeeping(t *testing.T) {
 	t.Setenv("C3_QUEUE_DIR", t.TempDir())
 	b := brokerWithChannel(t, mfWithTelegram(), &fakeChannel{})
 	defer b.Shutdown()
@@ -240,14 +252,46 @@ func TestCoveredByPush_BoundedEviction(t *testing.T) {
 	if got := len(w.coveredOrder); got != maxCoveredByPush {
 		t.Errorf("order list must stay bounded at %d; got %d", maxCoveredByPush, got)
 	}
-	if w.takeCoveredByPush(1) != nil {
-		t.Error("the oldest record should have been evicted")
+	if ids := w.takeCoveredByPush(1); len(ids) != 1 || ids[0] != 1 {
+		t.Errorf("the oldest outstanding record must survive the cap; got %v", ids)
 	}
-	if ids := w.takeCoveredByPush(int64(maxCoveredByPush + 10)); len(ids) != 1 {
-		t.Error("the newest record must survive eviction")
+	if ids := w.takeCoveredByPush(int64(maxCoveredByPush + 10)); ids != nil {
+		t.Errorf("a push beyond the cap must be left untracked; got %v", ids)
 	}
-	if w.takeCoveredByPush(int64(maxCoveredByPush+10)) != nil {
-		t.Error("take must clear the record")
+}
+
+// Two live pushes can legitimately share a MessageID (Telegram edited_message).
+// Their identity records must queue FIFO under that shared ack key; overwriting
+// the first record makes the first ack consume the second push's lines.
+func TestCoveredByPush_DuplicatePushIDQueuesFIFO(t *testing.T) {
+	w := &RouteWorker{}
+	w.recordCoveredByPush(7, []int64{1, 7})
+	w.recordCoveredByPush(7, []int64{2, 7})
+
+	first := w.takeCoveredByPush(7)
+	second := w.takeCoveredByPush(7)
+	if len(first) != 2 || first[0] != 1 || first[1] != 7 {
+		t.Fatalf("first duplicate-key record overwritten: got %v", first)
+	}
+	if len(second) != 2 || second[0] != 2 || second[1] != 7 {
+		t.Fatalf("second duplicate-key record missing/out of order: got %v", second)
+	}
+	if w.takeCoveredByPush(7) != nil {
+		t.Error("both queued records should be cleared after two takes")
+	}
+}
+
+func TestFlushPendingAck_ClearsCoveredRecordsWithoutPendingTurn(t *testing.T) {
+	w := &RouteWorker{}
+	w.recordCoveredByPush(7, []int64{7})
+
+	// An outbound can clear pendingAck before the holder dies, while its
+	// delivered-ack identity record is still outstanding. Death must still clear
+	// holder-local identity state so it cannot bleed into a replacement holder.
+	w.flushPendingAck("holder exited")
+
+	if len(w.coveredByPush) != 0 || len(w.coveredOrder) != 0 {
+		t.Fatalf("dead holder's covered records survived: map=%v order=%v", w.coveredByPush, w.coveredOrder)
 	}
 }
 

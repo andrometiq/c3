@@ -301,19 +301,25 @@ func TestFlushInbounds_MixedBatchCoveredCountsActualAppends(t *testing.T) {
 	stub := &Stub{CLI: "claude", PID: 1, ConnID: 7, Conn: brokerSide}
 	b.Routes.Claim(key, stub)
 
-	w := newRouteWorker(context.Background(), key, time.Hour, b)
-	defer w.Stop()
+	// Install the worker in the pool so the later handler-submitted consume
+	// reaches the SAME worker that recorded this push's covered identities.
+	b.Workers.mu.Lock()
+	w := b.Workers.spawnLocked(key)
+	b.Workers.mu.Unlock()
 
 	// Pre-seed msg 1 as already-seen by appending+recording it (simulate a prior
 	// delivery). Feed a batch [1 (seen), 2 (new)]: only 2 is appended → Covered=1.
 	w.dedup.record(1)
 	_ = b.Queue.Append(qrk, &c3types.Inbound{Channel: "telegram", ChatID: -100, TopicID: &tid, MessageID: 1, Text: "old", Timestamp: time.Now()})
 
-	batch := []*c3types.Inbound{
+	for _, in := range []*c3types.Inbound{
 		{Channel: "telegram", ChatID: -100, TopicID: &tid, MessageID: 1, Text: "dup", Timestamp: time.Now()},
 		{Channel: "telegram", ChatID: -100, TopicID: &tid, MessageID: 2, Text: "new", Timestamp: time.Now()},
+	} {
+		if !w.Submit(Job{Kind: JobInbound, Inbound: in}) {
+			t.Fatal("submit inbound batch")
+		}
 	}
-	go w.flushInbounds(context.Background(), batch)
 
 	raw, err := agent.ReadFrame()
 	if err != nil {
@@ -416,6 +422,10 @@ func TestHandleInboundDelivered_DispatchesConsume(t *testing.T) {
 	stub := claimedHolder(t, b, key)
 	stub.SetRoute(&key)
 	stub.MarkRouteConfirmed() // live-push ack consume requires a confirmed claim (§5 tripwire)
+	b.Workers.mu.Lock()
+	w := b.Workers.spawnLocked(key)
+	b.Workers.mu.Unlock()
+	w.recordCoveredByPush(1, []int64{1})
 
 	raw, _ := json.Marshal(ipc.InboundDeliveredMsg{Op: ipc.OpInboundDelivered, UpdateID: 1, OK: true, Count: 1})
 	b.handleInboundDelivered(stub, raw)

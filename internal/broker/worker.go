@@ -66,12 +66,15 @@ type BacklogResult struct {
 }
 
 // FetchJob asks the worker to Peek/Consume the route's durable queue. Limit<0
-// (or All) means everything. Ack=true consumes; false peeks. The result returns
+// (or All) means everything. For Ack=true, Lease arbitrates a timeout racing the
+// destructive operation: either cancellation wins before Consume starts, or
+// the caller waits for the already-started Consume's result. The result returns
 // via ResultCh.
 type FetchJob struct {
 	Limit    int
 	All      bool
 	Ack      bool
+	Lease    *fetchLease
 	ResultCh chan<- FetchResult
 }
 
@@ -82,14 +85,59 @@ type FetchResult struct {
 	Err       error
 }
 
-// ConsumeJob consumes the queued lines a Claude live push covered, off the front
-// (Claude live-ack path). A single push may MERGE a debounced batch of N stored
-// lines into one notification (mergeBatch), so the ack must consume ALL N lines
-// the push covered, not just one — otherwise N-1 stored lines are orphaned as
-// phantom backlog. Count is the number of stored lines the acked push covered
-// (>=1); MessageID is the merged push's id (the last in the batch), logged for
-// audit. Consumption is strictly oldest-first (live delivery is in arrival
-// order), so consuming Count off the head matches exactly the covered lines.
+// fetchLease makes "caller timed out" and "destructive Consume started" mutually
+// exclusive. beginConsume leaves mu held across the short local queue operation.
+// If cancel wins first, the worker must downgrade to Peek. If beginConsume wins,
+// cancel waits for finishConsume and reports false so the handler waits for the
+// real result instead of abandoning an already-consumed batch.
+type fetchLease struct {
+	mu      sync.Mutex
+	active  bool
+	started bool
+}
+
+func newFetchLease() *fetchLease {
+	return &fetchLease{active: true}
+}
+
+func (l *fetchLease) beginConsume() bool {
+	if l == nil {
+		return true
+	}
+	l.mu.Lock()
+	if !l.active {
+		l.mu.Unlock()
+		return false
+	}
+	l.started = true
+	return true // finishConsume releases mu
+}
+
+func (l *fetchLease) finishConsume() {
+	if l != nil {
+		l.mu.Unlock()
+	}
+}
+
+// cancel returns true only when the caller canceled before Consume began.
+func (l *fetchLease) cancel() bool {
+	if l == nil {
+		return true
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.started {
+		return false
+	}
+	l.active = false
+	return true
+}
+
+// ConsumeJob consumes the queued lines a live push covered (live-ack path). A
+// single push may merge N stored lines into one notification, so the worker
+// records those lines' identities and removes exactly them when the ack arrives.
+// Count is retained as wire/audit evidence; a missing identity record fails
+// toward keeping the queue rather than falling back to destructive head-consume.
 type ConsumeJob struct {
 	MessageID int64
 	Count     int
@@ -193,11 +241,13 @@ type RouteWorker struct {
 	// the delivered one queued to be re-delivered. Found and reproduced during the
 	// v0.1.0 release audit, 2026-07-25.
 	//
-	// Worker-goroutine-only (recorded in forwardOrFallback, read+cleared in
-	// handleConsume), so it needs no lock. Bounded by maxCoveredByPush: an entry is
-	// only removed by its ack, and a holder that dies mid-flight never acks.
-	coveredByPush map[int64][]int64
-	// coveredOrder is coveredByPush's insertion order, for bounded FIFO eviction.
+	// Multiple pushes can share one MessageID (edited_message), so each key owns a
+	// FIFO of records rather than one overwriteable record. Worker-goroutine-only
+	// (recorded in forwardOrFallback, read+cleared in handleConsume), so it needs
+	// no lock. Bounded by maxCoveredByPush outstanding records.
+	coveredByPush map[int64][][]int64
+	// coveredOrder is record insertion order (duplicates included), used to cap
+	// the total outstanding records.
 	coveredOrder []int64
 
 	// prevEchoDone chains the per-topic voice-readback echoes so they post in
@@ -240,9 +290,9 @@ const (
 
 	// maxCoveredByPush bounds the per-push covered-line records a route retains
 	// while waiting for delivered-acks. An entry is dropped by its own ack; a
-	// holder that dies mid-flight never acks, so the map needs a ceiling. Past it
-	// the oldest record is evicted and that push's ack falls back to the legacy
-	// head-consume (logged), which is no worse than the pre-fix behaviour.
+	// holder that dies mid-flight never acks, so the map needs a ceiling. At the
+	// ceiling newer pushes are left untracked and their acks consume nothing:
+	// recoverable duplicate delivery is safer than destroying unrelated backlog.
 	maxCoveredByPush = 64
 )
 
@@ -852,11 +902,11 @@ func mergeBatch(batch []*c3types.Inbound) *c3types.Inbound {
 // holder-conn-bad, write-error, fallback-cooldown-drop, fallback-send-fail,
 // AND fallback-sent (the user's message was bounced back to Telegram with a
 // boilerplate; no CLI processed it).
-// forwardOrFallback is the covered-count-only form, kept for callers that do not
-// know WHICH stored lines the push covered (direct-call paths and tests). Their
-// acks fall back to the legacy head-consume, which is correct whenever the queue
-// held nothing but this push's own lines. Production inbound goes through
-// flushInbounds, which knows the ids and calls forwardOrFallbackCovering.
+// forwardOrFallback is the covered-count-only form, kept for events and tests
+// that do not know WHICH stored lines the push covered. A positive-count ack for
+// this form fails toward keeping the queue because it has no identity record;
+// production text inbound goes through flushInbounds, which knows the ids and
+// calls forwardOrFallbackCovering.
 func (w *RouteWorker) forwardOrFallback(ctx context.Context, in *c3types.Inbound, covered int) {
 	w.forwardOrFallbackCovering(ctx, in, covered, nil, false)
 }
@@ -1241,11 +1291,22 @@ func (w *RouteWorker) handleFetch(_ context.Context, job *FetchJob) {
 	if job.All {
 		n = -1
 	}
+	effectiveAck := job.Ack
 	var msgs []c3types.Inbound
 	var err error
-	if job.Ack {
-		msgs, err = w.broker.Queue.Consume(qrk, n)
-	} else {
+	if effectiveAck {
+		if job.Lease == nil || job.Lease.beginConsume() {
+			func() {
+				defer job.Lease.finishConsume()
+				msgs, err = w.broker.Queue.Consume(qrk, n)
+			}()
+		} else {
+			effectiveAck = false
+			log.Printf("fetch_queue chan=%s chat=%d topic=%s: caller left before consume; downgraded ack=true to peek",
+				w.key.Channel, w.key.ChatID, TopicKeyStr(w.key))
+		}
+	}
+	if !effectiveAck {
 		msgs, err = w.broker.Queue.Peek(qrk, n)
 	}
 	if err != nil {
@@ -1253,14 +1314,14 @@ func (w *RouteWorker) handleFetch(_ context.Context, job *FetchJob) {
 		return
 	}
 	remaining, _ := w.broker.Queue.Pending(qrk)
-	if !job.Ack {
+	if !effectiveAck {
 		remaining -= len(msgs) // peek doesn't advance; "remaining after this batch"
 		if remaining < 0 {
 			remaining = 0
 		}
 	}
 	log.Printf("fetch_queue chan=%s chat=%d topic=%s ack=%v returned=%d remaining=%d",
-		w.key.Channel, w.key.ChatID, TopicKeyStr(w.key), job.Ack, len(msgs), remaining)
+		w.key.Channel, w.key.ChatID, TopicKeyStr(w.key), effectiveAck, len(msgs), remaining)
 	job.ResultCh <- FetchResult{Messages: msgs, Remaining: remaining}
 }
 
@@ -1353,13 +1414,13 @@ func (w *RouteWorker) handleConsume(_ context.Context, job *ConsumeJob) {
 		return
 	}
 
-	// Fallback: no covered-id record for this push (a direct-call/test path, or a
-	// record aged out past maxCoveredByPush). Legacy head-consume — correct
-	// whenever the queue holds only this push's lines.
-	if _, err := w.broker.Queue.Consume(qrk, n); err != nil {
-		log.Printf("queue consume(live-ack) FAIL chan=%s chat=%d topic=%s msg=%d count=%d: %v",
-			w.key.Channel, w.key.ChatID, TopicKeyStr(w.key), job.MessageID, n, err)
-	}
+	// No identity record means we cannot prove which lines this ack covered. Never
+	// guess by consuming the queue head: older undelivered backlog may sit there,
+	// which is the exact release-blocking loss this path was changed to prevent.
+	// Leaving the delivered line queued may duplicate it on a later fetch, but
+	// that is visible and recoverable; deleting an unrelated line is not.
+	log.Printf("queue consume(live-ack) SKIP chan=%s chat=%d topic=%s msg=%d count=%d: covered identity unavailable; leaving queue intact",
+		w.key.Channel, w.key.ChatID, TopicKeyStr(w.key), job.MessageID, n)
 }
 
 // recordCoveredByPush remembers which durable lines a live push covered, keyed by
@@ -1369,22 +1430,18 @@ func (w *RouteWorker) recordCoveredByPush(pushID int64, ids []int64) {
 	if pushID == 0 || len(ids) == 0 {
 		return
 	}
-	if w.coveredByPush == nil {
-		w.coveredByPush = make(map[int64][]int64, maxCoveredByPush)
+	if len(w.coveredOrder) >= maxCoveredByPush {
+		log.Printf("coveredByPush chan=%s chat=%d topic=%s: at cap, did not track push msg=%d (its ack will leave the durable copy queued)",
+			w.key.Channel, w.key.ChatID, TopicKeyStr(w.key), pushID)
+		return
 	}
-	if _, dup := w.coveredByPush[pushID]; !dup {
-		w.coveredOrder = append(w.coveredOrder, pushID)
+	if w.coveredByPush == nil {
+		w.coveredByPush = make(map[int64][][]int64, maxCoveredByPush)
 	}
 	// Copy: the caller's slice is flushInbounds' batch-local buffer.
-	w.coveredByPush[pushID] = append([]int64(nil), ids...)
-
-	for len(w.coveredOrder) > maxCoveredByPush {
-		oldest := w.coveredOrder[0]
-		w.coveredOrder = w.coveredOrder[1:]
-		delete(w.coveredByPush, oldest)
-		log.Printf("coveredByPush chan=%s chat=%d topic=%s: over cap, dropped record for push msg=%d (its ack falls back to head-consume)",
-			w.key.Channel, w.key.ChatID, TopicKeyStr(w.key), oldest)
-	}
+	record := append([]int64(nil), ids...)
+	w.coveredByPush[pushID] = append(w.coveredByPush[pushID], record)
+	w.coveredOrder = append(w.coveredOrder, pushID)
 }
 
 // takeCoveredByPush returns and clears the covered-line record for a push, or nil
@@ -1393,11 +1450,16 @@ func (w *RouteWorker) takeCoveredByPush(pushID int64) []int64 {
 	if w.coveredByPush == nil {
 		return nil
 	}
-	ids, ok := w.coveredByPush[pushID]
-	if !ok {
+	records := w.coveredByPush[pushID]
+	if len(records) == 0 {
 		return nil
 	}
-	delete(w.coveredByPush, pushID)
+	ids := records[0]
+	if len(records) == 1 {
+		delete(w.coveredByPush, pushID)
+	} else {
+		w.coveredByPush[pushID] = records[1:]
+	}
 	for i, id := range w.coveredOrder {
 		if id == pushID {
 			w.coveredOrder = append(w.coveredOrder[:i], w.coveredOrder[i+1:]...)
@@ -1604,16 +1666,16 @@ func (w *RouteWorker) trackPendingAck(in *c3types.Inbound) {
 // without processing them. Called ONLY on confirmed holder death, so it never
 // fires for a merely-slow live session. No-op when nothing is tracked.
 func (w *RouteWorker) flushPendingAck(reason string) {
+	// The holder is confirmed dead, so none of its outstanding push records may
+	// bleed into a replacement holder. Clear them even when pendingAck is empty
+	// (an outbound may already have cleared that separate handled-turn tracker).
+	w.coveredByPush = nil
+	w.coveredOrder = nil
 	if len(w.pendingAck) == 0 {
 		return
 	}
 	lost := w.pendingAck
 	w.pendingAck = nil
-	// The holder is confirmed dead, so no outstanding push will ever be acked.
-	// Drop their covered-line records rather than leave them to age out: their
-	// lines were never consumed and remain correctly queued.
-	w.coveredByPush = nil
-	w.coveredOrder = nil
 	requeued := 0
 	if w.broker != nil && w.broker.Queue != nil {
 		for _, in := range lost {

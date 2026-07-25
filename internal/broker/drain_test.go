@@ -51,14 +51,23 @@ func drainSpec(sel ...DrainSelector) DrainSpec {
 	return spec
 }
 
-// drainSrcMsg builds a source-routed organic message with a fixed timestamp so
-// banner assertions are deterministic.
+// drainSrcMsg builds a source-routed organic message with a fresh timestamp.
+// These fixtures pass through the real 14-day retention cap, so an absolute date
+// turns the suite into a time bomb once the wall clock advances past it.
 func drainSrcMsg(id int64, text string) *c3types.Inbound {
 	return &c3types.Inbound{
 		Channel: "telegram", ChatID: -100, TopicID: ptrI64(281), MessageID: id,
 		Sender:    c3types.Sender{UserID: 11, Username: "alice"},
 		Text:      text,
-		Timestamp: time.Date(2026, 7, 8, 14, 22, 0, 0, time.UTC),
+		Timestamp: time.Now().UTC(),
+	}
+}
+
+func TestDrainSrcMsg_UsesFreshTimestamp(t *testing.T) {
+	m := drainSrcMsg(1, "fresh")
+	age := time.Since(m.Timestamp)
+	if age < 0 || age > time.Minute {
+		t.Fatalf("drainSrcMsg timestamp is not fresh (age=%v); queue.MaxAge will eventually make drain tests silently evict their fixtures", age)
 	}
 }
 
@@ -234,7 +243,7 @@ func TestDrain_RewritesRoutingAndStampsProvenance(t *testing.T) {
 // have caught the original proposals' tail-append + blind head-consume flaw.
 func TestDrain_AttachedTargetNudge_NoUserLinePush(t *testing.T) {
 	b, fc := drainTestBroker(t)
-	ts := time.Date(2026, 7, 7, 9, 0, 0, 0, time.UTC)
+	ts := time.Now().UTC()
 	backlog1 := &c3types.Inbound{Channel: "telegram", ChatID: -200, TopicID: ptrI64(412), MessageID: 100, Text: "backlog-1", Timestamp: ts}
 	backlog2 := &c3types.Inbound{Channel: "telegram", ChatID: -200, TopicID: ptrI64(412), MessageID: 101, Text: "backlog-2", Timestamp: ts}
 	drainSeed(t, b, drainDst(), backlog1, backlog2)
@@ -491,13 +500,7 @@ func TestDrain_NoDedupSeed_OrganicSameIDStillDelivers(t *testing.T) {
 	b := brokerWithChannel(t, mf, fc)
 	defer b.Shutdown()
 
-	// Fresh timestamp so the drained line isn't age-evicted by the 14-day cap.
-	// drainSrcMsg hardcodes 2026-07-08 for banner determinism (other tests rely on
-	// that), but this test asserts pending COUNT and appends an organic same-id
-	// inbound that triggers evictIfOverCap — a stale drained ts would be silently
-	// age-dropped, masking INV-8 and making the test a date-triggered time-bomb.
 	moved := drainSrcMsg(7, "moved")
-	moved.Timestamp = time.Now()
 	drainSeed(t, b, drainSrc(), moved)
 	if _, err := b.Drain(drainSpec()); err != nil {
 		t.Fatalf("Drain: %v", err)

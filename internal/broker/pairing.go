@@ -195,13 +195,13 @@ func (p *pairingState) ClearGroup(chatID int64) {
 	delete(p.groups, chatID)
 }
 
-// RecordWrongDM counts one wrong code against the DM window and reports whether
-// that exhausted it. An exhausted window is closed here, so the caller only has
-// to decide what to log.
-func (p *pairingState) RecordWrongDM() (attempts int, exhausted bool) {
+// RecordWrongDM counts one wrong code against expected and reports whether that
+// exhausted it. If pairing was restarted after the caller read expected, the
+// replacement is left untouched.
+func (p *pairingState) RecordWrongDM(expected *PairWindow) (attempts int, exhausted bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if p.dm == nil || !p.dm.IsActive(p.now()) {
+	if p.dm == nil || p.dm != expected || !p.dm.IsActive(p.now()) {
 		return 0, false
 	}
 	p.dm.Wrong++
@@ -213,12 +213,12 @@ func (p *pairingState) RecordWrongDM() (attempts int, exhausted bool) {
 	return attempts, false
 }
 
-// RecordWrongGroup is RecordWrongDM for one group's window.
-func (p *pairingState) RecordWrongGroup(chatID int64) (attempts int, exhausted bool) {
+// RecordWrongGroup is RecordWrongDM for one group's expected window.
+func (p *pairingState) RecordWrongGroup(chatID int64, expected *PairWindow) (attempts int, exhausted bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	w, ok := p.groups[chatID]
-	if !ok || !w.IsActive(p.now()) {
+	if !ok || w != expected || !w.IsActive(p.now()) {
 		return 0, false
 	}
 	w.Wrong++
@@ -228,6 +228,30 @@ func (p *pairingState) RecordWrongGroup(chatID int64) (attempts int, exhausted b
 		return attempts, true
 	}
 	return attempts, false
+}
+
+// ConsumeDM atomically consumes expected after a matching code. A concurrent
+// restart replaces the pointer, so a stale match cannot clear the new window.
+func (p *pairingState) ConsumeDM(expected *PairWindow) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.dm == nil || p.dm != expected || !p.dm.IsActive(p.now()) {
+		return false
+	}
+	p.dm = nil
+	return true
+}
+
+// ConsumeGroup is ConsumeDM for one group's expected window.
+func (p *pairingState) ConsumeGroup(chatID int64, expected *PairWindow) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	w, ok := p.groups[chatID]
+	if !ok || w != expected || !w.IsActive(p.now()) {
+		return false
+	}
+	delete(p.groups, chatID)
+	return true
 }
 
 // AnyActive reports whether any pairing window is currently live.
@@ -343,12 +367,16 @@ func (b *Broker) Gate(in *c3types.Inbound) GateDecision {
 			// Wrong code during active pairing → silent drop to the sender, but the
 			// window is NOT free to guess at: count the attempt and close it once
 			// exhausted (see pairMaxWrongCodes).
-			if n, exhausted := b.Pairing.RecordWrongDM(); exhausted {
+			if n, exhausted := b.Pairing.RecordWrongDM(w); exhausted {
 				log.Printf("pairing: DM window CLOSED after %d wrong codes — possible brute-force; run /c3:pair again to re-arm", n)
 			}
 			return GateDrop
 		}
-		// Match. Add user to allowlist, persist, clear window.
+		if !b.Pairing.ConsumeDM(w) {
+			return GateDrop // pairing restarted while this inbound was evaluated
+		}
+		// Match. Add user to allowlist and persist; the exact window was consumed
+		// atomically above so a concurrent replacement cannot be cleared.
 		b.acceptDMPair(in.Sender.UserID, w.Code)
 		return GatePairConsumed
 	}
@@ -359,21 +387,23 @@ func (b *Broker) Gate(in *c3types.Inbound) GateDecision {
 		return GateDrop
 	}
 	if body != w.Code {
-		if n, exhausted := b.Pairing.RecordWrongGroup(in.ChatID); exhausted {
+		if n, exhausted := b.Pairing.RecordWrongGroup(in.ChatID, w); exhausted {
 			log.Printf("pairing: group %d window CLOSED after %d wrong codes — possible brute-force; run /c3:pair again to re-arm", in.ChatID, n)
 		}
 		return GateDrop
+	}
+	if !b.Pairing.ConsumeGroup(in.ChatID, w) {
+		return GateDrop // pairing restarted while this inbound was evaluated
 	}
 	b.acceptGroupPair(in.ChatID, w.Code)
 	return GatePairConsumed
 }
 
-// acceptDMPair finalizes a DM pairing match: clears the window, adds the
-// user_id to allowlist.Users, persists mappings.json. Best-effort
+// acceptDMPair finalizes an already-consumed DM pairing match: adds the user_id
+// to allowlist.Users and persists mappings.json. Best-effort
 // persistence — failures are logged but the in-memory allowlist update
 // still takes effect (the gate will let the user through immediately).
 func (b *Broker) acceptDMPair(userID int64, code string) {
-	b.Pairing.ClearDM()
 	b.mutateMappings(func(mf *mappings.MappingsFile) {
 		mf.AddAllowedUser(userID)
 	})
@@ -384,10 +414,9 @@ func (b *Broker) acceptDMPair(userID int64, code string) {
 	log.Printf("pairing: DM match user=%d code=%s ACCEPTED; allowlist persisted", userID, code)
 }
 
-// acceptGroupPair finalizes a group pairing match: clears that group's
-// window, adds the chat_id to allowlist.Groups, persists.
+// acceptGroupPair finalizes an already-consumed group pairing match: adds the
+// chat_id to allowlist.Groups and persists.
 func (b *Broker) acceptGroupPair(chatID int64, code string) {
-	b.Pairing.ClearGroup(chatID)
 	b.mutateMappings(func(mf *mappings.MappingsFile) {
 		mf.AddAllowedGroup(chatID)
 	})

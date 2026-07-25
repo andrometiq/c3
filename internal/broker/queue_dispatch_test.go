@@ -268,9 +268,12 @@ func TestHandleInboundDelivered_MergedBatchConsumesAllCovered(t *testing.T) {
 	for i := int64(1); i <= 5; i++ {
 		_ = b.Queue.Append(qrk, &c3types.Inbound{Channel: "telegram", ChatID: -100, TopicID: &tid, MessageID: i, Text: "m", Timestamp: time.Now()})
 	}
-	// b.Workers.Submit lazily spawns the route worker (WorkerPool.Submit), so the
-	// JobConsume the handler submits runs on a live worker — no manual worker
-	// setup needed.
+	// Install the worker and the exact identities represented by this synthetic
+	// merged push. A count-only ack is deliberately non-destructive.
+	b.Workers.mu.Lock()
+	w := b.Workers.spawnLocked(key)
+	b.Workers.mu.Unlock()
+	w.recordCoveredByPush(3, []int64{1, 2, 3})
 	stub := claimedHolder(t, b, key)
 	stub.SetRoute(&key)
 	stub.MarkRouteConfirmed() // live-push ack consume requires a confirmed claim (§5 tripwire)
@@ -365,20 +368,11 @@ func TestHandleFetchQueue_WorkerStall_ReturnsErrorNotWedge(t *testing.T) {
 	}
 }
 
-// TestHandleFetchQueue_AckTrue_NoTimeoutBlocksUntilWorker pins M1 (W1 review):
-// an Ack=true fetch is DESTRUCTIVE (handleFetch runs Queue.Consume, which durably
-// advances the cursor BEFORE writing resultCh). The handler must therefore NOT
-// apply workerJobTimeout to it — abandoning the consume orphans a durably-consumed
-// batch into a readerless channel = permanent silent inbound loss. Instead it must
-// BLOCK on resultCh until the (alive-but-busy) worker actually runs the job, then
-// deliver the REAL consumed batch.
-//
-// We shorten workerJobTimeout, park the route's single worker on a blocking reply
-// PAST that timeout, then submit an Ack=true fetch behind it. Pre-fix the handler
-// returned a timeout Err at 50ms (and the worker later consume-discarded). Post-fix
-// it waits — we confirm it does NOT return for 6x the timeout, then release the
-// worker and assert it delivers the actual consumed messages (not a timeout error).
-func TestHandleFetchQueue_AckTrue_NoTimeoutBlocksUntilWorker(t *testing.T) {
+// An Ack=true fetch abandoned while queued must not consume later into a
+// readerless result channel. The handler times out first and cancels the job's
+// lease; when the busy worker eventually reaches the job it peeks instead,
+// leaving every held line available for the agent's retry.
+func TestHandleFetchQueue_AckTrue_TimeoutCancelsConsume(t *testing.T) {
 	t.Setenv("C3_QUEUE_DIR", t.TempDir())
 	b, bc := brokerWithBlockingReply(t)
 
@@ -419,39 +413,62 @@ func TestHandleFetchQueue_AckTrue_NoTimeoutBlocksUntilWorker(t *testing.T) {
 	respCh := make(chan ipc.FetchQueueResp, 1)
 	go func() { respCh <- readFetchResp(t, agentSide) }()
 
-	// The destructive Ack=true fetch must NOT time out: well past workerJobTimeout
-	// (6x = 300ms) neither the response nor the handler may have returned — it is
-	// BLOCKING on the busy worker, not abandoning the consume.
+	// The broker must time out before an adapter's longer tool timeout. The
+	// handler cancels the lease before the worker can reach it.
 	select {
 	case resp := <-respCh:
-		t.Fatalf("Ack=true fetch returned before the worker ran (timeout fired on a destructive path): %+v", resp)
+		if resp.Err == "" {
+			t.Fatalf("stalled Ack=true fetch should report timeout, got %+v", resp)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Ack=true fetch did not time out before the adapter could abandon it")
+	}
+	select {
 	case <-done:
-		t.Fatal("handleFetchQueue returned before the worker ran — destructive consume was abandoned")
-	case <-time.After(6 * workerJobTimeout):
+	case <-time.After(2 * time.Second):
+		t.Fatal("handleFetchQueue did not return after its timeout response")
 	}
 
-	// Release the parked worker; the queued fetch now runs Queue.Consume and writes
-	// the real result, which the still-blocked (never-timed-out) handler delivers.
+	// Release the worker, then put a barrier behind the canceled fetch. Receiving
+	// the backlog result proves the worker already processed the canceled job.
 	bc.release <- struct{}{}
+	backlogCh := make(chan BacklogResult, 1)
+	if !b.Workers.Submit(key, Job{Kind: JobBacklog, Backlog: &BacklogJob{PeekN: 1, ResultCh: backlogCh}}) {
+		t.Fatal("submit barrier backlog job")
+	}
+	select {
+	case <-backlogCh:
+	case <-time.After(5 * time.Second):
+		t.Fatal("worker did not process the canceled fetch")
+	}
 
-	select {
-	case resp := <-respCh:
-		if resp.Err != "" {
-			t.Fatalf("Ack=true fetch after worker freed: unexpected Err %q", resp.Err)
-		}
-		if len(resp.Messages) != 3 || resp.Messages[0].MessageID != 1 {
-			t.Fatalf("Ack=true fetch returned %+v, want 3 consumed oldest-first", resp.Messages)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("Ack=true fetch never delivered the consumed batch after the worker was freed")
+	if n, _ := b.Queue.Pending(qrk); n != 3 {
+		t.Fatalf("orphaned Ack=true fetch consumed held lines after caller left; pending=%d, want 3", n)
 	}
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("handleFetchQueue did not return after delivering the result")
+}
+
+func TestFetchLease_TimeoutRacingStartedConsumeWaitsForResult(t *testing.T) {
+	lease := newFetchLease()
+	if !lease.beginConsume() {
+		t.Fatal("fresh lease refused consume")
 	}
-	if n, _ := b.Queue.Pending(qrk); n != 0 {
-		t.Fatalf("Ack=true should have consumed all queued lines; pending=%d, want 0", n)
+
+	canceled := make(chan bool, 1)
+	go func() { canceled <- lease.cancel() }()
+	select {
+	case <-canceled:
+		t.Fatal("timeout cancellation passed an in-progress destructive consume")
+	case <-time.After(20 * time.Millisecond):
+	}
+
+	lease.finishConsume()
+	select {
+	case won := <-canceled:
+		if won {
+			t.Fatal("cancel claimed it won after consume had started")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("cancel did not unblock after consume finished")
 	}
 }
 

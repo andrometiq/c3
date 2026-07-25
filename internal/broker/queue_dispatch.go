@@ -57,47 +57,33 @@ func (b *Broker) handleFetchQueue(conn *ipc.Conn, stub *Stub, raw []byte) {
 		return
 	}
 	resultCh := make(chan FetchResult, 1)
-	job := Job{Kind: JobFetch, Fetch: &FetchJob{Limit: req.Limit, All: req.All, Ack: req.Ack, ResultCh: resultCh}}
+	var lease *fetchLease
+	if req.Ack {
+		lease = newFetchLease()
+	}
+	job := Job{Kind: JobFetch, Fetch: &FetchJob{
+		Limit: req.Limit, All: req.All, Ack: req.Ack,
+		Lease: lease, ResultCh: resultCh,
+	}}
 	if !b.Workers.Submit(*route, job) {
 		_ = conn.WriteJSON(ipc.FetchQueueResp{Op: ipc.OpFetchQueueResult, ID: req.ID, Err: "worker queue full or stopped"})
 		return
 	}
 	var res FetchResult
-	if req.Ack {
-		// M1 (W1 review): an Ack=true fetch is DESTRUCTIVE — handleFetch runs
-		// Queue.Consume, which durably advances the cursor / deletes the lines BEFORE
-		// it writes resultCh. Abandoning it on workerJobTimeout orphans that consume:
-		// the worker later runs the job, the batch is consumed (and the Telegram
-		// offset already advanced at persist time), but the result lands in a now-
-		// readerless cap-1 channel → the batch is consumed yet never delivered →
-		// permanent silent inbound loss. So the BROKER does NOT time out the
-		// destructive path; we block on <-resultCh. A1/A2 already fast-fail an EXITED
-		// worker via errWorkerStopped (shutdown() drains it), so this block only
-		// persists for an alive-but-BUSY worker (bounded by the STT deadline).
-		// CAVEAT (NOT yet fully fixed): the *adapter* still abandons this same
-		// round-trip at its own ~120s timeout (cmd/c3-*-adapter), which is < a long
-		// STT flush — so a fetch_queue(ack=true) queued behind a >120s STT can still
-		// be orphaned the same way (the worker later consumes; the adapter waiter is
-		// gone). That residual is PRE-EXISTING (byte-identical to master, not this
-		// branch); removing the broker's 30s timeout here only closed the worse
-		// regression this branch had introduced. The real fix is delivery-contingent:
-		// peek-then-explicit-ack (consume only after the FetchQueueResp is confirmed
-		// written), or an id-targeted consume — a design call tracked as a follow-up.
-		res = <-resultCh
-	} else {
-		// Non-destructive PEEK (Ack=false): a discarded peek consumes nothing, so
-		// abandoning a genuinely stalled worker is safe and keeps the connection's
-		// single serial read loop alive (A3/A4). KEEP the timeout only here.
-		select {
-		case res = <-resultCh:
-		case <-time.After(workerJobTimeout):
-			// A3: an EXITED worker already replied errWorkerStopped fast; this fires
-			// only for a worker that genuinely STALLED. Return THIS op's clean error
-			// and let the read loop keep serving — do NOT wedge on the never-written
-			// resultCh.
-			_ = conn.WriteJSON(ipc.FetchQueueResp{Op: ipc.OpFetchQueueResult, ID: req.ID, Err: "fetch_queue: worker did not respond within " + workerJobTimeout.String()})
-			return
+	// A stalled worker must not wedge this connection's serial read loop. For an
+	// Ack=true timeout, the lease makes cancellation atomic with starting the
+	// destructive Consume. If cancellation wins, a late worker downgrades to
+	// Peek. If Consume already started, cancellation waits for that short local
+	// queue operation and we deliver its real result rather than orphaning it.
+	select {
+	case res = <-resultCh:
+	case <-time.After(workerJobTimeout):
+		if req.Ack && lease != nil && !lease.cancel() {
+			res = <-resultCh
+			break
 		}
+		_ = conn.WriteJSON(ipc.FetchQueueResp{Op: ipc.OpFetchQueueResult, ID: req.ID, Err: "fetch_queue: worker did not respond within " + workerJobTimeout.String()})
+		return
 	}
 	resp := ipc.FetchQueueResp{Op: ipc.OpFetchQueueResult, ID: req.ID, Remaining: res.Remaining}
 	if res.Err != nil {

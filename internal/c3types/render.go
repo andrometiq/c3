@@ -93,10 +93,17 @@ var metaPrefixes = []string{"from=", "message_id=", "reply_to", "attachment=", "
 // attribution forgery into the agent's context, from any member of an allowlisted
 // group. (v0.1.0 release audit, 2026-07-25.)
 func bodyCouldForgeMeta(text string) bool {
-	if !strings.ContainsAny(text, "\r\n") {
+	if !strings.ContainsAny(text, "\r\n\u0085\u2028\u2029") {
 		return false // a single-line body can never produce a second line
 	}
-	for _, line := range strings.FieldsFunc(text, func(r rune) bool { return r == '\n' || r == '\r' }) {
+	for _, line := range strings.FieldsFunc(text, func(r rune) bool {
+		switch r {
+		case '\n', '\r', '\u0085', '\u2028', '\u2029':
+			return true
+		default:
+			return false
+		}
+	}) {
 		s := strings.TrimSpace(line)
 		for _, p := range metaPrefixes {
 			if strings.HasPrefix(s, p) {

@@ -520,3 +520,54 @@ func TestGate_WrongCodes_ExhaustGroupWindowIndependently(t *testing.T) {
 		t.Errorf("exhausting a GROUP window must not close the DM window")
 	}
 }
+
+// A guess is evaluated against one specific pairing window. If an operator
+// restarts pairing between the lookup and the attempt record/consume, traffic
+// from the old window must not increment, close, or consume the replacement.
+func TestPairing_OldWindowCannotMutateReplacement(t *testing.T) {
+	p := newPairingState()
+	if _, err := p.StartDM(); err != nil {
+		t.Fatal(err)
+	}
+	oldDM := p.DMWindow()
+	if _, err := p.StartDM(); err != nil {
+		t.Fatal(err)
+	}
+	newDM := p.DMWindow()
+
+	if _, exhausted := p.RecordWrongDM(oldDM); exhausted {
+		t.Fatal("an attempt against the old DM window exhausted the replacement")
+	}
+	if newDM.Wrong != 0 {
+		t.Fatalf("old-window attempt incremented replacement DM window: Wrong=%d", newDM.Wrong)
+	}
+	if p.ConsumeDM(oldDM) {
+		t.Fatal("an old matching DM window consumed the replacement")
+	}
+	if p.DMWindow() != newDM {
+		t.Fatal("replacement DM window was cleared")
+	}
+
+	const gid = int64(-100200300)
+	if _, err := p.StartGroup(gid); err != nil {
+		t.Fatal(err)
+	}
+	oldGroup := p.GroupWindow(gid)
+	if _, err := p.StartGroup(gid); err != nil {
+		t.Fatal(err)
+	}
+	newGroup := p.GroupWindow(gid)
+
+	if _, exhausted := p.RecordWrongGroup(gid, oldGroup); exhausted {
+		t.Fatal("an attempt against the old group window exhausted the replacement")
+	}
+	if newGroup.Wrong != 0 {
+		t.Fatalf("old-window attempt incremented replacement group window: Wrong=%d", newGroup.Wrong)
+	}
+	if p.ConsumeGroup(gid, oldGroup) {
+		t.Fatal("an old matching group window consumed the replacement")
+	}
+	if p.GroupWindow(gid) != newGroup {
+		t.Fatal("replacement group window was cleared")
+	}
+}

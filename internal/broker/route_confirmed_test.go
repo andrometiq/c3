@@ -123,9 +123,10 @@ func TestHandleFetchQueue_PeekAllowedWhenRouteNotConfirmed(t *testing.T) {
 }
 
 // The live-push ack (handleInboundDelivered → JobConsume) is the OTHER destructive
-// path: it must drop the consume while the route is unconfirmed, then consume once
-// confirmed.
-func TestHandleInboundDelivered_DropsConsumeUntilRouteConfirmed(t *testing.T) {
+// path. It must drop the consume while the route is unconfirmed, and route
+// confirmation alone must not make a synthetic/count-only ack destructive: only
+// an ack tied to a recorded push identity may remove durable lines.
+func TestHandleInboundDelivered_RequiresConfirmedRouteAndDeliveryIdentity(t *testing.T) {
 	t.Setenv("C3_QUEUE_DIR", t.TempDir())
 	b := brokerWithChannel(t, mfWithTelegram(), &fakeChannel{})
 	defer b.Shutdown()
@@ -150,17 +151,14 @@ func TestHandleInboundDelivered_DropsConsumeUntilRouteConfirmed(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 
-	// Confirm the route — a re-ack now consumes off the head.
+	// Confirm the route. This ack was never tied to an actual broker push, so it
+	// still must not consume from the head.
 	stub.MarkRouteConfirmed()
 	b.handleInboundDelivered(stub, raw)
-	deadline = time.Now().Add(2 * time.Second)
-	for {
-		if n, _ := b.Queue.Pending(qrk); n == 1 {
-			break
-		}
-		if time.Now().After(deadline) {
-			n, _ := b.Queue.Pending(qrk)
-			t.Fatalf("confirmed live-ack(Count=2) should consume 2; pending=%d, want 1", n)
+	deadline = time.Now().Add(300 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if n, _ := b.Queue.Pending(qrk); n != 3 {
+			t.Fatalf("count-only ack consumed backlog without a recorded push identity; pending=%d, want 3", n)
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
