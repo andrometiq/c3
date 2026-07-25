@@ -36,8 +36,8 @@ func ExecutableDir() (string, error) {
 	return filepath.Dir(exe), nil
 }
 
-// InstallBinaries atomically installs the binaries in srcPaths (name → source
-// path) into destDir. It is the verify-then-swap installer:
+// InstallBinaries stages then installs the binaries in srcPaths (name → source
+// path) into destDir. Each individual rename is atomic:
 //
 //	Phase 1 (stage): copy EVERY source into a private temp file inside destDir
 //	  (same filesystem ⇒ the later rename is atomic). If ANY staging step fails
@@ -48,19 +48,15 @@ func ExecutableDir() (string, error) {
 //
 //	Phase 2 (swap): rename each staged temp file onto its final name. Renames are
 //	  atomic per-file on the same fs and the destDir was already proven writable
-//	  by staging, so this loop does not fail in practice; the residual near-zero
-//	  window (a rename erroring after some siblings already renamed) is logged
-//	  and returned, and the operator's next `c3-broker update` re-runs cleanly.
+//	  by staging. A residual rename failure after earlier siblings were replaced
+//	  can leave a partial install; the error is returned honestly for repair.
 //
 // destDir must exist and be writable. All sources should be pre-verified present
 // by the caller (Update does this after checksum + extraction).
 //
-// KNOWN LIMITATION (Windows): the Phase-2 os.Rename swaps below cannot replace a
-// binary whose .exe is a currently-running image — Windows locks the file. So
-// self-update of a live broker/adapter fails here on Windows; until that's
-// handled (rename-aside then delete-on-next-start), update the Windows box by
-// rebuilding from source. The auto-update checker is disabled on dev builds, and
-// no Windows release exists yet, so this path is currently unreached on Windows.
+// Update refuses Windows before calling this function: Phase-2 os.Rename cannot
+// replace a currently-running .exe, and swapping the other siblings first would
+// leave a mixed-version install.
 func InstallBinaries(destDir string, srcPaths map[string]string) error {
 	if len(srcPaths) == 0 {
 		return fmt.Errorf("install: no binaries to install")

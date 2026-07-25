@@ -235,7 +235,7 @@ Usage:
   c3-broker update [--check]
                         Update C3 to the latest GitHub release: download the
                         platform tarball, verify it against SHA256SUMS, and
-                        atomically swap the nine binaries in place. --check only
+                        stage and replace the nine binaries in place. --check only
                         reports current vs latest without installing. Does NOT
                         stop a running broker (it keeps its old code until it
                         restarts); prints how to bounce it after installing.

@@ -490,10 +490,11 @@ Apply these instead of the Linux-only steps referenced above:
   `plugins/c3/stt/stt-handler.py`) **and** `plugins.stt.python` (absolute path
   to the real `python.exe`) in `mappings.json`, and restart the broker so it
   loads them.
-- **Updates.** The auto-updater can't replace a running `.exe` on Windows (the
-  OS locks it). Update by rebuilding from source: `git pull` in the clone →
-  `go install ./cmd/...` → fully quit and restart Claude Desktop / relaunch
-  Claude Code.
+- **Updates.** `c3-broker update --check` works, but installation is refused on
+  Windows: replacing some live `.exe` files can leave a mixed-version install.
+  Fully quit C3 / Claude Desktop / the coding CLI, then re-extract the newer
+  release tarball over the installed binaries. A source install can instead use
+  `git pull` → `go install ./cmd/...`, followed by a full restart.
 - **Skip §6 (systemd).** There is no systemd on Windows; the default on-demand
   broker spawn is what you get.
 

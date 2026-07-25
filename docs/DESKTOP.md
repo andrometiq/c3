@@ -115,7 +115,7 @@ Two host behaviors are worth knowing (they are Claude Desktop limits, not C3 bug
   Re-run `c3-broker install-desktop --config "<that path>"`, or hand-edit the file there.
 - **protocolVersion `2025-11-25`.** The adapter negotiates this MCP protocol version. After restart, confirm the `c3` tools appear in the chat. If they're refused, it's almost always a version-negotiation mismatch — check the adapter and Claude Desktop versions.
 - **Approval is a local GUI tap.** Approving a tool call is a click in the Desktop app; "Always allow" is per-chat. There is **no** Telegram permission relay here (that Allow/Deny-over-Telegram flow is Claude Code-only).
-- **Auto-update is not yet wired for Windows.** `c3-broker update` / the auto-updater cannot replace a running `.exe` on Windows (the OS locks it). Update the Windows box by **rebuilding from source** — `git pull`, then `go install ./cmd/c3-broker ./cmd/c3-desktop-adapter`, then fully quit + restart Claude Desktop. (From-source builds report version `dev` and never auto-update, so the checker stays quiet.)
+- **Auto-update is not wired for Windows.** `c3-broker update --check` works, but installation is refused because replacing some live `.exe` files can leave a mixed-version install. Fully quit C3 and Claude Desktop, then re-extract the newer release tarball over the installed binaries. A source install can instead use `git pull`, then `go install ./cmd/c3-broker ./cmd/c3-desktop-adapter`, followed by a full restart. (From-source builds report version `dev` and never auto-update, so the checker stays quiet.)
 
 ## Verify on the box tomorrow
 

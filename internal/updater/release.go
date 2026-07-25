@@ -1,6 +1,6 @@
 // Package updater implements C3's self-update: query the latest GitHub release,
 // download the platform tarball, verify it against the release's SHA256SUMS, and
-// atomically swap the installed binaries in place.
+// stage then replace the installed binaries in place.
 //
 // Design invariants (see docs/USAGE.md "Updating C3"):
 //   - HTTPS only; checksum verification is mandatory before anything is replaced.

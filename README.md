@@ -35,7 +35,7 @@ Differentiators first:
 - **Cross-CLI on one broker** — Claude Code and Codex on the same project coordinate through the broker, so only one holds the topic claim at a time; no double-replies.
 - **Rich two-way Telegram** — markdown in both directions (bold/italic, lists, code blocks, tables, blockquotes), quote-replies with the quoted text in context, attachments, message edits, reactions, and polls, all surfaced to the CLI as structured channel events.
 - **Self-hosted, one Go binary set, MIT** — the broker runs on your machine and holds your bot token in a mode-0600 config file. No vendor cloud relay.
-- **Keeps itself current** — an update notice in your status line when a newer release ships, and a checksum-verified `/c3:update` one-command install (or fully automatic, opt-in) that atomically swaps the binaries and lets sessions reconnect on their own.
+- **Keeps itself current** — an update notice in your status line when a newer release ships, and a checksum-verified `/c3:update` one-command install (or fully automatic, opt-in) that stages and replaces the binaries and lets sessions reconnect on their own. Windows updates are manual: fully quit C3, then re-extract the release tarball.
 
 Delighters — the demo magic, not the headline:
 

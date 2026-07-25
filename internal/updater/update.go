@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 
 	"github.com/karthikeyan5/c3/internal/version"
 )
@@ -65,9 +66,14 @@ func CheckOnly(ctx context.Context, current string, client *http.Client) (*Resul
 // (Installed=false, error=nil) when the current build is dev, when the latest
 // release is not strictly newer, or when the latest is a prerelease/draft. On a
 // real update it downloads the platform tarball + SHA256SUMS, verifies the
-// checksum BEFORE touching anything, extracts, and atomically swaps the six
-// binaries. On ANY failure the installed binaries are left untouched.
+// checksum BEFORE touching anything, extracts, stages all nine binaries, then
+// replaces them in place. Windows is refused before network or file work because
+// replacing live .exe images can otherwise leave a mixed-version install.
 func Update(ctx context.Context, opts Options) (*Result, error) {
+	return updateForOS(ctx, opts, runtime.GOOS)
+}
+
+func updateForOS(ctx context.Context, opts Options, goos string) (*Result, error) {
 	current := opts.CurrentVersion
 	if current == "" {
 		current = version.Current()
@@ -75,6 +81,9 @@ func Update(ctx context.Context, opts Options) (*Result, error) {
 	res := &Result{CurrentVersion: current}
 	if version.IsDevString(current) {
 		return res, nil // dev builds never self-update
+	}
+	if goos == "windows" {
+		return res, fmt.Errorf("self-update is not supported on Windows: fully quit C3/your coding CLI, then download and re-extract the newer release tarball over the installed .exe files")
 	}
 
 	rel, err := FetchLatest(ctx, opts.Client)

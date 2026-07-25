@@ -248,10 +248,15 @@ has no release identity to compare against.)
 
 **Manual update (one command).** Run `/c3:update` in Claude Code, or `c3-broker
 update` from any shell. It queries the latest release, downloads the tarball for
-your platform, verifies it against the release's `SHA256SUMS`, and atomically
-swaps the nine binaries in place — the running binaries are never touched until
-the download is verified, and on any failure the old binaries are left exactly as
-they were. `c3-broker update --check` reports current-vs-latest without installing.
+your platform, verifies it against the release's `SHA256SUMS`, stages all nine
+binaries, and then replaces them in place. Nothing is replaced before the whole
+download is verified and staged. A rare rename failure during replacement is
+reported without claiming every sibling stayed untouched. `c3-broker update
+--check` reports current-vs-latest without installing.
+
+On Windows, `--check` works but installation is refused: live `.exe` replacement
+can leave a mixed-version install. Fully quit C3 and the coding CLI, then
+re-extract the newer release tarball over the installed binaries.
 
 The swap is on disk only: the **running broker keeps its old code until it
 restarts**. From a separate terminal, `kill -TERM <pid>` (the command prints the

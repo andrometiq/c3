@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -164,6 +165,32 @@ func TestUpdate_NoOpForDevBuild(t *testing.T) {
 	}
 	if res.Installed {
 		t.Error("dev build must never self-update")
+	}
+}
+
+func TestUpdateForOS_WindowsRefusesBeforeNetworkOrSwap(t *testing.T) {
+	dest := t.TempDir()
+	seedOldBinaries(t, dest)
+
+	res, err := updateForOS(context.Background(), Options{
+		CurrentVersion: "v1.0.0",
+		DestDir:        dest,
+	}, "windows")
+	if err == nil {
+		t.Fatal("Windows self-update must be refused before its per-file renames can leave a mixed-version install")
+	}
+	if !strings.Contains(strings.ToLower(err.Error()), "windows") ||
+		!strings.Contains(strings.ToLower(err.Error()), "re-extract") {
+		t.Fatalf("refusal must give the Windows user an actionable manual path; got %v", err)
+	}
+	if res.Checked || res.Installed {
+		t.Fatalf("Windows refusal must happen before network/download/install work: %+v", res)
+	}
+	for _, name := range BinaryNames {
+		got, readErr := os.ReadFile(filepath.Join(dest, name))
+		if readErr != nil || string(got) != "OLD-"+name {
+			t.Fatalf("%s changed during Windows refusal: body=%q err=%v", name, got, readErr)
+		}
 	}
 }
 

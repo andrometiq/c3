@@ -18,13 +18,16 @@ const updateUsage = `c3-broker update — check for and install the latest C3 re
 
 Usage:
   c3-broker update           Download the latest release, verify its SHA256SUMS,
-                             and atomically swap the installed binaries in place.
+                             and replace the installed binaries in place.
   c3-broker update --check   Report the current vs latest version without
                              downloading or installing anything.
 
 The manual update swaps the binaries on disk but does NOT stop a running broker
 (the daemon keeps its old code until it restarts). After a successful install it
 prints how to roll the running broker onto the new version.
+
+Windows: --check works, but installation is refused because live .exe files
+cannot be replaced safely. Fully quit C3, then re-extract the release tarball.
 `
 
 // updateCheckTimeout / updateRunTimeout bound the CLI's own context; the updater
@@ -81,7 +84,7 @@ func runUpdate(args []string) error {
 	defer cancel()
 	res, err := updater.Update(ctx, updater.Options{CurrentVersion: cur, Client: updater.DefaultClient()})
 	if err != nil {
-		return fmt.Errorf("update failed (installed binaries left untouched): %w", err)
+		return fmt.Errorf("update failed: %w", err)
 	}
 	if !res.Installed {
 		fmt.Printf("c3 is already up to date (running %s; latest %s).\n", cur, res.LatestVersion)
