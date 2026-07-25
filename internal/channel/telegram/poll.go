@@ -592,7 +592,7 @@ func (c *Channel) dispatchPollUpdate(updateID int64, poll *gotgbot.Poll) {
 
 	// Late-event-after-worker-idle (v1 accepted limit): emitEvent → host.Emit →
 	// Workers.Submit. If the route's worker has already idle-exited, Submit
-	// returns false and host.Emit logs a metadata-only "emit DROP" line (see
+	// returns false and host.Emit logs a metadata-only "emit SATURATED" line (see
 	// internal/broker/host.go). For v1 a late aggregate tally on a long-closed
 	// poll may thus be dropped — that is acceptable and visible in the log;
 	// stop_poll is the deterministic read path that never depends on a live
@@ -1228,15 +1228,16 @@ func (c *Channel) dispatchMessage(updateID int64, msg *gotgbot.Message, edited b
 		c.seamStageLocked(in.MessageID, updateID)
 		c.mu.Unlock()
 	}
-	// I4: Emit reports false when the worker queue is full/stopped and the inbound
-	// is DROPPED (never persisted). The seam above already staged msgToUpdate +
-	// the tracker's in-flight registration for this update, so a drop would strand
-	// the update_id in-flight forever and wedge the contiguous-prefix offset for
-	// ALL inbound on a >64 burst. The message is gone from the pipeline, so the
-	// offset MUST move past it: clear the now-orphaned seam entry and mark the
-	// update done. (Telegram won't redeliver it within this offset, matching the
-	// existing emit-DROP semantics — a queue-full burst is a capacity drop, logged
-	// loudly by Emit, not a silent loss-of-offset wedge.)
+	// Emit reports false when the route worker is still saturated after Emit's own
+	// bounded grace window (submitGraceWindow). The seam above already staged
+	// msgToUpdate + the tracker's in-flight registration for this update.
+	//
+	// This used to mark the update done so the contiguous-prefix offset advanced
+	// past it (I4), on the reasoning that a >64 burst must not wedge all inbound.
+	// But Telegram never redelivers an ACKNOWLEDGED update, so advancing destroyed
+	// a message the user sent — silently, and only visible in broker.log. The
+	// maintainer's call (v0.1.0 release audit) reverses that trade: redelivery
+	// churn under overload is preferable to deliberate loss.
 	if !c.host.Emit(in) && c.offTrk != nil {
 		// The route worker is saturated and this message was NOT persisted anywhere.
 		//

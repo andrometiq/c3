@@ -38,7 +38,7 @@ Field order is stable so you can grep / awk.
 ```
 telegram: inbound update=12345 msg=914 chat=-1001234567890 thread=914 kind=text edited=false
 telegram: suppress phantom edit update=12346 msg=914 chat=-1001... thread=914 kind=voice — deliverable content unchanged (reaction-triggered edited_message); not re-dispatched
-emit DROP chan=telegram chat=-1001... topic=914 msg=914: worker queue full or stopped
+emit SATURATED chan=telegram chat=-1001... topic=914 msg=914: worker queue full after 2s — HOLDING the offset so Telegram redelivers (not dropped)
 delivered chan=telegram chat=-1001... topic=914 msg=914 to cli=claude pid=1234 conn=2
 deliver FAIL chan=telegram chat=-1001... topic=914 msg=914 to cli=claude pid=1234: write: broken pipe
 drop chan=telegram chat=-1001... topic=- msg=915: no claim, fallback in cooldown
@@ -188,7 +188,7 @@ See `INSTALL.md` step 2. (The broker singleton flock prevents a second *local*
 
 - One line per **delivery outcome**, not per stage. Stages are debug noise.
 - Lead with the verb: `delivered`, `drop`, `deliver FAIL`, `fallback`,
-  `fallback FAIL`, `emit DROP`. Greppable.
+  `fallback FAIL`, `emit SATURATED`. Greppable.
 - Always include `chan=… chat=… topic=… msg=…` in that order.
 - Failures get a trailing `: <reason>`. Successes don't.
 - Never log message content. Never log usernames. See content policy above.
