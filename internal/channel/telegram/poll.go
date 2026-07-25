@@ -1238,9 +1238,23 @@ func (c *Channel) dispatchMessage(updateID int64, msg *gotgbot.Message, edited b
 	// existing emit-DROP semantics — a queue-full burst is a capacity drop, logged
 	// loudly by Emit, not a silent loss-of-offset wedge.)
 	if !c.host.Emit(in) && c.offTrk != nil {
+		// The route worker is saturated and this message was NOT persisted anywhere.
+		//
+		// Do NOT mark the update done. Leaving it in-flight holds the
+		// contiguous-prefix offset, so Telegram retains the update and redelivers
+		// it once the route drains — the message survives instead of being dropped.
+		// This is the same loss-free shape as a failed durable Append.
+		//
+		// Remove exactly THIS update's staged seam entry (not the front, which may
+		// belong to an earlier still-in-flight update on the same message_id), and
+		// forget its poll-side dedup record so the redelivery genuinely
+		// RE-DISPATCHES instead of being dedup-skipped until the 5-minute TTL.
+		// The no-progress re-poll is paced by pollIdleBackoff.
 		c.mu.Lock()
 		c.seamRemoveLocked(in.MessageID, updateID)
 		c.mu.Unlock()
-		c.markUpdateDone(updateID)
+		if c.dedup != nil {
+			c.dedup.forget(updateID)
+		}
 	}
 }

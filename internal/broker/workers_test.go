@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/karthikeyan5/c3/internal/c3types"
 	"github.com/karthikeyan5/c3/internal/mappings"
 )
 
@@ -154,5 +155,73 @@ func TestWorkerPool_StopDrains(t *testing.T) {
 	pool.Stop()
 	if pool.Active() != 0 {
 		t.Errorf("active=%d, want 0 after Stop", pool.Active())
+	}
+}
+
+// SubmitWait must take the fast path when the worker has room — no waiting, no
+// timers.
+func TestWorkerPool_SubmitWait_FastPathWhenRoom(t *testing.T) {
+	p := NewWorkerPool(context.Background(), time.Hour, nil)
+	defer p.Stop()
+
+	key := MakeRouteKey("telegram", 1, nil)
+	start := time.Now()
+	if !p.SubmitWait(key, Job{Kind: JobInbound, Inbound: &c3types.Inbound{MessageID: 1}}) {
+		t.Fatal("SubmitWait must accept when the worker queue has room")
+	}
+	if el := time.Since(start); el > submitGraceWindow/2 {
+		t.Errorf("fast path should not wait; took %v", el)
+	}
+}
+
+// A stopped pool must refuse immediately rather than burning the whole grace
+// window — and must never hang.
+func TestWorkerPool_SubmitWait_StoppedRefusesPromptly(t *testing.T) {
+	p := NewWorkerPool(context.Background(), time.Hour, nil)
+	key := MakeRouteKey("telegram", 1, nil)
+	p.Stop()
+
+	done := make(chan bool, 1)
+	start := time.Now()
+	go func() {
+		done <- p.SubmitWait(key, Job{Kind: JobInbound, Inbound: &c3types.Inbound{MessageID: 1}})
+	}()
+	select {
+	case ok := <-done:
+		if ok {
+			t.Fatal("a stopped pool must refuse")
+		}
+	case <-time.After(submitGraceWindow + 2*time.Second):
+		t.Fatal("SubmitWait hung on a stopped pool")
+	}
+	if el := time.Since(start); el > submitGraceWindow+time.Second {
+		t.Errorf("stopped pool should refuse within the grace window; took %v", el)
+	}
+}
+
+// Cancelling the pool's context must unblock a waiting SubmitWait, so a shutdown
+// can never be held up by a saturated route.
+func TestWorkerPool_SubmitWait_ContextCancelUnblocks(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	p := NewWorkerPool(ctx, time.Hour, nil)
+	defer p.Stop()
+
+	key := MakeRouteKey("telegram", 1, nil)
+	// Saturate the route worker's inbox so SubmitWait has to wait.
+	for i := 0; i < 4096; i++ {
+		if !p.Submit(key, Job{Kind: JobInbound, Inbound: &c3types.Inbound{MessageID: int64(i)}}) {
+			break // queue full — that is what we want
+		}
+	}
+
+	done := make(chan bool, 1)
+	go func() {
+		done <- p.SubmitWait(key, Job{Kind: JobInbound, Inbound: &c3types.Inbound{MessageID: 9999}})
+	}()
+	cancel()
+	select {
+	case <-done: // returned; value irrelevant, the point is it did not hang
+	case <-time.After(submitGraceWindow + 2*time.Second):
+		t.Fatal("SubmitWait did not unblock on context cancel")
 	}
 }

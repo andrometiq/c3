@@ -10,12 +10,17 @@ import (
 	"github.com/karthikeyan5/c3/internal/channel"
 )
 
-// I4: when Emit DROPS an inbound (worker queue full / stopped), dispatchMessage
-// records msgToUpdate + the tracker's in-flight Register BEFORE Emit. A drop must
-// not strand that update_id in-flight forever (which wedges the contiguous-prefix
-// offset for ALL inbound on a >64 burst). On a drop, dispatchMessage must clear
-// the seam and MarkDone the update so the committed offset advances past it.
-func TestDispatchMessage_EmitDrop_DoesNotStrandOffset(t *testing.T) {
+// A saturated route worker must HOLD the Telegram offset, not advance past the
+// message.
+//
+// This inverts the original I4 behaviour. I4 marked the update done on a
+// worker-queue-full drop so a >64 burst could not wedge the contiguous-prefix
+// offset for every route — but the cost was silent, unrecoverable loss of a
+// message the user sent, with no notice and no .trash copy. The maintainer's call
+// (v0.1.0 release audit) is that redelivery churn is preferable to deliberate
+// loss: Emit now absorbs a momentary burst (submitGraceWindow) and, if the route
+// is still saturated, the update stays in-flight so Telegram redelivers it.
+func TestDispatchMessage_EmitSaturated_HoldsOffsetForRedelivery(t *testing.T) {
 	h := &fakeHost{decision: channel.GateInboundAllow, emitDrops: true}
 	c := makeChannel(h)
 	c.offTrk = newOffsetTracker(100)
@@ -29,16 +34,23 @@ func TestDispatchMessage_EmitDrop_DoesNotStrandOffset(t *testing.T) {
 	if got := h.emitCount(); got != 1 {
 		t.Fatalf("Emit should be attempted once; got %d", got)
 	}
-	// The committed offset MUST advance past the dropped update — not stall at 100.
-	if got := c.offTrk.Committed(); got != 101 {
-		t.Fatalf("dropped update stranded the offset: committed=%d, want 101 (advanced past the drop)", got)
+	// The committed offset MUST stay at 100: advancing past an unpersisted message
+	// destroys it, because Telegram never redelivers an acknowledged update.
+	if got := c.offTrk.Committed(); got != 100 {
+		t.Fatalf("MESSAGE LOSS: offset advanced past a message that was never persisted; committed=%d, want 100 (held for redelivery)", got)
 	}
-	// The orphaned msgToUpdate seam must be cleared (no leak).
+	// The orphaned msgToUpdate seam must be cleared (no leak) — the redelivery
+	// stages a fresh entry.
 	c.mu.Lock()
 	_, leaked := c.msgToUpdate[textMsg("hi", 42).MessageId]
 	c.mu.Unlock()
 	if leaked {
-		t.Fatal("msgToUpdate entry for a dropped inbound must be cleared (leak)")
+		t.Fatal("msgToUpdate entry for a saturated inbound must be cleared (leak)")
+	}
+	// And the poll-side dedup record must be forgotten, or the redelivery is
+	// dedup-skipped and the "loss-free retry" never actually retries.
+	if c.dedup != nil && c.dedup.SeenOrAdd(&gotgbot.Update{UpdateId: 101}) {
+		t.Fatal("dedup entry must be forgotten so the Telegram redelivery re-dispatches")
 	}
 }
 
@@ -125,9 +137,9 @@ func TestSeam_EmitDropRemovesOnlyTheDroppedEntry(t *testing.T) {
 	c.seamStageLocked(msgID, 501)
 	c.mu.Unlock()
 
-	// A second update 502 (an edit) for the SAME message_id arrives; its Emit
-	// DROPS. The cleanup must remove EXACTLY 502 (just staged), not the front 501,
-	// and MarkDone 502.
+	// A second update 502 (an edit) for the SAME message_id arrives; its route is
+	// saturated. The cleanup must remove EXACTLY 502 (just staged), never the
+	// front 501, which belongs to an earlier still-in-flight update.
 	c.offTrk.Register(502)
 	c.dispatchMessage(502, textMsg("edit", 42), true, nil)
 
@@ -135,16 +147,17 @@ func TestSeam_EmitDropRemovesOnlyTheDroppedEntry(t *testing.T) {
 	ids := c.msgToUpdate[msgID]
 	c.mu.Unlock()
 	if len(ids) != 1 || ids[0] != 501 {
-		t.Fatalf("Emit-drop cleanup must leave the earlier in-flight 501 staged; seam=%v, want [501]", ids)
+		t.Fatalf("saturation cleanup must leave the earlier in-flight 501 staged; seam=%v, want [501]", ids)
 	}
-	// 501 still in-flight blocks the prefix; 502 was marked done (dropped).
+	// BOTH stay in-flight now: 501 awaiting its persist, 502 held for redelivery.
 	if got := c.offTrk.Committed(); got != 500 {
 		t.Fatalf("501 still in-flight must hold committed at 500; got %d", got)
 	}
-	// When 501 finally persists, committed jumps to 502 (502 already done).
+	// Even after 501 persists, the prefix must NOT jump past 502 — 502 was never
+	// persisted, and advancing over it would destroy it.
 	c.onPersisted(&c3types.Inbound{MessageID: msgID})
-	if got := c.offTrk.Committed(); got != 502 {
-		t.Fatalf("after 501 persists, committed must jump to 502 (502 already done); got %d", got)
+	if got := c.offTrk.Committed(); got != 501 {
+		t.Fatalf("MESSAGE LOSS: committed advanced past the unpersisted 502; got %d, want 501", got)
 	}
 }
 

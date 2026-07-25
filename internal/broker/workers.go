@@ -53,6 +53,49 @@ func NewWorkerPool(parent context.Context, idle time.Duration, broker *Broker) *
 // Submit returns false rather than stranding, so this terminates — the retry
 // either lands on a live worker or a freshly-spawned one. (A genuinely full queue
 // on a live worker returns false on both attempts, preserving the old semantics.)
+// submitGraceWindow is how long SubmitWait keeps retrying a full route worker
+// before giving up. It exists to absorb a MOMENTARY burst, not to wait out a
+// genuinely stuck route.
+//
+// It is deliberately short: Emit runs on the single Telegram poll goroutine
+// (poll.go dispatches updates synchronously), so every millisecond spent here
+// delays EVERY route's inbound and the next getUpdates. Two seconds is enough for
+// a worker to drain a job or two under normal load; past that the caller holds the
+// Telegram offset instead, and the redelivery is paced by pollIdleBackoff.
+const submitGraceWindow = 2 * time.Second
+
+// submitRetryInterval is how often SubmitWait re-attempts within the window. The
+// retry is a poll rather than a blocking channel send because RouteWorker.Submit
+// takes w.mu, and shutdown drains the queue under that same lock — a blocking send
+// while holding it would deadlock against a worker that is exiting.
+const submitRetryInterval = 25 * time.Millisecond
+
+// SubmitWait is Submit with a bounded wait: it retries a full worker for up to
+// submitGraceWindow before returning false. Use it on the inbound path, where a
+// false return means the caller must hold the channel's offset so the message is
+// redelivered rather than lost.
+func (p *WorkerPool) SubmitWait(key RouteKey, job Job) bool {
+	if p.Submit(key, job) {
+		return true // fast path: room now, no timers allocated
+	}
+	deadline := time.NewTimer(submitGraceWindow)
+	defer deadline.Stop()
+	tick := time.NewTicker(submitRetryInterval)
+	defer tick.Stop()
+	for {
+		select {
+		case <-p.ctx.Done():
+			return false
+		case <-deadline.C:
+			return false
+		case <-tick.C:
+			if p.Submit(key, job) {
+				return true
+			}
+		}
+	}
+}
+
 func (p *WorkerPool) Submit(key RouteKey, job Job) bool {
 	for attempt := 0; attempt < 2; attempt++ {
 		p.mu.Lock()

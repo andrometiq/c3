@@ -52,20 +52,29 @@ func (h *BrokerHost) Config(name string, target any) error {
 // Emit submits an inbound to the per-route worker pool. The worker drains
 // the pipeline (STT, OnInbound chain, debounce, forward to claimed stub).
 //
-// Returns true when the inbound was accepted onto the worker queue, false when
-// it was DROPPED (worker queue full — cap 64 — or stopped). A dropped inbound
-// never reaches the durable queue, so its source update_id would otherwise stay
-// in-flight forever; the caller (telegram dispatchMessage) reacts to a false
-// return by marking the update done so the contiguous-prefix offset advances past
-// it instead of wedging ALL inbound on a >64 burst (I4).
+// Returns true when the inbound was accepted onto the worker queue. A false
+// return means the route worker is saturated (cap 64) or stopped and this message
+// has NOT been persisted anywhere.
+//
+// This used to be a capacity DROP: the caller marked the update done so the
+// contiguous-prefix offset advanced past it (I4), trading one lost message for not
+// wedging all inbound on a burst. That is silent, unrecoverable loss of a message
+// the user sent — the exact thing the durable queue exists to prevent — and it was
+// invisible outside broker.log.
+//
+// Now: SubmitWait absorbs a momentary burst (submitGraceWindow), and if the route
+// is still saturated the caller HOLDS the Telegram offset so the message is
+// redelivered instead of destroyed. Telegram retains unacknowledged updates, so
+// the message survives; the redelivery loop is paced by pollIdleBackoff.
+// (v0.1.0 release audit, 2026-07-25 — maintainer's call on the I4 trade-off.)
 func (h *BrokerHost) Emit(in *c3types.Inbound) bool {
 	if in == nil {
 		return false
 	}
 	key := MakeRouteKey(in.Channel, in.ChatID, in.TopicID)
-	if !h.broker.Workers.Submit(key, Job{Kind: JobInbound, Inbound: in}) {
-		log.Printf("emit DROP chan=%s chat=%d topic=%s msg=%d: worker queue full or stopped",
-			in.Channel, in.ChatID, TopicPtrStr(in.TopicID), in.MessageID)
+	if !h.broker.Workers.SubmitWait(key, Job{Kind: JobInbound, Inbound: in}) {
+		log.Printf("emit SATURATED chan=%s chat=%d topic=%s msg=%d: worker queue full after %s — HOLDING the offset so Telegram redelivers (not dropped)",
+			in.Channel, in.ChatID, TopicPtrStr(in.TopicID), in.MessageID, submitGraceWindow)
 		return false
 	}
 	return true
