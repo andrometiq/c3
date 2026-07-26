@@ -241,17 +241,48 @@ func TestEvictOverCap_CorruptLineCursorConsistent(t *testing.T) {
 	}
 }
 
+// TestRecoverOnStartup_SkipsCorruptLine covers the corrupt-at-startup path: a
+// broker restart over a route whose file holds an unparseable line must rebuild the
+// index from the REAL lines only, leave the still-pending pair in place, and serve
+// exactly the real messages.
+//
+// The assertion is deliberately on StatusFor, which reads ONLY the in-memory index
+// (no file I/O): it is zero unless RecoverOnStartup actually ran. An earlier version
+// of this test never called RecoverOnStartup at all — it was a Peek test wearing a
+// startup name, and it would have passed with the whole startup scan deleted.
 func TestRecoverOnStartup_SkipsCorruptLine(t *testing.T) {
-	s := newStore(t)
+	dir := t.TempDir()
+	t.Setenv("C3_QUEUE_DIR", dir)
 	rk := RouteKey{Channel: "telegram", ChatID: -100}
-	_ = s.Append(rk, msg(1, "ok"))
+	s1, err := NewStore(QueueDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = s1.Append(rk, msg(1, "ok"))
 	// Manually append a corrupt line to the jsonl.
 	if err := appendRawLine(t, QueueDir(), rk, "{not json"); err != nil {
 		t.Fatal(err)
 	}
-	_ = s.Append(rk, msg(3, "ok2"))
+	_ = s1.Append(rk, msg(3, "ok2"))
+
+	// Restart: a fresh store over the same dir rebuilds its index from disk.
+	s2, err := NewStore(QueueDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s2.RecoverOnStartup(); err != nil {
+		t.Fatalf("RecoverOnStartup over a corrupt line errored: %v", err)
+	}
+	// The recovered index counts the two real messages, never the corrupt line.
+	if st := s2.StatusFor(rk); st.Pending != 2 {
+		t.Fatalf("recovered StatusFor.Pending = %d, want 2 (msgs 1,3; a corrupt line is not a message)", st.Pending)
+	}
+	// A cursor-behind route keeps its live pair (it is not fully consumed).
+	if _, err := os.Stat(filepath.Join(dir, rk.File()+".jsonl")); err != nil {
+		t.Fatalf("live jsonl must survive recovery of a cursor-behind route: %v", err)
+	}
 	// A peek that walks past the corrupt line must skip it, not error.
-	got, err := s.Peek(rk, 5)
+	got, err := s2.Peek(rk, 5)
 	if err != nil {
 		t.Fatalf("peek over corrupt line errored: %v", err)
 	}

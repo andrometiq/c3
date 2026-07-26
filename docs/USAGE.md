@@ -139,16 +139,19 @@ Nothing ever leaves the queue by hard delete. When a route drains — the right 
 >
 > If that line is present, the recovery steps below do not apply until you clear the `.trash/` obstruction and **restart the broker** (retention state is decided once, at `NewStore`).
 
-The trash lives beside the queue, at `$XDG_STATE_HOME/c3/queue/.trash/` (fallback `~/.local/state/c3/queue/.trash/`). Two kinds of file appear there:
+The trash lives beside the queue, at `$XDG_STATE_HOME/c3/queue/.trash/` (fallback `~/.local/state/c3/queue/.trash/`). Three kinds of file appear there:
 
 - **A retired drain pair** — `<base>.<stamp>.jsonl` is the full line history at the moment of the drain, and `<base>.<stamp>.cur` is the pre-drain cursor. The pair shares one `<stamp>` (a UnixNano timestamp). `<base>` is the route-key filename — `<channel>__<chat_id>__<topic|none>`, e.g. `telegram__-100__none` for a DM/no-topic route, or `telegram__-1001234__948` for topic 948.
 - **An evict snapshot** — `<base>.<stamp>.evicted.jsonl` holds lines dropped by the per-route cap/age eviction (never a whole drain).
+- **A quarantined corrupt line** — `<base>.<stamp>.corrupt.jsonl` holds the **raw bytes** of one or more lines the queue could not parse, copied out before they were removed from the live queue. The usual cause is a write cut short by a full disk or a power cut, and the fragment may be part of a real message. The removal is also logged to `broker.log` (`removed N unparseable line(s) …`), so this never happens silently.
+
+  > **These are NOT valid queue records — never feed one back into a live queue.** Read the file by hand to see what the fragment was. Concatenating it into `<base>.jsonl` (as the step-3 recipe below does for a *retired* `.jsonl`) would inject an unparseable line into a healthy queue, which the store would then have to quarantine all over again.
 
 **Recovering a drained batch (broker STOPPED).** The store is single-owner via the route workers, so an external `mv` against a live broker races the writer. Stop the broker first (`pkill c3-broker` from a separate terminal), do the moves, then let the next CLI session spawn a fresh broker — `RecoverOnStartup` re-indexes the restored route, and you `fetch_queue` it from the session attached to that topic.
 
 1. `ls "$XDG_STATE_HOME/c3/queue/.trash/"` (or `~/.local/state/c3/queue/.trash/`) and find the pair for the route; note the `<stamp>`.
 2. **No live `<base>.jsonl`** (nothing new arrived since the drain): `mv` both files back to `<base>.jsonl` and `<base>.cur`. Restoring the `.cur` replays **only the final drained batch** (`lines[cursor:]`). Omit the `.cur` to replay **everything** in the file (over-delivery, never loss).
-3. **Live `<base>.jsonl` exists** (new messages arrived since): concatenate the trash `.jsonl` **first**, then the live `.jsonl`, into the live name, and remove the live `.cur`:
+3. **Live `<base>.jsonl` exists** (new messages arrived since): concatenate the trash `.jsonl` **first**, then the live `.jsonl`, into the live name, and remove the live `.cur`. Use the retired `<base>.<stamp>.jsonl` only — never a `.corrupt.jsonl`, whose contents are not valid records:
    ```
    cat .trash/<base>.<stamp>.jsonl <base>.jsonl > <base>.jsonl.tmp \
      && mv <base>.jsonl.tmp <base>.jsonl \

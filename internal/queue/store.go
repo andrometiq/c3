@@ -111,9 +111,28 @@ func (s *Store) Append(rk RouteKey, in *c3types.Inbound) error {
 	if err != nil {
 		return fmt.Errorf("queue: marshal: %w", err)
 	}
-	f, err := os.OpenFile(s.jsonlPath(rk), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
+	f, err := os.OpenFile(s.jsonlPath(rk), os.O_APPEND|os.O_CREATE|os.O_RDWR, 0600)
 	if err != nil {
 		return fmt.Errorf("queue: open append: %w", err)
+	}
+	// Self-heal a torn tail before appending. A previous Append can leave a
+	// PARTIAL line with no trailing newline: Go's poll.FD.Write loops over short
+	// writes, so an ENOSPC/EFBIG write persists the bytes it managed to write and
+	// still returns an error (Append then reports failure and the broker holds the
+	// Telegram offset — worker.go's disk-full path). Power loss can leave the same
+	// tail. Appending straight onto that fragment CONCATENATES this record onto it,
+	// and the joined line no longer parses — so THIS message is destroyed even
+	// though Append returns nil and the caller then lets the offset advance past
+	// it. Emitting the missing separator in the SAME write keeps the fragment on a
+	// line of its own (quarantined + logged on the next read) and lands this record
+	// intact. Never truncate the fragment: a duplicate is recoverable, a destroyed
+	// message is not.
+	if fi, serr := f.Stat(); serr == nil && fi.Size() > 0 {
+		var last [1]byte
+		if _, rerr := f.ReadAt(last[:], fi.Size()-1); rerr == nil && last[0] != '\n' {
+			log.Printf("queue: %s: torn tail detected (file ends mid-line at %d bytes) — inserting the missing separator so the incoming record is not concatenated onto the fragment", rk.File(), fi.Size())
+			data = append([]byte{'\n'}, data...)
+		}
 	}
 	if _, err := f.Write(append(data, '\n')); err != nil {
 		_ = f.Close()
@@ -164,8 +183,16 @@ func (s *Store) syncDir() error {
 	return nil
 }
 
-// readLines returns the parsed inbound lines and the cursor. Corrupt lines are
-// skipped (logged via the returned skipped count is implicit — caller logs).
+// readLines returns the parsed inbound lines and the cursor. A line that does not
+// parse becomes a sentinel-tagged placeholder carrying its RAW bytes, so the
+// cursor's line numbering stays aligned with the file AND the bytes survive long
+// enough to be quarantined into .trash/ before a rewrite strips them.
+//
+// Nothing is logged here, deliberately: readLines runs on every Peek/Pending/status
+// refresh, so a log at this point would repeat on every poll. The never-silent
+// lines fire once each, where the loss actually happens — Consume (the cursor steps
+// past the bytes, making them permanently undeliverable) and quarantineCorrupt (the
+// bytes leave the live file).
 func (s *Store) readLines(rk RouteKey) (lines []c3types.Inbound, cursor int, err error) {
 	f, err := os.Open(s.jsonlPath(rk))
 	if err != nil {
@@ -189,7 +216,12 @@ func (s *Store) readLines(rk RouteKey) (lines []c3types.Inbound, cursor int, err
 			// aligned with the file, but mark it skippable via a zero MessageID
 			// caller filters. We tag it with a sentinel channel so Peek/Consume
 			// can drop it.
-			lines = append(lines, c3types.Inbound{Channel: corruptSentinel})
+			//
+			// Text here is NOT a message body — it is the line's RAW bytes, kept
+			// so quarantineCorrupt can copy them into .trash/ before a rewrite
+			// discards them. Never read .Text off a raw lines[] element without
+			// checking the sentinel first; every current reader does.
+			lines = append(lines, c3types.Inbound{Channel: corruptSentinel, Text: line})
 			continue
 		}
 		lines = append(lines, in)
@@ -254,13 +286,21 @@ func (s *Store) Consume(rk RouteKey, n int) ([]c3types.Inbound, error) {
 	}
 	out := make([]c3types.Inbound, 0, cap0)
 	pos := cursor
+	stepped := 0
 	for pos < len(lines) && (n < 0 || len(out) < n) {
 		in := lines[pos]
 		pos++
 		if in.Channel == corruptSentinel {
+			stepped++
 			continue // step over corrupt lines, don't return them
 		}
 		out = append(out, in)
+	}
+	// Stepping the cursor over an unparseable line is the moment that line becomes
+	// permanently undeliverable, so it must never be silent. The cursor only moves
+	// forward, so each corrupt line is walked here exactly once.
+	if stepped > 0 {
+		log.Printf("queue: %s: cursor stepped over %d unparseable line(s) — those bytes will never be delivered as messages (raw bytes retained in .trash/ when the line is removed or the pair retires)", rk.File(), stepped)
 	}
 	// Advance the cursor to pos (after the last consumed/skipped line).
 	if pos >= len(lines) {
@@ -358,11 +398,13 @@ func (s *Store) EvictOverCap(rk RouteKey) (int, error) {
 	// the cursor into the same corrupt-free coordinate space.
 	real := make([]c3types.Inbound, 0, len(lines))
 	cursorReal := 0 // cursor mapped into the corrupt-free index space
+	var corrupt []string
 	for i, in := range lines {
 		if i < cursor && in.Channel != corruptSentinel {
 			cursorReal++
 		}
 		if in.Channel == corruptSentinel {
+			corrupt = append(corrupt, in.Text)
 			continue
 		}
 		real = append(real, in)
@@ -371,6 +413,9 @@ func (s *Store) EvictOverCap(rk RouteKey) (int, error) {
 		// Only corrupt lines remained; rewrite drops them all. The resulting
 		// zero-byte .jsonl carries nothing recoverable, so retirePair plain-removes
 		// it rather than cluttering .trash/ with an empty snapshot.
+		if err := s.quarantineCorrupt(rk, corrupt); err != nil {
+			return 0, err
+		}
 		if err := s.rewrite(rk, real); err != nil {
 			return 0, err
 		}
@@ -408,6 +453,9 @@ func (s *Store) EvictOverCap(rk RouteKey) (int, error) {
 	// a harmless duplicate GC'd later; a snapshot failure returns before the
 	// rewrite, so the live queue is untouched (fail-toward-keeping).
 	if err := s.snapshotDropped(rk, real[:drop]); err != nil {
+		return 0, err
+	}
+	if err := s.quarantineCorrupt(rk, corrupt); err != nil {
 		return 0, err
 	}
 	if err := s.rewrite(rk, kept); err != nil {
@@ -452,8 +500,10 @@ func (s *Store) RefreshText(rk RouteKey, messageID int64, newText string) (bool,
 	// the cursor from the rewritten file.
 	real := make([]c3types.Inbound, 0, len(lines))
 	cursorReal := 0
+	var corrupt []string
 	for i, in := range lines {
 		if in.Channel == corruptSentinel {
+			corrupt = append(corrupt, in.Text)
 			continue
 		}
 		if i < cursor {
@@ -477,6 +527,9 @@ func (s *Store) RefreshText(rk RouteKey, messageID int64, newText string) (bool,
 	}
 	if !found {
 		return false, nil
+	}
+	if err := s.quarantineCorrupt(rk, corrupt); err != nil {
+		return false, err
 	}
 	if err := s.rewrite(rk, real); err != nil {
 		return false, err
@@ -537,8 +590,10 @@ func (s *Store) RemoveIDs(rk RouteKey, sel map[int64][]int) (removed []c3types.I
 	// not desync the cursor from the rewritten file.
 	real := make([]c3types.Inbound, 0, len(lines))
 	cursorReal := 0
+	var corrupt []string
 	for i, in := range lines {
 		if in.Channel == corruptSentinel {
+			corrupt = append(corrupt, in.Text)
 			continue
 		}
 		if i < cursor {
@@ -581,6 +636,9 @@ func (s *Store) RemoveIDs(rk RouteKey, sel map[int64][]int) (removed []c3types.I
 	// (fail-toward-keeping); a crash between snapshot and rewrite leaves the lines in
 	// both places — a harmless duplicate GC'd later.
 	if err := s.snapshotDropped(rk, removed); err != nil {
+		return nil, err
+	}
+	if err := s.quarantineCorrupt(rk, corrupt); err != nil {
 		return nil, err
 	}
 	if err := s.rewrite(rk, kept); err != nil {
@@ -694,6 +752,9 @@ func (s *Store) trashCur(base string, stamp int64) string {
 func (s *Store) trashEvicted(base string, stamp int64) string {
 	return filepath.Join(s.trashDir(), fmt.Sprintf("%s.%d.evicted.jsonl", base, stamp))
 }
+func (s *Store) trashCorrupt(base string, stamp int64) string {
+	return filepath.Join(s.trashDir(), fmt.Sprintf("%s.%d.corrupt.jsonl", base, stamp))
+}
 
 func pathExists(p string) bool {
 	_, err := os.Lstat(p)
@@ -799,45 +860,88 @@ func (s *Store) snapshotDropped(rk RouteKey, dropped []c3types.Inbound) error {
 	stamp := firstFreeStamp(time.Now().UnixNano(), func(st int64) bool {
 		return pathExists(s.trashEvicted(base, st))
 	})
-	final := s.trashEvicted(base, stamp)
-	tmp := final + ".tmp"
-	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0600)
-	if err != nil {
-		return fmt.Errorf("queue: open evict snapshot: %w", err)
-	}
-	w := bufio.NewWriter(f)
+	payload := make([][]byte, 0, len(real))
 	for _, in := range real {
 		data, merr := json.Marshal(in)
 		if merr != nil {
-			_ = f.Close()
-			_ = os.Remove(tmp)
 			return fmt.Errorf("queue: marshal evict snapshot: %w", merr)
 		}
-		_, _ = w.Write(append(data, '\n'))
+		payload = append(payload, data)
 	}
-	if err := w.Flush(); err != nil {
-		_ = f.Close()
-		_ = os.Remove(tmp)
-		return fmt.Errorf("queue: flush evict snapshot: %w", err)
-	}
-	if err := f.Sync(); err != nil {
-		_ = f.Close()
-		_ = os.Remove(tmp)
-		return fmt.Errorf("queue: fsync evict snapshot: %w", err)
-	}
-	if err := f.Close(); err != nil {
-		_ = os.Remove(tmp)
-		return fmt.Errorf("queue: close evict snapshot: %w", err)
-	}
-	if err := os.Rename(tmp, final); err != nil {
-		_ = os.Remove(tmp)
-		return fmt.Errorf("queue: rename evict snapshot: %w", err)
-	}
-	if err := fsyncDir(s.trashDir()); err != nil {
+	if err := s.writeTrashLines(s.trashEvicted(base, stamp), payload); err != nil {
 		return err
 	}
 	s.gcTrash(time.Now())
 	return nil
+}
+
+// quarantineCorrupt copies the RAW bytes of unparseable lines into
+// .trash/<base>.<stamp>.corrupt.jsonl and logs the loss, BEFORE the rewrite that
+// strips them from the live file. Every other destructive path in this package
+// already retains (retirePair) or snapshots (snapshotDropped) what it removes;
+// the corrupt-line discard was the one that was both total and invisible. A
+// corrupt line is usually a torn write that swallowed a real message, so the
+// bytes are exactly what a human needs to recover it by hand. Snapshot failure
+// returns BEFORE the rewrite, so the live queue is untouched (fail-toward-keeping).
+func (s *Store) quarantineCorrupt(rk RouteKey, raws []string) error {
+	if len(raws) == 0 {
+		return nil
+	}
+	base := rk.File()
+	if s.retentionDisabled {
+		// Retention off (item G) means no .trash/ to retain into — but "never
+		// silent" is not part of the degradation: still log the destruction.
+		log.Printf("queue: %s: DESTROYING %d unparseable line(s) — .trash retention is disabled, no copy kept", base, len(raws))
+		return nil
+	}
+	stamp := firstFreeStamp(time.Now().UnixNano(), func(st int64) bool {
+		return pathExists(s.trashCorrupt(base, st))
+	})
+	payload := make([][]byte, 0, len(raws))
+	for _, r := range raws {
+		payload = append(payload, []byte(r))
+	}
+	final := s.trashCorrupt(base, stamp)
+	if err := s.writeTrashLines(final, payload); err != nil {
+		return err
+	}
+	log.Printf("queue: %s: removed %d unparseable line(s) from the live queue; raw bytes retained at %s for TrashTTL — a torn/partial write may have swallowed a real message", base, len(raws), final)
+	s.gcTrash(time.Now())
+	return nil
+}
+
+// writeTrashLines atomically writes payload (one entry per line) to a file in
+// .trash/ using the crash-safe tmp -> fsync -> rename -> dir-fsync pattern shared
+// by snapshotDropped and quarantineCorrupt.
+func (s *Store) writeTrashLines(final string, payload [][]byte) error {
+	tmp := final + ".tmp"
+	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0600)
+	if err != nil {
+		return fmt.Errorf("queue: open trash snapshot: %w", err)
+	}
+	w := bufio.NewWriter(f)
+	for _, line := range payload {
+		_, _ = w.Write(append(line, '\n'))
+	}
+	if err := w.Flush(); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmp)
+		return fmt.Errorf("queue: flush trash snapshot: %w", err)
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmp)
+		return fmt.Errorf("queue: fsync trash snapshot: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("queue: close trash snapshot: %w", err)
+	}
+	if err := os.Rename(tmp, final); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("queue: rename trash snapshot: %w", err)
+	}
+	return fsyncDir(s.trashDir())
 }
 
 // fsyncDir fsyncs a directory so newly-created or renamed entries in it are
@@ -869,6 +973,8 @@ func trashStamp(name string) (int64, bool) {
 	switch {
 	case strings.HasSuffix(s, ".evicted.jsonl"):
 		s = strings.TrimSuffix(s, ".evicted.jsonl")
+	case strings.HasSuffix(s, ".corrupt.jsonl"):
+		s = strings.TrimSuffix(s, ".corrupt.jsonl")
 	case strings.HasSuffix(s, ".jsonl"):
 		s = strings.TrimSuffix(s, ".jsonl")
 	case strings.HasSuffix(s, ".cur"):
