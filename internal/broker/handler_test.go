@@ -214,7 +214,10 @@ func TestConnDrop_ReleasesClaimWhenPIDDead(t *testing.T) {
 		Groups:       map[string]mappings.GroupConfig{"main": {ChatID: -100}},
 		DMChatID:     42,
 	}
-	br := New(mf)
+	// A registered channel, not just a configured one: attach now refuses a
+	// channel that mappings.json declares but the broker never started, since
+	// claiming a route with no transport attaches a session to nothing.
+	br := brokerWithChannel(t, mf, &fakeChannel{})
 	defer br.Shutdown()
 
 	a, b := net.Pipe()

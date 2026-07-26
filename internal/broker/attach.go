@@ -103,6 +103,25 @@ func (b *Broker) handleAttach(conn *ipc.Conn, stub *Stub, raw []byte) {
 		return
 	}
 
+	// CONFIGURED is not REGISTERED. Every attach path below validates chanName
+	// against mappings.json — the config file — and none of them checked that the
+	// broker actually has a running channel by that name. A stanza for a channel
+	// whose transport failed to start (or was never built into this binary) let
+	// attach return OK on a route with no poller and nothing to send through: the
+	// session believes it is attached, the claim registry agrees, and no message
+	// moves in either direction. Fail closed and name the difference, because
+	// "it's in my mappings.json" is exactly what the user will check first.
+	if _, err := b.Channel(chanName); err != nil {
+		_ = conn.WriteJSON(ipc.AttachedMsg{
+			Op: ipc.OpAttached, OK: false,
+			Err: fmt.Sprintf("channel %q is configured in mappings.json but is not running in this broker (%v) — "+
+				"attaching would claim a route with no transport, so nothing you send or receive would move. "+
+				"The usual cause is a channel stanza with no credentials yet (an empty bot_token starts the broker "+
+				"with no inbound transport); check the broker's startup output.", chanName, err),
+		})
+		return
+	}
+
 	// If the caller passed a freeform Expr, parse it into structured fields
 	// before dispatching. This is the shared parser every CLI's slash-command
 	// wrapper invokes via `attach(expr=$ARGUMENTS)` — keeps each CLI's
