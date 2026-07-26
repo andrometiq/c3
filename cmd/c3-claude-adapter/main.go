@@ -255,6 +255,32 @@ type adapter struct {
 	// every post-restart attach records nothing and a future --resume recovers a
 	// stale own topic.
 	recoverFired atomic.Bool
+	// recoverStarted records that a recovery attempt has BEGUN — set
+	// synchronously by every caller BEFORE it invokes fireRecover (including the
+	// `go fireRecover` callers, so a caller that immediately waits on the identity
+	// gate cannot race past a goroutine that has not run yet). Never reset: it
+	// answers "is there an identity question in flight for this process?", which
+	// is the only thing awaitIdentitySettled needs. recoverFired cannot serve that
+	// role — it is reset by refireRecoverOnReconnect and released on the
+	// nothing-was-sent paths, and it is set INSIDE fireRecover, one goroutine
+	// hop too late.
+	recoverStarted atomic.Bool
+	// identitySettled is closed once the first recovery attempt has FINISHED —
+	// recovered, registered, refused, failed, or timed out. It is the completion
+	// signal recoverFired was being misread as: recoverFired records ENTRY into
+	// fireRecover, and entry is not an answer. toolAttach waits on this so an
+	// attach is never answered while this session still doesn't know who it is.
+	//
+	// Created lazily by identityGate (not in newAdapter) so an adapter built as a
+	// bare struct literal behaves identically to one from the constructor.
+	// One-shot for the process, exactly like the Codex adapter's: the FIRST
+	// attempt answers the identity question, and a later re-registration (a
+	// reconnect refire, or a retry after a send that never happened) improves the
+	// broker's records without re-opening a question that is already answered —
+	// re-arming it would let an attach block on a gate nobody is left to close.
+	idmu            sync.Mutex
+	identitySettled chan struct{}
+	settleOnce      sync.Once
 	// recoverRechecked makes the first-tools/call belt-and-suspenders recheck run
 	// at most once, so a non-resume session doesn't re-stat the handoff file on
 	// every subsequent tools/call.
@@ -714,6 +740,7 @@ func (a *adapter) refireRecoverOnReconnect(ctx context.Context) {
 		return // not a resumed/hook session — nothing to re-register.
 	}
 	a.recoverFired.Store(false)
+	a.recoverStarted.Store(true)
 	go a.fireRecover(ctx, e)
 }
 
@@ -1293,7 +1320,7 @@ func (a *adapter) buildMCPServer() *mcp.Server {
 				// Belt-and-suspenders for BUG #1: if the background watch hasn't
 				// yet fired the recover (the handoff landed between watch polls as
 				// the first turn arrived), re-check the handoff once here and fire.
-				a.recheckRecoverOnFirstActivity()
+				a.recheckRecoverOnFirstActivity(ctx)
 			}
 			return next(ctx, method, req)
 		}
@@ -1557,6 +1584,13 @@ func decodeArgs(raw json.RawMessage) (map[string]any, error) {
 // toolAttach implements the `attach` tool: send AttachReq to the broker
 // and wait for an AttachedMsg. Mirrors the pre-migration handleAttachLocal.
 func (a *adapter) toolAttach(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	// Identity before anything that depends on it: an attach is ANSWERED from
+	// this session's identity, so it must not be answered while an in-flight
+	// recovery is still deciding who this session is. No-op once settled, and a
+	// no-op entirely when no recovery was ever started. The first-tools/call
+	// recheck covers the first call whatever it is; this covers every LATER
+	// attach, which that once-only recheck does not.
+	a.awaitIdentitySettled(ctx)
 	args, err := decodeArgs(req.Params.Arguments)
 	if err != nil {
 		return nil, fmt.Errorf("invalid params: %w", err)
@@ -1924,11 +1958,6 @@ const (
 	// survives for 24h (sessionhandoff.PruneStale). This watch only covers the
 	// narrower case where inbound arrives BEFORE the session's first tool call.
 	recoverWatchBudget = 30 * time.Minute
-	// recoverSyncBudget bounds how long the first tools/call waits for the
-	// recover round-trip to complete before being released. The broker is on a
-	// local unix socket, so the healthy case is sub-millisecond; this only exists
-	// so a wedged broker cannot hold a user's first turn indefinitely.
-	recoverSyncBudget = 3 * time.Second
 	// recoverWatchInterval is the background re-check cadence. Generous (the file
 	// stat is cheap, but there's no need to spin) — a ~1s lag on a resume that
 	// hasn't had its first turn yet is invisible.
@@ -1938,6 +1967,17 @@ const (
 	recoverLateThreshold = 10 * time.Second
 	recoverRespTimeout   = 10 * time.Second
 )
+
+// recoverSettleBudget bounds how long an identity-dependent call (the first
+// tools/call, and every `attach`) waits for the recovery round-trip to FINISH.
+// Deliberately longer than recoverRespTimeout so it is a genuine backstop rather
+// than the normal exit: every ordinary failure inside fireRecover (write error,
+// broker error, response timeout) settles the gate by itself well inside this
+// window, so reaching this budget means the recovery goroutine is wedged. It
+// replaced a 3s budget that expired BEFORE fireRecover's own 10s response
+// timeout could — which guaranteed the unidentified-dispatch outcome on any slow
+// broker. A var (not a const) so tests can shorten it, matching livePeekTimeout.
+var recoverSettleBudget = recoverRespTimeout + 2*time.Second
 
 // livePeekTimeout bounds the flush-time live re-peek of the held count so the
 // deferred notice never delays the first tools/call beyond a moment; on timeout
@@ -1964,6 +2004,9 @@ func (a *adapter) recoverSessionOnResume(ctx context.Context) {
 	if !found {
 		return // non-hook / non-c3 / non-resumed session — nothing to recover.
 	}
+	// Mark the identity question OPEN before firing, so an attach arriving in the
+	// same instant waits for the answer instead of racing it.
+	a.recoverStarted.Store(true)
 	a.fireRecover(ctx, entry)
 }
 
@@ -2008,6 +2051,15 @@ func (a *adapter) fireRecover(ctx context.Context, entry sessionhandoff.Entry) {
 	if !a.recoverFired.CompareAndSwap(false, true) {
 		return // already fired (watch + first-activity recheck race) — idempotent.
 	}
+	// The CAS winner OWNS the identity question, so it answers it on EVERY exit
+	// path below — recovered, registered, refused, write-failed, timed out. A
+	// session that could not be identified is a settled answer ("nobody"), not a
+	// session that blocks attaches until a budget expires: a hung attach is a
+	// worse failure than an unidentified one. (The CAS loser deliberately does
+	// NOT settle — the winner is still working, and letting the loser answer for
+	// it is the exact entry-read-as-completion mistake this guards against.)
+	defer a.markIdentitySettled()
+
 	respCh := make(chan ipc.RecoverSessionResp, 1)
 	a.rsmu.Lock()
 	a.rsPending = respCh
@@ -2022,12 +2074,28 @@ func (a *adapter) fireRecover(ctx context.Context, entry sessionhandoff.Entry) {
 
 	conn := a.currentConn()
 	if conn == nil {
+		// NOTHING WAS SENT — so nothing was registered, and holding the
+		// once-per-connection guard here wedges the session permanently: every
+		// later attempt short-circuits on a recovery that never happened, and the
+		// broker never learns this session's stable id, so every subsequent
+		// attach is recorded against nothing. Release the guard so a later
+		// attempt can actually fire.
+		//
+		// Releasing does not re-open the identity gate (deliberately — see
+		// identitySettled): with no broker connection, toolAttach itself answers
+		// "broker reconnecting — retry attach in a moment", so no attach can be
+		// answered in this window anyway, and the reconnect path re-fires.
+		a.recoverFired.Store(false)
+		log.Printf("recover-session: no broker connection — nothing sent; releasing the once-per-connection guard so a later attempt can register this session")
 		return
 	}
 	if err := conn.WriteJSON(ipc.RecoverSessionReq{
 		Op: ipc.OpRecoverSession, StableSessionID: entry.StableSessionID, CWD: entry.CWD,
 	}); err != nil {
-		log.Printf("recover-session: write failed: %v", err)
+		// Same as conn == nil: the request never reached the broker, so the guard
+		// must not stay set on a recovery that did not happen.
+		a.recoverFired.Store(false)
+		log.Printf("recover-session: write failed: %v (nothing sent — guard released for a later attempt)", err)
 		return
 	}
 
@@ -2073,51 +2141,94 @@ func (a *adapter) fireRecover(ctx context.Context, entry sessionhandoff.Entry) {
 // session doesn't re-stat the file on every later call, and the round-trip runs
 // in a goroutine so it never blocks the tools/call. fireRecover's CompareAndSwap
 // still guarantees a single RecoverSessionReq even if the watch fires concurrently.
-func (a *adapter) recheckRecoverOnFirstActivity() {
+func (a *adapter) recheckRecoverOnFirstActivity(ctx context.Context) {
 	if !a.recoverRechecked.CompareAndSwap(false, true) {
 		return // only on the very first tools/call.
 	}
-	if a.recoverFired.Load() {
-		return // the background watch already handled it.
+	if !a.recoverStarted.Load() {
+		// No recovery under way — try to start one from the handoff.
+		inst := instanceIDFromEnv()
+		if inst == "" {
+			return
+		}
+		e, ok := sessionhandoff.Read(inst)
+		if !ok {
+			return
+		}
+		log.Printf("recover-session: handoff found on first tools/call (background watch had not yet fired) — recovering now, BEFORE this call reaches the broker")
+		fireCtx := a.runCtx
+		if fireCtx == nil {
+			fireCtx = context.Background()
+		}
+		// The round trip runs on the PROCESS context (it must outlive this call),
+		// while the wait below runs on the CALL's context. recoverStarted is set
+		// before the goroutine so the wait cannot slip past a goroutine that has
+		// not been scheduled yet.
+		a.recoverStarted.Store(true)
+		go a.fireRecover(fireCtx, e)
 	}
-	inst := instanceIDFromEnv()
-	if inst == "" {
-		return
-	}
-	e, ok := sessionhandoff.Read(inst)
-	if !ok {
-		return
-	}
-	log.Printf("recover-session: handoff found on first tools/call (background watch had not yet fired) — recovering now, BEFORE this call reaches the broker")
-	ctx := a.runCtx
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	// SYNCHRONOUS, deliberately. This used to be `go a.fireRecover(...)` and the
-	// middleware returned straight into next(), which raced the RecoverSessionReq
-	// against the very tools/call that triggered it. When that call was `attach`,
-	// the broker handled attach FIRST — with no stable session id yet, because it
+	// BLOCK HERE, deliberately. This used to return straight into next() as soon
+	// as the recovery had been ENTERED, which raced the RecoverSessionReq against
+	// the very tools/call that triggered it. When that call was `attach`, the
+	// broker handled attach FIRST — with no stable session id yet, because it
 	// learns the id only from RecoverSessionReq — so attachBare fell to its picker
 	// branch. The recover then landed a moment later, the broker claimed the topic
 	// and posted its "resumed" notice to the channel. Same instant, opposite
 	// answers: the channel said attached, the CLI showed a topic picker.
 	//
 	// Ordering is the fix, not a longer timeout. The broker must know who this
-	// session IS before it answers a question whose answer depends on that.
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		a.fireRecover(ctx, e)
-	}()
+	// session IS before it answers a question whose answer depends on that — and
+	// "knows who it is" means the recovery FINISHED, not that it started.
+	a.awaitIdentitySettled(ctx)
+}
+
+// identityGate returns the channel that closes when this session's identity
+// question has been answered, creating it on first use. Lazy so an adapter built
+// as a bare struct literal (as several tests do) behaves like one from
+// newAdapter instead of waiting on a nil channel forever.
+func (a *adapter) identityGate() chan struct{} {
+	a.idmu.Lock()
+	defer a.idmu.Unlock()
+	if a.identitySettled == nil {
+		a.identitySettled = make(chan struct{})
+	}
+	return a.identitySettled
+}
+
+// markIdentitySettled answers the identity question for this process. Idempotent
+// — the first recovery attempt to finish settles it, and later re-registrations
+// (reconnect refires) do not re-open it.
+func (a *adapter) markIdentitySettled() {
+	gate := a.identityGate()
+	a.settleOnce.Do(func() { close(gate) })
+}
+
+// awaitIdentitySettled blocks until this session's identity question has been
+// ANSWERED. Returns immediately when no recovery was ever started — nothing will
+// ever settle it, and blocking on that would hang every attach in a non-resumed
+// session.
+func (a *adapter) awaitIdentitySettled(ctx context.Context) {
+	if !a.recoverStarted.Load() {
+		return
+	}
 	select {
-	case <-done:
-	case <-time.After(recoverSyncBudget):
-		// The broker is on a local unix socket, so this is a sub-millisecond
-		// round-trip in every healthy case; reaching here means something is
-		// genuinely wrong. Release the call rather than hold the user's first
-		// turn hostage — the recover keeps running and still lands, we just no
-		// longer guarantee it lands first.
-		log.Printf("recover-session: still in flight after %v — releasing the first tools/call; if it was `attach`, the CLI may see a picker while the recover completes behind it", recoverSyncBudget)
+	case <-a.identityGate():
+	case <-ctx.Done():
+	case <-time.After(recoverSettleBudget):
+		// Say plainly what proceeding means: the session is dispatching this call
+		// as an UNIDENTIFIED session — one the broker has no stable id for. An
+		// `attach` answered here cannot silently re-claim this session's own last
+		// topic; it falls to the picker / explicit-name path. That is a degraded
+		// answer, not an unsafe one: a recover that lands later takes the broker's
+		// record-only branch (internal/broker/handler.go handleRecoverSession,
+		// the already-attached arm), so it cannot steal the route the explicit
+		// attach just took.
+		log.Printf("recover-session: identity still unsettled after %v — dispatching this call as an UNIDENTIFIED session: an `attach` answered now will not silently re-claim this session's own topic (expect the picker) while the recover completes behind it", recoverSettleBudget)
+		// Giving up IS the answer, so record it. Without this the budget is paid
+		// again by every later identity-dependent call — the first tools/call
+		// waits it out, then the `attach` inside that same call waits it out
+		// again. One wedged recovery must cost one budget, not one per caller.
+		a.markIdentitySettled()
 	}
 }
 

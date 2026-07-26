@@ -273,6 +273,25 @@ type adapter struct {
 	// post-restart attach records nothing and a later Grok resume silently
 	// re-attaches to a stale topic. Claude-adapter parity (§3d2).
 	recoverFired atomic.Bool
+	// recoverStarted records that a recovery attempt has BEGUN — set
+	// synchronously by every caller BEFORE it invokes fireRecover. Never reset:
+	// it answers "is there an identity question in flight for this process?".
+	// recoverFired cannot answer that — it is reset by refireRecoverOnReconnect,
+	// released on the nothing-was-sent paths, and set inside fireRecover.
+	recoverStarted atomic.Bool
+	// identitySettled is closed once the first recovery attempt has FINISHED —
+	// recovered, registered, refused, failed, or timed out. It is the completion
+	// signal recoverFired was being misread as (recoverFired records ENTRY, and
+	// entry is not an answer), and ensureStableSessionRegistered waits on it so an
+	// attach is never answered while this session still doesn't know who it is.
+	// Created lazily by identityGate so an adapter built as a bare struct literal
+	// (as the forward tests do) behaves like one from newAdapter. One-shot for the
+	// process: a later re-registration improves the broker's records without
+	// re-opening an answered question — re-arming would let an attach block on a
+	// gate nobody is left to close.
+	idmu            sync.Mutex
+	identitySettled chan struct{}
+	settleOnce      sync.Once
 }
 
 // grokForwardReq is one inbound queued for the serial Grok-forward goroutine.
