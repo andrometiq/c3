@@ -196,10 +196,28 @@ func (h *PluginHost) FireOnAttach(s *plugin.Stub, m *plugin.Mapping) {
 
 type toolRegistry struct{ host *PluginHost }
 
+// Add registers a tool under its name. A name that is already registered is
+// REFUSED and logged — the incumbent stays.
+//
+// It used to plain-assign, so a second plugin claiming a name silently replaced
+// the first: the first plugin's tool vanished from List() with nothing said, and
+// whichever plugin loaded last won by load order. plugin.ToolRegistry's own doc
+// tells authors to prefix tool names "to avoid collisions across plugins" — that
+// was advice the implementation did not enforce.
+//
+// First-writer-wins rather than last, on the same asymmetry the rest of this
+// codebase uses: a refused registration is a log line the author reads and
+// fixes, while a silent replacement is a tool that stops existing for reasons
+// nobody can see. The registry has no consumers yet, which is exactly why this
+// is cheap now and a behaviour change once a third party has written against it.
 func (r *toolRegistry) Add(t plugin.Tool) {
 	r.host.mu.Lock()
+	defer r.host.mu.Unlock()
+	if _, dup := r.host.tools[t.Name]; dup {
+		log.Printf("plugin tool REFUSED name=%q: already registered by another plugin — the incumbent keeps the name; prefix tool names with your plugin name (e.g. \"<plugin>_<verb>\") to avoid this", t.Name)
+		return
+	}
 	r.host.tools[t.Name] = t
-	r.host.mu.Unlock()
 }
 
 func (r *toolRegistry) Remove(name string) {
