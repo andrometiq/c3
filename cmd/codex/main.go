@@ -8,6 +8,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -80,8 +81,8 @@ func run(args []string, self string) error {
 	if requestedWS == "" {
 		requestedWS = defaultWSURL
 	}
-	wsURL := chooseAppServerURL(requestedWS)
-	if err := ensureAppServer(realCodex, adapterPath, wsURL, cwd, topic); err != nil {
+	wsURL, err := startAppServer(realCodex, adapterPath, requestedWS, cwd, topic)
+	if err != nil {
 		return err
 	}
 
@@ -302,8 +303,40 @@ func ensureAppServer(realCodex, adapterPath, wsURL, cwd, topic string) error {
 	if err := cmd.Start(); err != nil {
 		return err
 	}
+	// MY child, or nobody — the never-adopt rule applied to the startup window.
+	//
+	// chooseAppServerURL picks a free port by PROBING it, which reserves nothing.
+	// Between that probe and this child binding, another launcher can probe the
+	// same port and win the bind. Its listener is reachable from here, so
+	// accepting "the port is reachable" as "my child is up" would put two
+	// sessions on one app-server — the exact cross-talk the refusal above exists
+	// to prevent, walked in through the startup window instead of the front door.
+	//
+	// A child that loses the bind race exits, so watching for its exit is what
+	// distinguishes "my listener" from "someone else's". Residual window, stated
+	// honestly rather than papered over: if the winner binds while my child is
+	// alive but has not yet failed its own bind, the reachability check below can
+	// still accept the winner's listener. Closing that completely needs either a
+	// startup nonce in the app-server (upstream, not ours) or per-socket owner
+	// lookup (not portable). Losing the race is what is handled here; the
+	// sub-millisecond overlap is not, and the caller's retry does not know about it.
+	exited := make(chan struct{})
+	go func() { _ = cmd.Wait(); close(exited) }()
+
 	deadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
+		select {
+		case <-exited:
+			// The child is gone. If the port is nonetheless live, someone else
+			// owns it — do NOT adopt; tell the caller to pick another port.
+			if tcpReachable(host, port, 500*time.Millisecond) {
+				return fmt.Errorf("%w: %s is held by another app-server%s",
+					errAppServerLostPortRace, wsURL, appServerPortOwner(wsURL))
+			}
+			return fmt.Errorf("codex app-server for %s exited during startup — see %s",
+				wsURL, appServerLogPath(port))
+		default:
+		}
 		if tcpReachable(host, port, 500*time.Millisecond) {
 			writeAppServerMeta(wsURL, cwd, topic, adapterPath, cmd.Process.Pid)
 			return nil
@@ -312,6 +345,32 @@ func ensureAppServer(realCodex, adapterPath, wsURL, cwd, topic string) error {
 	}
 	_ = cmd.Process.Kill()
 	return fmt.Errorf("codex app-server did not become reachable at %s", wsURL)
+}
+
+// errAppServerLostPortRace means another launcher won the port between our
+// free-port probe and our child's bind. It is retryable — on the NEXT port, never
+// by adopting the winner — and startAppServer is what retries it.
+var errAppServerLostPortRace = errors.New("app-server port lost to a concurrent launcher")
+
+// startAppServer picks a port and launches an app-server on it, retrying on a
+// fresh port when it loses a startup race. Each retry re-runs chooseAppServerURL,
+// which now sees the winner listening and walks past it, so two launchers racing
+// converge on two ports instead of colliding on one. Returns the URL actually
+// used, which is what the Codex TUI must be pointed at.
+func startAppServer(realCodex, adapterPath, requestedWS, cwd, topic string) (string, error) {
+	const attempts = 5
+	var err error
+	for i := 0; i < attempts; i++ {
+		wsURL := chooseAppServerURL(requestedWS)
+		if err = ensureAppServer(realCodex, adapterPath, wsURL, cwd, topic); err == nil {
+			return wsURL, nil
+		}
+		if !errors.Is(err, errAppServerLostPortRace) {
+			return "", err
+		}
+		fmt.Fprintf(os.Stderr, "c3: %v — trying another port\n", err)
+	}
+	return "", err
 }
 
 func requiredFeatureArgs(existing []string) []string {
