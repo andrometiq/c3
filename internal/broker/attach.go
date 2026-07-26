@@ -947,6 +947,14 @@ func (b *Broker) tryClaim(conn *ipc.Conn, stub *Stub, key RouteKey, label string
 	// This is a legitimate, human-driven explicit/steal claim — confirm the route so
 	// the destructive consume paths (spec §5 tripwire) will service it.
 	stub.MarkRouteConfirmed()
+	// …and it retires the user-detached barrier: someone who detaches and then
+	// deliberately attaches again must be honored. Only RECOVERY stays blocked,
+	// which is why this clear lives in tryClaim (the explicit-claim site) and NOT in
+	// SetRoute or Routes.Claim — recoverSession claims through Routes.Claim directly,
+	// so a recovery can never clear the very barrier that is meant to stop it.
+	// Ordered after the claim succeeds: a refused claim (live collision) leaves the
+	// barrier standing, because nothing about the user's detach was reversed.
+	stub.SetExplicitlyDetached(false)
 	if isFresh {
 		go b.sendWelcome(stub, key, label)
 	}
@@ -1138,6 +1146,20 @@ func routeKeyFromSessionAttachment(sa mappings.SessionAttachment) RouteKey {
 // broker-bounce / reconnect-driven recover ops doesn't rewrite mappings.json
 // (with its .bak + fsyncs) every time.
 func (b *Broker) recoverSession(stub *Stub) (RouteKey, int, []ipc.QueuedItem, bool) {
+	if stub.ExplicitlyDetached() {
+		// The user explicitly detached this connection: no recovery may undo that.
+		// The barrier lives HERE, at the single claim site, because that is where
+		// the invariant is — every caller (handleRecoverSession's auto-resume,
+		// attachBare's manual own-recover, anything added later) gets it. In the
+		// production sequence handleRecoverSession has already converted the flag
+		// into the durable tombstone by the time control reaches this function, so
+		// the Recoverable() check below would refuse too; keeping the check at the
+		// claim site is deliberate fail-closed insurance in the same spirit as
+		// routeConfirmed — a future refactor that moves the tombstone write must not
+		// be able to silently re-open "detach undone by late recovery". Cleared by
+		// tryClaim, so an explicit re-attach is honored (only recovery is blocked).
+		return RouteKey{}, 0, nil, false
+	}
 	sid := stub.StableSessionIDValue()
 	if sid == "" {
 		return RouteKey{}, 0, nil, false

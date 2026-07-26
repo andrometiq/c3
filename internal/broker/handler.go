@@ -257,9 +257,23 @@ func (b *Broker) buildHelloAck(hello ipc.HelloMsg, stub *Stub) ipc.HelloAckMsg {
 // HandleConn must NOT call this: that's a process exit, not a user detach, and
 // tombstoning there would wipe recovery on every quit-without-detach (defeating
 // the feature). Conn-drop releases claims directly via Routes.ReleaseAllByConnID.
+//
+// The tombstone is keyed on the stable session id, which the broker may not have
+// yet: a resumed session's id arrives on a SessionStart handoff that can land
+// long after hello (the adapter watches for it for ~30 minutes), and the `detach`
+// tool writes OpRelease unconditionally, even holding no route. "Unknown identity
+// ⇒ nothing to tombstone" is therefore a REACHABLE state, not a theoretical one,
+// and the recover op that arrives afterwards used to re-claim the route the user
+// had just left. So the release also raises a per-connection barrier that late
+// recovery cannot reverse (Stub.explicitlyDetached) — the identity-independent
+// half of the same decision.
 func (b *Broker) handleRelease(stub *Stub) {
 	b.Routes.ReleaseAllByConnID(stub.ConnID)
 	stub.SetRoute(nil) // also clears routeConfirmed — a detach re-arms the §5 consume tripwire
+	// Set unconditionally (not only in the empty-id case): the flag means "the user
+	// detached THIS connection", so it is true whether or not we could also write
+	// the durable tombstone below. tryClaim clears it on the next explicit attach.
+	stub.SetExplicitlyDetached(true)
 	if sid := stub.StableSessionIDValue(); sid != "" {
 		b.mutateMappings(func(mf *mappings.MappingsFile) {
 			mf.TombstoneSessionAttachment(sid)
@@ -281,6 +295,11 @@ func (b *Broker) handleRelease(stub *Stub) {
 //     session. On success, report it + the held backlog count so the adapter
 //     can surface a one-shot auto-attach notification.
 //
+// Ahead of the not-attached branch sits the detach barrier: a stub the user
+// EXPLICITLY detached keeps the identity registration but gets no route restore
+// and no welcome, and its attachment is tombstoned now that there is an id to key
+// the tombstone on (see the branch comment).
+//
 // Fail-closed: a malformed request or an empty stable id records nothing and
 // recovers nothing.
 func (b *Broker) handleRecoverSession(conn *ipc.Conn, stub *Stub, raw []byte) {
@@ -297,6 +316,31 @@ func (b *Broker) handleRecoverSession(conn *ipc.Conn, stub *Stub, raw []byte) {
 		// future resume recovers it. No re-claim. This is bookkeeping, not an
 		// auto-re-attach, so it runs regardless of the auto_attach_on_resume gate.
 		b.recordCurrentRouteForStable(stub, *cur)
+	} else if stub.ExplicitlyDetached() {
+		// The user detached this connection BEFORE its stable id was known, so
+		// handleRelease had nothing to tombstone. Now that the identity has arrived,
+		// take exactly half this frame: KEEP the identity registration
+		// (SetStableSessionID above already ran, so a later EXPLICIT attach on this
+		// connection is still recorded against this session and a future resume can
+		// recover THAT), and DROP the route restore + its "resumed" welcome, which
+		// would undo a deliberate user action. Dropping the whole frame instead
+		// would silently un-key this session, costing the user recording they never
+		// asked to lose.
+		//
+		// Write the tombstone now that there is something to key it on. The
+		// per-connection flag dies with the connection while the persisted
+		// attachment outlives it, so without this a broker bounce — routine, and the
+		// Grok adapter re-fires recovery on every reconnect — would hand the
+		// detached route straight back on the next connection. Writing it here makes
+		// "detach before the identity arrived" mean exactly what "detach after the
+		// identity arrived" already means at handleRelease, instead of a weaker
+		// promise that depends on invisible timing. It is also reversible in the
+		// normal way: any explicit attach upserts the attachment and clears it.
+		b.mutateMappings(func(mf *mappings.MappingsFile) {
+			mf.TombstoneSessionAttachment(req.StableSessionID)
+		})
+		_ = b.SaveMappings()
+		log.Printf("recover: REFUSED session=%s — this connection was explicitly detached before its id was known; identity recorded, route NOT restored, attachment tombstoned", req.StableSessionID)
 	} else if !b.Mappings().AutoAttachOnResumeEnabled() {
 		// Gate (default ON post-redesign — nil ⇒ enabled; only an explicit
 		// "auto_attach_on_resume": false disables it): the stable id is recorded

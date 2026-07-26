@@ -80,7 +80,23 @@ type Stub struct {
 	// fail-closed → no recording, no recovery). Guarded by stubMu; mutated via
 	// SetStableSessionID.
 	stableSessionID string
-	hasReplied      bool
+	// explicitlyDetached records that the USER detached this connection (the
+	// `detach` tool → OpRelease → handleRelease) — as opposed to a conn drop or a
+	// process exit, neither of which is a detach. It is the identity barrier for
+	// late recovery: handleRelease can only tombstone the PERSISTED attachment when
+	// the stable session id is already known, but on a resumed session the
+	// SessionStart handoff that carries that id lands AFTER hello and the adapter's
+	// recovery watch stays live for ~30 minutes, so a detach can legitimately
+	// arrive while the broker still knows no identity. Without this flag the late
+	// RecoverSessionReq finds an untombstoned attachment and re-claims the very
+	// route the user just left — an explicit user action silently undone by a
+	// background process that arrived later. Set by handleRelease; CLEARED by
+	// tryClaim, so a deliberate re-attach on the same connection is honored and
+	// only RECOVERY is blocked; read by recoverSession (the claim site) and by
+	// handleRecoverSession (which upgrades it to the durable tombstone once the
+	// identity finally arrives). Guarded by stubMu.
+	explicitlyDetached bool
+	hasReplied         bool
 
 	// pushRoutes records, per outstanding live push, the ROUTE that push went out
 	// on — keyed by the pushed MessageID, which every adapter echoes back verbatim
@@ -226,6 +242,26 @@ func (s *Stub) StableSessionIDValue() string {
 	s.stubMu.Lock()
 	defer s.stubMu.Unlock()
 	return s.stableSessionID
+}
+
+// SetExplicitlyDetached sets (true, from handleRelease) or clears (false, from
+// tryClaim's successful explicit claim) this connection's user-detached barrier.
+// See the explicitlyDetached field doc. Guarded by stubMu like SetRoute.
+func (s *Stub) SetExplicitlyDetached(v bool) {
+	s.stubMu.Lock()
+	defer s.stubMu.Unlock()
+	s.explicitlyDetached = v
+}
+
+// ExplicitlyDetached reports whether the user detached this connection and has
+// not explicitly re-attached since. recoverSession refuses to claim while it is
+// set, and handleRecoverSession refuses the route restore (keeping only the
+// identity registration) when a recover op lands on such a connection. Guarded
+// by stubMu.
+func (s *Stub) ExplicitlyDetached() bool {
+	s.stubMu.Lock()
+	defer s.stubMu.Unlock()
+	return s.explicitlyDetached
 }
 
 // SetCannotRender records whether this session's host silently drops channel
