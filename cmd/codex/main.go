@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -252,7 +253,22 @@ func ensureAppServer(realCodex, adapterPath, wsURL, cwd, topic string) error {
 		return err
 	}
 	if tcpReachable(host, port, 500*time.Millisecond) {
-		return nil
+		// Something is listening. Adopt it ONLY if our own record vouches for it.
+		// Reachability alone proves a socket exists, not whose it is — and this
+		// early return used to be unconditional, so any process holding the port
+		// was adopted as our app-server and every inbound message went to it.
+		if appServerMetaMatches(wsURL, cwd, topic, adapterPath) {
+			return nil
+		}
+		// chooseAppServerURL should already have moved us to a free port, so
+		// reaching here means either a race with another launcher or a foreign
+		// process on the port. Refuse loudly. Silently sharing is how two topics
+		// ended up in one TUI; a failed launch is recoverable, cross-talk is not.
+		return fmt.Errorf(
+			"%s is already in use by an app-server this session cannot claim as its own "+
+				"(cwd=%q topic=%q). Refusing to share it — messages for another session would "+
+				"surface in this one. Retry, or set C3_CODEX_APP_SERVER_WS to a free ws://127.0.0.1:<port>",
+			wsURL, cwd, topic)
 	}
 	argv := []string{realCodex}
 	argv = append(argv, requiredFeatureArgs(nil)...)
@@ -309,20 +325,67 @@ func hasCWDArg(args []string) bool {
 	return false
 }
 
-func appServerMetaPath() string {
-	return fmt.Sprintf("/tmp/c3-codex-app-server-%d.json", os.Getuid())
+// appServerMetaPath is per-UID **and per-port**. It used to be one file per
+// user, which meant a second app-server on a different port silently overwrote
+// the first one's record — after which the first was unrecognisable and a third
+// launch could not tell whose it was. One record per listener, or the record
+// describes only whichever listener started most recently.
+func appServerMetaPath(port int) string {
+	return fmt.Sprintf("/tmp/c3-codex-app-server-%d-%d.json", os.Getuid(), port)
 }
 
+// processAlive reports whether pid is a live process we own. Signal 0 performs
+// the permission and existence checks without delivering anything.
+func processAlive(pid int) bool {
+	if pid <= 0 {
+		return false
+	}
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		return false
+	}
+	return proc.Signal(syscall.Signal(0)) == nil
+}
+
+// appServerMetaMatches reports whether the app-server recorded for wsURL is
+// THIS session's own — i.e. whether it is safe to adopt instead of starting a
+// fresh one.
+//
+// **An unknown identity must never match another unknown identity.** That single
+// rule is the whole point of this function. inferTopicName deliberately returns
+// "" when the launch directory is the shared root rather than a project, so two
+// sessions started from that root both carry topic "". Comparing them field by
+// field made "" == "" and concluded they were the same session — so the second
+// adopted the first's app-server, and Telegram messages for two different topics
+// were both posted into one TUI. The broker had routed each to the correct
+// adapter; the adapters then merged them here.
+//
+// Failing to SEPARATE costs an extra process. Failing to SHARE correctly sends
+// one person's messages to another. Those are not symmetrical, so an unknown
+// identity refuses to match and takes a fresh port.
 func appServerMetaMatches(wsURL, cwd, topic, adapterPath string) bool {
-	data, err := os.ReadFile(appServerMetaPath())
+	if topic == "" {
+		return false // unknown identity — never adopt someone else's app-server
+	}
+	_, port, err := parseWSURL(wsURL)
+	if err != nil {
+		return false
+	}
+	data, err := os.ReadFile(appServerMetaPath(port))
 	if err != nil {
 		return false
 	}
 	var meta struct {
 		WSURL     string            `json:"ws_url"`
+		PID       int               `json:"pid"`
 		Signature map[string]string `json:"signature"`
 	}
 	if err := json.Unmarshal(data, &meta); err != nil {
+		return false
+	}
+	// A stale record whose process is gone must not vouch for whatever else has
+	// since taken the port.
+	if !processAlive(meta.PID) {
 		return false
 	}
 	return meta.WSURL == wsURL &&
@@ -332,6 +395,10 @@ func appServerMetaMatches(wsURL, cwd, topic, adapterPath string) bool {
 }
 
 func writeAppServerMeta(wsURL, cwd, topic, adapterPath string, pid int) {
+	_, port, err := parseWSURL(wsURL)
+	if err != nil {
+		return
+	}
 	data := map[string]any{
 		"ws_url": wsURL,
 		"pid":    pid,
@@ -342,7 +409,7 @@ func writeAppServerMeta(wsURL, cwd, topic, adapterPath string, pid int) {
 		},
 	}
 	encoded, _ := json.MarshalIndent(data, "", "  ")
-	_ = os.WriteFile(appServerMetaPath(), append(encoded, '\n'), 0o600)
+	_ = os.WriteFile(appServerMetaPath(port), append(encoded, '\n'), 0o600)
 }
 
 func findRealCodex(self string) (string, error) {
