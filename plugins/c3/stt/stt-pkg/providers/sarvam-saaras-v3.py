@@ -13,6 +13,25 @@ import os, json, time, subprocess, mimetypes, urllib.request, urllib.error
 # Sarvam API base (sarvamai/environment.py: SarvamAIEnvironment.PRODUCTION.base)
 _SARVAM_BASE = "https://api.sarvam.ai"
 
+MODEL_ID = "saaras:v3"
+
+# USD per minute: Sarvam publishes this model in INR (₹30/hour list price as of
+# the 2026-07-26 survey). No verified INR->USD rate belongs in source, so the
+# bake-off reports this provider's cost as unknown rather than printing an
+# invented conversion. Compare it on accuracy and latency; price it yourself.
+COST_PER_MINUTE_USD = None
+
+# UNRESOLVED, 2026-07-26 survey: Sarvam's June-2026 changelog marks
+# /speech-to-text-translate as legacy (saaras:v2.5) while /speech-to-text
+# defaults to saaras:v3 — and the live OpenAPI for /speech-to-text lists no
+# `prompt` field. _transcribe_rest below still posts to the translate endpoint
+# whenever a vocabulary exists, which means vocabulary biasing may be running
+# against the older model. Left ALONE on purpose: this is the incumbent
+# fallback that works today, the replacement request shape could not be
+# verified without a live key, and a blind rewrite of a working fallback is a
+# worse bet than a documented question. Settle it with the bake-off harness
+# (../bakeoff/) once a key and the corpus are available.
+
 # Dynamic vocabulary (set by main stt.py via set_vocabulary)
 _VOCAB = {"terms": [], "context": ""}
 
@@ -55,6 +74,10 @@ def _get_key():
         except:
             pass
     return _SARVAM_KEY
+
+def available() -> str:
+    """"" when this provider can run, else why it can't (see stt.py)."""
+    return "" if _get_key() else "SARVAM_API_KEY not set (env or ~/.claude/stt.env)"
 
 def _get_duration(audio_path):
     """Get audio duration in seconds using ffprobe.

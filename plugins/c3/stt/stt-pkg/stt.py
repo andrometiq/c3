@@ -2,20 +2,45 @@
 """Pluggable STT chain — runs providers in order until one succeeds.
 
 Usage: python3 stt.py <audio_file>
-       python3 stt.py <audio_file> --chain gemini,sarvam
-       python3 stt.py <audio_file> --chain sarvam  (sarvam only, no fallback)
+       python3 stt.py <audio_file> --chain gemini-3-flash-openrouter,sarvam-saaras-v3
+       python3 stt.py <audio_file> --chain sarvam-saaras-v3  (one provider, no fallback)
+       python3 stt.py --list-providers                       (what's installed + keyed)
 
 Config:
-  --chain <providers>   Comma-separated provider names (default: gemini,sarvam)
+  --chain <providers>   Comma-separated provider names, best first (see below)
   --retries <n>         Retries per provider before moving to next (default: 1)
   --retry-delay <s>     Seconds between retries (default: 2)
 
+WHERE THE ORDER IS CONFIGURED
+-----------------------------
+The chain is ordered: position 1 is tried first, position 2 only if 1 fails,
+and so on. It resolves in exactly this precedence:
+
+  1. --chain on the command line          (ad-hoc / bake-off runs)
+  2. $C3_STT_CHAIN                        (the normal way to change it)
+  3. DEFAULT_CHAIN below                  (what ships)
+
+`stt-handler.py` invokes this script WITHOUT --chain, so in production the
+chain comes from $C3_STT_CHAIN or the default. The handler loads
+`~/.claude/stt.env` — the same file `c3-broker setup` writes API keys into —
+and passes every key=value in it to this process as an environment variable.
+So the supported, no-source-edit way to reorder providers is one line in
+~/.claude/stt.env:
+
+    C3_STT_CHAIN=soniox-stt-async-v5,gemini-3-flash-openrouter,sarvam-saaras-v3
+
+Run `python3 stt.py --list-providers` to see the installed provider names,
+which ones have their API key configured, and the currently-resolved chain.
+
 Providers are Python files in the providers/ directory.
 Each must implement: transcribe(audio_path: str, audio_bytes: bytes) -> str | None
+Each may optionally implement:
+    set_vocabulary(vocab: dict) -> None   # called before every transcribe()
+    available() -> str                    # "" = ready, else a reason to skip
 
 To add a new provider:
-  1. Create providers/my_provider.py with a transcribe() function
-  2. Use --chain gemini,my_provider,sarvam
+  1. Create providers/my-provider.py with a transcribe() function
+  2. Put it in the chain: --chain gemini-3-flash-openrouter,my-provider
 
 Stdout: clean transcript only
 Stderr: retry/fallback/error logging
@@ -229,6 +254,145 @@ def _parse_vocab_txt(path):
             terms.append({"preferred": preferred, "not": nots, "note": note})
     return {"terms": terms, "context": context}
 
+# --- Ordered provider chain ---
+# Position 1 is tried first; 2 runs only if 1 fails; 3 only if 2 fails, etc.
+#
+# The order below is the 2026-07-26 model survey's ranking for this workload
+# (Indian-English + Tamil code-switched long-form dictation with heavy
+# proper-noun/jargon load). It is derived from PUBLISHED benchmarks and API
+# capability, NOT from a measured run on this install's own audio. Measure it:
+#     python3 ../bakeoff/run_bakeoff.py --audio-dir <corpus>
+# and then set C3_STT_CHAIN to whatever actually won.
+#
+#   1. gemini-3-flash-openrouter — only provider with an unbounded biasing
+#      mechanism (the vocabulary's "NOT these" negatives go straight into the
+#      prompt), handles self-corrections, translates inline, ~9.5h per request.
+#   2. soniox-stt-async-v5      — biasing API shaped like the vocabulary file
+#      (context.terms), native code-mixing, one-way translation to English,
+#      5h files, cheapest per hour.
+#   3. elevenlabs-scribe-v2     — best independently-measured English WER,
+#      keyterms biasing (1000 terms), no duration wall. Verbatim only: it does
+#      NOT translate, so Tamil spans come back in Tamil.
+#   4. sarvam-saaras-v3         — retained as the trailing fallback: it is the
+#      incumbent, the only Indic specialist here, and the key is usually already
+#      provisioned. Dropping it would regress a working install on the strength
+#      of an unmeasured ranking.
+#
+# Providers whose API key is not configured are skipped instantly (see
+# available()), so listing four costs nothing when only one is keyed.
+DEFAULT_CHAIN = (
+    "gemini-3-flash-openrouter,"
+    "soniox-stt-async-v5,"
+    "elevenlabs-scribe-v2,"
+    "sarvam-saaras-v3"
+)
+
+
+def _resolve_chain(cli_chain=None):
+    """Resolve the ordered provider chain. Pure — reads env, no I/O.
+
+    Precedence: --chain > $C3_STT_CHAIN > DEFAULT_CHAIN. Blank/whitespace
+    values at any level fall through to the next. Returns a list of provider
+    names in try-order, with duplicates dropped (first occurrence wins) so a
+    typo'd chain can't make one provider burn its retries twice."""
+    for candidate in (cli_chain, os.environ.get("C3_STT_CHAIN"), DEFAULT_CHAIN):
+        if not candidate or not candidate.strip():
+            continue
+        names, seen = [], set()
+        for raw in candidate.split(","):
+            name = raw.strip()
+            if name and name not in seen:
+                seen.add(name)
+                names.append(name)
+        if names:
+            return names
+    return []
+
+
+def _provider_unavailable_reason(mod):
+    """Why this provider cannot run at all, or "" when it can. Pure-ish.
+
+    Optional provider hook:  available() -> str
+    Returns "" when ready, or a short human reason ("SONIOX_API_KEY not set")
+    otherwise. Lets an unkeyed provider be skipped INSTANTLY instead of burning
+    1+retries attempts (and the retry sleeps between them) on a failure that
+    cannot succeed — which is what makes a four-deep default chain free for an
+    install that has only one key.
+
+    Providers that don't define available() are always attempted: the v0.1.0
+    contract is unchanged and this hook stays optional. A hook that itself
+    raises is treated as available — a broken hook must never remove a working
+    provider from the chain."""
+    fn = getattr(mod, "available", None)
+    if not callable(fn):
+        return ""
+    try:
+        return (fn() or "").strip()
+    except Exception:
+        return ""
+
+
+def run_chain(providers, audio_path, audio_bytes, vocab,
+              retries=1, retry_delay=2.0, log=None):
+    """Try providers in order; return the first non-empty transcript, else None.
+
+    `providers` is an ordered list of (name, module). Each gets 1+retries
+    attempts; a provider is exhausted on empty results OR exceptions, and the
+    next one in the chain then runs. Vocabulary is re-applied before every
+    attempt. `log` takes one string (defaults to stderr) — stdout belongs to
+    the transcript alone."""
+    log = log or (lambda msg: print(msg, file=sys.stderr))
+
+    runnable = []
+    for name, mod in providers:
+        reason = _provider_unavailable_reason(mod)
+        if reason:
+            log(f"[stt] skipping {name}: {reason}")
+            continue
+        runnable.append((name, mod))
+    if not runnable:
+        log("[stt] no runnable providers — every provider in the chain is unavailable")
+        return None
+
+    for idx, (name, mod) in enumerate(runnable):
+        max_attempts = 1 + retries  # 1 initial + N retries
+        for attempt in range(1, max_attempts + 1):
+            try:
+                # Pass vocabulary if provider supports it
+                if hasattr(mod, "set_vocabulary"):
+                    mod.set_vocabulary(vocab)
+                result = mod.transcribe(audio_path, audio_bytes)
+                if result and result.strip():
+                    if idx > 0 or attempt > 1:
+                        log(f"[stt] success: {name} (attempt {attempt})")
+                    return result.strip()
+                log(f"[stt] {name} attempt {attempt}/{max_attempts}: empty result")
+            except Exception as e:
+                log(f"[stt] {name} attempt {attempt}/{max_attempts}: {type(e).__name__}: {e}")
+
+            if attempt < max_attempts:
+                log(f"[stt] retrying {name} in {retry_delay}s...")
+                time.sleep(retry_delay)
+
+        # Provider exhausted, move to next
+        if idx < len(runnable) - 1:
+            log(f"[stt] {name} exhausted, falling back to {runnable[idx + 1][0]}")
+    return None
+
+
+def list_providers():
+    """Every provider installed in providers/, in filename order.
+
+    Returns a list of (name, module_or_None). Used by --list-providers and by
+    the bake-off harness so both discover providers the same way."""
+    try:
+        files = sorted(f for f in os.listdir(PROVIDERS_DIR)
+                       if f.endswith(".py") and not f.startswith("__"))
+    except OSError:
+        return []
+    return [(f[:-3], load_provider(f[:-3])) for f in files]
+
+
 def load_provider(name):
     """Dynamically load a provider module from providers/<name>.py"""
     path = os.path.join(PROVIDERS_DIR, f"{name}.py")
@@ -245,11 +409,24 @@ def load_provider(name):
 
 def main():
     parser = argparse.ArgumentParser(description="Pluggable STT chain")
-    parser.add_argument("audio_file", help="Path to audio file")
-    parser.add_argument("--chain", default="gemini-3-flash-openrouter,sarvam-saaras-v3", help="Comma-separated provider chain (default: gemini-3-flash-openrouter,sarvam-saaras-v3)")
+    parser.add_argument("audio_file", nargs="?", help="Path to audio file")
+    parser.add_argument("--chain", default=None,
+                        help="Comma-separated provider chain, best first. "
+                             "Overrides $C3_STT_CHAIN; unset falls back to "
+                             f"$C3_STT_CHAIN then the built-in default ({DEFAULT_CHAIN})")
     parser.add_argument("--retries", type=int, default=1, help="Retries per provider (default: 1)")
     parser.add_argument("--retry-delay", type=float, default=2.0, help="Delay between retries in seconds (default: 2)")
+    parser.add_argument("--list-providers", action="store_true",
+                        help="List installed providers, their key status, and "
+                             "the resolved chain, then exit")
     args = parser.parse_args()
+
+    if args.list_providers:
+        _print_provider_listing(args.chain)
+        sys.exit(0)
+
+    if not args.audio_file:
+        parser.error("audio_file is required (or pass --list-providers)")
 
     audio_path = args.audio_file
     if not os.path.exists(audio_path):
@@ -285,7 +462,7 @@ def main():
         print(f"[stt] loudness ok (max_volume={max_volume_db}dB >= {threshold_db}dB)",
               file=sys.stderr)
 
-    chain = [name.strip() for name in args.chain.split(",") if name.strip()]
+    chain = _resolve_chain(args.chain)
     if not chain:
         print("ERROR: empty provider chain", file=sys.stderr)
         sys.exit(1)
@@ -309,36 +486,50 @@ def main():
         print("ERROR: no valid providers in chain", file=sys.stderr)
         sys.exit(1)
 
-    # Run chain: try each provider with retries
-    for idx, (name, mod) in enumerate(providers):
-        max_attempts = 1 + args.retries  # 1 initial + N retries
-        for attempt in range(1, max_attempts + 1):
-            try:
-                # Pass vocabulary if provider supports it
-                if hasattr(mod, 'set_vocabulary'):
-                    mod.set_vocabulary(vocab)
-                result = mod.transcribe(audio_path, audio_bytes)
-                if result and result.strip():
-                    if idx > 0 or attempt > 1:
-                        print(f"[stt] success: {name} (attempt {attempt})", file=sys.stderr)
-                    print(result.strip())
-                    sys.exit(0)
-                else:
-                    print(f"[stt] {name} attempt {attempt}/{max_attempts}: empty result", file=sys.stderr)
-            except Exception as e:
-                print(f"[stt] {name} attempt {attempt}/{max_attempts}: {type(e).__name__}: {e}", file=sys.stderr)
-
-            if attempt < max_attempts:
-                print(f"[stt] retrying {name} in {args.retry_delay}s...", file=sys.stderr)
-                time.sleep(args.retry_delay)
-
-        # Provider exhausted, move to next
-        if idx < len(providers) - 1:
-            next_name = providers[idx + 1][0]
-            print(f"[stt] {name} exhausted, falling back to {next_name}", file=sys.stderr)
+    # Run the chain in order: first non-empty transcript wins.
+    transcript = run_chain(
+        providers, audio_path, audio_bytes, vocab,
+        retries=args.retries, retry_delay=args.retry_delay,
+    )
+    if transcript:
+        print(transcript)
+        sys.exit(0)
 
     print("ERROR: all providers failed", file=sys.stderr)
     sys.exit(1)
+
+
+def _print_provider_listing(cli_chain=None):
+    """--list-providers: what's installed, what's keyed, what will actually run.
+
+    Prints to STDOUT (this mode produces no transcript, so stdout is free) so
+    `c3-broker setup` — or a human choosing an order — can see the valid
+    provider names and which ones have credentials, without reading source."""
+    chain = _resolve_chain(cli_chain)
+    if cli_chain and cli_chain.strip():
+        source = "--chain"
+    elif (os.environ.get("C3_STT_CHAIN") or "").strip():
+        source = "$C3_STT_CHAIN"
+    else:
+        source = "built-in default"
+
+    print("Installed providers (providers/<name>.py):")
+    for name, mod in list_providers():
+        if mod is None:
+            print(f"  {name:<28} UNLOADABLE (no transcribe() or import error)")
+            continue
+        reason = _provider_unavailable_reason(mod)
+        model = getattr(mod, "MODEL_ID", "") or "-"
+        status = f"unavailable — {reason}" if reason else "ready"
+        print(f"  {name:<28} {status:<40} model={model}")
+
+    print(f"\nResolved chain (from {source}), tried in this order:")
+    for i, name in enumerate(chain, 1):
+        print(f"  {i}. {name}")
+    print("\nTo change the order without editing source, put one line in "
+          "~/.claude/stt.env:\n"
+          "  C3_STT_CHAIN=" + ",".join(chain))
+
 
 if __name__ == "__main__":
     main()

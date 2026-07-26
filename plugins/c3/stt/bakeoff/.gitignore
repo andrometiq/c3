@@ -1,0 +1,17 @@
+# Bake-off output. NEVER commit this: results.md / results.json / transcripts/
+# contain the verbatim text of whatever voice notes were run through them, and
+# this is a public repository. Point --out somewhere outside the tree if you
+# want to keep a run around.
+results/
+
+# A corpus dropped in here for convenience must not be committed either —
+# it is audio of someone talking.
+corpus/
+refs/
+*.oga
+*.ogg
+*.opus
+*.mp3
+*.m4a
+*.wav
+*.flac

@@ -1,8 +1,37 @@
-"""Gemini 3 Flash STT provider via OpenRouter.
+"""Gemini Flash STT provider via OpenRouter.
 
 Requires: OPENROUTER_API_KEY env var (or in ~/.claude/stt.env)
+
+MODEL SUPERSEDED 2026-07-26. This provider shipped pinned to
+`google/gemini-3-flash-preview` (published 2025-12-17). Google has since
+released two newer audio-capable Flash generations; OpenRouter's live model
+index on 2026-07-26 lists `google/gemini-3.6-flash` (published 2026-07-21) as
+the current one, so that is now the default. The FILE NAME is deliberately
+unchanged: the filename is the provider's identity in every chain string and
+in existing ~/.claude/stt.env files, and renaming it would silently drop the
+provider out of those chains.
+
+Override the model without touching source:
+    C3_STT_GEMINI_MODEL=google/gemini-3.1-pro-preview
+(Pro scores materially better than Flash on Tamil in the IIT-Madras "Voice of
+India" benchmark, at ~1.4x the input price — worth measuring on your own audio
+with the bake-off harness before paying for it.)
 """
 import os, json, base64, urllib.request, urllib.error
+
+# Current audio-capable Gemini Flash on OpenRouter (verified against
+# https://openrouter.ai/api/v1/models on 2026-07-26: created 2026-07-21,
+# input_modalities includes "audio").
+DEFAULT_MODEL = "google/gemini-3.6-flash"
+MODEL_ID = os.environ.get("C3_STT_GEMINI_MODEL", "").strip() or DEFAULT_MODEL
+
+# All-in estimate, USD per minute of audio, for the bake-off cost column.
+# OpenRouter list price for google/gemini-3.6-flash on 2026-07-26:
+# $1.50/M input tokens, $7.50/M output tokens. Google bills audio at 32 tokens
+# per second = 1,920 input tokens/min -> $0.00288/min in. Transcript output at
+# ~150 wpm is ~200 tokens/min -> $0.0015/min out. Total ~= $0.0043/min
+# ($0.26/hr). Re-check when the model or its price changes.
+COST_PER_MINUTE_USD = 0.0043
 
 # --- Load API key ---
 _OR_KEY = None
@@ -24,6 +53,14 @@ def _get_key():
         except:
             pass
     return _OR_KEY
+
+
+def available() -> str:
+    """"" when this provider can run, else why it can't (see stt.py).
+
+    Lets the chain skip an unkeyed OpenRouter instantly instead of burning
+    every attempt on a RuntimeError that cannot succeed."""
+    return "" if _get_key() else "OPENROUTER_API_KEY not set (env or ~/.claude/stt.env)"
 
 # The exact token the model is told to emit when there is no intelligible
 # speech. transcribe() maps it (and an empty response) to None so the chain
@@ -78,7 +115,7 @@ def _build_vocab_prompt():
     return "\n".join(lines)
 
 def transcribe(audio_path: str, audio_bytes: bytes) -> str:
-    """Transcribe audio using Gemini 3 Flash via OpenRouter.
+    """Transcribe audio using Gemini Flash via OpenRouter.
     Returns transcript string or None on failure.
     """
     key = _get_key()
@@ -90,7 +127,7 @@ def transcribe(audio_path: str, audio_bytes: bytes) -> str:
     full_prompt = SYSTEM_PROMPT + _build_vocab_prompt()
 
     payload = json.dumps({
-        "model": "google/gemini-3-flash-preview",
+        "model": MODEL_ID,
         "temperature": 0,
         "messages": [
             {"role": "system", "content": full_prompt},
