@@ -277,6 +277,10 @@ func TestHandleInboundDelivered_MergedBatchConsumesAllCovered(t *testing.T) {
 	stub := claimedHolder(t, b, key)
 	stub.SetRoute(&key)
 	stub.MarkRouteConfirmed() // live-push ack consume requires a confirmed claim (§5 tripwire)
+	// The other half of the synthetic push: the ack is routed by the route the
+	// push went out on, recorded on the stub at push time (see Stub.pushRoutes).
+	// Without it this fabricated ack matches no push and consumes nothing.
+	stub.RecordPushRoute(3, key)
 
 	// A merged push of 3 lines, acked once with Count=3.
 	raw, _ := json.Marshal(ipc.InboundDeliveredMsg{Op: ipc.OpInboundDelivered, UpdateID: 3, OK: true, Count: 3})

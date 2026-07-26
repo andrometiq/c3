@@ -3,7 +3,6 @@ package broker
 import (
 	"sync"
 	"sync/atomic"
-	"time"
 )
 
 // Stub is the broker's view of a connected adapter. ConnID is the
@@ -33,11 +32,6 @@ type Stub struct {
 	// (waiting-for-reconnect) state.
 	connMu sync.RWMutex
 	Conn   any
-
-	// Disconnected is the time the conn dropped, or zero if connected.
-	// Holders keep their route claims while disconnected as long as the PID
-	// is still alive.
-	Disconnected time.Time
 
 	// Route is the currently-claimed route for this stub (one per connection
 	// in v1; re-attach replaces). nil when unclaimed. Set/cleared by the
@@ -87,6 +81,22 @@ type Stub struct {
 	// SetStableSessionID.
 	stableSessionID string
 	hasReplied      bool
+
+	// pushRoutes records, per outstanding live push, the ROUTE that push went out
+	// on — keyed by the pushed MessageID, which every adapter echoes back verbatim
+	// as InboundDeliveredMsg.UpdateID. The ack carries NO route, while the stub's
+	// CURRENT route can move between push and ack (the agent attaches to another
+	// topic mid-turn). Routing the destructive consume by CurrentRoute() therefore
+	// dispatches it to a worker that never made the push, which across two chats —
+	// Telegram message ids are unique per CHAT, not globally — removes lines from
+	// the WRONG route's queue. Authoritative state has to be CARRIED with the
+	// thing that depends on it, not re-inferred later.
+	//
+	// FIFO per key (an edited_message re-pushes one id); bounded by
+	// maxCoveredByPush. Written by the route worker goroutine, read by this
+	// connection's handler goroutine, so both go through stubMu.
+	pushRoutes map[int64][]RouteKey
+	pushOrder  []int64
 }
 
 // MarkDisconnected records that the stub's conn has dropped. The claim
@@ -95,18 +105,16 @@ func (s *Stub) MarkDisconnected() {
 	s.connMu.Lock()
 	defer s.connMu.Unlock()
 	s.Conn = nil
-	s.Disconnected = time.Now()
 }
 
 // Reattach swaps in a fresh conn (e.g., after the adapter reconnects). The
 // stub's identity (CLI, PID, CWD) is unchanged; ConnID is bumped by the
-// caller before this is invoked. Clears the disconnected timestamp.
+// caller before this is invoked.
 func (s *Stub) Reattach(conn any, newConnID uint64) {
 	s.connMu.Lock()
 	defer s.connMu.Unlock()
 	s.Conn = conn
 	s.ConnID = newConnID
-	s.Disconnected = time.Time{}
 }
 
 // IsConnected reports whether the stub currently has an active conn.
@@ -130,6 +138,13 @@ func (s *Stub) ConnValue() any {
 // protected. A connected stub is always alive. A disconnected stub is alive
 // if its PID still exists in the OS process table — meaning the user's
 // adapter process is still around and we're waiting for it to reconnect.
+//
+// Claims are PID-lived: there is deliberately NO disconnect timeout. A holder
+// that never reconnects keeps its claim until its process exits (or a human
+// force-steals the topic); how long it has been disconnected is not consulted.
+// The broker used to carry a Disconnected timestamp that no line of code read,
+// which invited the opposite belief — it was deleted rather than left to imply
+// a lifetime rule the code does not implement.
 func (s *Stub) IsAlive() bool {
 	if s.IsConnected() {
 		return true
@@ -250,6 +265,92 @@ func (s *Stub) HasReplied() bool {
 	s.stubMu.Lock()
 	defer s.stubMu.Unlock()
 	return s.hasReplied
+}
+
+// RecordPushRoute remembers the route a live push went out on, keyed by the
+// pushed MessageID the adapter echoes back on its delivered-ack. Called on the
+// route worker goroutine BEFORE the frame is written — a fast adapter acks on
+// this connection's own goroutine and can beat the worker to the next statement.
+// See the pushRoutes field doc.
+func (s *Stub) RecordPushRoute(pushID int64, key RouteKey) {
+	if pushID == 0 {
+		return
+	}
+	s.stubMu.Lock()
+	defer s.stubMu.Unlock()
+	// At the cap, evict the OLDEST record rather than refusing the newest: a
+	// dropped record only means its ack resolves to nothing and the consume is
+	// dropped, leaving that line queued (a recoverable duplicate). Refusing the
+	// newest would blind exactly the pushes still in flight.
+	for len(s.pushOrder) >= maxCoveredByPush {
+		oldest := s.pushOrder[0]
+		s.pushOrder = s.pushOrder[1:]
+		if recs := s.pushRoutes[oldest]; len(recs) > 1 {
+			s.pushRoutes[oldest] = recs[1:]
+		} else {
+			delete(s.pushRoutes, oldest)
+		}
+	}
+	if s.pushRoutes == nil {
+		s.pushRoutes = make(map[int64][]RouteKey, maxCoveredByPush)
+	}
+	s.pushRoutes[pushID] = append(s.pushRoutes[pushID], key)
+	s.pushOrder = append(s.pushOrder, pushID)
+}
+
+// TakePushRoute returns and clears the route the push with this id went out on,
+// or nil when this connection has no record of such a push — a broker restart, a
+// record evicted at the cap, or an ack replayed/fabricated for a push we never
+// made. Oldest-first when one id has several outstanding pushes.
+func (s *Stub) TakePushRoute(pushID int64) *RouteKey {
+	s.stubMu.Lock()
+	defer s.stubMu.Unlock()
+	recs := s.pushRoutes[pushID]
+	if len(recs) == 0 {
+		return nil
+	}
+	k := recs[0]
+	if len(recs) == 1 {
+		delete(s.pushRoutes, pushID)
+	} else {
+		s.pushRoutes[pushID] = recs[1:]
+	}
+	for i, id := range s.pushOrder {
+		if id == pushID {
+			s.pushOrder = append(s.pushOrder[:i], s.pushOrder[i+1:]...)
+			break
+		}
+	}
+	return &k
+}
+
+// AdoptPushRoutes moves prev's outstanding live-push records onto this stub so an
+// ack arriving AFTER an adapter reconnect still resolves to the route its push
+// went out on. Called from the hello reconnect branch beside the stable-session-id
+// carry. prev's records are older, so they keep the front of the FIFO; anything
+// already recorded on this stub (a push that landed between the claim transfer
+// and this call) is preserved behind them.
+func (s *Stub) AdoptPushRoutes(prev *Stub) {
+	if prev == nil || prev == s {
+		return
+	}
+	prev.stubMu.Lock()
+	routes, order := prev.pushRoutes, prev.pushOrder
+	prev.pushRoutes, prev.pushOrder = nil, nil
+	prev.stubMu.Unlock()
+	if len(order) == 0 {
+		return
+	}
+	s.stubMu.Lock()
+	defer s.stubMu.Unlock()
+	if s.pushRoutes == nil {
+		s.pushRoutes, s.pushOrder = routes, order
+		return
+	}
+	for id, recs := range routes {
+		s.pushRoutes[id] = append(recs, s.pushRoutes[id]...)
+	}
+	s.pushOrder = append(order, s.pushOrder...)
 }
 
 // CurrentRoute returns a copy of the stub's current claim, or nil.

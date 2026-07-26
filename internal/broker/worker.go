@@ -1034,6 +1034,23 @@ func (w *RouteWorker) forwardOrFallbackCovering(_ context.Context, in *c3types.I
 				pending = n - covered // covered lines are still queued until acked
 			}
 		}
+		// Does this push cover durable lines whose ack must consume them?
+		tracked := !in.IsEvent() && covered > 0 && len(coveredIDs) > 0
+		// Record the ROUTE on the pushed SESSION *before* the frame goes out. The
+		// delivered-ack carries no route (handleInboundDelivered resolves it from
+		// here), and the adapter can ack the instant the frame lands — on the
+		// connection's own goroutine, which is NOT serialized behind this worker.
+		// Recording after the write therefore lets a fast ack find nothing;
+		// TestFlushInbounds_MixedBatchCoveredCountsActualAppends catches exactly
+		// that. coveredByPush below is immune because its reader (handleConsume) is
+		// a job queued onto THIS worker; stub-side state has no such protection.
+		//
+		// A record orphaned by a FAILED write is harmless: the identity record
+		// below is made only on success, so such an ack resolves to the route and
+		// then hits handleConsume's "covered identity unavailable" skip.
+		if tracked {
+			holder.RecordPushRoute(in.MessageID, w.key)
+		}
 		if err := conn.WriteJSON(ipc.InboundMsg{Op: ipc.OpInbound, Inbound: *in, Covered: covered, Pending: pending}); err != nil {
 			log.Printf("deliver FAIL chan=%s chat=%d topic=%s msg=%d to cli=%s pid=%d: %v — %s",
 				w.key.Channel, w.key.ChatID, TopicKeyStr(w.key), in.MessageID,
@@ -1045,7 +1062,7 @@ func (w *RouteWorker) forwardOrFallbackCovering(_ context.Context, in *c3types.I
 		// meaningful for a non-event push that actually covered stored lines and
 		// whose caller knew their ids; otherwise the ack keeps the legacy
 		// head-consume path.
-		if !in.IsEvent() && covered > 0 && len(coveredIDs) > 0 {
+		if tracked {
 			w.recordCoveredByPush(in.MessageID, coveredIDs)
 		}
 		// Live delivery: the message stays queued until the adapter sends

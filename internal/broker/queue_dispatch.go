@@ -193,12 +193,14 @@ func (b *Broker) handleRetranscribe(conn *ipc.Conn, stub *Stub, raw []byte) {
 	_ = conn.WriteJSON(resp)
 }
 
-// handleInboundDelivered consumes the oldest queued message(s) for the stub's
-// route after the Claude adapter acks a successful live push (OK=true). A merged
-// push covers Count stored lines and is acked once, so Count lines are consumed
-// off the head (not 1, which would orphan Count-1 as phantom backlog). OK=false
-// leaves it queued (backlog + recovery nudge). No response is sent — it is a
-// one-way ack.
+// handleInboundDelivered consumes the queued message(s) covered by a live push
+// after the adapter acks it (OK=true), on the route that push ACTUALLY went out
+// on — not whatever route the stub holds by the time the ack lands. A merged
+// push covers Count stored lines and is acked once, so all of them are consumed
+// (not 1, which would orphan Count-1 as phantom backlog) — by IDENTITY, from the
+// record the push left behind; handleConsume never guesses at the queue head.
+// OK=false leaves it queued (backlog + recovery nudge). No response is sent — it
+// is a one-way ack.
 //
 // Count is forwarded VERBATIM (no 0→1 bump): a Count<=0 ack covered no stored
 // lines (the adapter should not even ack events now, but an older one might echo
@@ -214,10 +216,6 @@ func (b *Broker) handleInboundDelivered(stub *Stub, raw []byte) {
 		log.Printf("inbound_delivered NACK update=%d — leaving queued (backlog)", msg.UpdateID)
 		return
 	}
-	route := stub.CurrentRoute()
-	if route == nil {
-		return
-	}
 	// Drop a zero-/negative-covered ack outright — there is nothing to consume and
 	// no job worth dispatching (handleConsume would skip it anyway).
 	if msg.Count < 1 {
@@ -230,6 +228,25 @@ func (b *Broker) handleInboundDelivered(stub *Stub, raw []byte) {
 	// route. Fail-closed insurance; a legitimate holder always has a confirmed route.
 	if !stub.RouteConfirmed() {
 		log.Printf("inbound_delivered update=%d count=%d — route not confirmed by an explicit claim; consume DROPPED (§5 tripwire, Count lines remain as backlog)", msg.UpdateID, msg.Count)
+		return
+	}
+	// The ack carries NO route, and the stub's CURRENT route can have moved
+	// between the push and the ack: the agent attaches to another topic mid-turn
+	// while the grok adapter is still inside injectWithRetry's backoff (~2 min over
+	// 12 attempts — it is retrying precisely BECAUSE the agent is mid-turn). Using
+	// CurrentRoute() here dispatched this DESTRUCTIVE consume to a worker that
+	// never made the push: same chat it is a duplicate plus a permanently inflated
+	// pending count, and across two chats — Telegram message ids are unique per
+	// CHAT, not globally — it removes lines from the WRONG route's queue.
+	//
+	// Dispatch it to the route this session was ACTUALLY pushed on, recorded at
+	// push time. No wire change is needed: the broker already knew both halves of
+	// the correlation when it wrote the frame. Deliberately NOT taken from the
+	// adapter either — the least-trusted party must not get to name the queue it
+	// drains.
+	route := stub.TakePushRoute(msg.UpdateID)
+	if route == nil {
+		log.Printf("inbound_delivered update=%d count=%d conn=%d: no live push recorded for this session (broker restart / record cap / ack for a push we never made) — consume DROPPED (the line stays queued, recoverable via fetch_queue)", msg.UpdateID, msg.Count, stub.ConnID)
 		return
 	}
 	// ALSO (whole-branch review): surface a dropped consume like the sibling

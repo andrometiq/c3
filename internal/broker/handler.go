@@ -79,7 +79,40 @@ func (b *Broker) HandleConn(nc net.Conn) {
 		}
 		// Unregister the OLD stub (now superseded) and transfer its claims.
 		b.Stubs.Unregister(oldConnID)
-		b.Routes.TransferAllByConnID(oldConnID, stub)
+		transferred := b.Routes.TransferAllByConnID(oldConnID, stub)
+		// Carry the CLAIM onto the new stub, not just the routing-table entry.
+		// Routes now says this stub holds the route while the stub itself says it
+		// holds nothing, and every stub-derived path reads stub.CurrentRoute():
+		// inbound keeps arriving here (worker.go's Routes.Holder resolves to this
+		// stub) while `reply`/`react`/`poll` answer "no route claimed", the
+		// delivered-ack is dropped so the same lines are handed out again by
+		// fetch_queue, a bare attach falls through to the picker, and /c3:ping and
+		// /c3:sessions report "not attached". That window is PERMANENT if the
+		// adapter's attach replay never lands (write error, ValidateTopic failure,
+		// nothing to replay). Confirmation is a property of the CLAIM and it is the
+		// same claim, so re-derive it from the old stub rather than confirming
+		// blindly — a route bound without a real claim must stay fail-closed.
+		switch len(transferred) {
+		case 0:
+		case 1:
+			k := transferred[0]
+			stub.SetRoute(&k)
+			if existing.RouteConfirmed() {
+				stub.MarkRouteConfirmed()
+			}
+		default:
+			// TransferAllByConnID ranges a map, so "pick the first" would bind an
+			// arbitrary one of N. A stub holds at most one claim (tryClaim releases
+			// the old route before claiming the new one), so this is a broken
+			// invariant, not a case to guess at: leave the route unbound and say so.
+			log.Printf("hello: RECONNECT cli=%s pid=%d cwd=%q transferred %d claims — single-claim-per-stub violated; route left unbound",
+				hello.CLI, hello.PID, hello.CWD, len(transferred))
+		}
+		// Carry the outstanding live-push records too: a delivered-ack that arrives
+		// after the reconnect must still resolve to the route its push went out on
+		// (see Stub.pushRoutes). Ordered after the transfer so a push racing this
+		// hello records onto the stub that now holds the claim.
+		stub.AdoptPushRoutes(existing)
 		log.Printf("hello: RECONNECT cli=%s pid=%d cwd=%q old-conn=%d new-conn=%d (claims transferred)",
 			hello.CLI, hello.PID, hello.CWD, oldConnID, stub.ConnID)
 	} else {
