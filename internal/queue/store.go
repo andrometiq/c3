@@ -88,7 +88,26 @@ func (s *Store) curPath(rk RouteKey) string   { return filepath.Join(s.dir, rk.F
 // the status index. The caller (worker) only treats the source update_id as
 // offset-eligible AFTER this returns nil.
 func (s *Store) Append(rk RouteKey, in *c3types.Inbound) error {
-	data, err := json.Marshal(in)
+	// Stamp the record format version on the way to disk. Append is the ONLY
+	// place a record enters the queue, so it is the only place that has to do
+	// this — rewrite() and snapshotDropped() re-serialize records that were
+	// already written, and must preserve whatever V those records carried (0,
+	// meaning version 1, for everything queued before this field existed).
+	//
+	// The stamp goes on a COPY, never on the caller's struct: Append takes a
+	// pointer the broker still holds and delivers over IPC after this returns,
+	// and mutating it here would be a side effect on the caller's value rather
+	// than a change to what the queue stores. A shallow copy marshals
+	// byte-identically to the original (the shared slices/pointers are only
+	// read during marshal). A nil `in` keeps its existing behaviour — marshals
+	// to "null" — instead of panicking on the dereference.
+	rec := in
+	if in != nil && in.V == 0 {
+		cp := *in
+		cp.V = c3types.InboundRecordVersion
+		rec = &cp
+	}
+	data, err := json.Marshal(rec)
 	if err != nil {
 		return fmt.Errorf("queue: marshal: %w", err)
 	}

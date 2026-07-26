@@ -341,9 +341,19 @@ func TestRemoveIDs_CursorRemapPreservesConsumed(t *testing.T) {
 	if got, err := s.Consume(rk, 2); err != nil || len(got) != 2 || got[1].MessageID != 2 {
 		t.Fatalf("consume = %+v err=%v, want msg1,msg2", got, err)
 	}
-	// Capture the exact consumed-line bytes before the remove.
-	wantM1, _ := json.Marshal(m1)
-	wantM2, _ := json.Marshal(m2)
+	// Capture the exact consumed-line bytes before the remove, read from the FILE
+	// rather than re-marshaled from m1/m2. The invariant under test is that
+	// rewrite() does not perturb bytes already on disk; re-deriving the
+	// expectation from the in-memory struct instead pins the encoder's current
+	// output, so any additive field Append legitimately stamps on the way to disk
+	// (the V record-version marker) breaks it while rewrite() is still perfectly
+	// faithful. Reading the real lines tests the real thing and cannot rot.
+	// Layout at this point: [msg1][corrupt][msg2][msg3][msg4].
+	beforeLines := rawJSONL(t, dir, rk)
+	if len(beforeLines) != 5 {
+		t.Fatalf("pre-remove on-disk lines = %d, want 5", len(beforeLines))
+	}
+	wantM1, wantM2 := beforeLines[0], beforeLines[2]
 
 	// Remove the pending msg3. rewrite() strips the corrupt line that sat BEFORE the
 	// cursor, so the cursor must be remapped (old .cur=3 → new .cur=2).
