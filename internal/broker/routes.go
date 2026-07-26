@@ -67,21 +67,62 @@ func (r *Routes) Claim(key RouteKey, stub *Stub) (*Stub, bool) {
 	return stub, true
 }
 
+// completeIdentity reports whether a hello named a session at all.
+//
+// The broker accepts any hello it can parse — an incomplete identity is not a
+// protocol error and the connection works normally. What it does NOT get is to
+// be MATCHED: the two predicates below refuse it, so it never adopts, transfers,
+// or is transferred to. That is the project rule stated positively — identity is
+// what buys persistence, and a session that declines to name itself declines the
+// persistence, rather than being punished at the door.
+//
+// CLI and PID are load-bearing; CWD deliberately is not. `os.Getwd()` fails when
+// a session's launch directory has been deleted (cmd/c3-claude-adapter/main.go
+// does `cwd, _ := os.Getwd()`), so requiring a non-empty CWD would strip a
+// BUNDLED adapter of its reconnect transfer in a real scenario. Empty-CWD
+// equality is safe once PID > 0 is enforced: two simultaneously live processes
+// cannot share a PID, so CWD never decides between two unknowns — PID does.
+func completeIdentity(cli string, pid int) bool { return cli != "" && pid > 0 }
+
 // sameLogicalSession returns whether two stubs represent the same adapter
 // process — same CLI, same PID, same CWD. Used to detect a reconnect of
 // an existing session and let it transfer its claim instead of fighting
 // for it.
+//
+// It FAILS CLOSED on an incomplete identity. Without that guard two adapters
+// that each sent an empty CLI, PID 0 and an empty CWD compared EQUAL, and the
+// caller below then handed one's claims to the other — the "two unknown
+// identities must never compare equal" rule, broken at the point that decides
+// who owns a route.
 func sameLogicalSession(a, b *Stub) bool {
+	if !completeIdentity(a.CLI, a.PID) || !completeIdentity(b.CLI, b.PID) {
+		return false
+	}
 	return a.CLI == b.CLI && a.PID == b.PID && a.CWD == b.CWD
 }
 
 // FindByLogicalSession returns the (first) stub matching the (CLI, PID,
 // CWD) triple, or nil if none. Used during hello to detect a reconnect
 // and transfer claims atomically.
+//
+// The guard is repeated here rather than delegated because this is a SECOND,
+// independent copy of the same comparison, and it is the more dangerous one: it
+// runs at HELLO time, before any attach, so an unguarded match hands over a live
+// session's claims to a connection that has not asked for anything yet. Fixing
+// sameLogicalSession alone would have left exactly this path open while every
+// test on the other path went green.
 func (r *Routes) FindByLogicalSession(cli string, pid int, cwd string) *Stub {
+	if !completeIdentity(cli, pid) {
+		return nil
+	}
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	for _, s := range r.m {
+		// No second completeIdentity check on s: reaching here means cli != "" and
+		// pid > 0, and a match requires s.CLI == cli && s.PID == pid, so a matched
+		// stub is necessarily complete too. A guard here would be unreachable —
+		// and worse than useless, because it would make the one guard above look
+		// optional to anyone reverting it, and to any test trying to pin it.
 		if s.CLI == cli && s.PID == pid && s.CWD == cwd {
 			return s
 		}

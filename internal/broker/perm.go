@@ -446,6 +446,14 @@ func (b *Broker) registerPerm(p *pendingPerm) bool {
 // registers a FRESH stub and transfers the claim to it — that is the same
 // session and must still be answered.
 //
+// That fallback used to make the sentence above FALSE for the whole function:
+// sameLogicalSession compared two incomplete identities as equal, so a verdict
+// could be delivered across the boundary this check exists to enforce. The
+// predicate now fails closed on an incomplete identity (routes.go
+// completeIdentity), which is what makes the pointer-first claim true end to
+// end. This function's guarantee therefore RESTS on that one — do not relax it
+// there without re-reading this.
+//
 // A nil owner means none was recorded (a pending built directly, as the older
 // perm/ask tests do): there is nothing to compare, so the check stays inert
 // rather than refusing a legitimate verdict. Every production registration goes

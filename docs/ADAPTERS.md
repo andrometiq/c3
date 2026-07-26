@@ -30,7 +30,11 @@ Every op below is labelled.
 - **Frozen** — the shape is part of the release contract. Fields will not be renamed, retyped, removed, or have their meaning changed without a protocol-version bump (see below). New **optional** fields may still be added; ignore what you don't recognise.
 - **Provisional** — real, implemented, and usable today, but **may change in a minor version**. If you depend on a Provisional op, pin your adapter to a C3 version and re-read this document before upgrading. We would rather label an op honestly than freeze a shape we are not confident in.
 
-The Frozen core is deliberately small: it is exactly the set an adapter cannot be correct without — handshake, ownership, message delivery with its acknowledgement, tool forwarding, durable-queue recovery, and errors.
+The Frozen core is deliberately small: handshake, ownership, message delivery with its acknowledgement, tool forwarding, durable-queue recovery, and errors.
+
+**"Frozen" is a promise about shape, not a requirement to implement.** The two are easy to conflate and this document used to. Every Frozen op's shape is part of the release contract — but of the 15, **12 are required** and 3 are frozen conveniences you may skip: `bye` (an optional graceful close; closing the socket is equivalent, and no built-in sends it) and the `list_topics` → `topics_list` pair (discovery only — an adapter that attaches explicitly, and surfaces the broker's picker response when it does not, is complete without them). Implementing them is a choice; their shape not changing under you is not.
+
+One boundary inside a Frozen op, stated explicitly because it is genuinely mixed: `attach`'s **envelope** is frozen, while the optional **proposal payload** it can carry is still Provisional. The actions today are `create`, `use_existing_other_group` (and its `…_with_alternative` form), `disambiguate_dm`, `force_steal` (and `force_steal_desktop`), and `pick_topic` — but treat that as a snapshot, not a closed set: **handle an unrecognised proposal action the way you handle an unknown op**, surfacing it to the user rather than failing.
 
 ### Mandatory rule: unknown ops must be logged and skipped, never fatal
 
@@ -121,9 +125,9 @@ The broker never rejects unknown JSON fields, and neither should you.
 
 Field names below are the literal JSON keys. `?` marks an optional field (omitted when empty/zero).
 
-### Frozen core — 15 ops
+### Frozen core — 15 ops (12 required, 3 optional)
 
-An adapter that implements only these is correct and complete for a CLI with no interactive-question, permission-relay, voice, or session-resume needs.
+An adapter that implements only these is correct and complete for a CLI with no interactive-question, permission-relay, voice, or session-resume needs. Three of the fifteen — `bye`, `list_topics`, `topics_list` — are frozen in shape but **optional to implement**; see *Stability* above.
 
 #### `hello` → `hello_ack` — the handshake
 
@@ -137,11 +141,15 @@ An adapter that implements only these is correct and complete for a CLI with no 
 | field | type | notes |
 |---|---|---|
 | `cli` | string | your adapter's CLI name. Appears in claim listings and logs. Avoid `c3-broker-cli` — that name is reserved for the bundled status client and is filtered out of session listings. |
-| `pid` | int | your adapter's pid. The broker keeps a claim alive as long as this pid lives, so it must be a real, live process id. |
+| `pid` | int | your adapter's pid. The broker keeps a claim alive as long as this pid lives, so it must be a real, live process id. A future version may additionally bind this pid to its process start time, so that a *recycled* pid is not treated as the same session; an honest pid is unaffected. |
 | `cwd` | string | resolved-absolute path. Seeds the attach picker's "current project" suggestion and the cwd→mapping lookup. |
 | `capabilities`? | []string | free-form tags. **Currently recorded on the wire but not read by the broker** — informational only. |
 | `cannot_render_channels`? | bool | **inverted sense, and load-bearing — read the next paragraph.** |
 | `protocol_version`? | int | absent ⇒ 1. |
+
+**The identity rule: `cli`, `pid` and `cwd` together are your session identity, and identity is what buys persistence.** A hello with an empty `cli` or `pid ≤ 0` is **accepted** — it is not a protocol error and your connection works normally — but it is **anonymous**, and the broker will never match it to any other connection. Concretely, an anonymous adapter gets no reconnect claim transfer (its claims are released when the connection drops, since a pid of `0` is never live), and no cross-connection continuation: a permission verdict arriving after a reconnect, or a "held by you" report, is refused rather than guessed at. Everything within one connection — attach, tools, inbound, permissions — works exactly as documented.
+
+The broker rejects only *malformed JSON*. It does not reject an incomplete identity; it declines to treat one as an identity. The reason is a rule this project holds without exception: **two unknown identities must never compare equal.** Two adapters that both omit these fields are not the same session, and the broker will not hand one's topic to the other on the strength of them matching in their emptiness.
 
 **`cannot_render_channels` is the one field a naive adapter gets wrong with data-loss consequences.** Absent or `false` means *"my host can render unsolicited channel pushes."* Set it to `true` only when you are confident your host **cannot** display a push. When true, the broker never marks that session's inbound as delivered: durable human messages fall through to the queue plus a held-notice (recoverable via `fetch_queue`, which is a tool *result* and therefore always renders), while the session keeps its claim for outbound.
 
@@ -454,7 +462,7 @@ While running:
 On the broker dropping the connection:
 
 - **Reconnect with backoff** — the built-ins loop with exponential backoff (0.5s → 30s cap) rather than giving up, and surface a one-shot "broker unreachable" advisory after ~30s so the user learns inbound is down instead of assuming it works.
-- **Re-handshake with `hello`** — *not* `server_info`. The broker recognises the same `(cli, pid, cwd)` triple as a reconnect and transfers your existing claims to the fresh connection, so your claim survives a bounce.
+- **Re-handshake with `hello`** — *not* `server_info`. The broker recognises the same `(cli, pid, cwd)` triple — **with `cli` non-empty and `pid > 0`** — as a reconnect and transfers your existing claims to the fresh connection, so your claim survives a bounce. An *anonymous* hello (see the identity rule above) gets no transfer: use the attach replay in the next bullet, which restores your claim precisely because dropping an anonymous connection releases it.
 - **Replay your last successful attach** with `replay: true` so the claim is restored without the welcome message firing again. Address a remembered topic by `topic_id` + `group` (+ `chat_id` cross-check), **not** by name: a DM recovers as `name: "dm"`, and replaying `attach(name: "dm")` can silently bind a topic literally named `dm`.
 - **Re-fire `recover_session`** if you had one.
 - **Wake every pending request** with a "broker reconnect" error so the host's tool calls don't hang.
