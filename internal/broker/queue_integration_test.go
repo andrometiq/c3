@@ -109,6 +109,47 @@ func TestHeldReplyText_CarriesCount(t *testing.T) {
 	}
 }
 
+// An EDITED message re-dispatches with the SAME MessageID but DIFFERENT content.
+// The delivered-dedup is keyed on MessageID alone, so without the Edited
+// exemption flushInbounds classifies the correction as a crash-replay: it skips
+// the Append AND calls markPersisted, which acks the source update to Telegram —
+// and Telegram never redelivers an acked update. The user's correction is
+// destroyed on disk and unrecoverable from the channel, while the operator is
+// told "held, nothing lost".
+func TestFlushInbounds_EditedMessageIsPersisted_NotSuppressedAsReplay(t *testing.T) {
+	t.Setenv("C3_QUEUE_DIR", t.TempDir())
+	b := brokerWithChannel(t, mfWithTelegram(), &fakeChannel{})
+	defer b.Shutdown()
+	// No claim on this route — the unconditional destroyer path.
+	w := newRouteWorker(context.Background(), RouteKey{Channel: "telegram", ChatID: -100}, time.Hour, b)
+	defer w.Stop()
+	qrk := queue.RouteKey{Channel: "telegram", ChatID: -100}
+
+	// The original.
+	w.flushInbounds(context.Background(), []*c3types.Inbound{
+		{Channel: "telegram", ChatID: -100, MessageID: 500, Text: "run the migration on staging", Timestamp: time.Now()},
+	})
+	// The user edits it. SEPARATE flush — in one batch mergeBatch would join the
+	// texts for delivery and mask the storage loss.
+	w.flushInbounds(context.Background(), []*c3types.Inbound{
+		{Channel: "telegram", ChatID: -100, MessageID: 500, Text: "run the migration on staging ONLY, NOT prod", Timestamp: time.Now(), Edited: true},
+	})
+
+	lines, err := b.Queue.Consume(qrk, -1)
+	if err != nil {
+		t.Fatalf("Consume: %v", err)
+	}
+	if len(lines) != 2 {
+		t.Fatalf("MESSAGE LOSS: the edit was suppressed as a replay and acked to Telegram; pending=%d, want 2", len(lines))
+	}
+	if lines[0].Text != "run the migration on staging" {
+		t.Fatalf("first line = %q, want the original", lines[0].Text)
+	}
+	if lines[1].Text != "run the migration on staging ONLY, NOT prod" {
+		t.Fatalf("MESSAGE LOSS: the amendment is not on disk; second line = %q", lines[1].Text)
+	}
+}
+
 func TestFlushInbounds_DedupesReplayedMessageID(t *testing.T) {
 	t.Setenv("C3_QUEUE_DIR", t.TempDir())
 	b := brokerWithChannel(t, mfWithTelegram(), &fakeChannel{})

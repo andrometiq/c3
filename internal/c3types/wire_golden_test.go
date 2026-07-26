@@ -102,13 +102,14 @@ func wireGoldens() []wireGolden {
 				DrainedFrom: "telegram__-1001__7",
 				V:           InboundRecordVersion,
 				ConvKind:    "group",
+				Edited:      true,
 			},
 			keys: []string{
 				"Channel", "ChatID", "TopicID", "MessageID", "Sender", "Text",
 				"Attachments", "ReplyTo", "Timestamp", "Kind", "Event",
-				"DrainedFrom", "V", "ConvKind",
+				"DrainedFrom", "V", "ConvKind", "Edited",
 			},
-			omitEmpty: []string{"Kind", "Event", "DrainedFrom", "V", "ConvKind"},
+			omitEmpty: []string{"Kind", "Event", "DrainedFrom", "V", "ConvKind", "Edited"},
 		},
 		{
 			name: "InboundEvent",

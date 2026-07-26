@@ -608,7 +608,20 @@ func (w *RouteWorker) flushInbounds(ctx context.Context, batch []*c3types.Inboun
 			// Dedup the at-least-once REPLAY a crash-mid-consume can produce
 			// (spec: "dedupe by message_id"). alreadySeen is PURE (it does not
 			// record), so a failed Append below never poisons the dedup set (C2).
-			if w.dedup != nil && w.dedup.alreadySeen(in.MessageID) {
+			//
+			// An EDIT is exempt. This dedup is keyed on MessageID alone and exists
+			// to suppress a crash-replay of the SAME content; an edited_message
+			// reuses the id with DIFFERENT content, so suppressing it skips the
+			// Append AND calls markPersisted — acking the update to Telegram, which
+			// never redelivers an acked update. That destroyed the user's correction
+			// outright. The queue is already built for the resulting state: two
+			// pending lines may share one MessageID (internal/queue/store.go
+			// RemoveIDs, occurrence-ordinal selection), and the push-coverage map
+			// keys a FIFO per id (coveredByPush). Cost of the exemption: a crash
+			// between a successful Append and the offset commit re-appends that edit
+			// once. A recoverable duplicate, which is the trade this project takes
+			// over a destroyed message.
+			if w.dedup != nil && !in.Edited && w.dedup.alreadySeen(in.MessageID) {
 				log.Printf("dedup chan=%s chat=%d topic=%s msg=%d: already delivered, suppressing replay",
 					w.key.Channel, w.key.ChatID, TopicKeyStr(w.key), in.MessageID)
 				// C3: the FIRST delivery of this message_id already persisted it and
@@ -1454,8 +1467,13 @@ func (w *RouteWorker) handleConsume(_ context.Context, job *ConsumeJob) {
 		// 1-based occurrence ordinals per id. A queue can legitimately hold two
 		// pending lines with one MessageID (an edited message re-dispatches with
 		// the same id), in which case this selects the OLDEST occurrence rather
-		// than strictly this push's line — same id, same message, and still a
-		// targeted removal rather than an unrelated head line.
+		// than strictly this push's line. Since the delivered-dedup exempts edits
+		// (see flushInbounds), those two lines carry the SAME id but DIFFERENT
+		// text, so this is not "the same message" — an out-of-order ack can remove
+		// the other occurrence, leaving one line queued for re-delivery. That is a
+		// recoverable DUPLICATE (both lines were pushed live in that ordering), not
+		// a destruction, and it is still a targeted removal by id rather than an
+		// unrelated head line.
 		sel := make(map[int64][]int, len(ids))
 		for _, id := range ids {
 			sel[id] = append(sel[id], len(sel[id])+1)

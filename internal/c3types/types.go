@@ -99,6 +99,19 @@ type Inbound struct {
 	// omitempty is REQUIRED, for the same reason as V: an unconditional
 	// "ConvKind":"" on every written record would itself be a format change.
 	ConvKind string `json:"ConvKind,omitempty"`
+
+	// Edited marks an inbound that re-delivers an ALREADY-DELIVERED MessageID
+	// with NEW content — a user editing a message they already sent. The channel
+	// states it; the broker needs it because its delivered-dedup is keyed on
+	// MessageID alone (internal/broker/worker.go deliveredDedup), which cannot
+	// tell an amendment from the crash-replay it exists to suppress. Without this
+	// bit an edit is classified a duplicate, skipped for storage, and its update
+	// acked — the user's correction is destroyed silently.
+	//
+	// omitempty is REQUIRED, same reason as V and ConvKind: an unconditional
+	// "Edited":false on every record would itself be a format change. An old
+	// JSONL line without the key unmarshals to false, the correct reading.
+	Edited bool `json:"Edited,omitempty"`
 }
 
 // InboundRecordVersion is the record format version a writer stamps into

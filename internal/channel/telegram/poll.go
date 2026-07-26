@@ -1126,6 +1126,11 @@ func (c *Channel) dispatchMessage(updateID int64, msg *gotgbot.Message, edited b
 		c.markUpdateDone(updateID)
 		return
 	}
+	// State the amendment fact for the broker: an edited_message re-dispatches
+	// with the SAME MessageID, and the broker's delivered-dedup is keyed on that
+	// id alone. (The phantom-edit suppressor below drops content-free edits, so
+	// anything that survives to Emit carries content the session must see.)
+	in.Edited = edited
 	kind := "text"
 	if len(in.Attachments) > 0 && in.Attachments[0].Kind != "" {
 		kind = in.Attachments[0].Kind
@@ -1222,16 +1227,17 @@ func (c *Channel) dispatchMessage(updateID int64, msg *gotgbot.Message, edited b
 	}
 	c.host.Logf("telegram: inbound update=%d msg=%d chat=%d thread=%d kind=%s edited=%v",
 		updateID, msg.MessageId, msg.Chat.Id, msg.MessageThreadId, kind, edited)
-	// Record the message_id → update_id seam BEFORE Emit so the broker's persist
-	// callback (fired after Append+fsync) can MarkDone the right source update.
-	// FIFO-append (not overwrite): two in-flight updates can share a message_id
-	// (an edited_message during the persist window), and each must resolve its own
-	// persist outcome in order. Guarded on the tracker being live (Start seeds
-	// msgToUpdate alongside it); unit tests that leave offTrk nil never persist, so
-	// the seam is unused.
+	// Record the (chat_id, message_id) → update_id seam BEFORE Emit so the broker's
+	// persist callback (fired after Append+fsync) can MarkDone the right source
+	// update. Scoped by CHAT because message_ids are per-chat and two chats persist
+	// concurrently (see seamKey). FIFO-append (not overwrite): two in-flight updates
+	// can share a (chat, message_id) — an edited_message during the persist window —
+	// and each must resolve its own persist outcome in order. Guarded on the
+	// tracker being live (Start seeds msgToUpdate alongside it); unit tests that
+	// leave offTrk nil never persist, so the seam is unused.
 	if c.offTrk != nil {
 		c.mu.Lock()
-		c.seamStageLocked(in.MessageID, updateID)
+		c.seamStageLocked(in.ChatID, in.MessageID, updateID)
 		c.mu.Unlock()
 	}
 	// Emit reports false when the route worker is still saturated after Emit's own
@@ -1262,7 +1268,7 @@ func (c *Channel) dispatchMessage(updateID int64, msg *gotgbot.Message, edited b
 		// submitGraceWindow Emit already spent before refusing — 2s per held
 		// update, one getUpdates per batch.
 		c.mu.Lock()
-		c.seamRemoveLocked(in.MessageID, updateID)
+		c.seamRemoveLocked(in.ChatID, in.MessageID, updateID)
 		c.mu.Unlock()
 		if c.dedup != nil {
 			c.dedup.forget(updateID)

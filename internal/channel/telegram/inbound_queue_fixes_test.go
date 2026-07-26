@@ -24,7 +24,7 @@ func TestDispatchMessage_EmitSaturated_HoldsOffsetForRedelivery(t *testing.T) {
 	h := &fakeHost{decision: channel.GateInboundAllow, emitDrops: true}
 	c := makeChannel(h)
 	c.offTrk = newOffsetTracker(100)
-	c.msgToUpdate = map[int64][]int64{}
+	c.msgToUpdate = map[seamKey][]int64{}
 	// makeChannel leaves c.dedup nil. The poll loop always has one, and the
 	// forget-on-saturation branch this test exists to cover is guarded by
 	// `c.dedup != nil` — so without this the branch is never reached and the
@@ -55,7 +55,10 @@ func TestDispatchMessage_EmitSaturated_HoldsOffsetForRedelivery(t *testing.T) {
 	// The orphaned msgToUpdate seam must be cleared (no leak) — the redelivery
 	// stages a fresh entry.
 	c.mu.Lock()
-	_, leaked := c.msgToUpdate[textMsg("hi", 42).MessageId]
+	// textMsg(_, 42) puts the message in CHAT 42 — the seam is keyed by
+	// (chat_id, message_id), so the lookup must use that chat or it reads an
+	// empty bucket and passes no matter what the cleanup did.
+	_, leaked := c.msgToUpdate[seamKey{chatID: 42, msgID: textMsg("hi", 42).MessageId}]
 	c.mu.Unlock()
 	if leaked {
 		t.Fatal("msgToUpdate entry for a saturated inbound must be cleared (leak)")
@@ -75,7 +78,7 @@ func TestDispatchMessage_EmitOK_LeavesUpdateInFlight(t *testing.T) {
 	h := &fakeHost{decision: channel.GateInboundAllow, emitDrops: false}
 	c := makeChannel(h)
 	c.offTrk = newOffsetTracker(100)
-	c.msgToUpdate = map[int64][]int64{}
+	c.msgToUpdate = map[seamKey][]int64{}
 
 	c.offTrk.Register(101)
 	c.dispatchMessage(101, textMsg("hi", 42), false, nil)
@@ -87,7 +90,8 @@ func TestDispatchMessage_EmitOK_LeavesUpdateInFlight(t *testing.T) {
 	}
 	// The seam must be staged (FIFO slice of one) for the persist callback to resolve.
 	c.mu.Lock()
-	ids, staged := c.msgToUpdate[textMsg("hi", 42).MessageId]
+	// textMsg(_, 42) dispatches in CHAT 42; the seam key is (chat_id, message_id).
+	ids, staged := c.msgToUpdate[seamKey{chatID: 42, msgID: textMsg("hi", 42).MessageId}]
 	c.mu.Unlock()
 	if !staged || len(ids) != 1 || ids[0] != 101 {
 		t.Fatalf("msgToUpdate must stage msg→[update] (got staged=%v ids=%v) so the persist callback can MarkDone it", staged, ids)
@@ -103,30 +107,34 @@ func TestDispatchMessage_EmitOK_LeavesUpdateInFlight(t *testing.T) {
 func TestSeam_TwoUpdatesSameMessageID_FIFOBothMarkDone(t *testing.T) {
 	c := &Channel{}
 	c.offTrk = newOffsetTracker(500)
-	c.msgToUpdate = map[int64][]int64{}
+	c.msgToUpdate = map[seamKey][]int64{}
 
 	const msgID = 42
-	// Stage update 501, then edited_message 502 for the SAME message_id.
+	// One chat throughout — the original and its edit share a chat_id (and thus a
+	// RouteKey and a single worker goroutine), which is exactly why FIFO-within-a-
+	// bucket is sound. See seamKey.
+	const chatID = int64(-1001)
+	// Stage update 501, then edited_message 502 for the SAME (chat, message_id).
 	for _, uid := range []int64{501, 502} {
 		c.offTrk.Register(uid)
 		c.mu.Lock()
-		c.seamStageLocked(msgID, uid)
+		c.seamStageLocked(chatID, msgID, uid)
 		c.mu.Unlock()
 	}
 
 	// First persist callback resolves the FIRST-staged update (501).
-	c.onPersisted(&c3types.Inbound{MessageID: msgID})
+	c.onPersisted(&c3types.Inbound{ChatID: chatID, MessageID: msgID})
 	if got := c.offTrk.Committed(); got != 501 {
 		t.Fatalf("first persist must MarkDone the first-staged update; committed=%d, want 501", got)
 	}
 	// Second persist callback resolves the second (502).
-	c.onPersisted(&c3types.Inbound{MessageID: msgID})
+	c.onPersisted(&c3types.Inbound{ChatID: chatID, MessageID: msgID})
 	if got := c.offTrk.Committed(); got != 502 {
 		t.Fatalf("second persist must MarkDone the second-staged update; committed=%d, want 502", got)
 	}
 	// Seam fully drained (key removed) — no leak.
 	c.mu.Lock()
-	_, leaked := c.msgToUpdate[msgID]
+	_, leaked := c.msgToUpdate[seamKey{chatID: chatID, msgID: msgID}]
 	c.mu.Unlock()
 	if leaked {
 		t.Fatal("seam must be empty after both updates resolved (no leak)")
@@ -141,14 +149,19 @@ func TestSeam_EmitDropRemovesOnlyTheDroppedEntry(t *testing.T) {
 	h := &fakeHost{decision: channel.GateInboundAllow, emitDrops: true}
 	c := makeChannel(h)
 	c.offTrk = newOffsetTracker(500)
-	c.msgToUpdate = map[int64][]int64{}
+	c.msgToUpdate = map[seamKey][]int64{}
 
 	const msgID = 100 // textMsg uses MessageId=100
-	// An earlier update 501 for this message_id is already staged + in-flight
-	// (Emitted OK previously, not yet persisted).
+	// The dispatch below uses textMsg("edit", 42), which lands in CHAT 42. The
+	// hand-staged entry MUST use that same chat: the seam is keyed by
+	// (chat_id, message_id), so staging under chat 0 would put the two entries in
+	// DIFFERENT buckets and this test would stop testing its own name.
+	const chatID = int64(42)
+	// An earlier update 501 for this (chat, message_id) is already staged +
+	// in-flight (Emitted OK previously, not yet persisted).
 	c.offTrk.Register(501)
 	c.mu.Lock()
-	c.seamStageLocked(msgID, 501)
+	c.seamStageLocked(chatID, msgID, 501)
 	c.mu.Unlock()
 
 	// A second update 502 (an edit) for the SAME message_id arrives; its route is
@@ -158,7 +171,7 @@ func TestSeam_EmitDropRemovesOnlyTheDroppedEntry(t *testing.T) {
 	c.dispatchMessage(502, textMsg("edit", 42), true, nil)
 
 	c.mu.Lock()
-	ids := c.msgToUpdate[msgID]
+	ids := c.msgToUpdate[seamKey{chatID: chatID, msgID: msgID}]
 	c.mu.Unlock()
 	if len(ids) != 1 || ids[0] != 501 {
 		t.Fatalf("saturation cleanup must leave the earlier in-flight 501 staged; seam=%v, want [501]", ids)
@@ -169,9 +182,90 @@ func TestSeam_EmitDropRemovesOnlyTheDroppedEntry(t *testing.T) {
 	}
 	// Even after 501 persists, the prefix must NOT jump past 502 — 502 was never
 	// persisted, and advancing over it would destroy it.
-	c.onPersisted(&c3types.Inbound{MessageID: msgID})
+	c.onPersisted(&c3types.Inbound{ChatID: chatID, MessageID: msgID})
 	if got := c.offTrk.Committed(); got != 501 {
 		t.Fatalf("MESSAGE LOSS: committed advanced past the unpersisted 502; got %d, want 501", got)
+	}
+}
+
+// Telegram message_ids are unique per CHAT, not per bot, so two chats can hold an
+// in-flight message with the SAME message_id. Emit routes by chat_id
+// (broker/host.go), so those two messages are persisted by CONCURRENT per-route
+// workers and their persist callbacks arrive in arbitrary order. Each callback
+// must resolve the update staged for ITS OWN chat. Resolved positionally (the old
+// message_id-only key), chat B's persist marks chat A's still-unpersisted update
+// done, the committed offset advances past it, and Telegram — which never
+// redelivers an acknowledged update — destroys the message.
+func TestSeam_CrossChatSameMessageID_ResolvesPerChat(t *testing.T) {
+	c := &Channel{}
+	c.offTrk = newOffsetTracker(1000)
+	c.dedup = newUpdateDedup(2000, 5*time.Minute)
+	c.msgToUpdate = map[seamKey][]int64{}
+
+	const (
+		chatA = int64(-100200300) // group: a VOICE note, slow STT
+		chatB = int64(4242)       // DM: text, persists immediately
+		msgID = int64(42)         // the SAME message_id in both chats — legal
+		updA  = int64(1001)
+		updB  = int64(1002)
+	)
+
+	// Seed the poll-side dedup exactly as the poll loop does (poll.go, SeenOrAdd
+	// before dispatch). Without this the eviction assertions below are DEAD:
+	// SeenOrAdd on an unrecorded update returns false no matter what forget() did.
+	uA := gotgbot.Update{UpdateId: updA, Message: &gotgbot.Message{MessageId: msgID, Chat: gotgbot.Chat{Id: chatA}}}
+	uB := gotgbot.Update{UpdateId: updB, Message: &gotgbot.Message{MessageId: msgID, Chat: gotgbot.Chat{Id: chatB}}}
+	if c.dedup.SeenOrAdd(&uA) || c.dedup.SeenOrAdd(&uB) {
+		t.Fatal("precondition: fresh updates must record, not skip")
+	}
+
+	// Staged in poll order, A then B (poll.go dispatches a batch in order).
+	c.offTrk.Register(updA)
+	c.offTrk.Register(updB)
+	c.mu.Lock()
+	c.seamStageLocked(chatA, msgID, updA)
+	c.seamStageLocked(chatB, msgID, updB)
+	c.mu.Unlock()
+
+	// Chat B's worker wins the race. It must resolve updB — NOT the front of a
+	// message_id-keyed FIFO, which is chat A's updA.
+	c.onPersisted(&c3types.Inbound{ChatID: chatB, MessageID: msgID})
+
+	// updA is still mid-STT and unpersisted, so the CONTIGUOUS prefix cannot move
+	// at all: 1002 done with 1001 in flight leaves committed at 1000.
+	if got := c.offTrk.Committed(); got != 1000 {
+		t.Fatalf("MESSAGE LOSS: committed advanced to %d over chat A's unpersisted update %d; want 1000 — Telegram never redelivers an acked update", got, updA)
+	}
+
+	// Chat A's Append now FAILS. The loss-free contract is "offset holds, Telegram
+	// redelivers" — which only holds if updA was never marked done.
+	c.onPersistFailed(&c3types.Inbound{ChatID: chatA, MessageID: msgID})
+	if got := c.offTrk.Committed(); got != 1000 {
+		t.Fatalf("after chat A's Append failure committed=%d, want 1000 (held, loss-free)", got)
+	}
+	// The dedup eviction must have targeted updA…
+	if c.dedup.SeenOrAdd(&uA) {
+		t.Fatal("chat A's redelivery must re-dispatch (its own dedup entry evicted), not skip")
+	}
+	// …and chat B's entry must SURVIVE. B persisted; evicting it re-delivers B twice.
+	if !c.dedup.SeenOrAdd(&uB) {
+		t.Fatal("chat B persisted; its dedup entry must NOT be evicted by chat A's failure")
+	}
+
+	// The redelivery re-stages and this time persists → prefix jumps to 1002.
+	c.offTrk.Register(updA)
+	c.mu.Lock()
+	c.seamStageLocked(chatA, msgID, updA)
+	c.mu.Unlock()
+	c.onPersisted(&c3types.Inbound{ChatID: chatA, MessageID: msgID})
+	if got := c.offTrk.Committed(); got != 1002 {
+		t.Fatalf("committed = %d, want 1002 (both chats resolved, prefix contiguous)", got)
+	}
+	c.mu.Lock()
+	leaked := len(c.msgToUpdate)
+	c.mu.Unlock()
+	if leaked != 0 {
+		t.Fatalf("seam must be fully drained; %d key(s) leaked", leaked)
 	}
 }
 
@@ -184,7 +278,7 @@ func TestDedupForget_AppendFailureReDispatchesAndHoldsOffset(t *testing.T) {
 	c := &Channel{}
 	c.offTrk = newOffsetTracker(600)
 	c.dedup = newUpdateDedup(2000, 5*time.Minute)
-	c.msgToUpdate = map[int64][]int64{}
+	c.msgToUpdate = map[seamKey][]int64{}
 
 	// First dispatch of update 601 (message_id 100): the poll loop records it in
 	// the dedup, registers it in-flight, and dispatchMessage stages the seam.
@@ -194,12 +288,14 @@ func TestDedupForget_AppendFailureReDispatchesAndHoldsOffset(t *testing.T) {
 	}
 	c.offTrk.Register(601)
 	c.mu.Lock()
-	c.seamStageLocked(u.Message.MessageId, 601)
+	// The seam is keyed by (chat_id, message_id) — take the chat from the fixture
+	// so stage and callback cannot drift apart.
+	c.seamStageLocked(u.Message.Chat.Id, u.Message.MessageId, 601)
 	c.mu.Unlock()
 
 	// The worker's Append FAILS → onPersistFailed fires. It must (a) NOT advance
 	// the offset (loss-free hold) and (b) evict the poll-side dedup entry.
-	c.onPersistFailed(&c3types.Inbound{MessageID: u.Message.MessageId})
+	c.onPersistFailed(&c3types.Inbound{ChatID: u.Message.Chat.Id, MessageID: u.Message.MessageId})
 
 	if got := c.offTrk.Committed(); got != 600 {
 		t.Fatalf("Append failure must HOLD the offset (loss-free); committed=%d, want 600", got)
@@ -212,7 +308,7 @@ func TestDedupForget_AppendFailureReDispatchesAndHoldsOffset(t *testing.T) {
 	}
 	// Seam drained by the failure callback (the redelivery re-stages it fresh).
 	c.mu.Lock()
-	_, leaked := c.msgToUpdate[u.Message.MessageId]
+	_, leaked := c.msgToUpdate[seamKey{chatID: u.Message.Chat.Id, msgID: u.Message.MessageId}]
 	c.mu.Unlock()
 	if leaked {
 		t.Fatal("onPersistFailed must pop the seam entry (redelivery re-stages fresh)")
@@ -231,7 +327,7 @@ func TestPersistFailThenSuccess_ConvergesAndAdvancesOffset(t *testing.T) {
 	c := &Channel{}
 	c.offTrk = newOffsetTracker(600)
 	c.dedup = newUpdateDedup(2000, 5*time.Minute)
-	c.msgToUpdate = map[int64][]int64{}
+	c.msgToUpdate = map[seamKey][]int64{}
 
 	// First dispatch of update 601 (message_id 42): poll loop records + registers
 	// + stages the seam.
@@ -241,11 +337,13 @@ func TestPersistFailThenSuccess_ConvergesAndAdvancesOffset(t *testing.T) {
 	}
 	c.offTrk.Register(601)
 	c.mu.Lock()
-	c.seamStageLocked(u.Message.MessageId, 601)
+	// (chat_id, message_id) key — chat taken from the fixture so stage and
+	// callback cannot drift apart.
+	c.seamStageLocked(u.Message.Chat.Id, u.Message.MessageId, 601)
 	c.mu.Unlock()
 
 	// Append FAILS → offset HELD at 600 (loss-free), dedup evicted, seam popped.
-	c.onPersistFailed(&c3types.Inbound{MessageID: u.Message.MessageId})
+	c.onPersistFailed(&c3types.Inbound{ChatID: u.Message.Chat.Id, MessageID: u.Message.MessageId})
 	if got := c.offTrk.Committed(); got != 600 {
 		t.Fatalf("after Append failure committed=%d, want 600 (held, loss-free)", got)
 	}
@@ -258,19 +356,19 @@ func TestPersistFailThenSuccess_ConvergesAndAdvancesOffset(t *testing.T) {
 	}
 	c.offTrk.Register(601)
 	c.mu.Lock()
-	c.seamStageLocked(u2.Message.MessageId, 601)
+	c.seamStageLocked(u2.Message.Chat.Id, u2.Message.MessageId, 601)
 	c.mu.Unlock()
 
 	// This time Append SUCCEEDS → onPersisted MarkDone's 601 and the committed
 	// offset advances OVER it. The retry loop terminates here; without a
 	// terminating success this is the Windows spam loop.
-	c.onPersisted(&c3types.Inbound{MessageID: u2.Message.MessageId})
+	c.onPersisted(&c3types.Inbound{ChatID: u2.Message.Chat.Id, MessageID: u2.Message.MessageId})
 	if got := c.offTrk.Committed(); got != 601 {
 		t.Fatalf("after recovery committed=%d, want 601 (converged — offset advanced)", got)
 	}
 	// Seam fully drained after the success — no leak.
 	c.mu.Lock()
-	_, leaked := c.msgToUpdate[u2.Message.MessageId]
+	_, leaked := c.msgToUpdate[seamKey{chatID: u2.Message.Chat.Id, msgID: u2.Message.MessageId}]
 	c.mu.Unlock()
 	if leaked {
 		t.Fatal("seam entry must be drained after onPersisted")
@@ -308,7 +406,7 @@ func TestDispatchMessage_StatusFromStranger_DroppedNotAnswered(t *testing.T) {
 	h := &fakeHost{decision: channel.GateInboundDrop, cmdHandled: true}
 	c := makeChannel(h)
 	c.offTrk = newOffsetTracker(200)
-	c.msgToUpdate = map[int64][]int64{}
+	c.msgToUpdate = map[seamKey][]int64{}
 
 	c.offTrk.Register(201)
 	// No recover needed: the gate drops before any SendReply, so the nil bot in
@@ -335,7 +433,7 @@ func TestDispatchMessage_StatusFromAllowlisted_StillAnswered(t *testing.T) {
 	h := &fakeHost{decision: channel.GateInboundAllow, cmdHandled: true}
 	c := makeChannel(h)
 	c.offTrk = newOffsetTracker(300)
-	c.msgToUpdate = map[int64][]int64{}
+	c.msgToUpdate = map[seamKey][]int64{}
 
 	c.offTrk.Register(301)
 	func() {

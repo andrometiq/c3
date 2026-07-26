@@ -32,7 +32,7 @@ func TestPollLoop_ShutdownSavesCommittedOffset(t *testing.T) {
 	// Seed committed at 4 (a prior resume point) so the delivered update_id=5 is the
 	// next contiguous id and MarkDone(5) advances the committed prefix to 5.
 	c.offTrk = newOffsetTracker(4)
-	c.msgToUpdate = map[int64][]int64{}
+	c.msgToUpdate = map[seamKey][]int64{}
 	store, err := newOffsetStore("telegram")
 	if err != nil {
 		t.Fatalf("newOffsetStore: %v", err)

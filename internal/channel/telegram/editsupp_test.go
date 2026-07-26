@@ -37,7 +37,7 @@ func TestDispatchMessage_PhantomEditSuppressed(t *testing.T) {
 	h := &fakeHost{decision: channel.GateInboundAllow, emitDrops: false}
 	c := makeChannel(h)
 	c.offTrk = newOffsetTracker(800)
-	c.msgToUpdate = map[int64][]int64{}
+	c.msgToUpdate = map[seamKey][]int64{}
 	c.editSupp = newEditSuppressor(8192, 48*time.Hour)
 
 	// Original voice message, update 801: emitted, persisted.
@@ -46,7 +46,9 @@ func TestDispatchMessage_PhantomEditSuppressed(t *testing.T) {
 	if got := h.emitCount(); got != 1 {
 		t.Fatalf("original must emit once; got %d", got)
 	}
-	c.onPersisted(&c3types.Inbound{MessageID: 300})
+	// voiceMsg lands in CHAT 42; the seam is keyed by (chat_id, message_id), so
+	// the persist callback must carry that chat or it resolves nothing.
+	c.onPersisted(&c3types.Inbound{ChatID: 42, MessageID: 300})
 	if got := c.offTrk.Committed(); got != 801 {
 		t.Fatalf("original persisted; committed=%d, want 801", got)
 	}
@@ -63,11 +65,44 @@ func TestDispatchMessage_PhantomEditSuppressed(t *testing.T) {
 		t.Fatalf("suppressed edit must MarkDone its update; committed=%d, want 802", got)
 	}
 	// No seam entry may be staged for a suppressed edit (nothing will persist it).
+	// This is a NEGATIVE assertion, so the key must be the one dispatchMessage
+	// would actually have staged: voiceMsg puts the message in CHAT 42. Looking up
+	// seamKey{0, 300} would read an empty bucket and pass forever regardless of
+	// what the suppressor did.
 	c.mu.Lock()
-	_, staged := c.msgToUpdate[300]
+	_, staged := c.msgToUpdate[seamKey{chatID: 42, msgID: 300}]
 	c.mu.Unlock()
 	if staged {
 		t.Fatal("suppressed edit staged a msgToUpdate seam entry (would leak / wedge)")
+	}
+}
+
+// The channel must STATE the amendment fact on the record it emits. An
+// edited_message re-dispatches with the SAME MessageID, and the broker's
+// delivered-dedup is keyed on that id alone — without in.Edited it classifies the
+// correction as a crash-replay, skips the Append AND acks the update to Telegram,
+// destroying the user's edit permanently (internal/broker/worker.go flushInbounds).
+func TestDispatchMessage_SetsEditedMarker(t *testing.T) {
+	h := &fakeHost{decision: channel.GateInboundAllow, emitDrops: false}
+	c := makeChannel(h) // no editSupp, no offTrk: nothing suppresses or stages here
+
+	// An edited_message (edited=true) must be marked.
+	c.dispatchMessage(101, textMsg("corrected", 42), true, nil)
+	// An ordinary message must NOT be marked — otherwise the flag is a constant
+	// and the broker's replay dedup is disabled for every message, not just edits.
+	c.dispatchMessage(100, textMsg("original", 42), false, nil)
+
+	h.mu.Lock()
+	got := append([]*c3types.Inbound(nil), h.emitted...)
+	h.mu.Unlock()
+	if len(got) != 2 {
+		t.Fatalf("both dispatches must Emit; got %d", len(got))
+	}
+	if !got[0].Edited {
+		t.Fatal("an edited_message must be emitted with Edited=true, or the broker's message_id-keyed dedup destroys the correction and acks it to Telegram")
+	}
+	if got[1].Edited {
+		t.Fatal("an ordinary message must be emitted with Edited=false (the flag must not be a constant)")
 	}
 }
 
@@ -77,12 +112,12 @@ func TestDispatchMessage_RealEditStillDelivered(t *testing.T) {
 	h := &fakeHost{decision: channel.GateInboundAllow, emitDrops: false}
 	c := makeChannel(h)
 	c.offTrk = newOffsetTracker(800)
-	c.msgToUpdate = map[int64][]int64{}
+	c.msgToUpdate = map[seamKey][]int64{}
 	c.editSupp = newEditSuppressor(8192, 48*time.Hour)
 
 	c.offTrk.Register(801)
 	c.dispatchMessage(801, voiceMsg(300, "uniq-A"), false, nil)
-	c.onPersisted(&c3types.Inbound{MessageID: 300})
+	c.onPersisted(&c3types.Inbound{ChatID: 42, MessageID: 300}) // voiceMsg → chat 42
 
 	edited := voiceMsg(300, "uniq-A")
 	edited.Caption = "now with a caption"
@@ -101,7 +136,7 @@ func TestDispatchMessage_SameUpdateRedeliveryNotSuppressed(t *testing.T) {
 	h := &fakeHost{decision: channel.GateInboundAllow, emitDrops: false}
 	c := makeChannel(h)
 	c.offTrk = newOffsetTracker(800)
-	c.msgToUpdate = map[int64][]int64{}
+	c.msgToUpdate = map[seamKey][]int64{}
 	c.editSupp = newEditSuppressor(8192, 48*time.Hour)
 
 	// A real edit (update 810) dispatches… and its durable Append FAILS.
@@ -110,7 +145,7 @@ func TestDispatchMessage_SameUpdateRedeliveryNotSuppressed(t *testing.T) {
 	if got := h.emitCount(); got != 1 {
 		t.Fatalf("first dispatch must emit; got %d", got)
 	}
-	c.onPersistFailed(&c3types.Inbound{MessageID: 300})
+	c.onPersistFailed(&c3types.Inbound{ChatID: 42, MessageID: 300}) // voiceMsg → chat 42
 
 	// Telegram redelivers update 810 (offset held). It must re-dispatch.
 	c.dispatchMessage(810, voiceMsg(300, "uniq-A"), true, nil)
@@ -125,7 +160,7 @@ func TestDispatchMessage_UnknownMessageEditDelivered(t *testing.T) {
 	h := &fakeHost{decision: channel.GateInboundAllow, emitDrops: false}
 	c := makeChannel(h)
 	c.offTrk = newOffsetTracker(800)
-	c.msgToUpdate = map[int64][]int64{}
+	c.msgToUpdate = map[seamKey][]int64{}
 	c.editSupp = newEditSuppressor(8192, 48*time.Hour)
 
 	c.offTrk.Register(801)

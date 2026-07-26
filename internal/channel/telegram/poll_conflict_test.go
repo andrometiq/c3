@@ -160,7 +160,7 @@ func TestPollLoop_PacesNoProgressRepollOnUnackedFrontier(t *testing.T) {
 	fb := &funcBotClient{} // delay 0 → an UNPACED loop spins as fast as the CPU allows
 	c := newConflictTestChannel(h, fb)
 	c.offTrk = newOffsetTracker(4)
-	c.msgToUpdate = map[int64][]int64{}
+	c.msgToUpdate = map[seamKey][]int64{}
 	c.dedup = newUpdateDedup(2000, 5*time.Minute)
 
 	upd := []gotgbot.Update{{
@@ -212,7 +212,7 @@ func TestPollLoop_NewUpdatesDispatchWithoutPacing(t *testing.T) {
 	fb := &funcBotClient{delay: time.Millisecond}
 	c := newConflictTestChannel(h, fb)
 	c.offTrk = newOffsetTracker(1000)
-	c.msgToUpdate = map[int64][]int64{}
+	c.msgToUpdate = map[seamKey][]int64{}
 	c.dedup = newUpdateDedup(2000, 5*time.Minute)
 
 	fb.fn = func(call int) (json.RawMessage, error) {

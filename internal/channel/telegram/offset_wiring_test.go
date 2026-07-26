@@ -15,27 +15,31 @@ import (
 func TestPollOffsetWiring_NoAdvancePastUnpersisted(t *testing.T) {
 	c := &Channel{}
 	c.offTrk = newOffsetTracker(100)
-	c.msgToUpdate = map[int64][]int64{}
+	c.msgToUpdate = map[seamKey][]int64{}
 
 	// The real persist callback the channel registers in Start (onPersisted).
 	persist := c.onPersisted
 
-	// Batch of three accepted updates 101,102,103; stage msg→update like
+	// One chat throughout: the seam is keyed by (chat_id, message_id), and the
+	// callback must carry the SAME ChatID the stage used or it resolves nothing.
+	const chatID = int64(-1001)
+
+	// Batch of three accepted updates 101,102,103; stage (chat,msg)→update like
 	// dispatchMessage does before Emit (FIFO seam).
 	for _, p := range []struct{ msg, upd int64 }{{1, 101}, {2, 102}, {3, 103}} {
 		c.offTrk.Register(p.upd)
 		c.mu.Lock()
-		c.seamStageLocked(p.msg, p.upd)
+		c.seamStageLocked(chatID, p.msg, p.upd)
 		c.mu.Unlock()
 	}
 	// 101 and 103 persist; 102 is still mid-STT/mid-Append (the "crash" point).
-	persist(&c3types.Inbound{MessageID: 1})
-	persist(&c3types.Inbound{MessageID: 3})
+	persist(&c3types.Inbound{ChatID: chatID, MessageID: 1})
+	persist(&c3types.Inbound{ChatID: chatID, MessageID: 3})
 	if got := c.offTrk.Committed(); got != 101 {
 		t.Fatalf("committed = %d, want 101 (must NOT pass unpersisted 102)", got)
 	}
 	// 102 finally persists → committed jumps to 103.
-	persist(&c3types.Inbound{MessageID: 2})
+	persist(&c3types.Inbound{ChatID: chatID, MessageID: 2})
 	if got := c.offTrk.Committed(); got != 103 {
 		t.Fatalf("committed after 102 persisted = %d, want 103", got)
 	}

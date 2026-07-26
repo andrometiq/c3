@@ -100,6 +100,29 @@ func (c Config) RichInboundEnabled() bool {
 	return c.RichInbound == nil || *c.RichInbound
 }
 
+// seamKey scopes in-flight update bookkeeping by (chat_id, message_id).
+// Telegram message_ids are unique per CHAT, not per bot, and Emit routes by
+// chat_id (broker/host.go), so two chats' messages are persisted by CONCURRENT
+// per-route workers (broker/worker.go) whose persist callbacks arrive in
+// arbitrary order. Keyed on message_id alone, chat B's callback pops the FIFO
+// front — chat A's still-unpersisted update — and marks it done; the offset then
+// advances past a message Telegram will never redeliver.
+//
+// TopicID is deliberately NOT part of the key. Forum topics share their
+// supergroup's single message_id sequence, so two topics can never hold the same
+// message_id and adding it buys nothing; and if Telegram ever reported an
+// edited_message with a different message_thread_id than its original, keying on
+// it would put the edit in a DIFFERENT bucket, its update_id would never be
+// marked done, and the contiguous-prefix offset would wedge PERMANENTLY. Chat-only
+// keying degrades to a self-healing mis-attribution in that same scenario —
+// prefer the recoverable failure.
+//
+// In-memory only: never marshalled to the queue record or the IPC wire.
+type seamKey struct {
+	chatID int64
+	msgID  int64
+}
+
 // Channel is the Telegram channel implementation. Construct via New, register
 // via the broker's channel registry.
 type Channel struct {
@@ -181,17 +204,22 @@ type Channel struct {
 
 	// Persisted-offset wiring (Component 2). offTrk advances the committed
 	// offset only over durably-persisted (or no-op) updates. msgToUpdate maps a
-	// stored inbound's MessageID back to the source update_id(s) so the broker's
-	// persist callback can MarkDone the right update. It is a FIFO SLICE per
-	// message_id, not a scalar: two in-flight updates can share a message_id (an
-	// edited_message arriving during the original's persist window), and a scalar
-	// map would overwrite — the first update would never mark done (wedge) and the
+	// stored inbound's (chat_id, message_id) back to the source update_id(s) so
+	// the broker's persist callback can MarkDone the right update. It is keyed by
+	// seamKey — message_ids are unique per CHAT, and two chats are persisted by
+	// concurrent per-route workers whose callbacks arrive in arbitrary order, so a
+	// message_id-only key lets one chat's persist ack another chat's still
+	// in-flight update (see seamKey). Within one key it is a FIFO SLICE, not a
+	// scalar: two in-flight updates can share a (chat, message_id) — an
+	// edited_message arriving during the original's persist window — and a scalar
+	// map would overwrite: the first update would never mark done (wedge) and the
 	// callback could mark a not-yet-persisted second update done (latent loss).
-	// Staging appends; the persist callbacks pop-front, resolving them in stage
-	// order. mu guards msgToUpdate.
+	// That same-chat pair shares a RouteKey, so ONE worker goroutine resolves them
+	// serially and stage order is callback order. Staging appends; the persist
+	// callbacks pop-front, resolving them in stage order. mu guards msgToUpdate.
 	mu          sync.Mutex
 	offTrk      *offsetTracker
-	msgToUpdate map[int64][]int64
+	msgToUpdate map[seamKey][]int64
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -348,7 +376,7 @@ func (c *Channel) Start(ctx context.Context, host channel.Host) error {
 		loaded, _ = c.offsets.Load()
 	}
 	c.offTrk = newOffsetTracker(loaded)
-	c.msgToUpdate = map[int64][]int64{}
+	c.msgToUpdate = map[seamKey][]int64{}
 	if bh, ok := host.(interface {
 		SetPersistedCallback(func(*c3types.Inbound))
 	}); ok {
@@ -410,45 +438,51 @@ func (c *Channel) Start(ctx context.Context, host channel.Host) error {
 }
 
 // seamStageLocked appends update_id to the FIFO of in-flight update_ids awaiting
-// a persist outcome for message_id. Caller holds c.mu. FIFO (append here,
-// pop-front in the persist callbacks) because two updates can share a message_id
-// (an edited_message arriving during the original's persist window); staging in
-// order lets the callbacks resolve them in the SAME order, so the first-staged
-// update is the first marked — never the overwrite bug of the old scalar map.
-func (c *Channel) seamStageLocked(msgID, updateID int64) {
-	c.msgToUpdate[msgID] = append(c.msgToUpdate[msgID], updateID)
+// a persist outcome for (chat_id, message_id). Caller holds c.mu. FIFO (append
+// here, pop-front in the persist callbacks) because two updates can share a
+// (chat, message_id) (an edited_message arriving during the original's persist
+// window); staging in order lets the callbacks resolve them in the SAME order, so
+// the first-staged update is the first marked — never the overwrite bug of the
+// old scalar map.
+func (c *Channel) seamStageLocked(chatID, msgID, updateID int64) {
+	k := seamKey{chatID: chatID, msgID: msgID}
+	c.msgToUpdate[k] = append(c.msgToUpdate[k], updateID)
 }
 
 // seamPopFrontLocked removes and returns the oldest staged update_id for
-// message_id (FIFO). Caller holds c.mu. Returns (0,false) if none staged. The key
-// is deleted when its slice empties so an absent key reads as "nothing staged".
-func (c *Channel) seamPopFrontLocked(msgID int64) (int64, bool) {
-	ids := c.msgToUpdate[msgID]
+// (chat_id, message_id) (FIFO). Caller holds c.mu. Returns (0,false) if none
+// staged. The key is deleted when its slice empties so an absent key reads as
+// "nothing staged".
+func (c *Channel) seamPopFrontLocked(chatID, msgID int64) (int64, bool) {
+	k := seamKey{chatID: chatID, msgID: msgID}
+	ids := c.msgToUpdate[k]
 	if len(ids) == 0 {
 		return 0, false
 	}
 	uid := ids[0]
 	if len(ids) == 1 {
-		delete(c.msgToUpdate, msgID)
+		delete(c.msgToUpdate, k)
 	} else {
-		c.msgToUpdate[msgID] = ids[1:]
+		c.msgToUpdate[k] = ids[1:]
 	}
 	return uid, true
 }
 
 // seamRemoveLocked removes the first staged entry equal to updateID for
-// message_id. Caller holds c.mu. Used by the Emit-DROP cleanup, which must drop
-// exactly the entry it JUST staged — not the front, which may belong to an
-// earlier still-in-flight update sharing the message_id. Returns true if removed.
-func (c *Channel) seamRemoveLocked(msgID, updateID int64) bool {
-	ids := c.msgToUpdate[msgID]
+// (chat_id, message_id). Caller holds c.mu. Used by the Emit-DROP cleanup, which
+// must drop exactly the entry it JUST staged — not the front, which may belong to
+// an earlier still-in-flight update sharing the (chat, message_id). Returns true
+// if removed.
+func (c *Channel) seamRemoveLocked(chatID, msgID, updateID int64) bool {
+	k := seamKey{chatID: chatID, msgID: msgID}
+	ids := c.msgToUpdate[k]
 	for i, id := range ids {
 		if id == updateID {
 			ids = append(ids[:i], ids[i+1:]...)
 			if len(ids) == 0 {
-				delete(c.msgToUpdate, msgID)
+				delete(c.msgToUpdate, k)
 			} else {
-				c.msgToUpdate[msgID] = ids
+				c.msgToUpdate[k] = ids
 			}
 			return true
 		}
@@ -462,7 +496,7 @@ func (c *Channel) seamRemoveLocked(msgID, updateID int64) bool {
 // the committed offset over it.
 func (c *Channel) onPersisted(in *c3types.Inbound) {
 	c.mu.Lock()
-	uid, found := c.seamPopFrontLocked(in.MessageID)
+	uid, found := c.seamPopFrontLocked(in.ChatID, in.MessageID)
 	c.mu.Unlock()
 	if found && c.offTrk != nil {
 		c.offTrk.MarkDone(uid)
@@ -479,7 +513,7 @@ func (c *Channel) onPersisted(in *c3types.Inbound) {
 // committed offset is intentionally left un-advanced.
 func (c *Channel) onPersistFailed(in *c3types.Inbound) {
 	c.mu.Lock()
-	uid, found := c.seamPopFrontLocked(in.MessageID)
+	uid, found := c.seamPopFrontLocked(in.ChatID, in.MessageID)
 	c.mu.Unlock()
 	if found && c.dedup != nil {
 		c.dedup.forget(uid)
