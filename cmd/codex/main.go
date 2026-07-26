@@ -80,9 +80,7 @@ func run(args []string, self string) error {
 	if requestedWS == "" {
 		requestedWS = defaultWSURL
 	}
-	wsURL := chooseAppServerURL(requestedWS, cwd, topic, func(candidate string) bool {
-		return appServerMetaMatches(candidate, cwd, topic, adapterPath)
-	})
+	wsURL := chooseAppServerURL(requestedWS)
 	if err := ensureAppServer(realCodex, adapterPath, wsURL, cwd, topic); err != nil {
 		return err
 	}
@@ -203,7 +201,10 @@ func tomlString(s string) string {
 	return string(data)
 }
 
-func chooseAppServerURL(requestedWSURL, cwd, topic string, metaMatches func(string) bool) string {
+// chooseAppServerURL picks a ws:// URL for this launch. A busy port is never
+// adopted — see the never-adopt rationale on ensureAppServer — so the only
+// question here is which port is free.
+func chooseAppServerURL(requestedWSURL string) string {
 	if requestedWSURL != defaultWSURL && !strings.HasPrefix(requestedWSURL, "ws://127.0.0.1:") {
 		return requestedWSURL
 	}
@@ -211,7 +212,7 @@ func chooseAppServerURL(requestedWSURL, cwd, topic string, metaMatches func(stri
 	if err != nil {
 		return requestedWSURL
 	}
-	if !tcpReachable(host, port, 500*time.Millisecond) || metaMatches(requestedWSURL) {
+	if !tcpReachable(host, port, 500*time.Millisecond) {
 		return requestedWSURL
 	}
 	for candidatePort := port + 1; candidatePort < port+50; candidatePort++ {
@@ -253,22 +254,33 @@ func ensureAppServer(realCodex, adapterPath, wsURL, cwd, topic string) error {
 		return err
 	}
 	if tcpReachable(host, port, 500*time.Millisecond) {
-		// Something is listening. Adopt it ONLY if our own record vouches for it.
-		// Reachability alone proves a socket exists, not whose it is — and this
-		// early return used to be unconditional, so any process holding the port
-		// was adopted as our app-server and every inbound message went to it.
-		if appServerMetaMatches(wsURL, cwd, topic, adapterPath) {
-			return nil
-		}
+		// NEVER ADOPT. Something is listening, and reachability proves only that
+		// a socket exists — not whose it is.
+		//
+		// This used to adopt on a matching (cwd, topic, adapter) record. That is
+		// a DESCRIPTION, not an identity: two launches made the same way produce
+		// the same description forever, so it can only ever answer "were these
+		// started alike?", never "are these the same session?". Refusing when the
+		// description was UNKNOWN (empty topic) stopped the launches from the
+		// shared root that caused the two-topics-in-one-TUI incident, but two
+		// launches from any project SUBDIRECTORY still both infer the project's
+		// name, still match field for field, and still merged.
+		//
+		// The fix is not a better description. Adoption bought nothing worth
+		// keeping: Codex threads live in their own rollout files and `codex
+		// resume` reloads them onto any app-server, so an app-server holds no
+		// state worth reclaiming. Session continuity belongs at the broker, keyed
+		// on Codex's own thread id. So a busy port is now always refused, and the
+		// record below is diagnostics only.
+		//
 		// chooseAppServerURL should already have moved us to a free port, so
-		// reaching here means either a race with another launcher or a foreign
-		// process on the port. Refuse loudly. Silently sharing is how two topics
-		// ended up in one TUI; a failed launch is recoverable, cross-talk is not.
+		// reaching here means a race with another launcher or a foreign process.
+		// A failed launch is recoverable; cross-talk is not.
 		return fmt.Errorf(
-			"%s is already in use by an app-server this session cannot claim as its own "+
-				"(cwd=%q topic=%q). Refusing to share it — messages for another session would "+
-				"surface in this one. Retry, or set C3_CODEX_APP_SERVER_WS to a free ws://127.0.0.1:<port>",
-			wsURL, cwd, topic)
+			"%s is already in use%s. Refusing to share an app-server — messages meant for "+
+				"another session would surface in this one. Retry, or set "+
+				"C3_CODEX_APP_SERVER_WS to a free ws://127.0.0.1:<port>",
+			wsURL, appServerPortOwner(wsURL))
 	}
 	argv := []string{realCodex}
 	argv = append(argv, requiredFeatureArgs(nil)...)
@@ -347,51 +359,40 @@ func processAlive(pid int) bool {
 	return proc.Signal(syscall.Signal(0)) == nil
 }
 
-// appServerMetaMatches reports whether the app-server recorded for wsURL is
-// THIS session's own — i.e. whether it is safe to adopt instead of starting a
-// fresh one.
+// appServerPortOwner describes, for a human reading a refusal, what we know
+// about whoever holds wsURL's port. It returns a leading-space clause to splice
+// into an error message, or "" when we know nothing useful.
 //
-// **An unknown identity must never match another unknown identity.** That single
-// rule is the whole point of this function. inferTopicName deliberately returns
-// "" when the launch directory is the shared root rather than a project, so two
-// sessions started from that root both carry topic "". Comparing them field by
-// field made "" == "" and concluded they were the same session — so the second
-// adopted the first's app-server, and Telegram messages for two different topics
-// were both posted into one TUI. The broker had routed each to the correct
-// adapter; the adapters then merged them here.
-//
-// Failing to SEPARATE costs an extra process. Failing to SHARE correctly sends
-// one person's messages to another. Those are not symmetrical, so an unknown
-// identity refuses to match and takes a fresh port.
-func appServerMetaMatches(wsURL, cwd, topic, adapterPath string) bool {
-	if topic == "" {
-		return false // unknown identity — never adopt someone else's app-server
-	}
+// This is DIAGNOSTICS ONLY and must never gate a decision. The record it reads
+// used to answer "may I adopt this app-server?" via a field-by-field comparison
+// of (cwd, topic, adapter) — a description rather than an identity, which two
+// sessions launched the same way share forever. That comparison put two Telegram
+// topics into one Codex TUI. Nothing branches on this function's result; it only
+// makes the refusal actionable by naming the process to look at.
+func appServerPortOwner(wsURL string) string {
 	_, port, err := parseWSURL(wsURL)
 	if err != nil {
-		return false
+		return ""
 	}
 	data, err := os.ReadFile(appServerMetaPath(port))
 	if err != nil {
-		return false
+		return ""
 	}
 	var meta struct {
-		WSURL     string            `json:"ws_url"`
 		PID       int               `json:"pid"`
 		Signature map[string]string `json:"signature"`
 	}
-	if err := json.Unmarshal(data, &meta); err != nil {
-		return false
+	if err := json.Unmarshal(data, &meta); err != nil || meta.PID <= 0 {
+		return ""
 	}
-	// A stale record whose process is gone must not vouch for whatever else has
-	// since taken the port.
 	if !processAlive(meta.PID) {
-		return false
+		return fmt.Sprintf(" (a C3 app-server recorded on that port, pid %d, is no longer running —"+
+			" something else has taken the port)", meta.PID)
 	}
-	return meta.WSURL == wsURL &&
-		meta.Signature["cwd"] == cwd &&
-		meta.Signature["topic"] == topic &&
-		meta.Signature["adapter"] == adapterPath
+	if cwd := meta.Signature["cwd"]; cwd != "" {
+		return fmt.Sprintf(" by a C3 app-server (pid %d, launched from %s)", meta.PID, cwd)
+	}
+	return fmt.Sprintf(" by a C3 app-server (pid %d)", meta.PID)
 }
 
 func writeAppServerMeta(wsURL, cwd, topic, adapterPath string, pid int) {

@@ -165,7 +165,7 @@ func TestChooseAppServerURLFallsForwardWhenDefaultOccupied(t *testing.T) {
 	}
 	defer ln.Close()
 	defaultURL := "ws://" + ln.Addr().String()
-	got := chooseAppServerURL(defaultURL, "/tmp/work", "dm", func(string) bool { return false })
+	got := chooseAppServerURL(defaultURL)
 	if got == defaultURL {
 		t.Fatalf("chooseAppServerURL reused occupied default %s", defaultURL)
 	}
