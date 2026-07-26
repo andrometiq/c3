@@ -42,6 +42,17 @@ func (b *Broker) HandleConn(nc net.Conn) {
 		return
 	}
 
+	// Protocol version: WARN on mismatch, never refuse. `c3 update` swaps the
+	// binaries and exits the broker while adapter processes belonging to
+	// already-running CLI sessions reconnect to the NEW broker with their OLD
+	// code — mixed-version pairs are a normal event on a single host, not an
+	// anomaly. Refusing here would turn every routine update into a hard outage;
+	// a logged warning turns it into a diagnosable line. Absence (older adapter)
+	// normalizes to v1 and logs nothing.
+	if w := ipc.BrokerProtocolWarning(hello.CLI, hello.PID, hello.ProtocolVersion); w != "" {
+		log.Print(w)
+	}
+
 	// Reconnect detection: if we have a disconnected stub for the same
 	// (CLI, PID, CWD), this is the same adapter coming back after a brief
 	// drop. Transfer its claims to a fresh ConnID instead of registering a
@@ -183,7 +194,13 @@ func (b *Broker) HandleConn(nc net.Conn) {
 // via RecoverSessionReq (handleRecoverSession). buildHelloAck therefore keeps
 // only its pre-recovery behavior.
 func (b *Broker) buildHelloAck(hello ipc.HelloMsg, stub *Stub) ipc.HelloAckMsg {
-	ack := ipc.HelloAckMsg{Op: ipc.OpHelloAck, ConnID: stub.ConnID}
+	ack := ipc.HelloAckMsg{
+		Op:     ipc.OpHelloAck,
+		ConnID: stub.ConnID,
+		// Always stamped, so an adapter can name the disagreement from its side
+		// too (an older broker omits it ⇒ the adapter reads v1).
+		ProtocolVersion: ipc.ProtocolVersion,
+	}
 	if len(b.Mappings().Channels) == 0 {
 		ack.NoConfig = true
 	} else if _, ok := b.Mappings().LookupByCwd(hello.CWD); !ok {

@@ -387,6 +387,7 @@ func (a *adapter) hello() error {
 		// Inverted: set only when we're confident the host drops channel pushes,
 		// so the broker holds our inbound in the queue instead of acking it lost.
 		CannotRenderChannels: !a.hostRenderCapable,
+		ProtocolVersion:      ipc.ProtocolVersion,
 	}); err != nil {
 		return err
 	}
@@ -397,6 +398,10 @@ func (a *adapter) hello() error {
 	var ack ipc.HelloAckMsg
 	if err := json.Unmarshal(raw, &ack); err != nil {
 		return err
+	}
+	// Version disagreement is logged, never fatal — see ipc.ProtocolVersion.
+	if w := ipc.AdapterProtocolWarning("claude", ack.ProtocolVersion); w != "" {
+		log.Print(w)
 	}
 	a.helloAck = ack
 	a.connID = ack.ConnID
@@ -455,6 +460,13 @@ func (a *adapter) brokerReader(ctx context.Context) {
 			var errMsg ipc.ErrorMsg
 			_ = json.Unmarshal(raw, &errMsg)
 			log.Printf("broker error: %s", errMsg.Err)
+		default:
+			// An op this build does not know — normally a NEWER broker (mixed
+			// versions are routine after `c3 update`; see ipc.ProtocolVersion).
+			// Skipping it is correct: unknown ops are additive by contract. Log
+			// it so the skip is VISIBLE — a silent drop is the worst failure
+			// mode there is. File-only log, like the rest of this reader.
+			log.Printf("claude: ignoring unknown op %q from broker (this adapter speaks protocol v%d — the broker may be a newer c3 build; restart this CLI to match)", op, ipc.ProtocolVersion)
 		}
 	}
 }
@@ -1895,9 +1907,28 @@ func (a *adapter) dispatchRetranscribeResult(raw []byte) {
 // start, and a non-c3 / fresh-non-resumed session (no handoff ever) just polls
 // cheap file stats to the budget, then expires silently — zero regression.
 const (
-	// recoverWatchBudget bounds the background handoff watch — long enough to
-	// outlast a very slow hook write (5 min ≫ the +91s worst case observed).
-	recoverWatchBudget = 5 * time.Minute
+	// recoverWatchBudget bounds the background handoff watch.
+	//
+	// It was 5 minutes, sized against a slow hook write. That measured the wrong
+	// thing. The adapter spawns when the CLI PROCESS starts; the SessionStart hook
+	// writes the handoff when a SESSION is CHOSEN. Under `claude --resume` the gap
+	// between those two is however long the human sits at the resume picker, which
+	// is unbounded by construction — one observed run was 15m20s (adapter 09:12:06,
+	// watch expired 09:17:06, handoff written 09:27:26), so the watch had given up
+	// ten minutes before the thing it was watching for existed.
+	//
+	// 30 minutes covers a realistic picker pause at 1 stat/second, which is
+	// nothing. It is not the correctness guarantee, though: the authoritative path
+	// is recheckRecoverOnFirstActivity, which reads the handoff synchronously on
+	// the first tools/call no matter how long that takes, and the handoff file
+	// survives for 24h (sessionhandoff.PruneStale). This watch only covers the
+	// narrower case where inbound arrives BEFORE the session's first tool call.
+	recoverWatchBudget = 30 * time.Minute
+	// recoverSyncBudget bounds how long the first tools/call waits for the
+	// recover round-trip to complete before being released. The broker is on a
+	// local unix socket, so the healthy case is sub-millisecond; this only exists
+	// so a wedged broker cannot hold a user's first turn indefinitely.
+	recoverSyncBudget = 3 * time.Second
 	// recoverWatchInterval is the background re-check cadence. Generous (the file
 	// stat is cheap, but there's no need to spin) — a ~1s lag on a resume that
 	// hasn't had its first turn yet is invisible.
@@ -2053,13 +2084,40 @@ func (a *adapter) recheckRecoverOnFirstActivity() {
 	if inst == "" {
 		return
 	}
-	if e, ok := sessionhandoff.Read(inst); ok {
-		log.Printf("recover-session: handoff found on first tools/call (background watch had not yet fired) — recovering now")
-		ctx := a.runCtx
-		if ctx == nil {
-			ctx = context.Background()
-		}
-		go a.fireRecover(ctx, e)
+	e, ok := sessionhandoff.Read(inst)
+	if !ok {
+		return
+	}
+	log.Printf("recover-session: handoff found on first tools/call (background watch had not yet fired) — recovering now, BEFORE this call reaches the broker")
+	ctx := a.runCtx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	// SYNCHRONOUS, deliberately. This used to be `go a.fireRecover(...)` and the
+	// middleware returned straight into next(), which raced the RecoverSessionReq
+	// against the very tools/call that triggered it. When that call was `attach`,
+	// the broker handled attach FIRST — with no stable session id yet, because it
+	// learns the id only from RecoverSessionReq — so attachBare fell to its picker
+	// branch. The recover then landed a moment later, the broker claimed the topic
+	// and posted its "resumed" notice to the channel. Same instant, opposite
+	// answers: the channel said attached, the CLI showed a topic picker.
+	//
+	// Ordering is the fix, not a longer timeout. The broker must know who this
+	// session IS before it answers a question whose answer depends on that.
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		a.fireRecover(ctx, e)
+	}()
+	select {
+	case <-done:
+	case <-time.After(recoverSyncBudget):
+		// The broker is on a local unix socket, so this is a sub-millisecond
+		// round-trip in every healthy case; reaching here means something is
+		// genuinely wrong. Release the call rather than hold the user's first
+		// turn hostage — the recover keeps running and still lands, we just no
+		// longer guarantee it lands first.
+		log.Printf("recover-session: still in flight after %v — releasing the first tools/call; if it was `attach`, the CLI may see a picker while the recover completes behind it", recoverSyncBudget)
 	}
 }
 

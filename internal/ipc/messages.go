@@ -271,6 +271,15 @@ type HelloMsg struct {
 	// (unknown field ignored) compatible; the fix engages only new-adapter↔
 	// new-broker, matching the single-host-lockstep note above.
 	CannotRenderChannels bool `json:"cannot_render_channels,omitempty"`
+
+	// ProtocolVersion is the IPC wire-protocol version this adapter speaks (see
+	// ipc.ProtocolVersion for the bump rule). Additive + omitempty: an adapter
+	// that predates versioning omits it, and absence means version 1 — the
+	// broker normalizes with PeerProtocolVersion and NEVER errors on absence.
+	// A mismatch is logged by the broker and the connection proceeds; C3 does
+	// not refuse a connection over version, because `c3 update` routinely
+	// leaves old adapters talking to a new broker on the same host.
+	ProtocolVersion int `json:"protocol_version,omitempty"`
 }
 
 // RecoverSessionReq is the adapter → broker request to re-attach a resumed
@@ -327,9 +336,16 @@ type HelloAckMsg struct {
 	// Additive + omitempty: nil for older brokers that predate the CMG
 	// build, and nil when no channel is resolvable for the connection's
 	// route (the adapter falls back to a sensible default in that case).
-	// IPC has no version field; v1 relies on additive-omitempty +
-	// single-host lockstep `/c3:build` (spec §L4).
+	// Additive-omitempty is what makes that safe across builds; the handshake
+	// now ALSO carries an explicit ProtocolVersion (below) for the changes
+	// additive-omitempty cannot cover.
 	Capabilities *c3types.Capabilities `json:"capabilities,omitempty"`
+
+	// ProtocolVersion is the IPC wire-protocol version the BROKER speaks (see
+	// ipc.ProtocolVersion for the bump rule). Additive + omitempty: a broker
+	// that predates versioning omits it, and absence means version 1. The
+	// adapter logs a mismatch and carries on — the handshake still succeeds.
+	ProtocolVersion int `json:"protocol_version,omitempty"`
 }
 
 // Holder identifies a claim holder for diagnostic responses.

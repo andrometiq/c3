@@ -242,6 +242,7 @@ func (a *adapter) hello() error {
 		Op: ipc.OpHello, CLI: "desktop", PID: os.Getpid(), CWD: desktopCWD(),
 		Capabilities:         []string{"fetch_queue"},
 		CannotRenderChannels: true,
+		ProtocolVersion:      ipc.ProtocolVersion,
 	}); err != nil {
 		return err
 	}
@@ -252,6 +253,10 @@ func (a *adapter) hello() error {
 	var ack ipc.HelloAckMsg
 	if err := json.Unmarshal(raw, &ack); err != nil {
 		return err
+	}
+	// Version disagreement is logged, never fatal — see ipc.ProtocolVersion.
+	if w := ipc.AdapterProtocolWarning("desktop", ack.ProtocolVersion); w != "" {
+		log.Print(w)
 	}
 	a.helloAck = ack
 	return nil
@@ -314,6 +319,13 @@ func (a *adapter) brokerReader(ctx context.Context) {
 			var errMsg ipc.ErrorMsg
 			_ = json.Unmarshal(raw, &errMsg)
 			log.Printf("broker error: %s", errMsg.Err)
+		default:
+			// An op this build does not know — normally a NEWER broker (mixed
+			// versions are routine after `c3 update`; see ipc.ProtocolVersion).
+			// Skipping it is correct: unknown ops are additive by contract. Log
+			// it so the skip is VISIBLE — a silent drop is the worst failure
+			// mode there is.
+			log.Printf("desktop: ignoring unknown op %q from broker (this adapter speaks protocol v%d — the broker may be a newer c3 build; restart this CLI to match)", op, ipc.ProtocolVersion)
 		}
 	}
 }

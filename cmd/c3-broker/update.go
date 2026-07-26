@@ -101,19 +101,25 @@ func printPostInstall(newVersion string) {
 	fmt.Fprintf(&b, "\nC3 binaries updated to %s.\n", newVersion)
 	if pid := runningBrokerPID(); pid > 0 {
 		fmt.Fprintf(&b, `
-The RUNNING broker (pid %d) is still the OLD version — the new binary is on disk,
-but the daemon keeps its old code until it restarts. To roll it onto %s:
+The new binaries are on disk, but nothing running is using them yet: the broker
+(pid %d) and the adapter inside every open CLI session are still the old build.
+
+Roll the broker — adapters reconnect and respawn it from the new binary:
 
     kill -TERM %d
 
-Adapters reconnect automatically (exponential backoff) and re-spawn the new
-broker, replaying their attach — so live sessions recover on their own. This
-command does NOT stop the running broker for you.
-`, pid, newVersion, pid)
+Then restart your Claude Code / Codex session(s): an adapter lives as long as its
+CLI session, so only a restart puts it on %s.
+
+Skipping the restart is safe — C3 never refuses a connection over version. An old
+adapter on the new broker just logs one "PROTOCOL VERSION MISMATCH" line and keeps
+working until that session restarts.
+`, pid, pid, newVersion)
 	} else {
 		fmt.Fprintf(&b, `
-No broker is currently running; the next CLI session's adapter spawns the new
-binary automatically.
+No broker is running; the next CLI session spawns the new binary automatically.
+Restart any open Claude Code / Codex session too — its adapter stays on the old
+build until it does.
 `)
 	}
 	fmt.Fprintf(&b, `
