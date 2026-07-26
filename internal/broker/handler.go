@@ -574,7 +574,18 @@ func (b *Broker) handleListTopics(conn *ipc.Conn) {
 			}
 			key := MakeRouteKey(chanName, tp.ChatID, ptrI64Val(tp.TopicID))
 			if holder, ok := b.Routes.Holder(key); ok {
-				entry.ClaimedBy = &ipc.Holder{CLI: holder.CLI, PID: holder.PID, CWD: holder.CWD}
+				// Liveness is checked HERE, at read time, not merely at claim
+				// time. A holder that is disconnected AND whose PID is gone is
+				// reaped and the topic reported free — otherwise `topics`
+				// renders a ghost claim for a CLI that has exited, and disagrees
+				// with `c3-broker status`, which has always reaped at read time
+				// (handleListClaims below). Two views of one fact must not be
+				// able to give different answers.
+				if holder.IsAlive() {
+					entry.ClaimedBy = &ipc.Holder{CLI: holder.CLI, PID: holder.PID, CWD: holder.CWD}
+				} else {
+					b.Routes.Release(key, holder.ConnID)
+				}
 			}
 			resp.Topics = append(resp.Topics, entry)
 		}
