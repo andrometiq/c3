@@ -13,7 +13,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"github.com/karthikeyan5/c3/internal/ipc"
+	"github.com/Andrometiq/c3/internal/ipc"
 )
 
 // scriptedConn is a fake mcp.Connection that returns a fixed sequence of frames

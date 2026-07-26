@@ -27,7 +27,7 @@ BINS="c3-broker c3-claude-adapter c3-codex-adapter c3-grok-adapter c3-agy-adapte
 # time via -ldflags -X so a release binary knows its own version (dev builds,
 # built without this, report "dev" and never auto-update). Must stay in sync
 # with internal/version.
-VERSIONPKG="github.com/karthikeyan5/c3/internal/version.Version"
+VERSIONPKG="github.com/Andrometiq/c3/internal/version.Version"
 
 # sha256 helper that works on both Linux (sha256sum) and macOS (shasum).
 sha256() {

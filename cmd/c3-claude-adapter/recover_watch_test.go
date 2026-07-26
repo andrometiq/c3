@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/karthikeyan5/c3/internal/ipc"
-	"github.com/karthikeyan5/c3/internal/sessionhandoff"
+	"github.com/Andrometiq/c3/internal/ipc"
+	"github.com/Andrometiq/c3/internal/sessionhandoff"
 )
 
 // TestWatchForHandoff_FiresOnLateArrival covers BUG #1: the SessionStart hook

@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/karthikeyan5/c3/internal/ipc"
+	"github.com/Andrometiq/c3/internal/ipc"
 )
 
 // TestRenderRecoverNotice_SurfacesBacklogPreview covers BUG #2: a recovered

@@ -14,7 +14,7 @@ import (
 	"fmt"
 	"unicode/utf16"
 
-	"github.com/karthikeyan5/c3/internal/c3types"
+	"github.com/Andrometiq/c3/internal/c3types"
 )
 
 // Gate is the single validate+degrade choke point for an outbound message. It

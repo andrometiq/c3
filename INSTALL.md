@@ -2,7 +2,7 @@
 
 > **For human users:** open a Claude Code session in any directory and paste:
 >
->     follow https://github.com/karthikeyan5/c3/blob/master/INSTALL.md to install c3
+>     follow https://github.com/Andrometiq/c3/blob/master/INSTALL.md to install c3
 >
 > (or `follow /path/to/local/c3/INSTALL.md` if you've cloned locally)
 >
@@ -73,7 +73,7 @@ VERSION=v0.1.0
 OS=$(uname -s | tr '[:upper:]' '[:lower:]')
 ARCH=$(uname -m); [ "$ARCH" = x86_64 ] && ARCH=amd64; [ "$ARCH" = aarch64 ] && ARCH=arm64
 pkg="c3_${VERSION}_${OS}_${ARCH}"
-base="https://github.com/karthikeyan5/c3/releases/download/$VERSION"
+base="https://github.com/Andrometiq/c3/releases/download/$VERSION"
 curl -fsSL -O "$base/${pkg}.tar.gz"
 curl -fsSL -O "$base/SHA256SUMS"
 
@@ -114,7 +114,7 @@ build:
 
 ```bash
 # idempotent: pull if already cloned, else clone fresh
-[ -d ~/.local/share/c3/.git ] && git -C ~/.local/share/c3 pull || git clone https://github.com/karthikeyan5/c3 ~/.local/share/c3
+[ -d ~/.local/share/c3/.git ] && git -C ~/.local/share/c3 pull || git clone https://github.com/Andrometiq/c3 ~/.local/share/c3
 cd ~/.local/share/c3 && go install \
   ./cmd/c3-broker ./cmd/c3-claude-adapter ./cmd/c3-codex-adapter \
   ./cmd/c3-grok-adapter ./cmd/c3-agy-adapter ./cmd/c3-desktop-adapter \
@@ -232,7 +232,7 @@ both only if the user wants both.
 
 Tell the user to run these in this Claude Code session and confirm when done:
 
->     /plugin marketplace add karthikeyan5/c3
+>     /plugin marketplace add Andrometiq/c3
 >     /plugin install c3@c3
 >     /reload-plugins
 >
@@ -464,7 +464,7 @@ mkdir -p ~/.config/systemd/user
 # from a clone:  cp docs/systemd/c3-broker.service ~/.config/systemd/user/
 # prebuilt (no clone):
 curl -fsSL -o ~/.config/systemd/user/c3-broker.service \
-  https://raw.githubusercontent.com/karthikeyan5/c3/master/docs/systemd/c3-broker.service
+  https://raw.githubusercontent.com/Andrometiq/c3/master/docs/systemd/c3-broker.service
 # Edit ExecStart= to your c3-broker path (e.g. ~/.local/bin/c3-broker) before enabling.
 systemctl --user daemon-reload
 systemctl --user enable --now c3-broker.service
@@ -502,7 +502,7 @@ Apply these instead of the Linux-only steps referenced above:
   PowerShell). These Windows binaries are
   cross-compiled and have **not** had a clean-room CI pass — that is what
   "beta" means here. To build them yourself instead, install **Go ≥1.25** (the
-  portable zip needs no admin), then `git clone https://github.com/karthikeyan5/c3`
+  portable zip needs no admin), then `git clone https://github.com/Andrometiq/c3`
   (or `git pull` if you already have it) into a durable dir and run §1's same
   eight-package `go install` command.
 - **§1 PATH — use `setx`, not a shell rc.** Add the install dir to PATH via

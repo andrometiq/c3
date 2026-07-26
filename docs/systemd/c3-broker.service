@@ -1,6 +1,6 @@
 [Unit]
 Description=C3 broker — Telegram multiplexer for Claude Code / Codex CLIs
-Documentation=https://github.com/karthikeyan5/c3
+Documentation=https://github.com/Andrometiq/c3
 After=network-online.target
 Wants=network-online.target
 # Never enter a "failed" state from restart bursts — we always want a broker.

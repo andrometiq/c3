@@ -6,10 +6,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/karthikeyan5/c3/internal/c3types"
-	"github.com/karthikeyan5/c3/internal/ipc"
-	"github.com/karthikeyan5/c3/internal/mappings"
-	"github.com/karthikeyan5/c3/internal/queue"
+	"github.com/Andrometiq/c3/internal/c3types"
+	"github.com/Andrometiq/c3/internal/ipc"
+	"github.com/Andrometiq/c3/internal/mappings"
+	"github.com/Andrometiq/c3/internal/queue"
 )
 
 // captureAttached runs write (which must produce exactly one AttachedMsg on the

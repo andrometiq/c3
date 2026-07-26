@@ -13,7 +13,7 @@
 // directly (the adapters pass raw JSON-schema maps, not struct-tag reflection).
 package mcptools
 
-import "github.com/karthikeyan5/c3/internal/c3types"
+import "github.com/Andrometiq/c3/internal/c3types"
 
 // allMediaKinds is the fallback ordered media-kind enum used when a manifest
 // reports no MediaKinds (e.g. a zero-value Capabilities). Matches the historical

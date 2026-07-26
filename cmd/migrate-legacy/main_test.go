@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/karthikeyan5/c3/internal/mappings"
+	"github.com/Andrometiq/c3/internal/mappings"
 )
 
 func TestMigrate_FreshConfig(t *testing.T) {

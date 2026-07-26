@@ -12,7 +12,7 @@ import (
 
 	"github.com/PaulSonOfLars/gotgbot/v2"
 
-	"github.com/karthikeyan5/c3/internal/c3types"
+	"github.com/Andrometiq/c3/internal/c3types"
 )
 
 // readback.go — the Go home of the voice-transcript "readback" that the Python

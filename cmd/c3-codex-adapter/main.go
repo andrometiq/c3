@@ -55,14 +55,14 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"github.com/karthikeyan5/c3/internal/broker"
-	"github.com/karthikeyan5/c3/internal/c3types"
-	"github.com/karthikeyan5/c3/internal/ipc"
-	"github.com/karthikeyan5/c3/internal/mcptools"
-	"github.com/karthikeyan5/c3/internal/mode"
-	"github.com/karthikeyan5/c3/internal/osutil"
-	"github.com/karthikeyan5/c3/internal/spawn"
-	"github.com/karthikeyan5/c3/internal/termtitle"
+	"github.com/Andrometiq/c3/internal/broker"
+	"github.com/Andrometiq/c3/internal/c3types"
+	"github.com/Andrometiq/c3/internal/ipc"
+	"github.com/Andrometiq/c3/internal/mcptools"
+	"github.com/Andrometiq/c3/internal/mode"
+	"github.com/Andrometiq/c3/internal/osutil"
+	"github.com/Andrometiq/c3/internal/spawn"
+	"github.com/Andrometiq/c3/internal/termtitle"
 )
 
 const (

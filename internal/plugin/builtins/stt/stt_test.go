@@ -10,9 +10,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/karthikeyan5/c3/internal/c3types"
-	"github.com/karthikeyan5/c3/internal/channel"
-	"github.com/karthikeyan5/c3/internal/plugin"
+	"github.com/Andrometiq/c3/internal/c3types"
+	"github.com/Andrometiq/c3/internal/channel"
+	"github.com/Andrometiq/c3/internal/plugin"
 )
 
 // fakeHost is a minimal plugin.Host capturing the OnVoiceReceived callback

@@ -4,7 +4,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/karthikeyan5/c3/internal/c3types"
+	"github.com/Andrometiq/c3/internal/c3types"
 )
 
 // reachability combines the inbound (fetchHealth) and outbound (outboundHealth)

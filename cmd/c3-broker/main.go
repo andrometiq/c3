@@ -27,13 +27,13 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/karthikeyan5/c3/internal/broker"
-	"github.com/karthikeyan5/c3/internal/channel/telegram"
-	"github.com/karthikeyan5/c3/internal/mappings"
-	"github.com/karthikeyan5/c3/internal/osutil"
-	"github.com/karthikeyan5/c3/internal/plugin"
-	"github.com/karthikeyan5/c3/internal/plugin/builtins/stt"
-	"github.com/karthikeyan5/c3/internal/sessionhandoff"
+	"github.com/Andrometiq/c3/internal/broker"
+	"github.com/Andrometiq/c3/internal/channel/telegram"
+	"github.com/Andrometiq/c3/internal/mappings"
+	"github.com/Andrometiq/c3/internal/osutil"
+	"github.com/Andrometiq/c3/internal/plugin"
+	"github.com/Andrometiq/c3/internal/plugin/builtins/stt"
+	"github.com/Andrometiq/c3/internal/sessionhandoff"
 )
 
 // builtinPlugins lists the plugins compiled into the broker. Order matters

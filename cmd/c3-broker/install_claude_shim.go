@@ -9,7 +9,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/karthikeyan5/c3/internal/shimconfig"
+	"github.com/Andrometiq/c3/internal/shimconfig"
 )
 
 // shimSentinel is a byte sequence embedded in the claude-shim binary that

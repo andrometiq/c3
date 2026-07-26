@@ -14,7 +14,7 @@ import (
 //
 // It is a var (not a const) solely so tests can point FetchLatest at a loopback
 // httptest server; production never reassigns it.
-var LatestReleaseURL = "https://api.github.com/repos/karthikeyan5/c3/releases/latest"
+var LatestReleaseURL = "https://api.github.com/repos/Andrometiq/c3/releases/latest"
 
 // maxAPIBody caps the release-API JSON we read, so a hostile/huge response can't
 // exhaust memory. A release payload is a few KB; 1 MiB is generous headroom.

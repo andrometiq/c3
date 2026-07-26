@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/karthikeyan5/c3/internal/c3types"
+	"github.com/Andrometiq/c3/internal/c3types"
 )
 
 // A normal 3-column GFM table with an alignment delimiter row and inline styling

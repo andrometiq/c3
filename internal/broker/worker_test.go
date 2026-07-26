@@ -8,9 +8,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/karthikeyan5/c3/internal/c3types"
-	"github.com/karthikeyan5/c3/internal/channel"
-	"github.com/karthikeyan5/c3/internal/mappings"
+	"github.com/Andrometiq/c3/internal/c3types"
+	"github.com/Andrometiq/c3/internal/channel"
+	"github.com/Andrometiq/c3/internal/mappings"
 )
 
 // TestMain isolates the durable queue to a throwaway dir for the whole broker

@@ -3,7 +3,7 @@ package main
 import (
 	"testing"
 
-	"github.com/karthikeyan5/c3/internal/ipc"
+	"github.com/Andrometiq/c3/internal/ipc"
 )
 
 func TestRenderGrokRecoverNotice_Empty(t *testing.T) {

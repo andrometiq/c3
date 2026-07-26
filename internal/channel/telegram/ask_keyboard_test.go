@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/karthikeyan5/c3/internal/c3types"
+	"github.com/Andrometiq/c3/internal/c3types"
 )
 
 // askButtonsForTest mirrors the broker's askKeyboard output format

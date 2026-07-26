@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/karthikeyan5/c3/internal/c3types"
-	"github.com/karthikeyan5/c3/internal/queue"
+	"github.com/Andrometiq/c3/internal/c3types"
+	"github.com/Andrometiq/c3/internal/queue"
 )
 
 // No session attached → the inbound is queued (not dropped) AND a held-count

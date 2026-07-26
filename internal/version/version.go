@@ -4,7 +4,7 @@
 //
 // Version is injected at release-build time via
 //
-//	-ldflags "-X github.com/karthikeyan5/c3/internal/version.Version=v1.0.0"
+//	-ldflags "-X github.com/Andrometiq/c3/internal/version.Version=v1.0.0"
 //
 // (see scripts/package.sh, which the release workflow and `make dist` share). A
 // plain `go build` / `go install` — including the /c3:build path — leaves it

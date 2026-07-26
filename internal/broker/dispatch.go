@@ -7,9 +7,9 @@ import (
 	"strings"
 	"unicode/utf16"
 
-	"github.com/karthikeyan5/c3/internal/c3types"
-	"github.com/karthikeyan5/c3/internal/capability"
-	"github.com/karthikeyan5/c3/internal/channel"
+	"github.com/Andrometiq/c3/internal/c3types"
+	"github.com/Andrometiq/c3/internal/capability"
+	"github.com/Andrometiq/c3/internal/channel"
 )
 
 // dispatchTool translates a tool-call (name, args) into a channel method call.

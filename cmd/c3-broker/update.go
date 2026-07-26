@@ -8,10 +8,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/karthikeyan5/c3/internal/broker"
-	"github.com/karthikeyan5/c3/internal/osutil"
-	"github.com/karthikeyan5/c3/internal/updater"
-	"github.com/karthikeyan5/c3/internal/version"
+	"github.com/Andrometiq/c3/internal/broker"
+	"github.com/Andrometiq/c3/internal/osutil"
+	"github.com/Andrometiq/c3/internal/updater"
+	"github.com/Andrometiq/c3/internal/version"
 )
 
 const updateUsage = `c3-broker update — check for and install the latest C3 release.

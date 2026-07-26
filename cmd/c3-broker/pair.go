@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strconv"
 
-	"github.com/karthikeyan5/c3/internal/ipc"
+	"github.com/Andrometiq/c3/internal/ipc"
 )
 
 // runPair is the `c3-broker pair` subcommand. Sends an OpPairModeStart to

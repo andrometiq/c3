@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/karthikeyan5/c3/internal/ipc"
+	"github.com/Andrometiq/c3/internal/ipc"
 )
 
 // FIX 1 (2026-06-03): /c3:ping must match the calling session by PID

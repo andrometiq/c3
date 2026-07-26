@@ -1,4 +1,4 @@
-module github.com/karthikeyan5/c3
+module github.com/Andrometiq/c3
 
 go 1.25.0
 

@@ -6,9 +6,9 @@ import (
 	"log"
 	"time"
 
-	"github.com/karthikeyan5/c3/internal/c3types"
-	"github.com/karthikeyan5/c3/internal/channel"
-	"github.com/karthikeyan5/c3/internal/ipc"
+	"github.com/Andrometiq/c3/internal/c3types"
+	"github.com/Andrometiq/c3/internal/channel"
+	"github.com/Andrometiq/c3/internal/ipc"
 )
 
 // BrokerHost is the broker's concrete implementation of channel.Host.

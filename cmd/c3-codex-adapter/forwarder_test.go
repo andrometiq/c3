@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Andrometiq/c3/internal/c3types"
 	"github.com/gorilla/websocket"
-	"github.com/karthikeyan5/c3/internal/c3types"
 )
 
 func TestForwardInboundToCodexAppServerStartsTurn(t *testing.T) {

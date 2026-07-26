@@ -4,8 +4,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/karthikeyan5/c3/internal/c3types"
-	"github.com/karthikeyan5/c3/internal/mappings"
+	"github.com/Andrometiq/c3/internal/c3types"
+	"github.com/Andrometiq/c3/internal/mappings"
 )
 
 func TestBrokerHost_ConfigUnmarshal(t *testing.T) {

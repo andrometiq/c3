@@ -3,7 +3,7 @@ package telegram
 import (
 	"time"
 
-	"github.com/karthikeyan5/c3/internal/c3types"
+	"github.com/Andrometiq/c3/internal/c3types"
 )
 
 // Bot API limits and ceilings the Telegram manifest advertises. Kept as named

@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/karthikeyan5/c3/internal/c3types"
+	"github.com/Andrometiq/c3/internal/c3types"
 )
 
 // The silent-loss safety net (2026-07-12 dentist incident): a message delivered

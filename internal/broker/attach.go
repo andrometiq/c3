@@ -11,9 +11,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/karthikeyan5/c3/internal/c3types"
-	"github.com/karthikeyan5/c3/internal/ipc"
-	"github.com/karthikeyan5/c3/internal/mappings"
+	"github.com/Andrometiq/c3/internal/c3types"
+	"github.com/Andrometiq/c3/internal/ipc"
+	"github.com/Andrometiq/c3/internal/mappings"
 )
 
 // handleAttach is the broker-side attach proposal flow per spec §5.2-§5.5.

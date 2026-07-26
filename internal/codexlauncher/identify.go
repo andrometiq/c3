@@ -6,7 +6,7 @@ import (
 	"runtime/debug"
 )
 
-const packagePath = "github.com/karthikeyan5/c3/cmd/codex"
+const packagePath = "github.com/Andrometiq/c3/cmd/codex"
 
 // IsC3 reports whether path is a Go executable built from C3's cmd/codex
 // package. It is deliberately stricter than "a file named codex": install and

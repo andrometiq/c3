@@ -3,7 +3,7 @@ package telegram
 import (
 	"testing"
 
-	"github.com/karthikeyan5/c3/internal/c3types"
+	"github.com/Andrometiq/c3/internal/c3types"
 )
 
 // TestCapabilities_GoldenManifest pins the Telegram channel's v1 capability

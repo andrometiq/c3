@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/karthikeyan5/c3/internal/ipc"
+	"github.com/Andrometiq/c3/internal/ipc"
 )
 
 func TestRenderSessionsTable_EmptyList(t *testing.T) {

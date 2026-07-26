@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/karthikeyan5/c3/internal/c3types"
-	"github.com/karthikeyan5/c3/internal/queue"
+	"github.com/Andrometiq/c3/internal/c3types"
+	"github.com/Andrometiq/c3/internal/queue"
 )
 
 // captureLog redirects the default logger to a buffer for the duration of fn and

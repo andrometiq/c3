@@ -130,7 +130,7 @@ refused while the `.exe` files may be live (quit C3 and re-extract the tarball i
 In any Claude Code session, paste:
 
 ```text
-follow https://github.com/karthikeyan5/c3/blob/master/INSTALL.md to install c3
+follow https://github.com/Andrometiq/c3/blob/master/INSTALL.md to install c3
 ```
 
 The playbook asks which host you want — Claude Code, Claude Desktop, or CoWork — then

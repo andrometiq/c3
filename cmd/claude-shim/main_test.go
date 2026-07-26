@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/karthikeyan5/c3/internal/shimconfig"
+	"github.com/Andrometiq/c3/internal/shimconfig"
 )
 
 func TestInjectC3Plugin_FlagAbsent_Prepends(t *testing.T) {

@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/karthikeyan5/c3/internal/c3types"
+	"github.com/Andrometiq/c3/internal/c3types"
 )
 
 // tsMsg builds a message with an explicit timestamp (for the MIN/MAX age tests).

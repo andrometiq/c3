@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/karthikeyan5/c3/internal/version"
+	"github.com/Andrometiq/c3/internal/version"
 )
 
 // healthFileEntry is the per-channel shape nested under "channels" in

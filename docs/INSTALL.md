@@ -63,7 +63,7 @@ You need:
 Add C3's marketplace straight from GitHub and install the plugin:
 
 ```
-/plugin marketplace add karthikeyan5/c3
+/plugin marketplace add Andrometiq/c3
 /plugin install c3@c3
 /reload-plugins
 ```
@@ -77,7 +77,7 @@ project.
 > *that clone* as the marketplace instead (the plugin cache from a GitHub add
 > doesn't carry the Go source `/c3:build` needs):
 > ```bash
-> git clone https://github.com/karthikeyan5/c3 ~/.local/share/c3
+> git clone https://github.com/Andrometiq/c3 ~/.local/share/c3
 > ```
 > then `/plugin marketplace add ~/.local/share/c3`. `/c3:build` compiles from
 > this directory on every build, so pick a stable path (not `~/Downloads` or
@@ -105,7 +105,7 @@ VERSION=v0.1.0
 OS=$(uname -s | tr '[:upper:]' '[:lower:]')
 ARCH=$(uname -m); [ "$ARCH" = x86_64 ] && ARCH=amd64; [ "$ARCH" = aarch64 ] && ARCH=arm64
 pkg="c3_${VERSION}_${OS}_${ARCH}"
-base="https://github.com/karthikeyan5/c3/releases/download/$VERSION"
+base="https://github.com/Andrometiq/c3/releases/download/$VERSION"
 curl -fsSL -O "$base/${pkg}.tar.gz"
 curl -fsSL -O "$base/SHA256SUMS"
 

@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/karthikeyan5/c3/internal/broker"
-	"github.com/karthikeyan5/c3/internal/mappings"
+	"github.com/Andrometiq/c3/internal/broker"
+	"github.com/Andrometiq/c3/internal/mappings"
 )
 
 // sandboxSetupEnv isolates a setup-flow test from the real machine: fresh

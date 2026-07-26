@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/karthikeyan5/c3/internal/ipc"
+	"github.com/Andrometiq/c3/internal/ipc"
 )
 
 const recoverRespTimeout = 8 * time.Second

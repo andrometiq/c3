@@ -6,8 +6,8 @@ import (
 	"log"
 	"time"
 
-	"github.com/karthikeyan5/c3/internal/c3types"
-	"github.com/karthikeyan5/c3/internal/ipc"
+	"github.com/Andrometiq/c3/internal/c3types"
+	"github.com/Andrometiq/c3/internal/ipc"
 )
 
 // retranscribeTimeout bounds the synchronous STT chain run on the IPC read

@@ -6,7 +6,7 @@ import (
 
 	"github.com/PaulSonOfLars/gotgbot/v2"
 
-	"github.com/karthikeyan5/c3/internal/c3types"
+	"github.com/Andrometiq/c3/internal/c3types"
 )
 
 // StopPoll force-closes a bot-sent poll and returns its final aggregate tally.

@@ -8,9 +8,9 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/karthikeyan5/c3/internal/mappings"
-	"github.com/karthikeyan5/c3/internal/queue"
-	"github.com/karthikeyan5/c3/internal/sessionhandoff"
+	"github.com/Andrometiq/c3/internal/mappings"
+	"github.com/Andrometiq/c3/internal/queue"
+	"github.com/Andrometiq/c3/internal/sessionhandoff"
 )
 
 // sessionHookInput is the subset of the SessionStart hook's stdin JSON we use.

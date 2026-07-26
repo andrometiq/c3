@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/karthikeyan5/c3/internal/ipc"
-	"github.com/karthikeyan5/c3/internal/proctree"
+	"github.com/Andrometiq/c3/internal/ipc"
+	"github.com/Andrometiq/c3/internal/proctree"
 )
 
 // runPing is the `c3-broker ping` subcommand. Sends an OpPingThisSession

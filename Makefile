@@ -13,7 +13,7 @@ PLATFORMS := linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64 win
 # Inject the build version so a binary knows its own release identity (the
 # auto-updater compares it against the latest GitHub release). Kept in sync with
 # scripts/package.sh's VERSIONPKG. Empty VERSION ⇒ no injection ⇒ dev build.
-VERSION_LDFLAGS := $(if $(VERSION),-X github.com/karthikeyan5/c3/internal/version.Version=$(VERSION),)
+VERSION_LDFLAGS := $(if $(VERSION),-X github.com/Andrometiq/c3/internal/version.Version=$(VERSION),)
 
 build:
 	@mkdir -p $(BIN_DIR)

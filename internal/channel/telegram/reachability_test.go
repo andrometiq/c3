@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/karthikeyan5/c3/internal/c3types"
+	"github.com/Andrometiq/c3/internal/c3types"
 )
 
 // newWiredChannel builds a Channel with the inbound machine and the combiner

@@ -22,10 +22,10 @@ import (
 
 	"golang.org/x/term"
 
-	"github.com/karthikeyan5/c3/internal/broker"
-	"github.com/karthikeyan5/c3/internal/mappings"
-	"github.com/karthikeyan5/c3/internal/osutil"
-	"github.com/karthikeyan5/c3/internal/spawn"
+	"github.com/Andrometiq/c3/internal/broker"
+	"github.com/Andrometiq/c3/internal/mappings"
+	"github.com/Andrometiq/c3/internal/osutil"
+	"github.com/Andrometiq/c3/internal/spawn"
 )
 
 // telegramChannelName is the mappings.json channel key setup manages.
@@ -1555,7 +1555,7 @@ func joinBackgroundInstall(ch <-chan installResult) error {
 }
 
 // discoverSourceDir locates the C3 source tree (one with go.mod
-// module = github.com/karthikeyan5/c3) so the core `go install` has
+// module = github.com/Andrometiq/c3) so the core `go install` has
 // a working directory.
 //
 // Resolution order:
@@ -1587,7 +1587,7 @@ func discoverSourceDir() (string, bool) {
 }
 
 // walkUpForC3GoMod ascends parent directories looking for a go.mod
-// whose module declaration matches github.com/karthikeyan5/c3.
+// whose module declaration matches github.com/Andrometiq/c3.
 // Returns "" if none found within a small fixed budget (10 levels).
 func walkUpForC3GoMod(start string) string {
 	dir := start
@@ -1615,7 +1615,7 @@ func isC3SourceDir(dir string) bool {
 		line = strings.TrimSpace(line)
 		if strings.HasPrefix(line, "module ") {
 			mod := strings.TrimSpace(strings.TrimPrefix(line, "module"))
-			return mod == "github.com/karthikeyan5/c3"
+			return mod == "github.com/Andrometiq/c3"
 		}
 	}
 	return false

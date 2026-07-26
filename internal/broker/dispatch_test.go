@@ -10,8 +10,8 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/karthikeyan5/c3/internal/c3types"
-	"github.com/karthikeyan5/c3/internal/channel"
+	"github.com/Andrometiq/c3/internal/c3types"
+	"github.com/Andrometiq/c3/internal/channel"
 )
 
 // pollChannel is a test channel whose Capabilities advertise poll support and

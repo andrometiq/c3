@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/karthikeyan5/c3/internal/c3types"
-	"github.com/karthikeyan5/c3/internal/ipc"
+	"github.com/Andrometiq/c3/internal/c3types"
+	"github.com/Andrometiq/c3/internal/ipc"
 )
 
 // TestRecoverBroker_CtxCancelStopsLoop guards the D1 (adapter-ipc-2) reconnect-

@@ -19,7 +19,7 @@ import (
 	"testing"
 )
 
-const modulePath = "github.com/karthikeyan5/c3"
+const modulePath = "github.com/Andrometiq/c3"
 
 // telegramPkgRel is the ONE package allowed to name Telegram specifics. All
 // Telegram rendering/wire detail lives here; nothing above it may.

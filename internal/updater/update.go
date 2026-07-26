@@ -8,8 +8,8 @@ import (
 	"path/filepath"
 	"runtime"
 
-	"github.com/karthikeyan5/c3/internal/codexlauncher"
-	"github.com/karthikeyan5/c3/internal/version"
+	"github.com/Andrometiq/c3/internal/codexlauncher"
+	"github.com/Andrometiq/c3/internal/version"
 )
 
 // Options configures an Update run. The zero value is usable: Client defaults to

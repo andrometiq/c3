@@ -7,8 +7,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/karthikeyan5/c3/internal/channel/telegram"
-	"github.com/karthikeyan5/c3/internal/mode"
+	"github.com/Andrometiq/c3/internal/channel/telegram"
+	"github.com/Andrometiq/c3/internal/mode"
 )
 
 // HostCLI is the discovered identity of the CLI driving setup.

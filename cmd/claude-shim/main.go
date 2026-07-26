@@ -23,7 +23,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/karthikeyan5/c3/internal/shimconfig"
+	"github.com/Andrometiq/c3/internal/shimconfig"
 )
 
 const (

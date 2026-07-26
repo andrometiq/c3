@@ -5,8 +5,8 @@ package plugin
 import (
 	"context"
 
-	"github.com/karthikeyan5/c3/internal/c3types"
-	"github.com/karthikeyan5/c3/internal/channel"
+	"github.com/Andrometiq/c3/internal/c3types"
+	"github.com/Andrometiq/c3/internal/channel"
 )
 
 // Host is the broker-supplied interface that plugins receive at Register

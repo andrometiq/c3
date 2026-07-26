@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/karthikeyan5/c3/internal/c3types"
+	"github.com/Andrometiq/c3/internal/c3types"
 )
 
 // TestInboundContentSummary_CapturesContent guards D4 (adapter-ipc-4): on a

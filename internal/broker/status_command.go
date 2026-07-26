@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/karthikeyan5/c3/internal/c3types"
+	"github.com/Andrometiq/c3/internal/c3types"
 )
 
 // HandleCommand handles broker-owned Telegram bot commands: "/status",

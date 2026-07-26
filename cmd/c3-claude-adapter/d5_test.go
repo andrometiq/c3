@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/karthikeyan5/c3/internal/c3types"
+	"github.com/Andrometiq/c3/internal/c3types"
 )
 
 // TestAdviseBrokerDown_FrameRenders proves the D5 advisory actually renders as a

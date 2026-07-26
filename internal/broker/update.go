@@ -6,9 +6,9 @@ import (
 	"log"
 	"time"
 
-	"github.com/karthikeyan5/c3/internal/c3types"
-	"github.com/karthikeyan5/c3/internal/updater"
-	"github.com/karthikeyan5/c3/internal/version"
+	"github.com/Andrometiq/c3/internal/c3types"
+	"github.com/Andrometiq/c3/internal/updater"
+	"github.com/Andrometiq/c3/internal/version"
 )
 
 const (

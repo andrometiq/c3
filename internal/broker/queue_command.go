@@ -34,9 +34,9 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/karthikeyan5/c3/internal/c3types"
-	"github.com/karthikeyan5/c3/internal/mappings"
-	"github.com/karthikeyan5/c3/internal/queue"
+	"github.com/Andrometiq/c3/internal/c3types"
+	"github.com/Andrometiq/c3/internal/mappings"
+	"github.com/Andrometiq/c3/internal/queue"
 )
 
 // Grammar hints appended to parse rejects (operator-visible only — parse runs

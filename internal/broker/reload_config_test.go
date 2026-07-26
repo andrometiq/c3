@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/karthikeyan5/c3/internal/mappings"
+	"github.com/Andrometiq/c3/internal/mappings"
 )
 
 // TestBroker_SetMappings_AtomicSwap asserts the SIGHUP-driven config reload

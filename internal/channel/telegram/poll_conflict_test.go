@@ -9,7 +9,7 @@ import (
 
 	"github.com/PaulSonOfLars/gotgbot/v2"
 
-	"github.com/karthikeyan5/c3/internal/c3types"
+	"github.com/Andrometiq/c3/internal/c3types"
 )
 
 // funcBotClient is a scripted gotgbot.BotClient test double. Each getUpdates

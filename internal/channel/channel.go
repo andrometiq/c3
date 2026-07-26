@@ -5,7 +5,7 @@ package channel
 import (
 	"context"
 
-	"github.com/karthikeyan5/c3/internal/c3types"
+	"github.com/Andrometiq/c3/internal/c3types"
 )
 
 // Channel is the contract every transport implements. Methods are called by

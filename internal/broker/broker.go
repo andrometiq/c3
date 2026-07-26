@@ -8,12 +8,12 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/karthikeyan5/c3/internal/c3types"
-	"github.com/karthikeyan5/c3/internal/channel"
-	"github.com/karthikeyan5/c3/internal/mappings"
-	"github.com/karthikeyan5/c3/internal/plugin"
-	"github.com/karthikeyan5/c3/internal/proctree"
-	"github.com/karthikeyan5/c3/internal/queue"
+	"github.com/Andrometiq/c3/internal/c3types"
+	"github.com/Andrometiq/c3/internal/channel"
+	"github.com/Andrometiq/c3/internal/mappings"
+	"github.com/Andrometiq/c3/internal/plugin"
+	"github.com/Andrometiq/c3/internal/proctree"
+	"github.com/Andrometiq/c3/internal/queue"
 )
 
 // Broker holds the in-memory state shared by all connections: stubs registry,

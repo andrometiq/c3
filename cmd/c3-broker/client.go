@@ -19,8 +19,8 @@ import (
 	"os"
 	"time"
 
-	"github.com/karthikeyan5/c3/internal/broker"
-	"github.com/karthikeyan5/c3/internal/ipc"
+	"github.com/Andrometiq/c3/internal/broker"
+	"github.com/Andrometiq/c3/internal/ipc"
 )
 
 // dialBroker opens a transient connection to the broker socket and

@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/karthikeyan5/c3/internal/ipc"
+	"github.com/Andrometiq/c3/internal/ipc"
 )
 
 // The fake-tree tests exercise detectRenderCapable's logic; this grounds the REAL

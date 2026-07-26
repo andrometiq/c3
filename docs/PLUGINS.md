@@ -40,7 +40,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/karthikeyan5/c3/internal/plugin"
+	"github.com/Andrometiq/c3/internal/plugin"
 )
 
 const Name = "example"
@@ -88,7 +88,7 @@ func loadConfig(host plugin.Host) (*config, error) {
 Then register it in the broker's compiled-in plugin list — the `builtinPlugins` slice in `cmd/c3-broker/main.go` (there is **no** `internal/plugin/registry.go`; that's the real registrar):
 
 ```go
-import "github.com/karthikeyan5/c3/internal/plugin/builtins/example"
+import "github.com/Andrometiq/c3/internal/plugin/builtins/example"
 
 var builtinPlugins = []broker.BuiltinPlugin{
 	{Name: stt.Name, Register: func(h plugin.Host) error { return stt.Register(h) }},

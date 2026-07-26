@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/karthikeyan5/c3/internal/c3types"
+	"github.com/Andrometiq/c3/internal/c3types"
 )
 
 // readHealthFile reads + unmarshals health.json into the wrapper shape, failing

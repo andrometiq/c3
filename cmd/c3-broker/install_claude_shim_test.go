@@ -10,7 +10,7 @@ import (
 	"syscall"
 	"testing"
 
-	"github.com/karthikeyan5/c3/internal/shimconfig"
+	"github.com/Andrometiq/c3/internal/shimconfig"
 )
 
 func TestInstallClaudeShim_FreshInstall_CreatesSymlink(t *testing.T) {

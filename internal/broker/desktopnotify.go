@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/karthikeyan5/c3/internal/c3types"
+	"github.com/Andrometiq/c3/internal/c3types"
 )
 
 // healthNotifier raises a local desktop popup for a channel-health edge. An

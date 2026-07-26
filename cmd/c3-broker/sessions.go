@@ -7,8 +7,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/karthikeyan5/c3/internal/ipc"
-	"github.com/karthikeyan5/c3/internal/proctree"
+	"github.com/Andrometiq/c3/internal/ipc"
+	"github.com/Andrometiq/c3/internal/proctree"
 )
 
 // runSessions is the `c3-broker sessions` subcommand. Lists every live

@@ -5,7 +5,7 @@ import (
 
 	"github.com/PaulSonOfLars/gotgbot/v2"
 
-	"github.com/karthikeyan5/c3/internal/channel"
+	"github.com/Andrometiq/c3/internal/channel"
 )
 
 // genericTapWithKeyboard builds an accessible-message callback carrying `data`,

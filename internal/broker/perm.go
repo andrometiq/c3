@@ -6,8 +6,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/karthikeyan5/c3/internal/c3types"
-	"github.com/karthikeyan5/c3/internal/ipc"
+	"github.com/Andrometiq/c3/internal/c3types"
+	"github.com/Andrometiq/c3/internal/ipc"
 )
 
 // Permission relay (spec docs/superpowers/specs/2026-06-26-c3-permission-relay-

@@ -5,8 +5,8 @@ import (
 	"os"
 	"testing"
 
-	"github.com/karthikeyan5/c3/internal/ipc"
-	"github.com/karthikeyan5/c3/internal/mappings"
+	"github.com/Andrometiq/c3/internal/ipc"
+	"github.com/Andrometiq/c3/internal/mappings"
 )
 
 // SYMPTOM-3 (2026-06-04): multiple `claude` instances launched from the

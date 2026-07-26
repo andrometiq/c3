@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/karthikeyan5/c3/internal/c3types"
+	"github.com/Andrometiq/c3/internal/c3types"
 )
 
 // sendrich.go — outbound native rich-message tables (Bot API 10.1

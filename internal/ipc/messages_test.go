@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/karthikeyan5/c3/internal/c3types"
+	"github.com/Andrometiq/c3/internal/c3types"
 )
 
 func TestHelloMsg_Roundtrip(t *testing.T) {

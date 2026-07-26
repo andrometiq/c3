@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/karthikeyan5/c3/internal/c3types"
+	"github.com/Andrometiq/c3/internal/c3types"
 )
 
 // telegramLikeCaps is a full-featured manifest mirroring the Telegram literal,

@@ -7,7 +7,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/karthikeyan5/c3/internal/codexlauncher"
+	"github.com/Andrometiq/c3/internal/codexlauncher"
 )
 
 func runInstallCodexShim(args []string) error {
