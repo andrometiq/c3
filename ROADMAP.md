@@ -2,6 +2,41 @@
 
 What's next for C3 after v0.1. Everything here is future or unbuilt; shipped work is in git history. One line per item — details land in the design when each is built.
 
+## First after v0.1 — agent-to-agent messaging
+
+**One agent can post into another agent's topic, so it can wake it.** Today the human is the
+transport for every agent-to-agent nudge, and that is a real cost, not a theoretical one: a Codex
+review sat unclaimed for hours because the Codex harness cannot schedule a turn on a file event —
+only a human message wakes it. The collaboration protocol had to add a whole "nudge-by-default"
+clause to work around it. C3 already owns the one thing that would fix it: it can put a message in
+front of an idle agent.
+
+The motivating case is small and concrete — *"tell the Codex topic to arm its watcher"* — and it is
+the right first case precisely because it is small.
+
+**The safeguards are the design, not a garnish.** An agent that can post outside its own route is a
+new trust boundary, and v0.1 spent real effort closing exactly that shape: a tool call is now
+structurally addressed to the route the session claimed, and an args-supplied destination is refused
+outright. This feature deliberately reopens a narrow version of that, so it has to be built with
+the door frame, not cut through the wall:
+
+- **Addressed by topic, never by chat id.** The sender names a topic; it never supplies a raw
+  destination. Reuse the refusal that already exists rather than adding a bypass beside it.
+- **Rate-limited per (sender, target) pair, with a cooldown**, so a stuck agent cannot loop a
+  target into uselessness. A nudge is a doorbell, not a channel.
+- **Attributed and visibly non-human.** The receiving human must be able to tell at a glance that
+  an agent wrote it, and which one. An agent message that reads like the operator's is the failure
+  mode that ends this feature.
+- **Opt-in per target**, and revocable. A topic's holder decides whether it accepts nudges.
+- **Content-bounded.** A wake signal, not a side channel for work: short, no attachments, and never
+  a route by which one agent instructs another to act. The board and the exchange folder stay the
+  place where actual work is handed over — this only says *"go look at the board."*
+- **Audited** like every other outbound: sender, target, and outcome in the log.
+
+Open question worth settling in the design rather than in code: whether the nudge is a first-class
+broker op with the human merely spectating, or a normal message the human could equally have sent.
+The first is cleaner; the second is far easier to reason about when it misbehaves.
+
 ## Interactive & trust
 
 - Interactive Q&A: free-text / "Other" / comment answers (single/multi-select + Skip already ship).
@@ -14,7 +49,6 @@ What's next for C3 after v0.1. Everything here is future or unbuilt; shipped wor
 ## Reach
 
 - Remote spawn + control of Claude Code / Codex sessions from chat.
-- Inter-agent messaging — one agent can message another's channel (rate-limited).
 - Stream the agent's reasoning to the channel.
 - Be the phone surface for session managers (Claude Squad, CCManager, Conductor, …).
 - A generic ACP-client adapter — one code path that spawns and drives any
