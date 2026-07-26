@@ -48,21 +48,7 @@ func forwardInboundToCodexAppServer(ctx context.Context, in *c3types.Inbound, cf
 	defer conn.Close()
 
 	client := &codexWSClient{conn: conn, timeout: cfg.Timeout}
-	if _, err := client.request(ctx, "initialize", map[string]any{
-		"clientInfo": map[string]any{
-			"name":    "c3-codex-bridge",
-			"title":   "C3 Codex bridge",
-			"version": adapterVersion,
-		},
-		"capabilities": map[string]any{
-			"experimentalApi": true,
-			"optOutNotificationMethods": []string{
-				"item/agentMessage/delta",
-				"item/reasoning/textDelta",
-				"item/reasoning/summaryTextDelta",
-			},
-		},
-	}); err != nil {
+	if _, err := client.request(ctx, "initialize", codexInitializeParams()); err != nil {
 		return err
 	}
 	if err := client.notify("initialized", nil); err != nil {
@@ -94,6 +80,27 @@ func forwardInboundToCodexAppServer(ctx context.Context, in *c3types.Inbound, cf
 		}},
 	})
 	return err
+}
+
+// codexInitializeParams is the app-server `initialize` payload every C3 → Codex
+// WebSocket call sends. Shared by the inbound forwarder and the session-identity
+// probe (recover.go) so both introduce themselves to Codex identically.
+func codexInitializeParams() map[string]any {
+	return map[string]any{
+		"clientInfo": map[string]any{
+			"name":    "c3-codex-bridge",
+			"title":   "C3 Codex bridge",
+			"version": adapterVersion,
+		},
+		"capabilities": map[string]any{
+			"experimentalApi": true,
+			"optOutNotificationMethods": []string{
+				"item/agentMessage/delta",
+				"item/reasoning/textDelta",
+				"item/reasoning/summaryTextDelta",
+			},
+		},
+	}
 }
 
 func (c *codexWSClient) discoverThread(ctx context.Context, cwd string) (string, error) {

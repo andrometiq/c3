@@ -6,8 +6,10 @@
 //  1. On stdin: accept JSON-RPC 2.0 requests from Codex (initialize, tools/list,
 //     tools/call, ping, notifications/initialized).
 //  2. On the broker socket: connect, send hello, listen for inbound /
-//     tool_result / topics_list frames. The session starts UNATTACHED —
-//     attaching is explicit (a bare attach shows a picker).
+//     tool_result / topics_list frames. A FRESH session starts UNATTACHED —
+//     attaching is explicit (a bare attach shows a picker). A RESUMED
+//     conversation re-claims the topic IT ITSELF last held, keyed on its own
+//     Codex thread id (recover.go); it never guesses one from the cwd.
 //  3. For tools/call: route adapter-local tools (`attach`, `topics`,
 //     `fetch_queue`, `retranscribe`, `codex_forward`) directly; forward all
 //     other tools to the broker. Backlog is read on demand via `fetch_queue`
@@ -29,7 +31,12 @@
 //	                            shows a picker)
 //	C3_CODEX_REMOTE_BRIDGE      "1" iff launcher started us; gates forwarding
 //	C3_CODEX_CWD                absolute cwd; used for thread/list filtering
-//	C3_CODEX_APP_SERVER_WS      ws://host:port of the Codex app-server
+//	C3_CODEX_APP_SERVER_WS      ws://host:port of the Codex app-server; also the
+//	                            source of this session's identity (recover.go)
+//	C3_CODEX_THREAD_ID          optional operator pin: names this session's Codex
+//	                            thread for BOTH the forwarder and session
+//	                            recovery, and is the escape hatch when the
+//	                            app-server's loaded-thread list is ambiguous
 //	C3_CODEX_ALLOW_MANUAL_FORWARD  debug bypass for split-brain guard
 //
 // MCP wire layer: github.com/modelcontextprotocol/go-sdk (v1.6.0+).
@@ -100,11 +107,18 @@ func run() error {
 		return fmt.Errorf("hello: %w", err)
 	}
 
-	// No startup auto-attach: a Codex session starts UNATTACHED and attaches
-	// explicitly (a bare attach shows a picker). The old cwd-inferred
+	// No startup auto-attach: a FRESH Codex session starts UNATTACHED and
+	// attaches explicitly (a bare attach shows a picker). The old cwd-inferred
 	// C3_ATTACH_NAME auto-attach was a silent cwd-guess bind — the exact
 	// mis-target class this redesign closes (spec §2). The launcher still sets
-	// C3_ATTACH_NAME, but the adapter no longer consumes it (vestigial).
+	// C3_ATTACH_NAME, but the adapter no longer consumes it (vestigial), and it
+	// must never be revived: a cwd describes how a session was STARTED, so two
+	// sessions started alike share it forever.
+	//
+	// A RESUMED conversation is a different case and does re-attach silently —
+	// but only to the topic that conversation itself last held, keyed on its own
+	// Codex thread id. brokerReader starts that (recover.go); it is identity, not
+	// inference, and it recovers nothing when the identity is not certain.
 
 	srv := a.buildMCPServer()
 	a.transport = newLogNotifyTransport(&mcp.StdioTransport{})
@@ -205,6 +219,32 @@ type adapter struct {
 	// Reset on a successful reconnect so a later outage re-advises.
 	brokerDownAdvised atomic.Bool
 
+	// ── session recovery (recover.go) ───────────────────────────────────────
+	// rsPending is the waiter for an in-flight RecoverSessionResp, fed by
+	// dispatchRecoverSessionResult off the broker read loop. Guarded by rsmu.
+	rsmu      sync.Mutex
+	rsPending chan ipc.RecoverSessionResp
+
+	// recoverConn is the broker connection the last recovery was started on.
+	// brokerReader compares it every turn so recovery runs once per CONNECTION —
+	// once at startup, and again on a fresh conn after a broker restart (which
+	// otherwise loses this session's stable id). Guarded by rcmu.
+	rcmu        sync.Mutex
+	recoverConn *ipc.Conn
+
+	// threadID caches this session's resolved Codex thread id — the stable
+	// identity. Resolved at most once per process (a session cannot become a
+	// different conversation), so a reconnect re-registers without another
+	// app-server round trip. Guarded by tidmu.
+	tidmu    sync.Mutex
+	threadID string
+
+	// identitySettled is closed once the first recovery attempt has finished,
+	// whether it recovered, registered, or refused. toolAttach waits on it so an
+	// attach is never answered before this session knows who it is.
+	identitySettled chan struct{}
+	settleOnce      sync.Once
+
 	// forwardCh feeds the SINGLE serial Codex-forward goroutine (codexForwardLoop,
 	// started in newAdapter). Enqueueing here instead of spawning a goroutine per
 	// inbound is the M2 loss fix: the broker's OpInboundDelivered consume is
@@ -237,10 +277,11 @@ type codexForwardReq struct {
 
 func newAdapter() *adapter {
 	a := &adapter{
-		pending:   map[string]chan ipc.ToolResultMsg{},
-		fqPending: map[string]chan ipc.FetchQueueResp{},
-		rtPending: map[string]chan ipc.RetranscribeResp{},
-		forwardCh: make(chan codexForwardReq, 256),
+		pending:         map[string]chan ipc.ToolResultMsg{},
+		fqPending:       map[string]chan ipc.FetchQueueResp{},
+		rtPending:       map[string]chan ipc.RetranscribeResp{},
+		forwardCh:       make(chan codexForwardReq, 256),
+		identitySettled: make(chan struct{}),
 	}
 	// Single serial Codex-forward consumer. Started here (not per-inbound) so all
 	// forwards + delivery acks go through one in-order path — the invariant the
@@ -327,6 +368,11 @@ func (a *adapter) brokerReader(ctx context.Context) {
 		if conn == nil {
 			return
 		}
+		// Settle this session's identity (recover.go). Once per CONNECTION: the
+		// first turn does it at startup so a RESUMED Codex conversation silently
+		// re-claims its own topic, and a post-restart connection re-registers the
+		// stable id so later attaches are still recorded against this session.
+		a.ensureSessionRecoverForConn(ctx, conn)
 		raw, err := conn.ReadFrame()
 		if err != nil {
 			log.Printf("broker read err: %v — recovering", err)
@@ -353,6 +399,8 @@ func (a *adapter) brokerReader(ctx context.Context) {
 			a.dispatchFetchQueueResult(raw)
 		case ipc.OpRetranscribeResult:
 			a.dispatchRetranscribeResult(raw)
+		case ipc.OpRecoverSessionResult:
+			a.dispatchRecoverSessionResult(raw)
 		case ipc.OpError:
 			var errMsg ipc.ErrorMsg
 			_ = json.Unmarshal(raw, &errMsg)
@@ -1131,6 +1179,11 @@ func decodeArgs(raw json.RawMessage) (map[string]any, error) {
 }
 
 func (a *adapter) toolAttach(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	// Identity before anything that depends on it (recover.go rule (b)): an
+	// in-flight session recovery may be about to re-claim this session's own
+	// topic, and answering an attach first would race it. No-op once settled,
+	// and a no-op entirely when no recovery was started.
+	a.awaitIdentitySettled(ctx)
 	args, err := decodeArgs(req.Params.Arguments)
 	if err != nil {
 		return nil, fmt.Errorf("invalid params: %w", err)
