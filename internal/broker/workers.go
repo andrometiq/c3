@@ -61,7 +61,9 @@ func NewWorkerPool(parent context.Context, idle time.Duration, broker *Broker) *
 // (poll.go dispatches updates synchronously), so every millisecond spent here
 // delays EVERY route's inbound and the next getUpdates. Two seconds is enough for
 // a worker to drain a job or two under normal load; past that the caller holds the
-// Telegram offset instead, and the redelivery is paced by pollIdleBackoff.
+// Telegram offset instead. This window IS the redelivery pacing — a held dispatch
+// still counts as progress in the poll loop, so pollIdleBackoff never fires on
+// that path.
 const submitGraceWindow = 2 * time.Second
 
 // submitRetryInterval is how often SubmitWait re-attempts within the window. The

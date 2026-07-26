@@ -65,7 +65,14 @@ func (h *BrokerHost) Config(name string, target any) error {
 // Now: SubmitWait absorbs a momentary burst (submitGraceWindow), and if the route
 // is still saturated the caller HOLDS the Telegram offset so the message is
 // redelivered instead of destroyed. Telegram retains unacknowledged updates, so
-// the message survives; the redelivery loop is paced by pollIdleBackoff.
+// the message survives.
+//
+// What paces the retry is submitGraceWindow itself, NOT pollIdleBackoff: a held
+// dispatch still counts as progress in the poll loop, so the idle backoff never
+// fires on this path. Each held update costs the poll goroutine up to 2s inside
+// Emit before it refuses, and the whole batch issues one getUpdates — so K held
+// updates pace at 2s×K. That is more pacing than the 1s idle backoff it skips,
+// not less, which is why the hot-repoll failure mode does not arise here.
 // (v0.1.0 release audit, 2026-07-25 — maintainer's call on the I4 trade-off.)
 func (h *BrokerHost) Emit(in *c3types.Inbound) bool {
 	if in == nil {

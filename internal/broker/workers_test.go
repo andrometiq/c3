@@ -207,20 +207,62 @@ func TestWorkerPool_SubmitWait_ContextCancelUnblocks(t *testing.T) {
 	defer p.Stop()
 
 	key := MakeRouteKey("telegram", 1, nil)
-	// Saturate the route worker's inbox so SubmitWait has to wait.
-	for i := 0; i < 4096; i++ {
-		if !p.Submit(key, Job{Kind: JobInbound, Inbound: &c3types.Inbound{MessageID: int64(i)}}) {
-			break // queue full — that is what we want
-		}
+
+	// Saturate the route DETERMINISTICALLY. Filling a live worker's inbox by
+	// submitting in a loop is a race and loses often: run() drains the channel
+	// straight into its debounce buffer, so the producer may never see a full
+	// queue. Install a worker with a pre-filled inbox and NO run goroutine
+	// instead — Submit finds the queue full, workerExited finds `done` still
+	// open so it never respawns, and SubmitWait is guaranteed to reach its select.
+	stuck := &RouteWorker{
+		key:   key,
+		queue: make(chan Job, 64),
+		idle:  time.Hour,
+		done:  make(chan struct{}),
+	}
+	for i := 0; i < cap(stuck.queue); i++ {
+		stuck.queue <- Job{Kind: JobInbound, Inbound: &c3types.Inbound{MessageID: int64(i)}}
+	}
+	p.mu.Lock()
+	p.workers[key] = stuck
+	p.mu.Unlock()
+	// Drop it before the deferred Stop runs (defers are LIFO) so shutdown never
+	// waits on a worker that was never started.
+	defer func() {
+		p.mu.Lock()
+		delete(p.workers, key)
+		p.mu.Unlock()
+	}()
+
+	if p.Submit(key, Job{Kind: JobInbound, Inbound: &c3types.Inbound{MessageID: 9998}}) {
+		t.Fatal("precondition: the route must be saturated, but Submit accepted a job")
 	}
 
 	done := make(chan bool, 1)
 	go func() {
 		done <- p.SubmitWait(key, Job{Kind: JobInbound, Inbound: &c3types.Inbound{MessageID: 9999}})
 	}()
+	// Let the goroutine get past SubmitWait's fast-path Submit and park in the
+	// select before cancelling, so we are timing the cancellation and not the
+	// scheduler. 100ms is 4x submitRetryInterval; every retry inside it fails
+	// harmlessly against the still-full inbox.
+	time.Sleep(100 * time.Millisecond)
+
+	start := time.Now()
 	cancel()
 	select {
-	case <-done: // returned; value irrelevant, the point is it did not hang
+	case ok := <-done:
+		if ok {
+			t.Fatal("SubmitWait accepted a job into a route whose inbox is full — impossible unless the setup broke")
+		}
+		// THE assertion. Without the ctx.Done() arm, SubmitWait still returns
+		// false — but only once its submitGraceWindow deadline expires. Elapsed
+		// time is the only thing that distinguishes "cancellation released it"
+		// from "the timeout ran out", which is why the original test, asserting
+		// merely that it returned, stayed green with the arm deleted.
+		if el := time.Since(start); el > submitGraceWindow/2 {
+			t.Fatalf("SubmitWait took %v to return after cancellation; it should unblock near-instantly, far inside the %v grace window. That elapsed time means the deadline expired rather than the ctx.Done() branch firing", el, submitGraceWindow)
+		}
 	case <-time.After(submitGraceWindow + 2*time.Second):
 		t.Fatal("SubmitWait did not unblock on context cancel")
 	}

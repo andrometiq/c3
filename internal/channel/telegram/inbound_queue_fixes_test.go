@@ -25,6 +25,19 @@ func TestDispatchMessage_EmitSaturated_HoldsOffsetForRedelivery(t *testing.T) {
 	c := makeChannel(h)
 	c.offTrk = newOffsetTracker(100)
 	c.msgToUpdate = map[int64][]int64{}
+	// makeChannel leaves c.dedup nil. The poll loop always has one, and the
+	// forget-on-saturation branch this test exists to cover is guarded by
+	// `c.dedup != nil` — so without this the branch is never reached and the
+	// dedup assertion below silently tests nothing.
+	c.dedup = newUpdateDedup(2000, 5*time.Minute)
+
+	// Record update 101 exactly as the poll loop would before dispatching it,
+	// so there is a real entry for the saturated path to forget. dedupKey needs
+	// the Message coordinates, not just the update id.
+	seed := &gotgbot.Update{UpdateId: 101, Message: textMsg("hi", 42)}
+	if c.dedup.SeenOrAdd(seed) {
+		t.Fatal("precondition: update 101 must not already be recorded")
+	}
 
 	// Update 101 is the next contiguous id; its Emit will be DROPPED.
 	c.offTrk.Register(101)
@@ -48,8 +61,9 @@ func TestDispatchMessage_EmitSaturated_HoldsOffsetForRedelivery(t *testing.T) {
 		t.Fatal("msgToUpdate entry for a saturated inbound must be cleared (leak)")
 	}
 	// And the poll-side dedup record must be forgotten, or the redelivery is
-	// dedup-skipped and the "loss-free retry" never actually retries.
-	if c.dedup != nil && c.dedup.SeenOrAdd(&gotgbot.Update{UpdateId: 101}) {
+	// dedup-skipped and the "loss-free retry" never actually retries. SeenOrAdd
+	// returning false means no entry survives — i.e. forget() ran.
+	if c.dedup.SeenOrAdd(&gotgbot.Update{UpdateId: 101, Message: textMsg("hi", 42)}) {
 		t.Fatal("dedup entry must be forgotten so the Telegram redelivery re-dispatches")
 	}
 }

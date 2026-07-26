@@ -9,6 +9,7 @@ import (
 
 	"github.com/Andrometiq/c3/internal/broker"
 	"github.com/Andrometiq/c3/internal/mappings"
+	"github.com/Andrometiq/c3/internal/plugin/builtins/stt"
 	"github.com/Andrometiq/c3/internal/version"
 )
 
@@ -83,12 +84,34 @@ func runStatus() error {
 		}
 	}
 
-	// Plugins (config-only).
-	if mf != nil && len(mf.Plugins) > 0 {
+	// Plugins. Built-ins are listed whether or not they appear in config: they
+	// are compiled in and default to ON, so reading the state off the presence
+	// of a config key reported a disabled plugin as absent and a defaulted one
+	// as disabled — `cfg["enabled"].(bool)` yields false for an absent key,
+	// which is the opposite of what Register does with it.
+	if mf != nil {
 		fmt.Fprintln(&b, "Plugins:")
+		h := stt.Inspect(mf.Plugins[stt.Name])
+		fmt.Fprintf(&b, "  - %-10s enabled=%v", stt.Name, h.Enabled)
+		if h.HandlerPath != "" {
+			fmt.Fprintf(&b, " handler=%s", h.HandlerPath)
+		}
+		fmt.Fprintln(&b)
+		if h.Detail != "" {
+			fmt.Fprintf(&b, "               %s\n", h.Detail)
+		}
+		// Anything else under plugins.* is a config bag for a plugin that is not
+		// compiled in — say so rather than implying it does something.
 		for name, cfg := range mf.Plugins {
-			enabled, _ := cfg["enabled"].(bool)
-			fmt.Fprintf(&b, "  - %-10s enabled=%v\n", name, enabled)
+			if name == stt.Name {
+				continue
+			}
+			enabled, ok := cfg["enabled"].(bool)
+			state := "enabled=" + fmt.Sprint(enabled)
+			if !ok {
+				state = "enabled=(unset)"
+			}
+			fmt.Fprintf(&b, "  - %-10s %s — no such built-in; C3 does not load external plugins, so this entry does nothing\n", name, state)
 		}
 	}
 

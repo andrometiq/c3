@@ -23,6 +23,7 @@ package stt
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -68,6 +69,55 @@ const defaultTimeoutSeconds = 300
 // available for retranscribe/testing; older files are pruned after each
 // transcription. A negative config value keeps everything.
 const defaultAudioRetention = 500
+
+// Health is the EFFECTIVE state of the plugin, as opposed to the switch in
+// config. Enabled only says the operator did not turn it off; a plugin can be
+// enabled and still be unable to transcribe a single voice note, which is the
+// state `c3-broker status` used to report as a plain "enabled=true".
+type Health struct {
+	// Enabled is the effective value of plugins.stt.enabled, WITH the default
+	// applied. An absent key means true — matching Register.
+	Enabled bool
+	// HandlerPath is the configured plugins.stt.handler_path. Empty means the
+	// path is resolved from $CLAUDE_PLUGIN_ROOT in the BROKER's environment,
+	// which a separate status process cannot see.
+	HandlerPath string
+	// Detail is a one-line plain-language reading of the two fields above, or
+	// "" when there is nothing a reader needs to know.
+	Detail string
+}
+
+// Inspect reports Health for a raw plugins.stt config bag as read from
+// mappings.json. It decodes exactly the way PluginHost.Config does — a JSON
+// round-trip over defaults — so an absent or partial entry yields the same
+// answer the broker itself computed at startup.
+//
+// It deliberately does NOT stat the handler or read $CLAUDE_PLUGIN_ROOT. Both
+// belong to the broker's process, and `c3-broker status` is a different process
+// with a different environment: a status run from a plain shell would report
+// "no handler" for a broker that Claude Code started with the variable set.
+// Replacing one wrong answer with another is not an improvement. The broker
+// logs the authoritative resolved path once at startup, so the honest thing for
+// status to do is say where the answer lives.
+func Inspect(raw map[string]any) Health {
+	cfg := Config{Enabled: true, Timeout: defaultTimeoutSeconds}
+	if len(raw) > 0 {
+		if data, err := json.Marshal(raw); err == nil {
+			_ = json.Unmarshal(data, &cfg)
+		}
+	}
+	h := Health{Enabled: cfg.Enabled, HandlerPath: cfg.HandlerPath}
+	switch {
+	case !cfg.Enabled:
+		h.Detail = "off — plugins.stt.enabled=false; voice notes arrive untranscribed"
+	case cfg.HandlerPath == "":
+		h.Detail = "handler path not configured — resolved from $CLAUDE_PLUGIN_ROOT in the broker's environment. " +
+			"Hosts other than Claude Code (Desktop, Antigravity, Grok, a systemd unit) usually do not set it, " +
+			"and without it voice notes surface as [STT FAILED: handler_missing]. " +
+			"broker.log records the resolved path at startup; set plugins.stt.handler_path to remove the ambiguity"
+	}
+	return h
+}
 
 // Register subscribes the plugin's OnVoiceReceived callback. Called once at
 // broker startup if mappings.json:plugins.stt.enabled (default true).
