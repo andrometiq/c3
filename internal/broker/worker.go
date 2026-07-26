@@ -2,6 +2,7 @@ package broker
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"strings"
@@ -1272,6 +1273,55 @@ func (w *RouteWorker) evictIfOverCap(qrk queue.RouteKey) {
 }
 
 // handleFetch peeks or consumes the route's durable queue and returns the batch.
+// fetchAllBudget answers "how many of this route's queued messages fit in one
+// IPC frame?" for an unbounded fetch_queue(all=true).
+//
+// It exists because the two limits were set independently and can collide: a
+// route holds up to queue.MaxMessages records, and ipc.MaxFrameSize bounds one
+// frame. A record is ~250 bytes of envelope plus its Text, and Text carries STT
+// transcripts, which are NOT bounded by the channel's own message-length limit.
+// A thousand records averaging four kilobytes already reaches the cap.
+//
+// Returns ok=false when it cannot measure (peek failed, or nothing queued), in
+// which case the caller keeps its existing unbounded behaviour — this is a
+// safety bound, not a gate, and it must never be the reason a fetch fails.
+func (w *RouteWorker) fetchAllBudget(qrk queue.RouteKey) (int, bool) {
+	all, err := w.broker.Queue.Peek(qrk, -1)
+	if err != nil || len(all) == 0 {
+		return 0, false
+	}
+	// Headroom for the response envelope around the messages array: op, id,
+	// remaining, the JSON structure itself, and the terminating newline that
+	// MaxFrameSize counts. 8 KiB is far more than the envelope needs and costs
+	// nothing against a 4 MiB budget.
+	const envelopeHeadroom = 8 * 1024
+	budget := ipc.MaxFrameSize - envelopeHeadroom
+
+	used := 0
+	for i := range all {
+		enc, err := json.Marshal(&all[i])
+		if err != nil {
+			// Unmeasurable record: stop here rather than guess. Everything before
+			// it is still returned, and Remaining brings the caller back.
+			return i, i > 0
+		}
+		// +1 for the comma separating this element from the next.
+		used += len(enc) + 1
+		if used > budget {
+			if i == 0 {
+				// A single record bigger than the whole frame. Returning zero
+				// messages would wedge the route forever — the caller would
+				// re-fetch the same undeliverable head every time. Hand it over
+				// and let WriteJSON refuse loudly; the operator gets a named
+				// error instead of a queue that never drains.
+				return 0, false
+			}
+			return i, true
+		}
+	}
+	return len(all), true
+}
+
 func (w *RouteWorker) handleFetch(_ context.Context, job *FetchJob) {
 	if job == nil || job.ResultCh == nil {
 		return
@@ -1290,6 +1340,18 @@ func (w *RouteWorker) handleFetch(_ context.Context, job *FetchJob) {
 	n := job.Limit
 	if job.All {
 		n = -1
+		// An unbounded drain has to fit in ONE IPC frame, because the response is
+		// one frame. Consume first and discover that later and the overflowing
+		// messages are already gone from the queue — they were consumed, the
+		// write is refused, and nothing reaches the user.
+		//
+		// Peek does not advance the cursor and this worker is the single owner of
+		// the route, so peek-then-consume is atomic with respect to everything
+		// else that could touch this queue. Take only what fits; Remaining tells
+		// the caller to come back, which fetch_queue's contract already covers.
+		if fit, ok := w.fetchAllBudget(qrk); ok {
+			n = fit
+		}
 	}
 	effectiveAck := job.Ack
 	var msgs []c3types.Inbound

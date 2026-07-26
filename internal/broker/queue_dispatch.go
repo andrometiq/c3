@@ -91,7 +91,15 @@ func (b *Broker) handleFetchQueue(conn *ipc.Conn, stub *Stub, raw []byte) {
 	} else {
 		resp.Messages = res.Messages
 	}
-	_ = conn.WriteJSON(resp)
+	// Do NOT discard this error. A refused write puts nothing on the wire, so the
+	// adapter sits until its own timeout with no explanation anywhere — the worst
+	// shape a failure can take. The batch is size-bounded upstream (see
+	// RouteWorker.fetchAllBudget), so reaching here means either a transport
+	// failure or a single record larger than one whole frame.
+	if err := conn.WriteJSON(resp); err != nil {
+		log.Printf("fetch_queue chan=%s chat=%d: response not sent (%d messages, remaining=%d): %v",
+			route.Channel, route.ChatID, len(resp.Messages), resp.Remaining, err)
+	}
 }
 
 // handleRetranscribe re-runs the STT provider chain on a cached voice attachment
