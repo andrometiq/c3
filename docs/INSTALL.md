@@ -18,7 +18,8 @@ Telegram config are shared; only the host-integration wiring differs.
 | **Claude Desktop** | the desktop app's **Chat / Code** tabs | `c3-broker install-desktop` (see [`DESKTOP.md`](DESKTOP.md)) | **poll-only** — `fetch_queue` |
 | **CoWork** | Claude Desktop's **Cowork** tab (± hourly poll task) | same `install-desktop` | **poll-only** + optional scheduled poll |
 
-Codex is an optional add-on to any of these (Step 5).
+Codex is an optional add-on to any of these (Step 5). **Grok Build** and the **Antigravity
+CLI** are supported too — same binaries, same config, one extra command each (Step 5B).
 
 **Platform support.** **Linux is primary and fully supported.** **macOS** is
 supported (prebuilt binaries; `launchd` instead of systemd). **Windows (Claude
@@ -38,7 +39,7 @@ of Steps 1, 4, and 4.5.
 
 You need:
 
-- **Prebuilt binaries** (Linux + macOS, amd64/arm64) are attached to each release tag — the default path needs no toolchain. **Go ≥1.25** is only required if you build from source (contributors, or a platform without a prebuilt tarball): `go version` should print `go1.25` or newer. (The `go` directive in `go.mod` pins `1.25.0`; older toolchains will fail the build or silently auto-download 1.25.)
+- **Prebuilt binaries** (Linux, macOS and Windows, amd64/arm64) are attached to each release tag — the default path needs no toolchain. **Go ≥1.25** is only required if you build from source (contributors, or a platform without a prebuilt tarball): `go version` should print `go1.25` or newer. (The `go` directive in `go.mod` pins `1.25.0`; older toolchains will fail the build or silently auto-download 1.25.)
 - **A Telegram bot + group, set up per the checklist below.** Five minutes if you've done it before, ten if not. (Why these steps: the bot needs to read every group message, send into topics, and create/rename/close topics — so it is promoted to admin with **Manage Topics**, and privacy mode is disabled in BotFather as belt-and-braces so it still reads messages even if admin promotion was fumbled.)
 
   Use **Telegram Desktop, iOS, Android, or macOS** for the group-side steps — *not Telegram Web*. Web's Topics-enable and admin-rights UIs are incomplete.
@@ -91,23 +92,29 @@ C3 ships nine Go binaries:
 - `c3-claude-adapter` — Claude Code MCP server
 - `c3-codex-adapter` — Codex MCP server
 - `c3-grok-adapter` — Grok Build MCP server
-- `c3-agy-adapter` — Agy MCP server
+- `c3-agy-adapter` — Antigravity CLI MCP server
 - `c3-desktop-adapter` — Claude Desktop MCP server (the `install-desktop` target)
 - `claude-shim` — the `claude` wrapper that auto-injects the dev-channels flag (symlinked into PATH by `install-claude-shim`; see Step 4.5)
 - `codex` — the C3 Codex **launcher**. Deliberately NOT installed by the step below: it is named `codex` so it can take the place of the real one, and this guide puts `~/.local/bin` first on `PATH`, so installing it would silently reroute every `codex` invocation on your machine through C3. Step 5 installs it, and only if you want Codex integration.
 - `migrate-legacy` — one-shot migrator from a legacy Python-prototype config layout (only relevant if you have such a config)
 
 **Prebuilt (recommended).** Download the release tarball for your platform,
-verify it, and install the binaries into a directory on your `PATH`:
+verify it, and install the binaries into a directory on your `PATH`. There is
+**no version to edit** — `releases/latest/download/` always resolves to the
+newest published release:
 
 ```bash
-VERSION=v0.1.0
 OS=$(uname -s | tr '[:upper:]' '[:lower:]')
 ARCH=$(uname -m); [ "$ARCH" = x86_64 ] && ARCH=amd64; [ "$ARCH" = aarch64 ] && ARCH=arm64
-pkg="c3_${VERSION}_${OS}_${ARCH}"
-base="https://github.com/Andrometiq/c3/releases/download/$VERSION"
-curl -fsSL -O "$base/${pkg}.tar.gz"
+base="https://github.com/Andrometiq/c3/releases/latest/download"
+
+# SHA256SUMS has a fixed filename, so it downloads straight off `latest`. It
+# also lists every tarball in that release — which is where the versioned
+# tarball filename comes from. Nothing here needs editing at release time.
 curl -fsSL -O "$base/SHA256SUMS"
+pkg=$(grep -o "c3_[^ ]*_${OS}_${ARCH}\.tar\.gz" SHA256SUMS | head -1); pkg=${pkg%.tar.gz}
+[ -n "$pkg" ] || echo "STOP: no ${OS}/${ARCH} tarball in the latest release — build from source instead."
+curl -fsSL -O "$base/${pkg}.tar.gz"
 
 # Verify ONLY the tarball you downloaded. SHA256SUMS lists every platform, so
 # checking the whole file would report the five you don't have as failures.
@@ -125,9 +132,19 @@ done
 install -m 0755 "${pkg}/codex" ~/.local/libexec/c3/codex
 ```
 
+**If the first `curl` 404s, there is no published release to install** — either
+none has been cut yet, or the newest one is a **pre-release** (`releases/latest`
+deliberately skips pre-releases). Nothing is broken; build from source instead
+(next), which needs no release at all.
+<https://github.com/Andrometiq/c3/releases> shows what exists. To install a
+*specific* older release, swap `latest/download` for `download/<tag>` — e.g.
+`.../releases/download/v0.1.0` — and name `pkg` by hand; that pinned form is an
+example, not a path this guide keeps current.
+
 Confirm the install dir (`~/.local/bin` here) is on your `PATH`. (**Windows:** a
 prebuilt tarball *is* published — its binaries carry the `.exe` suffix — but
-PATH is set with `setx`, not a shell rc. See the **Windows (beta)** section.)
+there is no shell rc; set the **User** PATH via the Settings GUI or the
+PowerShell snippet in the **Windows (beta)** section. Do not use `setx PATH`.)
 
 **From source (contributors, or a platform without a prebuilt tarball).**
 With the repo cloned and added as a local marketplace
@@ -272,6 +289,27 @@ This is a Go subcommand that idempotently:
 
 Open a fresh terminal (or `hash -r` your existing one) and run `which codex`. It should resolve to `~/.local/bin/codex`. From now on every `codex` invocation goes through the C3 launcher → app-server → adapter chain. Use Codex normally.
 
+## Step 5B (optional): Grok Build / Antigravity CLI
+
+Both are add-ons to the install above, not alternatives to it — they reuse the same binaries
+(Step 2) and the same `mappings.json` (Step 3):
+
+```bash
+c3-broker install-grok    # Grok Build
+c3-broker install-agy     # Antigravity CLI
+```
+
+`install-grok` patches `~/.grok/config.toml`, touching only the keys C3 owns: it turns on
+`[cli] use_leader = true` (leader mode, required for live inbound) and points
+`[mcp_servers.c3]` at `c3-grok-adapter`. If it can't do that safely it refuses and prints the
+manual edit rather than writing a half-configured file. Without leader mode the adapter still
+works, but inbound is pull-only. See [`GROK-INJECT.md`](GROK-INJECT.md).
+
+`install-agy` writes a `c3` plugin into `~/.gemini/antigravity-cli/plugins/c3/` pointing at
+`c3-agy-adapter`. Antigravity has no async push, so inbound there is **poll-only** —
+`fetch_queue`. It's the newest adapter and the least travelled; expect rougher edges than the
+Claude Code path.
+
 ## Step 6: Verify
 
 In a fresh Claude Code session (started with the dev-channels flag from
@@ -325,9 +363,37 @@ these deltas instead of the Linux-only steps above:
   clean-room CI pass. To build instead, install **Go ≥1.25** (the portable zip
   needs no admin), clone the repo into a durable dir, and run the eight core
   package installs used by `/c3:build`.
-- **PATH via `setx`, not a shell rc.** `setx PATH "%PATH%;%USERPROFILE%\.local\bin"`
-  (or System Properties → Environment Variables), then **open a new terminal** —
-  an already-open shell keeps the stale PATH.
+- **PATH — edit the *User* PATH; there is no shell rc.** Easiest is the GUI:
+  Start → search "Edit environment variables for your account" → under **User
+  variables** select `Path` → **Edit** → **New** → `%USERPROFILE%\.local\bin` →
+  OK. The scriptable equivalent writes the **User** scope only and is safe to
+  re-run:
+
+  ```powershell
+  $dir      = Join-Path $env:USERPROFILE '.local\bin'
+  $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')   # User scope only
+  $entries  = @($userPath -split ';' | Where-Object { $_ -ne '' })
+  $already  = @($entries | ForEach-Object { $_.Trim().TrimEnd('\') }) -contains $dir.TrimEnd('\')
+
+  if ($already) {
+      "$dir is already on your User PATH - nothing changed."
+  } else {
+      [Environment]::SetEnvironmentVariable('Path', (($entries + $dir) -join ';'), 'User')
+      $env:Path = "$env:Path;$dir"   # this session too, so you can carry on here
+      "Added $dir to your User PATH. Other open terminals need a restart."
+  }
+  ```
+
+  Then **open a new terminal** — an already-open shell keeps the stale PATH.
+
+  > **Do not use `setx PATH "%PATH%;..."`.** `%PATH%` is the merged
+  > **system+user** PATH, so that command permanently copies the whole system
+  > PATH into your user PATH — and `setx` silently truncates at 1024
+  > characters. Together they shred a normal PATH. The two methods above touch
+  > only the User scope and have no length limit. (Side effect of the
+  > PowerShell form: reading the User PATH through .NET expands `%VAR%`
+  > references, so such entries are rewritten expanded — use the GUI if you
+  > rely on them staying unexpanded.)
 - **`claude` isn't on PATH** — it's bundled inside the Claude Desktop app
   (`%APPDATA%\Claude\claude-code\<ver>\claude.exe`); run the Step 1 `/plugin`
   commands from that bundled Claude Code.
@@ -345,8 +411,10 @@ these deltas instead of the Linux-only steps above:
 - **MSIX Desktop config trap** — Store-installed Claude Desktop loads its config
   from `...\Packages\Claude_*\LocalCache\Roaming\Claude\claude_desktop_config.json`;
   run `c3-broker install-desktop --config "<that path>"`.
-- **Updates rebuild from source** — the auto-updater can't replace a running
-  `.exe` on Windows. `git pull` → `/c3:build` → restart.
+- **Updates are manual** — `c3-broker update --check` works, but installation is refused on
+  Windows (replacing a live `.exe` can leave a mixed-version install). Fully quit C3 / Claude
+  Desktop / the CLI, then either re-extract the newer release tarball over the installed
+  binaries (prebuilt install) or `git pull` → `/c3:build` (source install), and restart.
 - **No systemd** — the default on-demand broker spawn is what you get
   (systemd supervision is Linux-only — see the top-level `INSTALL.md` §6).
 
@@ -362,7 +430,7 @@ Inside Claude Code, refresh the plugin files:
 /plugin upgrade c3@c3
 ```
 
-Then refresh the binaries: **prebuilt** — re-run Step 2's download with the new `VERSION`; **from source** — `/c3:build`. Marketplaces added from GitHub can also auto-update the plugin files at Claude Code startup; that's off by default for third-party marketplaces — toggle it in `/plugin → Marketplaces`. (Auto-update only refreshes plugin files; the binaries still come from the matching release tarball or a rebuild.)
+Then refresh the binaries: **prebuilt** — re-run Step 2's download block as-is (it resolves `latest` again, so it picks up the new release with nothing to edit); **from source** — `/c3:build`. Marketplaces added from GitHub can also auto-update the plugin files at Claude Code startup; that's off by default for third-party marketplaces — toggle it in `/plugin → Marketplaces`. (Auto-update only refreshes plugin files; the binaries still come from the matching release tarball or a rebuild.)
 
 State (`~/.config/c3/mappings.json`) is in XDG, not the plugin cache, so upgrades don't touch it.
 

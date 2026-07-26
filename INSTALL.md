@@ -30,7 +30,9 @@ C3 runs under three host environments. **Ask the user which one they want**
 | **Claude Desktop** | the desktop app's **Chat / Code** tabs | §3B — `c3-broker install-desktop` | **poll-only** — pull with `fetch_queue` |
 | **CoWork** | Claude Desktop's **Cowork** tab (optionally on a scheduled timer) | §3B — same `install-desktop` | **poll-only** + optional hourly poll task |
 
-(Codex is an optional add-on to any of these — §5.)
+(Codex is an optional add-on to any of these — §5. **Grok Build** and the **Antigravity
+CLI** are also supported; they are one-command add-ons layered on the same binaries and
+config — §5B.)
 
 ### Platform support
 
@@ -46,7 +48,8 @@ C3 runs under three host environments. **Ask the user which one they want**
 > on Windows** (a running `.exe` cannot be replaced in place — quit C3 and
 > re-extract the tarball instead). All Windows specifics are collected in
 > **§7 — apply those deltas instead of the Linux-only steps** (skip systemd and
-> the shell-rc `PATH` edit; use `.exe` binaries and `setx`).
+> the shell-rc `PATH` edit; use `.exe` binaries and the User-scope `PATH` edit
+> in §7).
 
 ### Routing
 
@@ -66,16 +69,23 @@ prebuilt tarball *is* published, but Windows is **beta** — see §7 for the
 Windows-specific steps and caveats.)
 
 **Prebuilt (default — Linux / macOS).** Download, verify, and install into
-`~/.local/bin`:
+`~/.local/bin`. **No version is hardcoded** — `releases/latest/download/`
+always resolves to the newest published release, so this block cannot go stale:
 
 ```bash
-VERSION=v0.1.0
 OS=$(uname -s | tr '[:upper:]' '[:lower:]')
 ARCH=$(uname -m); [ "$ARCH" = x86_64 ] && ARCH=amd64; [ "$ARCH" = aarch64 ] && ARCH=arm64
-pkg="c3_${VERSION}_${OS}_${ARCH}"
-base="https://github.com/Andrometiq/c3/releases/download/$VERSION"
-curl -fsSL -O "$base/${pkg}.tar.gz"
+base="https://github.com/Andrometiq/c3/releases/latest/download"
+
+# SHA256SUMS has a fixed filename, so it downloads straight off `latest`. It
+# also lists every tarball in that release — which is where the versioned
+# tarball filename comes from. Nothing here needs editing at release time.
 curl -fsSL -O "$base/SHA256SUMS"
+pkg=$(grep -o "c3_[^ ]*_${OS}_${ARCH}\.tar\.gz" SHA256SUMS | head -1); pkg=${pkg%.tar.gz}
+# If pkg is empty there is no tarball for this platform: STOP HERE, skip the rest
+# of this block, and use the from-source path below instead.
+[ -n "$pkg" ] || echo "STOP: no ${OS}/${ARCH} tarball in the latest release — use the from-source path below."
+curl -fsSL -O "$base/${pkg}.tar.gz"
 
 # Verify ONLY the tarball you downloaded. SHA256SUMS lists every platform, so
 # checking the whole file would report the five you don't have as failures.
@@ -101,8 +111,18 @@ The staged `~/.local/libexec/c3/codex` is not on `PATH`; it cannot shadow the
 user's real Codex CLI. §5 materializes it next to `c3-broker` only after the
 user opts in.
 
-If the download 404s (no tarball published for this platform), fall through to
-the from-source path.
+**If the first `curl` 404s, there is no published release to install** — either
+none has been cut yet, or the newest one is a **pre-release** (`releases/latest`
+deliberately skips pre-releases). That is not a broken install: use the
+from-source path below, which works with no release at all. Check
+<https://github.com/Andrometiq/c3/releases> to see what exists. A 404 on the
+*second* `curl` (or an empty `pkg`) means the release simply has no tarball for
+this OS/arch — same answer, build from source.
+
+To install a *specific* older release instead, replace `latest/download` with
+`download/<tag>` — for example `.../releases/download/v0.1.0` — and set `pkg`
+to that tag's tarball name by hand. That form is an example only; the pinned
+tag is not kept current in this guide, so prefer the `latest` block above.
 
 **From source (fallback, and the path contributors use).** Requires Go ≥1.25
 — run `go version`; if it's missing or older than 1.25, tell the user to
@@ -151,7 +171,9 @@ prebuilt, `$(go env GOPATH)/bin` for source). Tell the user:
 >
 > Open a new terminal and re-run this install to verify."
 
-…and stop. **(On Windows, `PATH` is set with `setx`, not a shell rc — §7.)**
+…and stop. **(On Windows there is no shell rc — set the User `PATH` with the
+Settings GUI or the PowerShell snippet in §7. Do not use `setx PATH` — see §7
+for why.)**
 
 ## 2. Configure C3 (all environments)
 
@@ -448,6 +470,37 @@ after `npm install -g @openai/codex` (or however they get Codex).
 (On Windows, Codex has no symlink/NVM equivalent yet and stays poll-only —
 tracked as a beta follow-up.)
 
+## 5B. (Optional) Grok Build / Antigravity CLI
+
+Both are add-ons to the install above — same binaries (§1), same `mappings.json` (§2), one
+extra command each. Neither replaces a §3 host; you can run them alongside one.
+
+**Grok Build:**
+
+```bash
+c3-broker install-grok
+```
+
+Patches `~/.grok/config.toml` in place, touching only the keys C3 owns: it sets
+`[cli] use_leader = true` (leader mode — required for live inbound) and points
+`[mcp_servers.c3]` at `c3-grok-adapter`. If it can't make the change safely — for example a
+commented-out `use_leader` it must not guess at — it refuses and prints the manual edit
+instead of writing a half-configured file. Then follow the plugin-install and reload lines it
+prints. Without leader mode the adapter still works, but inbound is pull-only
+(`fetch_queue`). Detail: [`docs/GROK-INJECT.md`](docs/GROK-INJECT.md).
+
+**Antigravity CLI:**
+
+```bash
+c3-broker install-agy
+```
+
+Writes a `c3` plugin into `~/.gemini/antigravity-cli/plugins/c3/` (`plugin.json`,
+`mcp_config.json`, `hooks.json`) pointing at `c3-agy-adapter`, then prints the verification
+steps. Antigravity has no async push, so inbound is **poll-only** — pull it with
+`fetch_queue`. This is the newest adapter and the least travelled; expect rougher edges than
+the Claude Code path.
+
 ## 6. (Optional, Linux only) Supervise the broker with systemd
 
 > **macOS / Windows:** there is no `systemd`/`systemctl` — skip this step. On
@@ -505,10 +558,44 @@ Apply these instead of the Linux-only steps referenced above:
   portable zip needs no admin), then `git clone https://github.com/Andrometiq/c3`
   (or `git pull` if you already have it) into a durable dir and run §1's same
   eight-package `go install` command.
-- **§1 PATH — use `setx`, not a shell rc.** Add the install dir to PATH via
-  `setx PATH "%PATH%;%USERPROFILE%\.local\bin"` (or System Properties →
-  Environment Variables), then **open a NEW terminal** — an already-open shell
-  keeps the stale PATH and reports `c3-broker: command not found`.
+- **§1 PATH — edit the *User* PATH; there is no shell rc.** Two safe ways:
+
+  **GUI (recommended).** Start → search "Edit environment variables for your
+  account" → under **User variables**, select `Path` → **Edit** → **New** →
+  add `%USERPROFILE%\.local\bin` → OK.
+
+  **PowerShell (scriptable, idempotent).** Reads and writes the **User** scope
+  only, and does nothing if the entry is already present:
+
+  ```powershell
+  $dir      = Join-Path $env:USERPROFILE '.local\bin'
+  $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')   # User scope only
+  $entries  = @($userPath -split ';' | Where-Object { $_ -ne '' })
+  $already  = @($entries | ForEach-Object { $_.Trim().TrimEnd('\') }) -contains $dir.TrimEnd('\')
+
+  if ($already) {
+      "$dir is already on your User PATH - nothing changed."
+  } else {
+      [Environment]::SetEnvironmentVariable('Path', (($entries + $dir) -join ';'), 'User')
+      $env:Path = "$env:Path;$dir"   # this session too, so you can carry on here
+      "Added $dir to your User PATH. Other open terminals need a restart."
+  }
+  ```
+
+  Then **open a NEW terminal** — an already-open shell keeps the stale PATH and
+  reports `c3-broker: command not found`.
+
+  > **Do not use `setx PATH "%PATH%;..."`.** It is a known PATH-destroyer, and
+  > no amount of care makes it safe: `%PATH%` at that moment is the **merged
+  > system+user** PATH, so it permanently copies the entire *system* PATH into
+  > your *user* PATH; and `setx` truncates its value at 1024 characters without
+  > warning. The two together silently shred a normal PATH. The methods above
+  > touch only the User scope and have no length limit.
+  >
+  > One side effect of the PowerShell form: reading the User PATH through .NET
+  > expands any `%VAR%` references, so entries written as `%USERPROFILE%\...`
+  > get rewritten in expanded form. Harmless for most setups — use the GUI if
+  > you deliberately rely on unexpanded entries.
 - **`claude` is not on PATH.** On Windows, Claude Code is bundled inside the
   Claude Desktop app (`%APPDATA%\Claude\claude-code\<ver>\claude.exe`). Run the
   §3A `/plugin` commands from that bundled Claude Code.
