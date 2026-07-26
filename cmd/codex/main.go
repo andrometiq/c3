@@ -286,8 +286,13 @@ func ensureAppServer(realCodex, adapterPath, wsURL, cwd, topic string) error {
 	argv = append(argv, requiredFeatureArgs(nil)...)
 	argv = append(argv, mcpConfigArgs(adapterPath, wsURL, cwd, topic)...)
 	argv = append(argv, "app-server", "--listen", wsURL)
-	logFile, _ := os.OpenFile("/tmp/c3-codex-app-server.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
-	if logFile == nil {
+	logFile, err := os.OpenFile(appServerLogPath(port), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil || logFile == nil {
+		// Worth a line rather than a swallowed `_`: the fallback splices the
+		// app-server's stdout+stderr into THIS terminal, which the Codex TUI is
+		// about to take over. A garbled TUI with no explanation is a mystery
+		// bug report.
+		fmt.Fprintf(os.Stderr, "c3: app-server log unavailable (%v); its output will mix into this terminal\n", err)
 		logFile = os.Stderr
 	}
 	cmd := exec.Command(argv[0], argv[1:]...)
@@ -344,6 +349,17 @@ func hasCWDArg(args []string) bool {
 // describes only whichever listener started most recently.
 func appServerMetaPath(port int) string {
 	return fmt.Sprintf("/tmp/c3-codex-app-server-%d-%d.json", os.Getuid(), port)
+}
+
+// appServerLogPath is per-UID and per-port for the same reason
+// appServerMetaPath is: N app-servers run at once (chooseAppServerURL walks to
+// the next free port and ensureAppServer refuses to share a busy one), and one
+// shared log cannot say which of them wrote a line — the exact question a
+// cross-talk incident needs answered. The UID component also stops user A's
+// 0600 file from making user B's open fail, which would splice B's app-server
+// output into B's terminal.
+func appServerLogPath(port int) string {
+	return fmt.Sprintf("/tmp/c3-codex-app-server-%d-%d.log", os.Getuid(), port)
 }
 
 // processAlive reports whether pid is a live process we own. Signal 0 performs

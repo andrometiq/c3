@@ -70,6 +70,31 @@ func (b *Broker) handleAttach(conn *ipc.Conn, stub *Stub, raw []byte) {
 		chanName = b.defaultChannel()
 	}
 	if chanName == "" {
+		// Distinguish "none configured" from "ambiguous". Only the former is
+		// setup advice: format.go maps AttachStatusNoTopicsConfigured to
+		// "Run `c3-broker setup`", which is wrong (and misleading) when the
+		// problem is that mappings.json has two channels and the request named
+		// neither. No Status → format.go's `attach failed: <err>` fall-through.
+		if configured := b.Mappings().Channels; len(configured) > 1 {
+			// Name them, and do NOT tell the user to "pass channel=<name>". The
+			// AttachReq carries a Channel field, but no shipped adapter exposes it
+			// in its attach tool schema — so that advice is un-followable, and a
+			// refusal whose remedy cannot be performed is worse than the guess it
+			// replaced. Until an adapter can select a channel, the honest remedy is
+			// the config file. (Unreachable today: only telegram is ever registered.)
+			names := make([]string, 0, len(configured))
+			for name := range configured {
+				names = append(names, name)
+			}
+			sort.Strings(names) // map order is random; a refusal must read the same every time
+			_ = conn.WriteJSON(ipc.AttachedMsg{
+				Op: ipc.OpAttached, OK: false,
+				Err: fmt.Sprintf("mappings.json configures %d channels (%s) and attach will not guess between them. "+
+					"Selecting a channel from the attach tool is not supported yet — leave one channel configured in mappings.json, "+
+					"or remove the others until it is.", len(configured), strings.Join(names, ", ")),
+			})
+			return
+		}
 		_ = conn.WriteJSON(ipc.AttachedMsg{
 			Op: ipc.OpAttached, OK: false,
 			Status: ipc.AttachStatusNoTopicsConfigured,
@@ -1189,9 +1214,15 @@ func (b *Broker) persistMapping(stub *Stub, chanName string, chatID, topicID int
 		// guard: never silently overwrite a saved cwd→topic with a different
 		// topic; the live claim still proceeds upstream in tryClaim).
 		if cwd != "" {
-			if existing, ok := mf.LookupByCwd(cwd); ok && (existing.ChatID != chatID || existing.TopicID != topicID) {
-				log.Printf("attach: REFUSED to rebind cwd=%q (saved=topic-%d %q → requested=topic-%d %q); live claim proceeds but saved default unchanged. To rebind, edit ~/.config/c3/mappings.json.",
-					cwd, existing.TopicID, existing.Name, topicID, name)
+			// Channel is part of the identity, not decoration: chat ids and
+			// topic ids are per-channel namespaces, so two channels can carry
+			// numerically identical ones. Comparing only (chat, topic) lets a
+			// cwd default silently rebind ACROSS channels — and the saved
+			// Channel is what the queue file, the recovery entry and the
+			// capability manifest are keyed on.
+			if existing, ok := mf.LookupByCwd(cwd); ok && (existing.Channel != chanName || existing.ChatID != chatID || existing.TopicID != topicID) {
+				log.Printf("attach: REFUSED to rebind cwd=%q (saved=%s topic-%d %q → requested=%s topic-%d %q); live claim proceeds but saved default unchanged. To rebind, edit ~/.config/c3/mappings.json.",
+					cwd, existing.Channel, existing.TopicID, existing.Name, chanName, topicID, name)
 			} else {
 				mf.UpsertMapping(cwd, mappings.Mapping{
 					Channel:        chanName,
@@ -1284,10 +1315,26 @@ func (b *Broker) resolveGroup(cc mappings.ChannelConfig, groupName string) (stri
 	return groupName, gCfg, ok
 }
 
-// defaultChannel returns the first channel name in mappings, or "" if none.
-// In v1 there's typically only one channel (telegram), so this is unambiguous.
+// defaultChannel returns THE channel when mappings configure exactly one.
+// Zero or two-plus → "": Go randomises map iteration order, so "the first
+// entry" is a DIFFERENT channel on different calls, and a coin flip binds the
+// session to a channel the user never named — the queue file name
+// (queue/paths.go:52-58), the saved cwd default (persistMapping below) and the
+// capability manifest (capsForChannel) all key on it. An unknown identity never
+// matches; refusing to guess is the whole rule.
+//
+// The length check, not a first-entry sentinel: a `""` channel key would make
+// any "first non-empty name" form order-dependent again.
+//
+// All three callers are safe on "": handleAttach below reports it, observe.go's
+// resolveTopicRoute returns observeNoChannel, and capsForChannel("") returns
+// nil, which handler.go documents as a valid wire value.
 func (b *Broker) defaultChannel() string {
-	for name := range b.Mappings().Channels {
+	chans := b.Mappings().Channels
+	if len(chans) != 1 {
+		return ""
+	}
+	for name := range chans {
 		return name
 	}
 	return ""

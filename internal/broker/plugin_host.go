@@ -295,7 +295,14 @@ func stateRoot() string {
 		return filepath.Join(x, "c3", "state")
 	}
 	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".local", "state", "c3")
+	// The "state" element is NOT redundant: $XDG_STATE_HOME defaults to
+	// $HOME/.local/state, so without it the two branches resolve the SAME
+	// logical directory to two different paths and a plugin's state vanishes
+	// when the broker is spawned with a different env (the 2026-05-09 env-fork
+	// shape recorded in paths.go:10-22). The env branch matches the documented
+	// contract — internal/plugin/host.go:62-64, "$XDG_STATE_HOME/c3/state/
+	// <plugin-name>/" — so this branch has to agree with it.
+	return filepath.Join(home, ".local", "state", "c3", "state")
 }
 
 func cacheRoot() string {

@@ -205,7 +205,21 @@ func (b *Broker) RegisterBuiltinPlugins(builtins []BuiltinPlugin) error {
 // RegisterChannel adds a channel to the broker. The channel is started
 // (which validates config and connects to the upstream API) before the
 // registration is recorded — if Start fails, no registration happens.
+// A name that is already registered is REFUSED (error, nothing started):
+// registering a second channel under one name is a duplicate, never a replace.
 func (b *Broker) RegisterChannel(ch channel.Channel) error {
+	b.chMu.Lock()
+	_, dup := b.channels[ch.Name()]
+	b.chMu.Unlock()
+	if dup {
+		// Never displace: the incumbent is already polling. Overwriting the map
+		// entry would leave it live, unreachable via Channel() and invisible to
+		// ShutdownWithin — so it is never Stop()ed and keeps issuing getUpdates
+		// on its token. Two pollers on one token is the 409-conflict wedge
+		// paths.go:10-22 records for the two-broker case, reproduced inside one
+		// process, while RegisterChannel returns nil. Refuse instead.
+		return fmt.Errorf("broker: channel %q already registered", ch.Name())
+	}
 	host := NewBrokerHost(b, ch.Name())
 	if err := ch.Start(b.ctx, host); err != nil {
 		return fmt.Errorf("broker: start channel %q: %w", ch.Name(), err)
