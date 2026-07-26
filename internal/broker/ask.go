@@ -60,6 +60,16 @@ type pendingAsk struct {
 	selected  []bool
 	messageID int64
 
+	// owner is the SESSION this question was asked FOR: the holder of `route` at
+	// registration time (handleAskRegister routes via stub.CurrentRoute(), so that
+	// holder IS the asking stub). deliverAskResult re-derives the recipient from
+	// the routes table at TAP time, so without this an answer is delivered to
+	// whoever holds the topic when the human taps — a different session than the
+	// one blocked on the question — while the chat records "✅ <option>" as though
+	// that session's question had been answered. Stamped by registerAsk; nil only
+	// on a record built by hand (tests), which leaves the check inert.
+	owner *Stub
+
 	// createdAt is when the ask was registered, stamped by register (FIX-1). The
 	// reaper expires asks older than askExpiryTTL, and the size cap evicts the
 	// entry with the smallest createdAt. Uses time.Now() — the same clock the rest
@@ -155,6 +165,21 @@ func (r *askRegistry) has(askID string) bool {
 	defer r.mu.Unlock()
 	_, ok := r.m[askID]
 	return ok
+}
+
+// bindingOf returns the tap-binding facts for askID — the message its keyboard
+// was rendered on and the session it was asked for — WITHOUT removing or
+// mutating anything. ok=false when askID is not registered. Peeked before any
+// resolve path runs so a mis-bound tap is refused before a multi-select toggle
+// has already flipped selection state on its way to being rejected.
+func (r *askRegistry) bindingOf(askID string) (owner *Stub, messageID int64, ok bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	p, ok := r.m[askID]
+	if !ok {
+		return nil, 0, false
+	}
+	return p.owner, p.messageID, true
 }
 
 // take atomically removes and returns the pendingAsk (resolve-once). The second
@@ -336,9 +361,11 @@ func parseAskData(data string) (askID string, idx int, ok bool) {
 // It returns true when the callback matched a live ask on this route — in which
 // case the caller (flushEvent) must SUPPRESS the generic event (the tap was the
 // answer/toggle, not a fresh <channel> event). It returns false for a non-ask
-// payload, an unknown/already-resolved askID, a route mismatch, or an out-of-range
-// index, so the generic path proceeds; the telegram channel has already auto-acked
-// the callback either way, so Telegram stops spinning regardless.
+// payload, an unknown/already-resolved askID, a route mismatch, an out-of-range
+// index, or a tap that fails the binding gate (askTapBound: wrong message, or a
+// route that changed hands since the question was asked), so the generic path
+// proceeds; the telegram channel has already auto-acked the callback either way,
+// so Telegram stops spinning regardless.
 //
 // Three callback forms (parseAskCallback):
 //   - "ask:<id>:<idx>" → single-select resolves immediately; multi-select TOGGLES
@@ -355,6 +382,9 @@ func (b *Broker) resolveAsk(route RouteKey, cb *c3types.CallbackEvent) bool {
 		return false
 	}
 	askID, action, idx := parseAskCallback(cb.Data)
+	if action != askActionNone && !b.askTapBound(route, askID, cb) {
+		return false
+	}
 	switch action {
 	case askActionIndex:
 		return b.resolveAskIndex(route, askID, idx)
@@ -365,6 +395,45 @@ func (b *Broker) resolveAsk(route RouteKey, cb *c3types.CallbackEvent) bool {
 	default:
 		return false
 	}
+}
+
+// askTapBound gates ALL THREE resolve paths (index / done / skip) on the two
+// bindings a bare askID does not carry. One gate, run before any of them, so a
+// mis-bound tap cannot toggle a multi-select's selection state on the way to
+// being refused.
+//
+//   - MESSAGE: the tap must come from the message the keyboard was RENDERED on.
+//     An agent can author a reply button with arbitrary callback_data
+//     (buttonsFromArgs applies no namespace filter, and worker.go notes that the
+//     "ask:" prefix is one an agent may legitimately reuse), so a planted
+//     "ask:<liveID>:<n>" elsewhere in the topic would otherwise rewrite the
+//     question's durable body to "✅ <option>" — a fabricated consent record —
+//     and hand the asking agent an answer no human chose. Positive mismatch ONLY:
+//     messageID is 0 between register and setMessageID (the deliberate fast-tap
+//     race) and cb.MessageID is 0 on a channel that carries none.
+//   - OWNER: the answer must reach the session that ASKED (see pendingAsk.owner).
+//
+// Refusing returns false, which is exactly what any unmatched "ask:" tap does
+// today — the generic event path proceeds (worker.go deliberately lets
+// unresolved ask taps through, unlike "perm:"). The ask stays REGISTERED so the
+// asking session is still answerable if it re-claims the route before
+// askExpiryTTL, and the reaper clears the keyboard if it never does.
+func (b *Broker) askTapBound(route RouteKey, askID string, cb *c3types.CallbackEvent) bool {
+	owner, msgID, ok := b.Asks.bindingOf(askID)
+	if !ok {
+		return true // unknown id — the resolve path below reports it, not us
+	}
+	if msgID != 0 && cb.MessageID != 0 && msgID != cb.MessageID {
+		log.Printf("ask MSG-MISMATCH chan=%s chat=%d topic=%s ask=%s want_msg=%d got_msg=%d: tap not bound to the question message",
+			route.Channel, route.ChatID, TopicKeyStr(route), askID, msgID, cb.MessageID)
+		return false
+	}
+	if !b.ownerStillHolds(owner, route) {
+		log.Printf("ask STALE-OWNER chan=%s chat=%d topic=%s ask=%s: route changed hands since the question was asked — answer NOT delivered",
+			route.Channel, route.ChatID, TopicKeyStr(route), askID)
+		return false
+	}
+	return true
 }
 
 // resolveAskIndex handles an option tap. Single-select resolves with the chosen
@@ -403,7 +472,10 @@ func (b *Broker) resolveAskDone(route RouteKey, askID string) bool {
 		return false
 	}
 	if p.route != route {
-		b.Asks.register(p)
+		// registerAsk, not the raw registry call: at the size cap a re-register
+		// evicts the oldest ask, and only registerAsk clears that entry's
+		// now-orphaned keyboard.
+		b.registerAsk(p)
 		return false
 	}
 	selected := selectedOptions(p)
@@ -421,7 +493,8 @@ func (b *Broker) resolveAskSkip(route RouteKey, askID string) bool {
 		return false
 	}
 	if p.route != route {
-		b.Asks.register(p)
+		// registerAsk, not the raw registry call — see resolveAskDone.
+		b.registerAsk(p)
 		return false
 	}
 	b.deliverAskResult(route, askID, ipc.AskAnswer{Skipped: true})
@@ -500,6 +573,14 @@ func (b *Broker) editAskMessage(route RouteKey, askID string, messageID int64, t
 // registration. The eviction keyboard-clear lives here, not in askRegistry,
 // because clearing requires a channel edit the registry has no handle on.
 func (b *Broker) registerAsk(p *pendingAsk) bool {
+	// Stamp the OWNER before the entry can be tapped: the session holding p.route
+	// right now is the session this question is being asked for. Only when unset,
+	// so the defensive re-registers above keep the ORIGINAL owner.
+	if p.owner == nil {
+		if holder, ok := b.Routes.Holder(p.route); ok {
+			p.owner = holder
+		}
+	}
 	evicted, ok := b.Asks.register(p)
 	if evicted != nil {
 		log.Printf("ask EVICTED chan=%s chat=%d topic=%s ask=%s reason=cap(max=%d) — clearing keyboard",

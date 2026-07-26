@@ -34,10 +34,16 @@ const (
 )
 
 // permCallbackPrefix is the opaque callback_data namespace for permission
-// keyboards: "perm:<verb>:<requestID>" where verb is "allow" | "deny". The
-// requestID (5 letters [a-km-z]) carries no colon, so the FIRST colon after the
-// prefix separates the verb from the id. Matches the reference Telegram plugin's
-// `perm:more|allow|deny:<id>` shape.
+// keyboards: "perm:<verb>:<requestID>" where verb is "allow" | "deny". Matches
+// the reference Telegram plugin's `perm:more|allow|deny:<id>` shape.
+//
+// The VERB COMES FIRST and the id is the unsplit remainder, so the FIRST colon
+// after the prefix separates them and the id may contain colons without
+// ambiguity. That matters because C3 does not mint the requestID — the CLI host
+// does (today: 5 letters [a-km-z]) and C3 validates nothing about it, so the
+// parser must not depend on the host's alphabet. Do NOT "harden" this into the
+// ask parser's LAST-colon split (askCallbackPrefix, ask.go), where the VARIABLE
+// part is the suffix: applied here it would truncate any id containing a colon.
 //
 // The telegram channel mirrors this constant (permTapDataPrefix, internal/
 // channel/telegram/poll.go) to defer the callback ack of this namespace to
@@ -53,6 +59,8 @@ const (
 	permAnswerNotAuthorizedText = "⛔ Not authorized — only a DM-paired C3 operator can answer a permission prompt. Tap ignored."
 	permAnswerGoneText          = "⌛ This permission prompt is no longer active — already answered or expired."
 	permAnswerWrongRouteText    = "⚠️ This prompt belongs to a different chat/topic — tap not processed."
+	permAnswerWrongMessageText  = "⚠️ This button is not the one this prompt was sent with — tap not processed."
+	permAnswerOwnerChangedText  = "⚠️ The session that asked for this no longer holds this topic — verdict not delivered. Ask that session to request again."
 )
 
 // permNoOperatorHint is appended to a relayed prompt when NO user is DM-paired
@@ -73,6 +81,19 @@ type pendingPerm struct {
 	toolName  string
 	preview   string
 	messageID int64
+
+	// owner is the SESSION this prompt was relayed FOR: the holder of `route` at
+	// registration time. handlePermissionRequest routes via stub.CurrentRoute(),
+	// so that holder IS the requesting stub. A verdict authorises THAT session's
+	// tool call, so it must reach that session and no other — without this the
+	// recipient is re-derived from the routes table at TAP time (deliverPermVerdict
+	// → Routes.Holder), and a route that changed hands in between (a confirmed
+	// force_steal, or the holder exiting and a new session attaching the topic
+	// inside permExpiryTTL) delivers one session's authorisation to another while
+	// the chat records "✅ Allowed" for an approval the asking session never got.
+	// Stamped by registerPerm; nil only on a record built by hand (tests), which
+	// leaves the check inert rather than refusing a legitimate verdict.
+	owner *Stub
 
 	// createdAt is when the perm was registered, stamped by register. The reaper
 	// expires perms older than permExpiryTTL; the size cap evicts the entry with
@@ -224,7 +245,9 @@ func parsePermCallback(data string) (requestID, behavior string, ok bool) {
 // authorized operator — in which case the caller (flushEvent) must SUPPRESS the
 // generic event (the tap was the verdict, not a fresh <channel> event). It
 // returns false for a non-perm payload, an unknown/already-resolved id, a route
-// mismatch, OR a non-operator tap.
+// mismatch, a non-operator tap, a tap that did not come from the message the
+// prompt was rendered on, OR a prompt whose requesting session no longer holds
+// the route (the last two are the tap-binding gates below).
 //
 // DEFERRED ACK (2026-06-30 live-bug fix): the telegram channel does NOT auto-ack
 // "perm:" callbacks — a callback query is answerable exactly once, and that one
@@ -274,8 +297,43 @@ func (b *Broker) resolvePerm(route RouteKey, cb *c3types.CallbackEvent) bool {
 	if p.route != route {
 		// Tap arrived on a different route than the prompt was sent to — re-register
 		// and fall through (mirrors resolveAskDone's defensive re-register).
-		b.Perms.register(p)
+		// registerPerm, not the raw registry call: at the size cap a re-register
+		// evicts the oldest perm, and only registerPerm clears that entry's
+		// now-orphaned Allow/Deny keyboard.
+		b.registerPerm(p)
 		b.answerPermCallback(route, cb.CallbackID, permAnswerWrongRouteText, false)
+		return false
+	}
+	// MESSAGE-BINDING: the tap must come from the message the prompt was RENDERED
+	// on, not merely carry its request id. C3 does not mint that id — the CLI host
+	// supplies it and parsePermCallback validates nothing about it — while an
+	// agent can author a reply keyboard with arbitrary callback_data
+	// (buttonsFromArgs applies no namespace filter). So a "perm:allow:<id>" button
+	// planted on ANY other message in this topic, or a visibly-stale keyboard whose
+	// best-effort clear failed followed by a host id re-mint, would otherwise spend
+	// a live verdict — the operator authorising a tool use other than the one on
+	// screen. Positive mismatch ONLY: p.messageID is 0 between register and
+	// setMessageID (the deliberate fast-tap race, handler.go) and cb.MessageID is 0
+	// on a channel that carries none — neither is evidence of a mismatch.
+	// Re-register so a stray tap cannot consume the real operator's live prompt.
+	if p.messageID != 0 && cb.MessageID != 0 && p.messageID != cb.MessageID {
+		log.Printf("perm MSG-MISMATCH chan=%s chat=%d topic=%s id=%s want_msg=%d got_msg=%d actor=%d: tap not bound to the prompt message",
+			route.Channel, route.ChatID, TopicKeyStr(route), requestID, p.messageID, cb.MessageID, cb.Actor.UserID)
+		b.registerPerm(p)
+		b.answerPermCallback(route, cb.CallbackID, permAnswerWrongMessageText, false)
+		return false
+	}
+	// OWNER-BINDING: the verdict goes to the session that ASKED for it, never to
+	// whoever happens to hold the route by the time the operator taps (see the
+	// pendingPerm.owner doc). Not re-registered: the asking session no longer holds
+	// this route, so the prompt is dead — clear its keyboard so a live Allow button
+	// authorising a stranger's tool call does not persist in the topic, and record
+	// the expiry rather than a verdict nobody received.
+	if !b.ownerStillHolds(p.owner, route) {
+		log.Printf("perm STALE-OWNER chan=%s chat=%d topic=%s id=%s tool=%s actor=%d: route changed hands since the prompt was relayed — verdict NOT delivered",
+			route.Channel, route.ChatID, TopicKeyStr(route), requestID, p.toolName, cb.Actor.UserID)
+		b.answerPermCallback(route, cb.CallbackID, permAnswerOwnerChangedText, true)
+		b.editPermMessage(route, requestID, p.messageID, permExpiredText(p.toolName, p.preview, time.Now()), [][]c3types.Button{})
 		return false
 	}
 	b.deliverPermVerdict(route, requestID, behavior)
@@ -358,6 +416,15 @@ func (b *Broker) editPermMessage(route RouteKey, requestID string, messageID int
 // clears the evicted (oldest) perm's now-orphaned keyboard. Returns false on a
 // requestID collision so the caller drops the relay.
 func (b *Broker) registerPerm(p *pendingPerm) bool {
+	// Stamp the OWNER before the entry can be tapped: the session holding p.route
+	// right now is the session this prompt is being relayed for. Only when unset,
+	// so resolvePerm's defensive re-registers keep the ORIGINAL owner instead of
+	// adopting whoever holds the route by then.
+	if p.owner == nil {
+		if holder, ok := b.Routes.Holder(p.route); ok {
+			p.owner = holder
+		}
+	}
 	evicted, ok := b.Perms.register(p)
 	if evicted != nil {
 		log.Printf("perm EVICTED chan=%s chat=%d topic=%s id=%s reason=cap(max=%d) — clearing keyboard",
@@ -365,6 +432,33 @@ func (b *Broker) registerPerm(p *pendingPerm) bool {
 		b.editPermMessage(evicted.route, evicted.requestID, evicted.messageID, permExpiredText(evicted.toolName, evicted.preview, time.Now()), [][]c3types.Button{})
 	}
 	return ok
+}
+
+// ownerStillHolds reports whether owner — the session a relayed prompt/question
+// was registered FOR — is STILL the holder of route. Shared by the perm and ask
+// resolve paths so "deliver only to the session that asked" has one definition.
+//
+// Identity is compared by stub POINTER first: a Stub is minted once per
+// connection (StubRegistry.Register) and a same-stub reattach bumps ConnID in
+// place, so the pointer is the strongest session identity the broker has and it
+// never compares two unknown identities equal. It falls back to the LOGICAL
+// session (CLI+PID+CWD, sameLogicalSession) because a routine adapter reconnect
+// registers a FRESH stub and transfers the claim to it — that is the same
+// session and must still be answered.
+//
+// A nil owner means none was recorded (a pending built directly, as the older
+// perm/ask tests do): there is nothing to compare, so the check stays inert
+// rather than refusing a legitimate verdict. Every production registration goes
+// through registerPerm/registerAsk, which stamp it.
+func (b *Broker) ownerStillHolds(owner *Stub, route RouteKey) bool {
+	if owner == nil {
+		return true
+	}
+	holder, claimed := b.Routes.Holder(route)
+	if !claimed || holder == nil {
+		return false
+	}
+	return holder == owner || sameLogicalSession(holder, owner)
 }
 
 // sweepExpiredPerms removes perms older than permExpiryTTL and best-effort clears
