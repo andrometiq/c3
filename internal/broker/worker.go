@@ -675,6 +675,12 @@ func (w *RouteWorker) flushInbounds(ctx context.Context, batch []*c3types.Inboun
 		// in-memory-only degrade (non-durable hold). No Append happened, so this
 		// deliberately does NOT touch w.dedup. The loud DISABLED log fires once at
 		// queue init (broker.go); we don't re-log per message here to avoid spam.
+		//
+		// The message is therefore DESTROYED unless it reaches a live claim below.
+		// That is deliberate ("lose it" beats "wedge the bridge") but it must never
+		// be silent: the operator is told at startup (announceQueueDegraded), on
+		// `/status` (status_command.go) and — on the exact no-claim path that loses
+		// it — by heldDegradedText instead of the "nothing lost" reassurance.
 		for _, in := range batch {
 			w.markPersisted(in)
 		}
@@ -1139,9 +1145,30 @@ func (w *RouteWorker) forwardOrFallbackCovering(_ context.Context, in *c3types.I
 			count = n
 		}
 	}
-	args := c3types.ReplyArgs{Channel: in.Channel, ChatID: in.ChatID, TopicID: in.TopicID, Text: heldReplyText(count)}
+	// Degraded mode (Broker.Queue == nil — queue init failed at startup): nothing
+	// above stored this message and nothing will recover it, because flushInbounds
+	// already marked it persisted and Telegram will never redeliver an acked
+	// update. Sending the reassurance here would tell the operator "nothing lost"
+	// at the exact moment the message is destroyed, so warn instead.
+	degraded := w.broker.Queue == nil
+	text := heldReplyText(count)
+	held := fmt.Sprintf("no claim, queued (count=%d)", count)
+	if degraded {
+		// No count: nothing was stored, and printing "count=1" next to a DROPPED
+		// line reads as "1 queued" to whoever greps this log looking for it.
+		text, held = heldDegradedText(), "no claim, "+degradedDropLogPhrase+", nothing stored"
+	}
+	args := c3types.ReplyArgs{Channel: in.Channel, ChatID: in.ChatID, TopicID: in.TopicID, Text: text}
 
-	if ch.Capabilities().EditMessages {
+	// Cadence, degraded mode only: take the LONG (5-minute Fallbacks) cooldown
+	// instead of the 10s held-notice debounce, on edit-capable channels too. The
+	// 10s window exists so each newly-queued message re-notifies that it landed
+	// safely — a per-message receipt, worth repeating because the count changes.
+	// The degraded warning is a MODE statement ("nothing arriving here is being
+	// saved"), identical every time and carrying no count, so firing it six times
+	// a minute through a burst is exactly how an operator learns to ignore an
+	// alert. Once per route per 5 minutes is a warning that still reads as one.
+	if !degraded && ch.Capabilities().EditMessages {
 		// Debounce (msg 6083): coalesce a burst of holds into ONE notice per route
 		// per HeldNotices window. The message is already durably queued above; only
 		// the re-notification is throttled. Without this a flood — the Windows
@@ -1167,11 +1194,11 @@ func (w *RouteWorker) forwardOrFallbackCovering(_ context.Context, in *c3types.I
 		return
 	}
 
-	// Channel cannot edit messages: preserve the original cooldown-gated single
-	// reply so a no-edit channel still doesn't spam the topic on every hold.
+	// Channel cannot edit messages (or we are degraded): the original
+	// cooldown-gated single reply, so the topic isn't spammed on every hold.
 	if !w.broker.Fallbacks.ShouldSend(w.key) {
-		log.Printf("hold chan=%s chat=%d topic=%s msg=%d: no claim, queued; held-reply in cooldown — %s",
-			w.key.Channel, w.key.ChatID, TopicKeyStr(w.key), in.MessageID, fallbackSummary(in))
+		log.Printf("hold chan=%s chat=%d topic=%s msg=%d: %s; notice in cooldown — %s",
+			w.key.Channel, w.key.ChatID, TopicKeyStr(w.key), in.MessageID, held, fallbackSummary(in))
 		return
 	}
 	if _, err := ch.SendReply(args); err != nil {
@@ -1179,8 +1206,8 @@ func (w *RouteWorker) forwardOrFallbackCovering(_ context.Context, in *c3types.I
 			w.key.Channel, w.key.ChatID, TopicKeyStr(w.key), in.MessageID, err, fallbackSummary(in))
 		return
 	}
-	log.Printf("hold chan=%s chat=%d topic=%s msg=%d: no claim, queued + held-reply (count=%d) — %s",
-		w.key.Channel, w.key.ChatID, TopicKeyStr(w.key), in.MessageID, count, fallbackSummary(in))
+	log.Printf("hold chan=%s chat=%d topic=%s msg=%d: %s + notice sent — %s",
+		w.key.Channel, w.key.ChatID, TopicKeyStr(w.key), in.MessageID, held, fallbackSummary(in))
 }
 
 // fallbackSummary returns a one-liner of message content for use in

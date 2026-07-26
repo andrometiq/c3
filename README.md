@@ -55,6 +55,21 @@ Send /status to check.
 Attach a session to that topic and the queued message is waiting for it. You don't re-record
 the voice note.
 
+If C3 could not open its queue directory at startup it cannot make that promise, so it does
+not make it — it says the opposite, in the same place:
+
+```text
+⚠️ NOT held — that message was dropped.
+C3's durable queue is DISABLED for this run — it failed to open at startup, so messages that arrive while no session is attached are NOT saved and cannot be recovered.
+
+
+Send /status to check.
+```
+
+It warns your DM at startup too, and `/status` keeps saying so until you fix it. Live delivery
+to an attached session still works; it is the hold-while-you're-away guarantee that is off.
+See *Degraded mode* in [`docs/USAGE.md`](docs/USAGE.md).
+
 *(Those are the strings C3 actually renders, copied out of the code — not a mock-up.)*
 
 ## Adapters

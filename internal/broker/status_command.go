@@ -99,14 +99,31 @@ func (b *Broker) statusForTopic(channelName string, chatID int64, topicID *int64
 			b.Routes.Release(key, h.ConnID)
 		}
 	}
-	return fmt.Sprintf("📊 %s · %d queued%s · %s · broker up", name, pending, oldestSuffix(oldest), attached)
+	line := fmt.Sprintf("📊 %s · %d queued%s · %s · broker up", name, pending, oldestSuffix(oldest), attached)
+	// Degraded mode: "0 queued · broker up" reads as healthy when it actually
+	// means nothing CAN be queued. The held-notice already tells the operator to
+	// "Send /status to check" — this is what they must find when they do. Own
+	// line, not an inline suffix: it has to survive being skimmed.
+	if b.Queue == nil {
+		line += "\n" + queueDegradedStatusLine
+	}
+	return line
 }
+
+// queueDegradedStatusLine is the ⚠️ line both /status renderings add while the
+// durable queue is disabled. Same sentence as the startup announcement and the
+// held-notice (queueDisabledWarning, fallback.go) so an operator who sees it
+// twice recognises it as one problem, not two.
+const queueDegradedStatusLine = "⚠️ " + queueDisabledWarning
 
 // statusGlobal renders the broker-wide summary (empty queues omitted).
 func (b *Broker) statusGlobal() string {
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "📊 Broker up (pid %d).", os.Getpid())
 	if b.Queue == nil {
+		// Without this the global summary is the single word "Broker up" — the most
+		// reassuring thing C3 can say, at the moment it is least true.
+		sb.WriteString("\n" + queueDegradedStatusLine)
 		return sb.String()
 	}
 	all := b.Queue.StatusAll()

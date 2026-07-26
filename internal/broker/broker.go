@@ -227,7 +227,44 @@ func (b *Broker) RegisterChannel(ch channel.Channel) error {
 	b.chMu.Lock()
 	b.channels[ch.Name()] = &channelRegistration{Channel: ch, Host: host}
 	b.chMu.Unlock()
+	// Degraded mode is announced HERE, not in New(): New() has no channel to speak
+	// through and no session to speak to, so its loud log line is the only trace —
+	// and a log nobody tails is exactly how this stayed silent. This is the first
+	// moment an operator-visible surface exists.
+	if b.Queue == nil {
+		b.announceQueueDegraded(ch)
+	}
 	return nil
+}
+
+// announceQueueDegraded tells the operator, once per channel per broker run, that
+// the durable inbound queue is disabled and messages arriving with no session
+// attached are destroyed (see queueDisabledWarning in fallback.go for the
+// mechanism). It invents no new notification path: it reuses the same pair
+// notifyUpdateRestart uses — the trusted broker-originated system-event broadcast
+// to live CLI sessions, and a direct SendReply on the channel.
+//
+// The Telegram leg targets the operator's DM rather than every known topic: the
+// DM is the one route that is always the operator's own, and fanning a startup
+// warning across every project topic is the kind of noise people mute. At cold
+// start no session has connected yet, so the DM is the leg that actually lands;
+// the broadcast covers the case where a session is already live.
+func (b *Broker) announceQueueDegraded(ch channel.Channel) {
+	msg := queueDisabledWarning + " Fix the queue directory (or its permissions) and restart the broker."
+	b.broadcastSystemEvent(&c3types.SystemEvent{
+		Source:  "c3",
+		Level:   "warn",
+		Title:   "Durable queue DISABLED",
+		Message: msg,
+	})
+	cc, ok := b.Mappings().Channels[ch.Name()]
+	if !ok || cc.DMChatID == 0 {
+		log.Printf("queue: degraded-mode notice not sent on channel %q — no operator DM configured", ch.Name())
+		return
+	}
+	if _, err := ch.SendReply(c3types.ReplyArgs{Channel: ch.Name(), ChatID: cc.DMChatID, Text: "⚠️ " + msg}); err != nil {
+		log.Printf("queue: degraded-mode notice to %s DM failed: %v", ch.Name(), err)
+	}
 }
 
 // Channel returns the registered channel implementation by name.

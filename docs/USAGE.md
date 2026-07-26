@@ -76,10 +76,21 @@ Once C3 has *received* a Telegram message it is written to disk before anything 
 How it works:
 
 - **Held on disk before the read offset moves.** A message that arrives while no session is attached to its topic is appended to a durable per-route queue under `$XDG_STATE_HOME/c3/queue/` (fallback `~/.local/state/c3/queue/`) and `fsync`'d to disk. The broker advances the Telegram read offset only *after* the message is durably persisted — so a broker crash mid-flight leaves the message with Telegram, which redelivers it on the next poll.
-- **The one exception, and it is worth knowing.** If the queue directory cannot be opened at startup — unwritable, full, wrong permissions — the broker logs `durable inbound hold DISABLED for this run` and keeps going *without* a queue. In that mode messages still reach an attached session live, but nothing is written to disk and the read offset still advances, so anything arriving while no session is attached is gone. Check for that line in the broker log if held messages ever fail to appear.
-- **Held-count auto-reply.** The first held message in a topic gets one reassurance reply: *"📨 Held — nothing lost. No CLI is attached to this topic right now. N message(s) queued — they'll be delivered when you attach a session here. Send /status to check."* It repeats at most once per 5-minute cooldown with the *running* count; messages in between are queued silently (no reply per voice note).
+- **The one exception, and it is worth knowing.** If the queue directory cannot be opened at startup — unwritable, full, wrong permissions — the broker logs `durable inbound hold DISABLED for this run` and keeps going *without* a queue. In that mode messages still reach an attached session live, but nothing is written to disk and the read offset still advances, so anything arriving while no session is attached is gone. It advances the offset deliberately: an un-acked Telegram update never clears, so refusing to ack would wedge *all* inbound rather than lose one message. C3 takes the loss and makes noise about it — see **Degraded mode** below.
+- **Held-count auto-reply.** The first held message in a topic gets one reassurance reply: *"📨 Held — nothing lost. N message(s) queued. Send /status to check."* On Telegram a fresh notice fires per held message (rate-limited to one per topic per 10 seconds, carrying the *running* count) so a new arrival is always signalled; messages inside that window are queued silently, with no reply per voice note.
 - **Backlog on attach.** When you `attach` to a topic with held messages, the session is told how many are queued (with a short per-message preview) and instructed to call `fetch_queue` to retrieve them. The agent decides whether to drain all at once or work through them in batches.
 - **Live messages are unaffected.** When a session is attached, messages still push through immediately; they're removed from the queue once the agent has actually taken them. The queue earns its keep only when there's no live consumer.
+
+### Degraded mode — when the durable queue is disabled
+
+Everything above is a promise C3 can only keep while it has a queue. Without one it inverts every surface rather than going quiet, because the failure is otherwise invisible until you go looking for a message that no longer exists:
+
+- **At startup** — a warning to your Telegram DM, plus a system advisory to any live CLI session.
+- **On `/status`** — a `⚠️ ... durable queue is DISABLED` line on both the per-topic and the global summary, so the reassuring `0 queued · broker up` can never stand alone.
+- **On every hold** — the auto-reply becomes *"⚠️ NOT held — that message was dropped."* instead of *"📨 Held — nothing lost."* It is deliberately on the slower 5-minute-per-topic cooldown rather than the 10-second held-notice window: the warning is the same sentence every time, and repeating it through a burst is how an alert gets ignored.
+- **In `broker.log`** — the `durable inbound hold DISABLED for this run` line at startup, then a `DROPPED — durable queue disabled` line for every dropped message, carrying the sender and the text (truncated to 200 characters). Not a substitute for the queue, but enough to know what you missed.
+
+The fix is to make the queue directory (`$XDG_STATE_HOME/c3/queue/`, fallback `~/.local/state/c3/queue/`) writable and restart the broker. Live delivery to an attached session is unaffected throughout.
 
 ### Pulling the backlog — the `fetch_queue` tool
 
