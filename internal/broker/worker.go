@@ -839,8 +839,10 @@ func (w *RouteWorker) flushEvent(ctx context.Context, ev *c3types.Inbound) {
 		// Permission relay (Phase 1): a "perm:<verb>:<id>" callback resolves a
 		// relayed permission prompt — resolvePerm pushes an OpPermissionVerdict to
 		// the holder and clears the keyboard, gated to the operator. A "perm:" tap is
-		// C3-internal — it is NEVER a meaningful generic event (unlike "ask:", whose
-		// prefix an agent-rendered reply button could legitimately reuse). So always
+		// C3-internal — it is NEVER a meaningful generic event. Neither is "ask:":
+		// this comment used to say an agent-rendered reply button could legitimately
+		// reuse that prefix, and as of the outbound reservation in dispatch.go it
+		// cannot — both prefixes are refused at the point a button is authored. So always
 		// SUPPRESS it, whether or not it resolved: a non-operator / unknown / expired /
 		// route-mismatched tap must not be surfaced as a raw callback event into the
 		// session (it's already auto-acked by the channel regardless).

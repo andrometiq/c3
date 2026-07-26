@@ -235,6 +235,8 @@ The only way a session claims a route. See the attach parser and proposal flow i
 
 A `tool_call` before any attach returns `error.message = "tool_call before attach: no route claimed"`. A stalled route worker returns a clean timeout error rather than wedging your read loop.
 
+**`args` never carries a destination.** Every tool call goes to the route your session claimed with `attach`, and only there. A `chat_id` or `topic_id` inside `args` is **refused**, not honoured and not ignored — the call fails with `"<field> is not a tool argument"`. Do not add either to a tool schema you expose. They were once honoured, which meant a compromised or prompt-injected agent could address any chat and thread the `topics` tool showed it; the destination is now structurally the claimed route. Note the refusal is on **presence**, not on disagreement: sending `chat_id` equal to your own route's id is still an error, because a value-comparing check would accept `chat_id: null`.
+
 #### `inbound` — unsolicited push
 
 ```json
