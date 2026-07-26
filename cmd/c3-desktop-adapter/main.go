@@ -18,6 +18,8 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -161,16 +163,44 @@ func desktopCWD() string {
 	return cwd
 }
 
+// newDesktopSessionID mints one RANDOM per-process session id.
+//
+// It is deliberately NOT derived from the pid. The broker persists this id in
+// mappings.json's session_attachments — one unqualified namespace, keyed on the
+// bare string, with a 30-day TTL — and recoverSession re-claims the recorded
+// topic for whoever presents a matching id (internal/broker/attach.go, the only
+// silent claim in the system). Pids are recycled, so the old "desktop-<pid>" form
+// was NOT distinct every launch: a fresh Desktop process that landed on a dead
+// session's pid presented that session's id, matched its attachment, and silently
+// inherited its topic — routeConfirmed set, so a later fetch_queue(ack=true) would
+// drain a stranger's queue. An unknown identity must never match another unknown
+// identity.
+func newDesktopSessionID() string {
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		// Unreachable on Go 1.24+ (crypto/rand.Read no longer returns an error);
+		// belt-and-braces only, and NOT a supported identity path. The nanotime
+		// is what keeps it distinct when the pid has been recycled.
+		return fmt.Sprintf("desktop-%d-%d", os.Getpid(), time.Now().UnixNano())
+	}
+	return "desktop-" + hex.EncodeToString(b[:])
+}
+
+// desktopSessionID is minted once and memoized, so every caller in this process
+// presents the SAME id to the broker for the life of the process.
+var desktopSessionID = sync.OnceValue(newDesktopSessionID)
+
 // sessionID is the stable id used for attach/claim continuity. Claude Desktop
 // gives its MCP servers no per-conversation id, so we let the user pin one via
 // C3_DESKTOP_SESSION (stable across restarts → the same claim can be reclaimed on
-// an explicit re-attach). Unset → a per-process id, which is distinct every launch
-// (no cross-process continuity, by design).
+// an explicit re-attach; that id is the user's deliberate choice, not a guess).
+// Unset → a random per-process id, which is distinct every launch (no
+// cross-process continuity, by design).
 func sessionID() string {
 	if sid := strings.TrimSpace(os.Getenv("C3_DESKTOP_SESSION")); sid != "" {
 		return sid
 	}
-	return fmt.Sprintf("desktop-%d", os.Getpid())
+	return desktopSessionID()
 }
 
 type adapter struct {

@@ -3,7 +3,9 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -357,6 +359,48 @@ func TestSessionID(t *testing.T) {
 	t.Setenv("C3_DESKTOP_SESSION", "")
 	if got := sessionID(); !strings.HasPrefix(got, "desktop-") {
 		t.Errorf("sessionID() = %q; want per-process desktop- prefix when unset", got)
+	}
+}
+
+// TestSessionIDIsNotPIDDerived pins the fix for the pid-recycling identity
+// defect. With C3_DESKTOP_SESSION unset the id must not be the pid form.
+func TestSessionIDIsNotPIDDerived(t *testing.T) {
+	t.Setenv("C3_DESKTOP_SESSION", "")
+	if got := sessionID(); got == fmt.Sprintf("desktop-%d", os.Getpid()) {
+		t.Fatalf("sessionID() = %q — the session id is pid-derived. PIDs are recycled, so a fresh "+
+			"Desktop process landing on a dead session's pid presents THAT session's id, matches its "+
+			"recorded session_attachment, and silently inherits its topic (routeConfirmed set, so "+
+			"fetch_queue(ack=true) drains a stranger's queue). Mint it randomly.", got)
+	}
+}
+
+// TestNewDesktopSessionIDNeverRepeats is rule (a) directly: two independently
+// minted ids must never compare equal. Any minter built from a recyclable or
+// defaulted input (pid, a zero value, a constant) fails here on the first repeat.
+func TestNewDesktopSessionIDNeverRepeats(t *testing.T) {
+	const mints = 128
+	seen := make(map[string]int, mints)
+	for i := 0; i < mints; i++ {
+		id := newDesktopSessionID()
+		if first, dup := seen[id]; dup {
+			t.Fatalf("newDesktopSessionID() returned %q on both mint %d and mint %d — two independently "+
+				"minted session ids compared EQUAL. An unknown identity must never match another unknown "+
+				"identity: colliding ids let one Desktop session inherit another's persisted topic claim.", id, first, i)
+		}
+		seen[id] = i
+	}
+}
+
+// TestSessionIDStableWithinProcess guards the memoization. The id is what the
+// broker records the attachment under (fireRecover), so every caller in this
+// process must present the same one.
+func TestSessionIDStableWithinProcess(t *testing.T) {
+	t.Setenv("C3_DESKTOP_SESSION", "")
+	first, second := sessionID(), sessionID()
+	if first != second {
+		t.Fatalf("sessionID() returned %q then %q — the per-process id is re-minted on every call, so "+
+			"the id the broker recorded the attachment under is not the id a later caller presents. "+
+			"Mint it once (sync.OnceValue) and reuse it.", first, second)
 	}
 }
 
