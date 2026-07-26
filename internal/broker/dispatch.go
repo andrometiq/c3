@@ -14,9 +14,23 @@ import (
 
 // dispatchTool translates a tool-call (name, args) into a channel method call.
 // Returns the MCP-shape result map (with content[].text or attachment_path
-// fields) and any error. The route key is used to fill in chat_id/topic_id
-// when the args don't provide them.
-func dispatchTool(ch channel.Channel, key RouteKey, tool string, args map[string]any) (map[string]any, error) {
+// fields) and any error. The destination is ALWAYS the claimed route key; a
+// tool call cannot address anything else (see rejectDestinationOverride).
+func dispatchTool(ch channel.Channel, key RouteKey, tool string, args map[string]any) (res map[string]any, err error) {
+	// SECURITY AUDIT: every agent-initiated outbound records the destination it
+	// actually went to. dispatchTool is the single funnel for every tool call, and
+	// the destination below is structurally the claimed route — this line is the
+	// evidence. Without it a plain text send leaves NO trace: logAlterations only
+	// writes when the gate altered something, and the media-send line needs a
+	// local Path, so a text-only exfiltration is invisible in the log. Metadata
+	// only, never message text (log.go content policy).
+	defer func() {
+		log.Printf("outbound-dispatch chan=%s chat=%d topic=%s tool=%s ok=%t",
+			key.Channel, key.ChatID, TopicKeyStr(key), tool, err == nil)
+	}()
+	if derr := rejectDestinationOverride(key, args); derr != nil {
+		return nil, derr
+	}
 	switch tool {
 	case "reply":
 		return dispatchReply(ch, key, args)
@@ -40,8 +54,8 @@ func dispatchTool(ch channel.Channel, key RouteKey, tool string, args map[string
 func dispatchReply(ch channel.Channel, key RouteKey, args map[string]any) (map[string]any, error) {
 	out := c3types.Outbound{
 		Channel: key.Channel,
-		ChatID:  argInt64(args, "chat_id", key.ChatID),
-		TopicID: argTopicID(args, "topic_id", key),
+		ChatID:  key.ChatID,
+		TopicID: routeTopicID(key),
 		Text:    argString(args, "text", ""),
 		// The agent writes standard markdown; C3 converts + escapes it for the
 		// channel. Markup is always the markdown intent (MarkupNative remains a
@@ -147,8 +161,8 @@ func dispatchPoll(ch channel.Channel, key RouteKey, args map[string]any) (map[st
 	// moved to the gate so it cannot diverge).
 	out := c3types.Outbound{
 		Channel: key.Channel,
-		ChatID:  argInt64(args, "chat_id", key.ChatID),
-		TopicID: argTopicID(args, "topic_id", key),
+		ChatID:  key.ChatID,
+		TopicID: routeTopicID(key),
 		Poll: &c3types.PollSpec{
 			Question:        question,
 			Options:         argStringSlice(args, "options"),
@@ -182,8 +196,7 @@ func dispatchStopPoll(ch channel.Channel, key RouteKey, args map[string]any) (ma
 	if messageID == 0 {
 		return nil, fmt.Errorf("stop_poll: message_id required")
 	}
-	chatID := argInt64(args, "chat_id", key.ChatID)
-	res, err := ch.StopPoll(chatID, messageID)
+	res, err := ch.StopPoll(key.ChatID, messageID)
 	if err != nil {
 		return nil, err
 	}
@@ -255,6 +268,22 @@ func mediaFromArgs(args map[string]any) []c3types.MediaItem {
 	return out
 }
 
+// c3InternalCallbackPrefix is the callback_data namespace of C3's own inert
+// keyboard indicator (callbackChosenData = "c3:_chosen", internal/channel/
+// telegram/poll.go): a tap there is swallowed by the channel and never surfaced
+// as an event, so agent data must not land in it either. Reserved as a whole
+// namespace, not as the single literal, so a future C3-internal callback needs
+// no second fix here.
+const c3InternalCallbackPrefix = "c3:"
+
+// reservedCallbackPrefixes are the callback_data namespaces C3 OWNS. The
+// inbound side routes a tap by prefix to a C3 resolver instead of to the agent —
+// "perm:" → resolvePerm (worker.go), "ask:" → resolveAsk (worker.go), "c3:" →
+// swallowed by the channel (poll.go) — and resolvePerm treats such a tap as the
+// human's tool-use verdict. An agent-authored button must therefore never mint
+// one.
+var reservedCallbackPrefixes = []string{permCallbackPrefix, askCallbackPrefix, c3InternalCallbackPrefix}
+
 // buttonsFromArgs parses the reply tool's `buttons` arg into a channel-neutral
 // inline keyboard ([][]c3types.Button — ROWS of buttons). `buttons` is a JSON
 // 2-D array: an array of rows, each row an array of {text, data, url} objects.
@@ -300,6 +329,16 @@ func buttonsFromArgs(args map[string]any) ([][]c3types.Button, error) {
 			if (data == "") == (urlStr == "") {
 				return nil, fmt.Errorf("button %q: set EXACTLY ONE of data (callback) or url (link)", text)
 			}
+			// The inbound side routes a tap by prefix, so a reserved prefix here
+			// would let the agent mint a payload C3 hands to its own resolver — and
+			// even without that, such a tap is swallowed and never reaches the agent.
+			// REFUSE, don't rewrite: the tap echoes Data back verbatim, so a silent
+			// escape would break the agent's own comparison of the value.
+			for _, p := range reservedCallbackPrefixes {
+				if strings.HasPrefix(data, p) {
+					return nil, fmt.Errorf("button %q: callback data %q starts with %q, a prefix C3 reserves for its own taps (permission Allow/Deny, ask answers, keyboard state) — a tap there is routed to C3, not to you; use a different prefix", text, data, p)
+				}
+			}
 			row = append(row, c3types.Button{Text: text, Data: data, URL: urlStr})
 		}
 		out = append(out, row)
@@ -313,7 +352,7 @@ func buttonsFromArgs(args map[string]any) ([][]c3types.Button, error) {
 func dispatchReact(ch channel.Channel, key RouteKey, args map[string]any) (map[string]any, error) {
 	a := c3types.ReactArgs{
 		Channel:   key.Channel,
-		ChatID:    argInt64(args, "chat_id", key.ChatID),
+		ChatID:    key.ChatID,
 		MessageID: argInt64(args, "message_id", 0),
 		Emoji:     argString(args, "emoji", ""),
 	}
@@ -340,7 +379,7 @@ func dispatchEditMessage(ch channel.Channel, key RouteKey, args map[string]any) 
 		markup = c3types.MarkupNone
 		notes = append(notes, "rich text is not supported on this channel — markdown was sent as plain text")
 		log.Printf("outbound-alteration chan=%s chat=%d topic=%s kind=markup_degraded detail=%q",
-			key.Channel, argInt64(args, "chat_id", key.ChatID), TopicKeyStr(key),
+			key.Channel, key.ChatID, TopicKeyStr(key),
 			"edit markup downgraded to none (channel RichText=false)")
 	}
 	if caps.MaxMessageRunes > 0 && utf16Len(text) > caps.MaxMessageRunes {
@@ -348,9 +387,17 @@ func dispatchEditMessage(ch channel.Channel, key RouteKey, args map[string]any) 
 			utf16Len(text), caps.MaxMessageRunes)
 	}
 
+	// An edit carries no Buttons and therefore DROPS any inline keyboard on the
+	// target message. c3types.EditArgs documents a nil Buttons as "leave the
+	// existing keyboard untouched", but that behaviour is not expressible through
+	// the Telegram client: EditMessageText assigns reply_markup unconditionally
+	// from a CONCRETE struct whose only slice carries omitempty, so a nil and an
+	// empty keyboard marshal to the identical `reply_markup={}` — the very bytes
+	// C3 itself sends to CLEAR a keyboard when a perm/ask resolves. An edit that
+	// must keep a keyboard has to re-send it.
 	a := c3types.EditArgs{
 		Channel:   key.Channel,
-		ChatID:    argInt64(args, "chat_id", key.ChatID),
+		ChatID:    key.ChatID,
 		MessageID: argInt64(args, "message_id", 0),
 		Text:      text,
 		Markup:    markup,
@@ -374,9 +421,7 @@ func utf16Len(s string) int {
 }
 
 func dispatchSendTyping(ch channel.Channel, key RouteKey, args map[string]any) (map[string]any, error) {
-	chatID := argInt64(args, "chat_id", key.ChatID)
-	tid := argTopicID(args, "topic_id", key)
-	if err := ch.SendTyping(chatID, tid); err != nil {
+	if err := ch.SendTyping(key.ChatID, routeTopicID(key)); err != nil {
 		return nil, err
 	}
 	return mcpText("typing"), nil
@@ -527,19 +572,36 @@ func argIntPtr(args map[string]any, key string) *int {
 	return &n
 }
 
-// argTopicID returns *int64 for topic_id arg, falling back to the route key's
-// HasTopic+TopicID if the arg is absent. nil means no topic (DM).
-func argTopicID(args map[string]any, key string, route RouteKey) *int64 {
-	if _, ok := args[key]; ok {
-		v := argInt64(args, key, 0)
-		if v == 0 {
-			return nil
-		}
-		return &v
-	}
+// routeTopicID renders the CLAIMED route's topic as the *int64 the outbound
+// types use. nil = no topic (a DM or a non-forum group).
+func routeTopicID(route RouteKey) *int64 {
 	if !route.HasTopic {
 		return nil
 	}
 	v := route.TopicID
 	return &v
+}
+
+// rejectDestinationOverride enforces that a tool call goes to the route the
+// session actually claimed. chat_id/topic_id are in NO tool schema and no
+// in-tree caller sets them, yet dispatch used to honour them — so a prompt-
+// injected agent could post into, react in or edit ANOTHER session's topic (the
+// `topics` tool hands it every chat/thread pair), and a `topic_id: 0` escaped a
+// forum topic into the group's General chat with no reconnaissance at all.
+// Refused on PRESENCE, not on disagreement: argInt64 falls back to the route's
+// own id for an unparseable value (JSON null, a bool, a string), so a
+// disagreement check would silently ACCEPT `chat_id: null`. Loud, so a
+// third-party adapter that sets one finds out instead of sending to the wrong
+// place. The house pattern is handleRetranscribe (queue_dispatch.go), which
+// derives chan/chat/topic from the claimed route rather than from args.
+// Metadata only in the log — never message text (log.go content policy).
+func rejectDestinationOverride(key RouteKey, args map[string]any) error {
+	for _, f := range []string{"chat_id", "topic_id"} {
+		if _, ok := args[f]; ok {
+			log.Printf("outbound-destination-refused chan=%s chat=%d topic=%s field=%s",
+				key.Channel, key.ChatID, TopicKeyStr(key), f)
+			return fmt.Errorf("%s is not a tool argument: a tool call always goes to the route this session attached to", f)
+		}
+	}
+	return nil
 }
