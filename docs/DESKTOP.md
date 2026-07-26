@@ -8,7 +8,7 @@ On Claude Desktop, C3 is a **pull bridge, not a push one.**
 
 There is **no** "a Telegram message arrived → Claude speaks up." That live-render behaviour exists only in Claude Code (via its channel-notification support). Claude Desktop has no way for an MCP server to interrupt a chat, so:
 
-- **Inbound is poll-only.** Telegram messages sent to your topic wait in C3's **durable on-disk queue**. Claude sees them only when *you ask it to check* — it calls `fetch_queue` and reads back whatever is waiting. Nothing is lost while you're away; it just doesn't surface on its own.
+- **Inbound is poll-only.** Telegram messages sent to your topic wait in C3's **durable on-disk queue**. Claude sees them only when *you ask it to check* — it calls `fetch_queue` and reads back whatever is waiting. They are held while you're away; they just don't surface on their own.
 - **Outbound is on request.** Ask Claude to `reply` / `react` and it sends to Telegram.
 - *(Optional)* an hourly **Claude Cowork Scheduled Task** can poll on a timer ("every hour, check my C3 messages and summarize"), which is the closest you get to push — a cron, not an interrupt.
 

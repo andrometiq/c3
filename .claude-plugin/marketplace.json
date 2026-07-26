@@ -1,12 +1,13 @@
 {
   "name": "c3",
   "owner": {
-    "name": "Karthikeyan"
+    "name": "Andrometiq",
+    "url": "https://github.com/Andrometiq"
   },
   "plugins": [
     {
       "name": "c3",
-      "description": "C3 — command every coding agent you run, from one chat. One self-hosted broker multiplexes every Claude Code and Codex session onto one Telegram bot: a thread per project, tap-to-approve tool calls, voice-note transcription, and a durable queue so no message you send is ever lost.",
+      "description": "C3 — command every coding agent you run, from one chat. One self-hosted broker multiplexes every Claude Code and Codex session onto one Telegram bot: a thread per project, tap-to-approve tool calls, voice-note transcription, and a durable on-disk queue that holds what you send while no session is attached.",
       "category": "messaging",
       "license": "MIT",
       "repository": "https://github.com/Andrometiq/c3",

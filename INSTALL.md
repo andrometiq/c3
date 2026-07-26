@@ -542,7 +542,8 @@ Details in `docs/systemd/README.md`.
 > Inbound is **poll-only** on Windows (for both Claude Code and Claude Desktop):
 > the render-detector fails safe and **holds inbound in the durable queue**
 > rather than risk losing it, so you pull messages with `/c3:fetch-queue`
-> (Claude Code) or `fetch_queue` / `/fetch-queue` (Desktop). Nothing is lost.
+> (Claude Code) or `fetch_queue` / `/fetch-queue` (Desktop). They are held, not
+> dropped.
 
 Apply these instead of the Linux-only steps referenced above:
 

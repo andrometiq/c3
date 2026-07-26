@@ -71,11 +71,11 @@ From there:
 
 ## Durable inbound queue & backlog
 
-Once C3 has *received* a Telegram message, it never loses it — even if no CLI is attached or the broker was down when it later caught up. Inbound messages are held on disk and delivered when a session attaches. You never have to re-forward a voice note or babysit delivery.
+Once C3 has *received* a Telegram message it is written to disk before anything else consumes it, and it stays there until a session takes it — even if no CLI is attached, or the broker was down when it later caught up. You don't have to re-forward a voice note or babysit delivery.
 
 How it works:
 
-- **Held, never dropped.** A message that arrives while no session is attached to its topic is appended to a durable per-route queue under `$XDG_STATE_HOME/c3/queue/` (fallback `~/.local/state/c3/queue/`) and `fsync`'d to disk. The broker only advances the Telegram read offset *after* the message is durably persisted, so a broker crash mid-flight can't lose anything — Telegram redelivers it on the next poll.
+- **Held on disk before the read offset moves.** A message that arrives while no session is attached to its topic is appended to a durable per-route queue under `$XDG_STATE_HOME/c3/queue/` (fallback `~/.local/state/c3/queue/`) and `fsync`'d to disk. The broker advances the Telegram read offset only *after* the message is durably persisted — so a broker crash mid-flight leaves the message with Telegram, which redelivers it on the next poll.
 - **Held-count auto-reply.** The first held message in a topic gets one reassurance reply: *"📨 Held — nothing lost. No CLI is attached to this topic right now. N message(s) queued — they'll be delivered when you attach a session here. Send /status to check."* It repeats at most once per 5-minute cooldown with the *running* count; messages in between are queued silently (no reply per voice note).
 - **Backlog on attach.** When you `attach` to a topic with held messages, the session is told how many are queued (with a short per-message preview) and instructed to call `fetch_queue` to retrieve them. The agent decides whether to drain all at once or work through them in batches.
 - **Live messages are unaffected.** When a session is attached, messages still push through immediately; they're removed from the queue once the agent has actually taken them. The queue earns its keep only when there's no live consumer.
@@ -211,7 +211,7 @@ C3 doesn't auto-delete. From your phone (Telegram), long-press the topic in the 
 
 ## When things go wrong
 
-- **No CLI is attached, but messages keep arriving** — nothing is lost. They're held in the durable queue and you get a "Held — nothing lost" reply (cooldown 5 min) with the running count; send `/status` to check depth. Open a session in the project directory and `attach`, and the agent retrieves the backlog with `fetch_queue`. See "Durable inbound queue & backlog" above.
+- **No CLI is attached, but messages keep arriving** — they're held, not dropped. They go into the durable queue and you get a held-notice reply (cooldown 5 min) with the running count; send `/status` to check depth. Open a session in the project directory and `attach`, and the agent retrieves the backlog with `fetch_queue`. See "Durable inbound queue & backlog" above.
 - **`attach` says the topic is held** — `topics` lists who. If it's a stale claim (the holder crashed), the broker now sweeps dead-pid holders on dispatch (2026-05-14 fix); just retry `attach`. If that doesn't free it, quit Claude Code and relaunch — the new session's broker auto-spawn starts clean. Don't bounce the broker from inside CC (killing the broker also kills this session's MCP server, requiring a manual `/mcp` reconnect). From an external terminal, `pkill c3-broker` works. For mappings.json edits, `/c3:reload-config` is non-disruptive.
 - **Voice transcription is wrong or failed** — never re-record. The original audio is saved; the CLI can `download_attachment` to re-listen, or `retranscribe` to re-run STT (e.g. once a flaky provider recovers). On an outright STT failure the agent sees a self-documenting message telling it exactly how to recover. The STT plugin's confidence isn't surfaced in v1; treat the transcript as a hint when accuracy matters.
 - **Typing indicator** — the broker now auto-pulses a typing indicator on a route while the agent is working, once that session has replied at least once in the topic (the signal you're in an active Telegram conversation). It stops when the agent sends its reply, or after a safety timeout. A brand-new topic shows no typing until the agent's first reply, and default-CLI-mode sessions (that never reply to Telegram) never pulse it.
@@ -308,8 +308,8 @@ This release changes how a session binds to a topic. Three user-visible changes:
 - **Restart your running CLI sessions after updating.** An old in-process adapter
   that replays a bare `attach` onto the freshly-restarted broker can land on the
   new picker (a discarded proposal, not a claim) and stay detached until you run a
-  manual `/attach`. Nothing is lost while detached — inbound is held in the durable
-  queue — but a quick relaunch of each live session avoids the surprise.
+  manual `/attach`. Inbound is held in the durable queue while detached, not
+  dropped — but a quick relaunch of each live session avoids the surprise.
 
 ## Privacy and safety
 
