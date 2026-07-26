@@ -3,6 +3,7 @@ package broker
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 	"time"
 
@@ -33,6 +34,12 @@ var retranscribeTimeout = 330 * time.Second
 // test can shorten it; production never reassigns it.
 var workerJobTimeout = 30 * time.Second
 
+// maxFetchIDBytes bounds the correlation id a fetch_queue request may carry. See
+// handleFetchQueue for why an unbounded id is a problem at all. A real id is a
+// uuid, a nanoid or a counter — tens of bytes — so a kilobyte is roughly 30x the
+// largest plausible one and cannot be reached by accident.
+const maxFetchIDBytes = 1024
+
 // handleFetchQueue routes a fetch_queue pull through the claimed route's worker
 // (single-owner file access). Limit default + max are clamped by the adapter;
 // the broker honors All (drain everything) and Ack (consume vs peek).
@@ -40,6 +47,27 @@ func (b *Broker) handleFetchQueue(conn *ipc.Conn, stub *Stub, raw []byte) {
 	var req ipc.FetchQueueReq
 	if err := json.Unmarshal(raw, &req); err != nil {
 		_ = conn.WriteJSON(ipc.FetchQueueResp{Op: ipc.OpFetchQueueResult, Err: "malformed fetch_queue: " + err.Error()})
+		return
+	}
+	// The correlation id is echoed VERBATIM into the same frame as the messages,
+	// and docs/ADAPTERS.md tells adapter authors to generate it themselves without
+	// publishing any length bound — so it is caller-chosen weight inside a
+	// 4 MiB frame. The worker counts it against the batch budget (fetchFrameFit),
+	// which is enough to keep the response sendable; this bound handles the
+	// degenerate end of the same lever, where the id alone would leave no room for
+	// any message and every fetch would come back empty for a reason the caller
+	// could never see. A real id is a uuid or a counter — 4 KiB is ~100x that.
+	//
+	// The refusal cannot echo an id it just called too long, so it answers with
+	// none: an adapter matching on id will time out this one request (and find the
+	// reason in broker.log), which is strictly better than a queue it can never
+	// drain. Nothing is consumed on this path.
+	if len(req.ID) > maxFetchIDBytes {
+		log.Printf("fetch_queue conn=%d: refused — correlation id is %d bytes (max %d); nothing was read or consumed",
+			stub.ConnID, len(req.ID), maxFetchIDBytes)
+		_ = conn.WriteJSON(ipc.FetchQueueResp{Op: ipc.OpFetchQueueResult,
+			Err: fmt.Sprintf("fetch_queue refused: correlation id is %d bytes, over the %d-byte limit — it is echoed into the same %d-byte frame as the messages. Nothing was consumed; retry with a short id.",
+				len(req.ID), maxFetchIDBytes, ipc.MaxFrameSize)})
 		return
 	}
 	route := stub.CurrentRoute()
@@ -63,7 +91,10 @@ func (b *Broker) handleFetchQueue(conn *ipc.Conn, stub *Stub, raw []byte) {
 	}
 	job := Job{Kind: JobFetch, Fetch: &FetchJob{
 		Limit: req.Limit, All: req.All, Ack: req.Ack,
-		Lease: lease, ResultCh: resultCh,
+		// The response echoes req.ID verbatim into the SAME frame as the messages,
+		// so the worker's frame budget has to know it before it consumes anything.
+		RespID: req.ID,
+		Lease:  lease, ResultCh: resultCh,
 	}}
 	if !b.Workers.Submit(*route, job) {
 		_ = conn.WriteJSON(ipc.FetchQueueResp{Op: ipc.OpFetchQueueResult, ID: req.ID, Err: "worker queue full or stopped"})
@@ -93,12 +124,19 @@ func (b *Broker) handleFetchQueue(conn *ipc.Conn, stub *Stub, raw []byte) {
 	}
 	// Do NOT discard this error. A refused write puts nothing on the wire, so the
 	// adapter sits until its own timeout with no explanation anywhere — the worst
-	// shape a failure can take. The batch is size-bounded upstream (see
-	// RouteWorker.fetchAllBudget), so reaching here means either a transport
-	// failure or a single record larger than one whole frame.
+	// shape a failure can take. The batch is sized against this exact response
+	// before anything is consumed (RouteWorker.fetchFrameFit), so an oversize frame
+	// can no longer reach here; what remains is transport failure (a dead peer),
+	// and on the Ack path those messages HAVE been consumed. Say so plainly —
+	// they are recoverable from the queue's retention window, but only by someone
+	// who knows to look.
 	if err := conn.WriteJSON(resp); err != nil {
-		log.Printf("fetch_queue chan=%s chat=%d: response not sent (%d messages, remaining=%d): %v",
-			route.Channel, route.ChatID, len(resp.Messages), resp.Remaining, err)
+		lost := ""
+		if req.Ack && len(resp.Messages) > 0 {
+			lost = fmt.Sprintf(" — those %d message(s) were already consumed and did NOT reach the session; recover them from the queue retention window", len(resp.Messages))
+		}
+		log.Printf("fetch_queue chan=%s chat=%d: response not sent (%d messages, remaining=%d): %v%s",
+			route.Channel, route.ChatID, len(resp.Messages), resp.Remaining, err, lost)
 	}
 }
 

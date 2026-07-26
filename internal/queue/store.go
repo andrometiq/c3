@@ -2,8 +2,11 @@ package queue
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
@@ -111,6 +114,11 @@ func (s *Store) Append(rk RouteKey, in *c3types.Inbound) error {
 	if err != nil {
 		return fmt.Errorf("queue: marshal: %w", err)
 	}
+	if len(data) > MaxRecordBytes {
+		if data, err = s.boundRecord(rk, rec, data); err != nil {
+			return err
+		}
+	}
 	f, err := os.OpenFile(s.jsonlPath(rk), os.O_APPEND|os.O_CREATE|os.O_RDWR, 0600)
 	if err != nil {
 		return fmt.Errorf("queue: open append: %w", err)
@@ -153,6 +161,101 @@ func (s *Store) Append(rk RouteKey, in *c3types.Inbound) error {
 		return err
 	}
 	s.refreshIndex(rk)
+	return nil
+}
+
+// truncationMarker is appended to a record whose Text boundRecord had to cut. It
+// is deliberately in-band and human-readable: the agent reads Text, and a cut-off
+// message that does not SAY it was cut off reads as a complete message.
+const truncationMarker = "\n\n⚠️ [C3] This message was truncated: the record was %d bytes, past the %d-byte per-record queue bound. The full original is retained under %s for %d days."
+
+// truncationMarkerNoRetention is the same notice for a store whose .trash/
+// retention could not be created (item G) — the cut bytes are gone, and saying so
+// is the whole point of the marker.
+const truncationMarkerNoRetention = "\n\n⚠️ [C3] This message was truncated: the record was %d bytes, past the %d-byte per-record queue bound, and queue retention is DISABLED — the removed text was not kept."
+
+// boundRecord brings an over-bound record under MaxRecordBytes, retaining the
+// FULL original under .trash/ first and marking the stored copy as truncated.
+//
+// Why truncate rather than reject: Append's error contract is "not persisted",
+// and the caller (the route worker) then holds the channel offset so the source
+// redelivers. For the producers that actually make oversize records — the
+// debounce-merge re-queue, a plugin that replaces the merged text, an STT
+// transcript off a subprocess's stdout — redelivery reproduces the SAME oversize
+// record, forever, and the offset never advances: one bad record would stop the
+// route from receiving anything ever again. Truncating keeps the route alive,
+// keeps the message's identity and its first megabyte, keeps the removed bytes
+// recoverable for TrashTTL, and says out loud that it happened. Rejecting trades
+// one damaged message for a dead route.
+//
+// Why not leave it alone: a record past MaxRecordBytes is not merely large, it is
+// undeliverable and contagious — past 4 MiB no fetch_queue response can ever
+// carry it, and past 8 MiB it makes the whole route unparseable (see
+// pendingStats). The bound is the one place every producer passes through.
+func (s *Store) boundRecord(rk RouteKey, rec *c3types.Inbound, data []byte) ([]byte, error) {
+	if rec == nil {
+		return data, nil // a nil record marshals to "null"; it is never over-bound
+	}
+	if err := s.retainOversize(rk, data); err != nil {
+		return nil, err
+	}
+	marker := fmt.Sprintf(truncationMarker, len(data), MaxRecordBytes, s.trashDir(), int(TrashTTL/(24*time.Hour)))
+	if s.retentionDisabled {
+		marker = fmt.Sprintf(truncationMarkerNoRetention, len(data), MaxRecordBytes)
+	}
+	// One pass is enough, and that is arithmetic rather than optimism: JSON never
+	// encodes a byte to LESS than one byte, so dropping k bytes from Text drops at
+	// least k bytes from the encoding. Cut the overflow plus the marker's own
+	// worst-case cost (6x covers \u00XX escaping of every byte it contains), then
+	// PROVE it with the re-marshal below rather than trusting the estimate — an
+	// estimate that drifts from the encoder is exactly the class of bug this file
+	// is being hardened against.
+	cut := len(rec.Text) - (len(data) - MaxRecordBytes) - 6*len(marker)
+	if cut < 0 {
+		cut = 0
+	}
+	cp := *rec
+	cp.Text = strings.ToValidUTF8(rec.Text[:cut], "") + marker
+	out, err := json.Marshal(&cp)
+	if err != nil {
+		return nil, fmt.Errorf("queue: marshal truncated record: %w", err)
+	}
+	if len(out) > MaxRecordBytes {
+		// The bloat is not in Text (a rogue plugin stuffing Attachments/Event).
+		// Drop the text entirely and try once more.
+		cp.Text = marker
+		if out, err = json.Marshal(&cp); err != nil {
+			return nil, fmt.Errorf("queue: marshal truncated record: %w", err)
+		}
+		if len(out) > MaxRecordBytes {
+			return nil, fmt.Errorf("queue: record is %d bytes with an empty Text (bound %d) — the oversize content is outside Text and cannot be trimmed here", len(out), MaxRecordBytes)
+		}
+	}
+	log.Printf("queue: %s: msg=%d record was %d bytes (bound %d) — stored TRUNCATED at %d bytes; the queued copy says so in its own text",
+		rk.File(), rec.MessageID, len(data), MaxRecordBytes, len(out))
+	return out, nil
+}
+
+// retainOversize copies the FULL original record into
+// .trash/<base>.<stamp>.oversize.jsonl before boundRecord truncates it, using the
+// same crash-safe writer as snapshotDropped/quarantineCorrupt. A failure returns
+// BEFORE the truncation, so nothing is cut that was not first kept
+// (fail-toward-keeping) — the queue's standing rule for every destructive path.
+func (s *Store) retainOversize(rk RouteKey, data []byte) error {
+	base := rk.File()
+	if s.retentionDisabled {
+		log.Printf("queue: %s: record is %d bytes (bound %d) and .trash retention is DISABLED — the truncated bytes are NOT recoverable", base, len(data), MaxRecordBytes)
+		return nil
+	}
+	stamp := firstFreeStamp(time.Now().UnixNano(), func(st int64) bool {
+		return pathExists(s.trashOversize(base, st))
+	})
+	final := s.trashOversize(base, stamp)
+	if err := s.writeTrashLines(final, [][]byte{data}); err != nil {
+		return err
+	}
+	log.Printf("queue: %s: full %d-byte original retained at %s for TrashTTL before truncation", base, len(data), final)
+	s.gcTrash(time.Now())
 	return nil
 }
 
@@ -234,6 +337,47 @@ func (s *Store) readLines(rk RouteKey) (lines []c3types.Inbound, cursor int, err
 }
 
 const corruptSentinel = "\x00corrupt"
+
+// countPendingLines counts the record lines after the cursor WITHOUT parsing
+// them. One record is one line, so this count survives the two things that break
+// readLines — a line that does not parse, and a line too long for its scanner
+// buffer — which is exactly when an honest count matters most. A file ending
+// mid-line (a torn tail Append has not healed yet) still holds that fragment's
+// record, so it counts as a line.
+func (s *Store) countPendingLines(rk RouteKey) (int, error) {
+	f, err := os.Open(s.jsonlPath(rk))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, nil
+		}
+		return 0, fmt.Errorf("queue: open count: %w", err)
+	}
+	defer f.Close()
+	buf := make([]byte, 64*1024)
+	total := 0
+	torn := false
+	for {
+		k, rerr := f.Read(buf)
+		if k > 0 {
+			total += bytes.Count(buf[:k], []byte{'\n'})
+			torn = buf[k-1] != '\n'
+		}
+		if rerr != nil {
+			if errors.Is(rerr, io.EOF) {
+				break
+			}
+			return 0, fmt.Errorf("queue: count read: %w", rerr)
+		}
+	}
+	if torn {
+		total++
+	}
+	pending := total - s.readCursor(rk)
+	if pending < 0 {
+		pending = 0
+	}
+	return pending, nil
+}
 
 // pendingFrom returns the non-corrupt lines after the cursor.
 func pendingFrom(lines []c3types.Inbound, cursor int) []c3types.Inbound {
@@ -331,7 +475,22 @@ func (s *Store) Pending(rk RouteKey) (int, time.Time) {
 func (s *Store) pendingStats(rk RouteKey) (n int, oldest, newest time.Time) {
 	lines, cursor, err := s.readLines(rk)
 	if err != nil {
-		return 0, time.Time{}, time.Time{}
+		// An unreadable queue is NOT an empty queue. Returning 0 here reported a
+		// route holding real messages as empty to /status, to the attach backlog
+		// summary and to the held-notice count — silently, and permanently: the
+		// usual cause is a record past readLines' scanner cap, which never clears
+		// itself, while Peek fails with "token too long" the whole time.
+		//
+		// The COUNT does not depend on the parse — one record is one line — so
+		// count the separators instead of guessing. That is a real number, and it
+		// is the number every "how much is waiting" consumer actually wants. The
+		// timestamps genuinely are unknown, so they stay zero; callers already
+		// guard Unix <= 0.
+		counted, cerr := s.countPendingLines(rk)
+		log.Printf("queue: %s: UNREADABLE (%v) — reporting %d pending line(s) counted WITHOUT parsing (count error: %v). "+
+			"Peek/Consume will keep failing on this route until the offending line is removed; the retained copies are under %s",
+			rk.File(), err, counted, cerr, s.trashDir())
+		return counted, time.Time{}, time.Time{}
 	}
 	pending := pendingFrom(lines, cursor)
 	for _, in := range pending {
@@ -684,6 +843,11 @@ func (s *Store) RecoverOnStartup() error {
 		}
 		lines, cursor, rerr := s.readLines(rk)
 		if rerr != nil {
+			// An unreadable route must not come back from a restart INVISIBLE.
+			// Skipping the index entry outright is how a route holding real
+			// messages reported Pending 0 to /status forever after a restart;
+			// refreshIndex now counts what it cannot parse and says so.
+			s.refreshIndex(rk)
 			continue
 		}
 		if cursor >= len(lines) {
@@ -754,6 +918,20 @@ func (s *Store) trashEvicted(base string, stamp int64) string {
 }
 func (s *Store) trashCorrupt(base string, stamp int64) string {
 	return filepath.Join(s.trashDir(), fmt.Sprintf("%s.%d.corrupt.jsonl", base, stamp))
+}
+func (s *Store) trashOversize(base string, stamp int64) string {
+	return filepath.Join(s.trashDir(), fmt.Sprintf("%s.%d.oversize.jsonl", base, stamp))
+}
+
+// RetentionDir is where records removed from the live queue are retained, or ""
+// when retention is disabled (item G) and removals hard-delete. Exported so a
+// caller that moves a record aside can tell the operator WHERE it went — or
+// honestly that it went nowhere.
+func (s *Store) RetentionDir() string {
+	if s.retentionDisabled {
+		return ""
+	}
+	return s.trashDir()
 }
 
 func pathExists(p string) bool {
@@ -975,6 +1153,8 @@ func trashStamp(name string) (int64, bool) {
 		s = strings.TrimSuffix(s, ".evicted.jsonl")
 	case strings.HasSuffix(s, ".corrupt.jsonl"):
 		s = strings.TrimSuffix(s, ".corrupt.jsonl")
+	case strings.HasSuffix(s, ".oversize.jsonl"):
+		s = strings.TrimSuffix(s, ".oversize.jsonl")
 	case strings.HasSuffix(s, ".jsonl"):
 		s = strings.TrimSuffix(s, ".jsonl")
 	case strings.HasSuffix(s, ".cur"):

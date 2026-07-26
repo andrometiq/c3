@@ -19,6 +19,26 @@ const (
 	MaxMessages = 1000
 	// MaxAge is the per-route age cap; EvictOverCap drops lines older than this.
 	MaxAge = 14 * 24 * time.Hour
+	// MaxRecordBytes bounds ONE record's marshaled size. Append enforces it; it is
+	// the only byte bound in the package (the others are count and age), and
+	// Append is the single gate every producer passes through — the debounce-merge
+	// re-queue, a plugin that replaces the merged text, an STT transcript straight
+	// off a subprocess's stdout. None of those is bounded at its own source.
+	//
+	// It has to sit UNDER two independent ceilings, and it is deliberately an
+	// order of magnitude under the lower one:
+	//   - 8 MiB, readLines' scanner cap. One record past it makes the WHOLE route
+	//     unreadable — Peek fails, and the route reports empty while holding
+	//     everything (see pendingStats).
+	//   - 4 MiB, ipc.MaxFrameSize. A record past it can never be delivered in a
+	//     fetch_queue response, because the response is one frame. (Not imported:
+	//     the queue package does not depend on the IPC layer, and a record bound
+	//     that tracked the frame cap exactly would leave zero room for the
+	//     envelope anyway.)
+	// 1 MiB is far above any legitimate record — a Telegram text message is 4096
+	// characters, and the largest thing that lands here is an STT transcript of a
+	// long voice note, on the order of a few hundred KB.
+	MaxRecordBytes = 1 << 20
 )
 
 // Retention window (.trash/). A drained/evicted route pair is renamed into

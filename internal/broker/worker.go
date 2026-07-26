@@ -72,9 +72,17 @@ type BacklogResult struct {
 // the caller waits for the already-started Consume's result. The result returns
 // via ResultCh.
 type FetchJob struct {
-	Limit    int
-	All      bool
-	Ack      bool
+	Limit int
+	All   bool
+	Ack   bool
+	// RespID is the correlation id the response will echo VERBATIM
+	// (docs/ADAPTERS.md: "Generate it yourself; the broker echoes it back"), and
+	// the adapter picks it — so it is caller-controlled length that lands in the
+	// same frame as the messages. The worker needs it because the frame budget
+	// has to size the ACTUAL response, id included; a budget computed without it
+	// under-counts by exactly the number of bytes the caller chose. Empty is
+	// legal (an observe carries no fetch id) and simply costs nothing.
+	RespID   string
 	Lease    *fetchLease
 	ResultCh chan<- FetchResult
 }
@@ -1331,54 +1339,199 @@ func (w *RouteWorker) evictIfOverCap(qrk queue.RouteKey) {
 	}
 }
 
-// handleFetch peeks or consumes the route's durable queue and returns the batch.
-// fetchAllBudget answers "how many of this route's queued messages fit in one
-// IPC frame?" for an unbounded fetch_queue(all=true).
+// fetchFrameFit answers the only question that may be asked BEFORE a destructive
+// fetch: how many of these records can the response actually carry?
 //
-// It exists because the two limits were set independently and can collide: a
-// route holds up to queue.MaxMessages records, and ipc.MaxFrameSize bounds one
-// frame. A record is ~250 bytes of envelope plus its Text, and Text carries STT
-// transcripts, which are NOT bounded by the channel's own message-length limit.
-// A thousand records averaging four kilobytes already reaches the cap.
+// It sizes the EXACT frame handleFetchQueue will write — the same struct, the
+// same echoed id, the same terminating newline WriteJSON counts — by marshaling
+// it. It deliberately does not estimate around a headroom constant, because
+// every way an estimate can drift from the encoder is a way to consume records
+// that can never be sent, and the two drifts that actually shipped were both
+// invisible: the echoed request id (adapter-chosen, published with no length
+// bound, and absent from the old constant) and JSON escaping (one control byte
+// costs six).
 //
-// Returns ok=false when it cannot measure (peek failed, or nothing queued), in
-// which case the caller keeps its existing unbounded behaviour — this is a
-// safety bound, not a gate, and it must never be the reason a fetch fails.
-func (w *RouteWorker) fetchAllBudget(qrk queue.RouteKey) (int, bool) {
-	all, err := w.broker.Queue.Peek(qrk, -1)
-	if err != nil || len(all) == 0 {
-		return 0, false
+// remainingHint must be >= the Remaining the response will carry. Its only
+// effect is the decimal width of that one field, so a wider hint is always safe.
+//
+// The return values say exactly one thing each — the old helper's "(0, false)"
+// meant BOTH "nothing fits" and "could not measure", and the caller read the
+// second meaning as "no bound applies" and drained the whole queue:
+//   - err != nil: the response ENVELOPE alone cannot fit a frame, so nothing can
+//     be delivered on this request no matter which records are chosen. Never a
+//     reason to touch the queue.
+//   - 0 with a non-empty msgs: the FIRST record alone cannot be encoded into any
+//     frame. That is a fact about that record, and the caller must deal with the
+//     record (see handleFetch's ruling) — not with the queue behind it.
+func fetchFrameFit(respID string, remainingHint int, msgs []c3types.Inbound) (int, error) {
+	envelope := func(m []c3types.Inbound) ([]byte, error) {
+		return json.Marshal(ipc.FetchQueueResp{
+			Op: ipc.OpFetchQueueResult, ID: respID, Messages: m, Remaining: remainingHint,
+		})
 	}
-	// Headroom for the response envelope around the messages array: op, id,
-	// remaining, the JSON structure itself, and the terminating newline that
-	// MaxFrameSize counts. 8 KiB is far more than the envelope needs and costs
-	// nothing against a 4 MiB budget.
-	const envelopeHeadroom = 8 * 1024
-	budget := ipc.MaxFrameSize - envelopeHeadroom
-
-	used := 0
-	for i := range all {
-		enc, err := json.Marshal(&all[i])
-		if err != nil {
-			// Unmeasurable record: stop here rather than guess. Everything before
-			// it is still returned, and Remaining brings the caller back.
-			return i, i > 0
+	bare, err := envelope(nil)
+	if err != nil {
+		return 0, fmt.Errorf("fetch_queue: cannot size the response envelope: %w", err)
+	}
+	if len(msgs) == 0 {
+		if len(bare)+1 > ipc.MaxFrameSize {
+			return 0, fmt.Errorf("fetch_queue: the response envelope alone is %d bytes (cap %d) — the echoed id is %d bytes",
+				len(bare)+1, ipc.MaxFrameSize, len(respID))
 		}
-		// +1 for the comma separating this element from the next.
-		used += len(enc) + 1
+		return 0, nil
+	}
+	// What the messages ARRAY itself costs (`,"messages":[` plus `]`), measured
+	// against the encoder rather than spelled out, so a change to the struct's
+	// json tag cannot silently desync this arithmetic from reality.
+	withOne, err := envelope(msgs[:1])
+	if err != nil {
+		return 0, fmt.Errorf("fetch_queue: cannot size the response envelope: %w", err)
+	}
+	first, err := json.Marshal(&msgs[0])
+	if err != nil {
+		// The head record cannot be marshaled at all — same disposition as one
+		// too large to encode: the caller must deal with the record.
+		return 0, nil
+	}
+	arrayCost := len(withOne) - len(bare) - len(first)
+	budget := ipc.MaxFrameSize - 1 - len(bare) - arrayCost // -1: the newline WriteJSON appends
+	if budget <= 0 {
+		return 0, fmt.Errorf("fetch_queue: the response envelope alone is %d bytes (cap %d) — the echoed id is %d bytes, leaving no room for any message",
+			len(bare)+arrayCost+1, ipc.MaxFrameSize, len(respID))
+	}
+	fit, used := 0, 0
+	for i := range msgs {
+		enc, merr := json.Marshal(&msgs[i])
+		if merr != nil {
+			break // unmeasurable record: everything before it is still deliverable
+		}
+		if i > 0 {
+			used++ // the comma separating this element from the previous one
+		}
+		used += len(enc)
 		if used > budget {
-			if i == 0 {
-				// A single record bigger than the whole frame. Returning zero
-				// messages would wedge the route forever — the caller would
-				// re-fetch the same undeliverable head every time. Hand it over
-				// and let WriteJSON refuse loudly; the operator gets a named
-				// error instead of a queue that never drains.
-				return 0, false
-			}
-			return i, true
+			break
+		}
+		fit = i + 1
+	}
+	// Belt: the arithmetic above says this fits. Confirm it against the encoder
+	// that will actually write it, because "computed to fit" and "fits" being the
+	// same thing is the assumption the whole defect was made of. Unreachable in
+	// practice (TestFetchFrameFit_IsExact… pins the arithmetic); if it ever fires,
+	// it says so and still refuses to hand over more than it has proven.
+	for fit > 0 {
+		enc, merr := envelope(msgs[:fit])
+		if merr == nil && len(enc)+1 <= ipc.MaxFrameSize {
+			break
+		}
+		log.Printf("fetch_queue: BUG — frame sizing disagreed with the encoder at %d records; halving rather than consuming an unproven batch", fit)
+		fit /= 2
+	}
+	return fit, nil
+}
+
+// oversizeNoticeText is the in-band explanation that replaces a record which can
+// never be encoded into a response frame. %s is where the original went.
+const oversizeNoticeText = "⚠️ [C3] This message could not be delivered: its stored record is %d bytes, past the %d-byte IPC frame cap, so no fetch_queue response can ever carry it. %s%s Ask the sender to resend it in smaller parts."
+
+// oversizeNotice builds the record handed to the agent IN PLACE OF one that was
+// moved out of the queue. It keeps the original's identity (channel, chat, topic,
+// message id, sender, timestamp) so the agent can see WHICH message this was, and
+// carries no content: the point is to be unmistakably a notice rather than a
+// message. Attachments are dropped (they may be the bloat) but counted, and Kind/
+// Event are deliberately NOT copied — a notice is an ordinary message, not a
+// synthesized channel event, and an event payload is the other way a record gets
+// large.
+func oversizeNotice(in c3types.Inbound, encoded int, retainedAt string, movedAside bool) c3types.Inbound {
+	where := "It is still queued (this fetch did not consume anything)."
+	if movedAside {
+		where = "It has been moved out of the queue so the messages behind it could be delivered."
+		if retainedAt != "" {
+			where += fmt.Sprintf(" The full original is retained under %s for %d days.", retainedAt, int(queue.TrashTTL/(24*time.Hour)))
+		} else {
+			where += " Queue retention is DISABLED on this broker, so no copy was kept."
 		}
 	}
-	return len(all), true
+	att := ""
+	if n := len(in.Attachments); n > 0 {
+		att = fmt.Sprintf(" (%d attachment(s) not listed here.)", n)
+	}
+	return c3types.Inbound{
+		Channel: in.Channel, ChatID: in.ChatID, TopicID: in.TopicID,
+		MessageID: in.MessageID, Sender: in.Sender, Timestamp: in.Timestamp,
+		ConvKind: in.ConvKind, V: in.V,
+		Text: fmt.Sprintf(oversizeNoticeText, encoded, ipc.MaxFrameSize, where, att),
+	}
+}
+
+// setAsideOversize moves ONE record that can never be encoded out of the live
+// queue, into the retention window, and reports it.
+//
+// THE RULING (the sub-decision this fix had to make): a record larger than a
+// whole frame is moved aside, never left in place and never truncated.
+//   - Leaving it queued is not "safe": it is a permanent outage for that route.
+//     Every later fetch re-reads the same head record, fits nothing, and returns
+//     nothing, so every message behind it is undeliverable too — one bad record
+//     silently takes the whole conversation with it, and nothing ever clears it.
+//   - Truncating it corrupts a user's message: the agent would read a cut-off
+//     message as the whole message and act on it. (queue.Append truncates too,
+//     but there it is the LAST gate before storage and it stamps the record with
+//     a visible marker; here we already have a complete record and no reason to
+//     damage it.)
+//   - Moving it aside keeps every property that matters: the rest of the backlog
+//     flows, the bytes survive under .trash/ for TrashTTL exactly like an evicted
+//     or quarantined line (store.go retirePair/quarantineCorrupt — the same
+//     "move it aside and say so" pattern), and the record's identity is handed to
+//     the agent in-band as a notice at the exact position in the stream where the
+//     message was.
+//
+// Nobody is left guessing: the agent gets the notice record, the operator gets a
+// Telegram message on the route, and broker.log names the record and the file.
+// Silence is what turned this defect into a data-loss incident.
+func (w *RouteWorker) setAsideOversize(qrk queue.RouteKey, head c3types.Inbound, encoded int) (c3types.Inbound, error) {
+	// The head is the FIRST pending occurrence of its message id, which is exactly
+	// what RemoveIDs' occurrence-ordinal selection addresses (it snapshots what it
+	// removes into .trash/ before the rewrite).
+	removed, err := w.broker.Queue.RemoveIDs(qrk, map[int64][]int{head.MessageID: {1}})
+	if err != nil {
+		return c3types.Inbound{}, err
+	}
+	if len(removed) == 0 {
+		// Nothing was removed, so a retry would re-read the same head forever.
+		// Refuse the fetch instead of spinning, and say why.
+		return c3types.Inbound{}, fmt.Errorf("fetch_queue: could not move the undeliverable %d-byte record (msg=%d) out of the queue; refusing to fetch past it", encoded, head.MessageID)
+	}
+	log.Printf("fetch_queue chan=%s chat=%d topic=%s: msg=%d is %d bytes — larger than one %d-byte IPC frame, so it can NEVER be delivered; moved out of the live queue (retained under %s) and reported to the agent in its place",
+		w.key.Channel, w.key.ChatID, TopicKeyStr(w.key), head.MessageID, encoded, ipc.MaxFrameSize, w.broker.Queue.RetentionDir())
+	return oversizeNotice(head, encoded, w.broker.Queue.RetentionDir(), true), nil
+}
+
+// notifyOversizeSetAside tells the OPERATOR, on the route itself, that messages
+// were moved out of the queue — mirroring evictIfOverCap's never-silent notice.
+// Sent after the queue work is done (never while holding the fetch lease) so a
+// slow channel call cannot stall the handler waiting on the result.
+func (w *RouteWorker) notifyOversizeSetAside(n int) {
+	if n == 0 || w.broker == nil {
+		return
+	}
+	ch, err := w.broker.Channel(w.key.Channel)
+	if err != nil {
+		return
+	}
+	var topicID *int64
+	if w.key.HasTopic {
+		t := w.key.TopicID
+		topicID = &t
+	}
+	retained := "no copy was kept (queue retention is disabled)"
+	if dir := w.broker.Queue.RetentionDir(); dir != "" {
+		retained = fmt.Sprintf("the full original(s) are retained under %s for %d days", dir, int(queue.TrashTTL/(24*time.Hour)))
+	}
+	_, _ = ch.SendReply(c3types.ReplyArgs{
+		Channel: w.key.Channel, ChatID: w.key.ChatID, TopicID: topicID,
+		Text: fmt.Sprintf("⚠️ %d message(s) were too large to deliver to the session (over the %d MiB transport limit) and were moved out of the queue so the rest could be delivered — %s. Please resend them in smaller parts.",
+			n, ipc.MaxFrameSize/(1024*1024), retained),
+	})
 }
 
 func (w *RouteWorker) handleFetch(_ context.Context, job *FetchJob) {
@@ -1399,27 +1552,66 @@ func (w *RouteWorker) handleFetch(_ context.Context, job *FetchJob) {
 	n := job.Limit
 	if job.All {
 		n = -1
-		// An unbounded drain has to fit in ONE IPC frame, because the response is
-		// one frame. Consume first and discover that later and the overflowing
-		// messages are already gone from the queue — they were consumed, the
-		// write is refused, and nothing reaches the user.
-		//
-		// Peek does not advance the cursor and this worker is the single owner of
-		// the route, so peek-then-consume is atomic with respect to everything
-		// else that could touch this queue. Take only what fits; Remaining tells
-		// the caller to come back, which fetch_queue's contract already covers.
-		if fit, ok := w.fetchAllBudget(qrk); ok {
-			n = fit
-		}
 	}
-	effectiveAck := job.Ack
+	// Decide the WHOLE response before consuming any of it. The response is one
+	// IPC frame, and WriteJSON refuses an oversize frame having written nothing
+	// (internal/ipc/conn.go) — so a batch assembled without regard to the frame is
+	// a batch that is consumed and then never delivered, with the caller told
+	// nothing at all. Peek does not advance the cursor and this worker is the
+	// single owner of the route, so peek → size → consume is atomic against
+	// everything else that could touch this queue.
+	//
+	// This applies to EVERY fetch form, not just all=true. req.Limit is forwarded
+	// verbatim (docs/ADAPTERS.md publishes the 50-cap as what the built-ins do,
+	// not as a contract a third-party adapter must honour), so an adapter asking
+	// for 2000 ordinary records is just as capable of assembling an unsendable
+	// frame as an unbounded drain is.
+	total, _ := w.broker.Queue.Pending(qrk)
+	cand, err := w.broker.Queue.Peek(qrk, n)
+	if err != nil {
+		job.ResultCh <- FetchResult{Err: err}
+		return
+	}
+	var notices []c3types.Inbound // stand-ins for records moved out of the queue
 	var msgs []c3types.Inbound
-	var err error
+	effectiveAck := job.Ack
 	if effectiveAck {
 		if job.Lease == nil || job.Lease.beginConsume() {
 			func() {
 				defer job.Lease.finishConsume()
-				msgs, err = w.broker.Queue.Consume(qrk, n)
+				// A head record too large for any frame blocks everything behind
+				// it. Move it aside (see setAsideOversize for the ruling) and look
+				// again; each pass provably removes one record, so this ends.
+				for len(cand) > 0 {
+					var headFit int
+					headFit, err = fetchFrameFit(job.RespID, total, cand[:1])
+					if err != nil || headFit > 0 {
+						break // envelope is unsendable (reported below), or the head is deliverable
+					}
+					var notice c3types.Inbound
+					if notice, err = w.setAsideOversize(qrk, cand[0], encodedSize(cand[0])); err != nil {
+						return
+					}
+					notices = append(notices, notice)
+					total--
+					if cand, err = w.broker.Queue.Peek(qrk, n); err != nil {
+						return
+					}
+				}
+				if err != nil {
+					return
+				}
+				// Budget the notices alongside the records: they ride in the same
+				// frame, so room taken by a notice is room a record cannot have.
+				var fit int
+				if fit, err = fetchFrameFit(job.RespID, total, append(append(make([]c3types.Inbound, 0, len(notices)+len(cand)), notices...), cand...)); err != nil {
+					return
+				}
+				take := fit - len(notices)
+				if take < 0 {
+					take = 0
+				}
+				msgs, err = w.broker.Queue.Consume(qrk, take)
 			}()
 		} else {
 			effectiveAck = false
@@ -1427,12 +1619,24 @@ func (w *RouteWorker) handleFetch(_ context.Context, job *FetchJob) {
 				w.key.Channel, w.key.ChatID, TopicKeyStr(w.key))
 		}
 	}
-	if !effectiveAck {
-		msgs, err = w.broker.Queue.Peek(qrk, n)
-	}
 	if err != nil {
 		job.ResultCh <- FetchResult{Err: err}
 		return
+	}
+	if !effectiveAck {
+		// PEEK: mutate nothing — internal/broker/observe.go rides this same path
+		// and its contract is that it never consumes. An undeliverable head record
+		// is still reported, so the caller can tell "nothing queued" apart from
+		// "something is stuck"; the ack path is what actually moves it aside.
+		var fit int
+		if fit, err = fetchFrameFit(job.RespID, total, cand); err != nil {
+			job.ResultCh <- FetchResult{Err: err}
+			return
+		}
+		if fit == 0 && len(cand) > 0 {
+			notices = []c3types.Inbound{oversizeNotice(cand[0], encodedSize(cand[0]), w.broker.Queue.RetentionDir(), false)}
+		}
+		msgs = cand[:fit]
 	}
 	remaining, _ := w.broker.Queue.Pending(qrk)
 	if !effectiveAck {
@@ -1441,9 +1645,28 @@ func (w *RouteWorker) handleFetch(_ context.Context, job *FetchJob) {
 			remaining = 0
 		}
 	}
-	log.Printf("fetch_queue chan=%s chat=%d topic=%s ack=%v returned=%d remaining=%d",
-		w.key.Channel, w.key.ChatID, TopicKeyStr(w.key), effectiveAck, len(msgs), remaining)
-	job.ResultCh <- FetchResult{Messages: msgs, Remaining: remaining}
+	out := msgs
+	if len(notices) > 0 {
+		out = append(append(make([]c3types.Inbound, 0, len(notices)+len(msgs)), notices...), msgs...)
+	}
+	log.Printf("fetch_queue chan=%s chat=%d topic=%s ack=%v returned=%d (of which %d oversize notice(s)) remaining=%d",
+		w.key.Channel, w.key.ChatID, TopicKeyStr(w.key), effectiveAck, len(out), len(notices), remaining)
+	job.ResultCh <- FetchResult{Messages: out, Remaining: remaining}
+	if effectiveAck {
+		// Off the lease: a channel round-trip must not sit inside the destructive
+		// section, and the caller already has its result.
+		w.notifyOversizeSetAside(len(notices))
+	}
+}
+
+// encodedSize is the byte size a record occupies in a response frame, or 0 if it
+// cannot be marshaled at all. Used only for operator-facing reporting.
+func encodedSize(in c3types.Inbound) int {
+	enc, err := json.Marshal(&in)
+	if err != nil {
+		return 0
+	}
+	return len(enc)
 }
 
 // handleBacklog reads the route's total queued count + an oldest-first preview
