@@ -1,8 +1,30 @@
-# Writing C3 Channels
+# C3 Channels
 
-A C3 channel is a transport — the thing that carries messages between users and the broker. Telegram is the v0.1 channel. The architecture admits more (web chat with magic-link sessions, voice mode, IRC, Slack, Matrix); each one is a Go package implementing a small interface.
+A channel is a transport — the thing that carries messages between users and the broker. Plugins are the other extension seam: they add capabilities orthogonal to transport (transcription, summarization, OCR). Channels move bytes. "Slack support" is a channel; "auto-translate every inbound" is a plugin.
 
-Channels are not plugins. Plugins extend the broker with capabilities orthogonal to transport (transcription, summarization, OCR). Channels move bytes. If you're adding "Slack support" you want a channel; if you're adding "auto-translate every inbound" you want a plugin.
+## Status: one channel, in-tree only
+
+**C3 v0.1.0 ships exactly one channel — Telegram — and channels are in-tree only for this release. This is a deliberate choice, not an oversight.**
+
+Concretely:
+
+- Every package in this repo lives under `internal/`. Go's internal-package rule means an out-of-tree module **cannot** import `github.com/Andrometiq/c3/internal/channel`, `internal/c3types`, or anything else here. There is no public package to build a channel against, and no plugin/`.so` loading path either.
+- `channel.Channel` has had exactly one implementation since it was written. It has never been compiled against a second one. Where the interface is transport-neutral and where it is Telegram-shaped has not been tested by anything except Telegram.
+
+So the honest framing is: **adding a channel today means opening a pull request into this repo, and changing this interface as part of it.** It is not "implement an interface from outside." We would rather say that plainly than ship a how-to that quietly does not work.
+
+## We want the second channel — please open the PR
+
+This is an invitation, not a brush-off. A real second transport (Slack, Matrix, IRC, XMPP, web chat, SMS) is the single most useful contribution C3 can receive right now, because it is the only thing that can tell us which parts of this interface are actually general.
+
+If you are considering it:
+
+- **Open an issue first** and say which transport. Not for gatekeeping — so we can tell you which of the blockers below will bite you, and so interface changes land once rather than twice.
+- **Expect to change `internal/channel/channel.go`, and that's fine.** A PR that only adds a package and works around the sharp edges is worse for everyone than one that fixes the edge. The identifier types and the `Emit` contract in particular are expected to move.
+- **Expect the merge to be collaborative.** The maintainer will pair on the broker-side changes (routing, gating, config) rather than hand you the whole surface.
+- Telegram must keep working. That constraint is real, and §"Known blockers" is largely a list of the places where a naive second channel silently breaks it.
+
+The rest of this document is the map: what the interface really is today, and exactly where it will not fit you.
 
 ## Where channels live
 
@@ -11,98 +33,169 @@ internal/
 ├── channel/
 │   ├── channel.go          # the Channel + Host interfaces
 │   └── telegram/
-│       ├── telegram.go     # implements Channel; New() constructor + getUpdates loop
+│       ├── telegram.go     # implements Channel; New() constructor + lifecycle
 │       ├── inbound.go      # raw update → normalized Inbound
 │       ├── outbound.go     # reply / react / edit_message / download implementations
 │       ├── poll.go         # long-poll dispatch + event surfacing
-│       └── ...             # format, media, sendrich, resilience, offset_tracker, ...
+│       ├── offset_tracker.go, offset_store.go   # persisted-offset machinery
+│       └── ...             # format, media, sendrich, resilience, readback, ...
 ```
 
-There is no `registry.go`. A new channel adds a sibling package under `internal/channel/<name>/` with an exported `New()` constructor, and is **hand-wired into the broker**: `cmd/c3-broker/main.go` calls `br.RegisterChannel(telegram.New())` today — add a `br.RegisterChannel(<name>.New())` line beside it. The broker does not iterate a registry at boot.
+There is no `registry.go`, and the broker does not iterate a registry at boot. A channel is **hand-wired**: `cmd/c3-broker/main.go` calls `br.RegisterChannel(telegram.New())`, and a second channel adds a sibling `br.RegisterChannel(<name>.New())` line beside it. That single line is also a guaranteed merge conflict for anyone maintaining a fork, which is one more reason the in-tree PR is the supported path.
 
 ## The Channel interface
 
+Reproduced from `internal/channel/channel.go` — read the file for the full doc comments.
+
 ```go
-package channel
-
-import (
-	"context"
-
-	"github.com/Andrometiq/c3/internal/c3types"
-)
-
-// Channel is the contract every transport implements. Methods are called by
-// the broker on its own goroutine — implementations must be safe for
-// concurrent use, except Start/Stop which are sequenced.
 type Channel interface {
-	// Name is the stable identifier ("telegram", "web", "voice"). Must match
-	// the key under mappings.json:channels.<name>.
 	Name() string
-
-	// Start brings the channel up. The implementation reads its config from
-	// host.Config(name, &cfg), opens its transport (long-poll, websocket,
-	// whatever), and begins emitting inbound via host.Emit. Returns when the
-	// channel is operational; long-running work goes in goroutines. host.Done()
-	// returns a channel closed at shutdown; observe it and stop cleanly. Note
-	// host is passed by interface value (Host, not *Host).
 	Start(ctx context.Context, host Host) error
-
-	// Stop tears down the transport. Called once, may be called concurrently
-	// with in-flight Send* calls — finish the in-flight call first, then close.
 	Stop() error
 
-	// Capabilities returns this channel's static capability manifest (what the
-	// broker advertises to adapters: rich text, chunking, media caps, etc.).
 	Capabilities() c3types.Capabilities
 
-	// Outbound primitives. The broker exposes these to adapters, which surface
-	// them as MCP tools (reply, react, edit_message, download_attachment, …).
 	SendReply(args c3types.ReplyArgs) (sentMessageID int64, err error)
 	SendTyping(chatID int64, threadID *int64) error
 	EditMessage(args c3types.EditArgs) (*c3types.EditResult, error)
 	React(args c3types.ReactArgs) error
 	DownloadAttachment(fileID string) (path string, err error)
 
-	// StopPoll force-closes a bot-sent poll and returns its final aggregate
-	// tally (Telegram-specific in v1; future channels may stub it).
 	StopPoll(chatID, messageID int64) (*c3types.PollResult, error)
 
-	// Topic management (Telegram-specific in v1; future channels may stub).
 	CreateTopic(chatID int64, name string) (topicID int64, err error)
 	ValidateTopic(chatID int64, threadID int64) error
 }
 ```
 
-`SendReply` returns the sent message id (`int64`), not a result struct. The outbound-arg types (`ReplyArgs`, `EditArgs`, `ReactArgs`) and results live in `internal/c3types`. The topic and poll methods are Telegram-shaped — channels not based on Telegram-style topics implement no-op stubs that return an unsupported error, or we refactor the interface as the second channel lands. The latter is preferred when it's clear the interface is generalizing too eagerly.
+Notes that are true today:
 
-## Inbound events
+- `Name()` must match the key under `mappings.json:channels.<name>`.
+- `Start` reads config via `host.Config(name, &cfg)`, opens the transport, and returns when the channel is operational; long-running work goes in goroutines. `host` is passed by interface value (`Host`, not `*Host`).
+- Methods are called from broker goroutines and must be safe for concurrent use, except `Start`/`Stop`, which are sequenced.
+- `Capabilities()` takes no argument in v1 deliberately: a `RouteKey` argument would introduce a `channel` → `broker` import cycle.
+- `SendReply` returns the sent message id as a bare `int64`, not a result struct.
+- `StopPoll`, `CreateTopic`, and `ValidateTopic` are Telegram-shaped. A transport without forum topics or bot polls can stub them with an unsupported error — but see §"Known blockers", because the identifier types are the deeper problem, not these three methods.
 
-A channel emits one normalized struct for every user-originated message:
+## The Host interface
 
 ```go
-type Inbound struct {
-	Channel    string             // your channel's name
-	ChatID     int64
-	TopicID    *int64             // nil for non-topic chats; 1 for Telegram General; >1 for custom
-	MessageID  int64
-	Sender     Sender
-	Text       string             // plain text after channel-side preprocessing
-	Attachments []Attachment
-	ReplyTo    *ReplyContext      // present iff the user quote-replied
-	Timestamp  time.Time
-	Raw        map[string]any     // channel-specific fields the broker might pass through
+type Host interface {
+	Config(name string, target any) error
+	Emit(in *c3types.Inbound) bool
+	Logf(format string, args ...any)
+	Done() <-chan struct{}
+	NotifyHealth(ev c3types.HealthEvent)
+	GateInbound(in *c3types.Inbound) GateInboundDecision
+	HandleCommand(in *c3types.Inbound) (reply string, handled bool)
 }
 ```
 
-Emit via `host.Emit(&Inbound{...})`, which returns `true` when the inbound was accepted onto the broker's per-route worker queue (and will be persisted) and `false` when it was dropped (queue full or stopped). On a `false` return the inbound never reaches durable storage, so a channel that staged any in-flight bookkeeping for it (e.g. an offset watermark) must resolve that itself. Before `Emit`, run the inbound through `host.GateInbound` (allowlist + pairing) and act on the decision. The broker handles the plugin pipeline, debounce, dedup, routing, and CLI delivery from there.
+- `Config(name, &cfg)` — JSON round-trip of `mappings.json:channels.<name>` into your struct. See blocker 3: the round-trip goes through a closed Go struct, so it can only ever hand you keys that struct already declares.
+- `Emit(*Inbound) bool` — submit an inbound to the per-route worker pool. **Read blocker 1 before you write the `false` branch.**
+- `GateInbound(*Inbound)` — allowlist + pairing gate. Channels **MUST** call this before `Emit` and act on the decision: `GateInboundAllow` → forward to `Emit`; `GateInboundDrop` → discard silently (never log content); `GateInboundPairConsumed` → discard silently, the broker has already mutated allowlist + pairing state.
+- `HandleCommand(*Inbound)` — hand a recognized broker command (`/status`, `/queue`, `/drain`) to the broker. On `handled=true` the channel sends the returned reply itself and MUST NOT gate, emit, queue, or route the message.
+- `NotifyHealth` — report a reachability UP/DOWN **edge** (not per attempt), non-blocking. The broker fans it out to out-of-band sinks so a dead channel can still raise an alarm through another path.
+- `Done()` — closed at shutdown.
+- `Logf` — use this; no `fmt.Println`.
 
-(Poll results, reactions, and callbacks are surfaced as *events* — an `Inbound` with a non-empty `Kind` and an `Event` payload — which the route worker flushes alone and keeps out of the text-debounce/STT path.)
+**Not on this interface but load-bearing:** `SetPersistedCallback` and `SetPersistFailedCallback`. See blocker 2.
 
-For voice messages, set `Attachments[0].Kind = "voice"` and `.FileID = "..."`. The broker will fan the event through `OnVoiceReceived` plugins (STT) before substituting the returned transcript into `.Text`.
+## Inbound events
+
+A channel emits one normalized struct per user-originated message. The real definition is `c3types.Inbound` in `internal/c3types/types.go`:
+
+```go
+type Inbound struct {
+	Channel     string        `json:"Channel"`
+	ChatID      int64         `json:"ChatID"`
+	TopicID     *int64        `json:"TopicID"`   // nil = no topic; &1 = Telegram General; >1 = custom
+	MessageID   int64         `json:"MessageID"`
+	Sender      Sender        `json:"Sender"`
+	Text        string        `json:"Text"`
+	Attachments []Attachment  `json:"Attachments"`
+	ReplyTo     *ReplyContext `json:"ReplyTo"`
+	Timestamp   time.Time     `json:"Timestamp"`
+
+	Kind        InboundKind   `json:"Kind,omitempty"`        // "" = ordinary message; non-empty = channel event
+	Event       *InboundEvent `json:"Event,omitempty"`       // payload for a non-empty Kind
+	DrainedFrom string        `json:"DrainedFrom,omitempty"` // drain provenance; set by the broker, not by you
+	V           int           `json:"V,omitempty"`           // record format version; absent or 0 means 1
+	ConvKind    string        `json:"ConvKind,omitempty"`    // "dm" | "group", stated by the channel
+}
+```
+
+There is **no `Raw` field** and no channel-specific passthrough. The JSON tags are frozen on purpose — this struct is marshalled straight into the durable queue `.jsonl` and onto the IPC wire, so the tag names are the on-disk and wire format. Do not "tidy" one.
+
+Set `ConvKind` if you add a channel. It exists precisely so the trust gate stops inferring DM-vs-group from a Telegram sign convention — see blocker 4. It currently has no readers; wiring one is part of the second-channel PR.
+
+Poll results, reactions, and callbacks are surfaced as *events*: an `Inbound` with a non-empty `Kind` and an `Event` payload. The route worker flushes those alone and keeps them out of the text-debounce and STT paths.
+
+For voice, set `Attachments[0].Kind = "voice"` and `.FileID`. The broker fans the event through `OnVoiceReceived` plugins (STT) before substituting the returned transcript into `.Text`.
+
+## Known blockers — the roadmap for a second channel
+
+These are code-verified, not hypothetical. They are listed in the order they will hurt.
+
+### 1. A `false` from `Emit` assumes your transport redelivers what you never acknowledged
+
+`Emit` returns `false` when the per-route worker is saturated (after a grace window) or stopped. On `false`, **the message has not been persisted anywhere** and the broker cannot recover it.
+
+The correct handling is **not** to advance past it. It is:
+
+> **Leave the message unacknowledged on your transport so the transport redelivers it. Do not clear the staged bookkeeping. Do not advance a cursor past it.**
+
+That reverses what earlier revisions of this document and the godoc in `channel.go` said. The earlier contract ("resolve the staged bookkeeping yourself") described a capacity **drop** — silent, unrecoverable loss of a message the user sent — which the v0.1.0 release audit removed. `BrokerHost.Emit` in `internal/broker/host.go` now records the reversal, and the Telegram implementation (`internal/channel/telegram/poll.go`, in `dispatchMessage`) implements it: on `false` it deliberately does **not** mark the update done, removes just that update's staged seam entry, and forgets its dedup record so the redelivery genuinely re-dispatches.
+
+**Why this is a blocker rather than a footnote:** that contract is only satisfiable on a *pull* transport with a server-side cursor. Telegram's `getUpdates` retains unacknowledged updates and redelivers them; withholding the acknowledgement is a real backpressure primitive. A *push* transport has nothing to hold. Slack's Events API is an HTTP POST needing a 200 within three seconds, with three retries and then the event is gone; Socket Mode has the same ceiling on the envelope ack; and unrelated events keep arriving meanwhile, so there is no contiguous prefix to hold in the first place. For those transports, `Emit → false` is permanent loss, and the interface offers no recovery primitive — no error return, no park, no blocking variant, no "wake me when the route drains."
+
+The assumption is currently stated only inside the Telegram implementation and the broker host, never in the interface. Making it explicit — or replacing `Emit(*Inbound) bool` with something a push transport can satisfy — is part of the work.
+
+### 2. The persisted-callback is a single broker-wide slot, and registering a second channel steals it
+
+`Broker.persistedCB` is one `func` field. `SetPersistedCallback` overwrites it, last write wins; `notifyPersisted` fires it for **every** persisted inbound with no channel filter. `SetPersistFailedCallback` is the same shape.
+
+Neither is on the `channel.Host` interface. The Telegram channel discovers them at `Start` by an anonymous interface type-assertion on its host (`internal/channel/telegram/telegram.go`), which is why reading `channel.go` alone will not tell you they exist.
+
+Telegram binds `onPersisted` to drive its persisted-offset tracker: the read offset advances only to the highest contiguous `update_id` that has been durably persisted. `RegisterChannel` calls `ch.Start(ctx, host)` — so a second channel that also binds the callback **overwrites Telegram's**. Telegram's contiguous prefix then never advances, the committed offset freezes at boot, the in-flight set grows without bound, and every restart redelivers from the last saved offset. Symmetrically, your channel starts receiving persist notifications for Telegram's inbounds.
+
+There is no registration order that avoids this. Whichever channel registers second wins; the other one wedges. The fix is a per-channel callback registry (or moving the notification onto `channel.Host` keyed by channel name), and it belongs in the second-channel PR.
+
+### 3. `mappings.ChannelConfig` is a closed struct — it deletes your config keys on the next save
+
+`mappings.ChannelConfig` in `internal/mappings/types.go` declares a fixed set of Telegram-shaped fields (`bot_token`, `default_group`, `groups`, `dm_chat_id`, `master_user_id`, `topics`, `debounce_ms`, `debounce_max_messages`, `fallback_cooldown_s`, `stt_prefix`, `api_base_url`, `api_base_urls`, `rich_inbound`). There is no `map[string]any` overflow and no `json.RawMessage` passthrough.
+
+`mappings.Read` unmarshals into that struct, discarding unknown keys. `mappings.Write` re-marshals **from** the struct and atomically replaces the file. So any broker action that saves mappings — an attach, a detach — **permanently deletes** a third-party channel's config keys from `mappings.json`. The pre-write `.bak` is one generation, so the second save eats the backup too.
+
+The user-visible failure is nasty because it is delayed: your channel works, the operator attaches a session to some unrelated topic, and your channel silently fails to start after the next restart. And `host.Config(name, &cfg)` round-trips through the same struct, so it can only ever hand you the subset of keys `ChannelConfig` declares, however the file was written.
+
+A second channel needs either a passthrough field on `ChannelConfig` or per-channel config files. Not a workaround — a fix.
+
+### 4. Identifiers are Telegram-shaped 64-bit integers, everywhere
+
+Every identifier seam in the interface is `int64`:
+
+- `Inbound.ChatID`, `.MessageID`, `.TopicID`; `Sender.UserID`; `ReplyContext.MessageID`; `ReactionEvent.MessageID`
+- `SendReply → (int64, error)`, `SendTyping(chatID int64, threadID *int64)`, `EditArgs{ChatID, MessageID int64}`, `ReactArgs{…}`, `StopPoll(chatID, messageID int64)`, `CreateTopic(chatID int64, …)`, `ValidateTopic(chatID, threadID int64)`
+- `MakeRouteKey(channel string, chatID int64, topicID *int64)` in `internal/broker/route.go`
+- `mappings.Allowlist{Users []int64, Groups []int64}`, `ChannelConfig{DMChatID, MasterUserID int64}`
+
+Transports with opaque string identifiers (Slack channel `C…`/user `U…` ids, message timestamps like `"1718722725.000300"`; Matrix event ids; XMPP JIDs) need a mapping, and it has to be **reversible**, because the adapter hands your `int64` back to you in `EditArgs`/`ReactArgs`/`ReplyArgs`. An in-memory intern table dies on restart — and `Inbound` is marshalled into the durable queue under a frozen key set, so after a broker restart every queued line holds integers that resolve to nothing. There is no `Raw` escape hatch to carry the real identifiers alongside.
+
+Two consequences worth calling out separately, because they are trust-boundary issues rather than ergonomics:
+
+- **DM-vs-group is decided by Telegram's chat-id sign rule.** `isPrivateChat` in `internal/broker/pairing.go` is `in.ChatID > 0`, and it feeds `Gate` → the allowlist. Any positive integer you synthesize for a public channel is classified as a DM and gated against `Allowlist.Users`, which holds Telegram user ids. `c3types.ConvKind` exists to fix exactly this and currently has no readers — teaching the gate to prefer it is prerequisite work.
+- **The allowlist is not namespaced by channel.** `Allowlist{Users, Groups}` is a flat list of `int64`. Any integer you coin can collide with a real Telegram id and grant access across channels.
+
+### 5. A failing `Start` aborts broker startup for everyone
+
+`RegisterChannel` starts the channel first and records the registration only if `Start` returns nil; `cmd/c3-broker/main.go` propagates that error out of startup. So a bad credential in a second channel takes the whole broker down, Telegram included. There is no per-channel isolation and no "continue with the other channels" loop.
+
+There is also no `enabled` flag: `ChannelConfig` has no such field and `RegisterChannel` checks nothing. Disabling a misbehaving channel today means a rebuild.
 
 ## Configuration
 
-Channel config lives at `mappings.json:channels.<name>`. The Telegram channel uses:
+Channel config lives at `mappings.json:channels.<name>`. Telegram's block:
 
 ```json
 {
@@ -110,23 +203,16 @@ Channel config lives at `mappings.json:channels.<name>`. The Telegram channel us
     "telegram": {
       "bot_token": "...",
       "default_group": "main",
-      "groups": {"main": {"chat_id": -100..., "title": "..."}},
-      "dm_chat_id": ...,
-      "topics": [...],
+      "groups": {"main": {"chat_id": -100, "title": "..."}},
+      "dm_chat_id": 0,
+      "topics": [],
       "debounce_ms": 1500
     }
   }
 }
 ```
 
-Your channel defines its own subkey schema. Common fields by convention:
-
-- `enabled: bool` — broker skips disabled channels at boot.
-- Auth (token, key, oauth) — channel-specific names; document them.
-- `topics` — only relevant if your transport has the topic concept. The broker reads/writes this; channels don't need to manage it.
-- `debounce_ms` — defaults to 1500 if absent. Channels can override.
-
-The broker doesn't introspect anything beyond `enabled`. Your channel reads what it needs via `host.Config(name, &cfg)`.
+Read it with `host.Config(name, &cfg)`. Subject to blocker 3: the set of keys that survive a round-trip is exactly the set `mappings.ChannelConfig` declares, and unknown keys are destroyed on the next save. `debounce_ms` defaults to 1500 when absent.
 
 ### Connectivity notifications
 
@@ -144,7 +230,7 @@ A top-level `notifications` block (sibling of `channels`, not per-channel) gover
 
 #### `health.json` shape (the ambient status-line read source)
 
-The broker writes the ambient connectivity state to `$XDG_STATE_HOME/c3/health.json` (fallback `$HOME/.local/state/c3/health.json`), resolved by `broker.HealthFilePath()`. It is written atomically (temp-in-same-dir + rename, no fsync — best-effort). The top level is a **wrapper that carries broker liveness**, with the per-channel snapshot nested under `channels`:
+The broker writes ambient connectivity state to `$XDG_STATE_HOME/c3/health.json` (fallback `$HOME/.local/state/c3/health.json`), resolved by `broker.HealthFilePath()`. It is written atomically (temp-in-same-dir + rename, no fsync — best-effort). The top level is a **wrapper carrying broker liveness**, with the per-channel snapshot nested under `channels`:
 
 ```json
 {
@@ -166,78 +252,89 @@ The broker writes the ambient connectivity state to `$XDG_STATE_HOME/c3/health.j
 ```
 
 - `broker_pid` — `os.Getpid()` of the writing broker.
-- `written_unix` — unix seconds, **refreshed on every write**: edge-driven writes (UP↔DOWN) *and* a slow 45-second refresh ticker that runs regardless of edges. So while the broker is alive, `written_unix` stays current.
+- `written_unix` — unix seconds, **refreshed on every write**: edge-driven writes (UP↔DOWN) *and* a slow 45-second refresh ticker that runs regardless of edges. While the broker is alive, `written_unix` stays current.
 - `version` — the running broker's build version (`"dev"` for an uninjected local build).
-- `update_available` / `latest_version` — **omitted** while the broker is on the current stable release; set once the ~6h update check finds a newer release, so the status line can render `c3 update available — /c3:update`. Independent of the `auto_update` toggle (the notice always fires). See "Updating C3" in [`USAGE.md`](USAGE.md).
+- `update_available` / `latest_version` — **omitted** while the broker is on the current stable release; set once the periodic update check finds a newer release, so the status line can render an update notice. Independent of the `auto_update` toggle. See "Updating C3" in [`USAGE.md`](USAGE.md).
 - `channels` — map of channel name → per-channel entry (`state` is `"up"`/`"down"`; `since_unix`/`since_hhmm`/`reason`/`consec` describe the current state). At boot it is `{}` (no outage asserted), so a crash never leaves a stale per-channel `down`.
-  - For `telegram`, `state` is the **combined reachability** of both directions: the channel now tracks outbound send health (sends failing after retries) alongside inbound fetch health, and surfaces them on this **single** entry so one root cause (the wire is down ⇒ both fail) never produces two notifications. `reason` therefore reflects the failing direction(s): `"inbound unreachable"`, `"outbound send failing"`, or `"unreachable (inbound + outbound)"`. No new field and no status-line reader change — the reader still reads `.channels.telegram.state`/`.reason`.
+  - For `telegram`, `state` is the **combined reachability** of both directions: the channel tracks outbound send health alongside inbound fetch health and surfaces both on one entry, so a single root cause never produces two notifications. `reason` reflects the failing direction(s): `"inbound unreachable"`, `"outbound send failing"`, or `"unreachable (inbound + outbound)"`.
 
-**Why the wrapper exists (broker-dead detection):** previously the top level was a flat `{"<channel>": {...}}` map written only on health edges + startup. When the **broker process** died, the file froze at its last value (usually `up`), so a status line showed green while C3 was completely dead. A reader now treats **`broker_pid` not alive** (e.g. `kill(pid, 0)` fails) **OR** `now - written_unix > 90s` (2× the 45s refresh interval) as **broker-down/unknown**, regardless of the per-channel `state`. The bash status-line reader reads `.channels.telegram.state` and `.channels.telegram.since_hhmm`, and additionally checks `broker_pid`/`written_unix` for liveness.
+**Why the wrapper exists (broker-dead detection):** the top level used to be a flat `{"<channel>": {...}}` map written only on health edges and at startup. When the **broker process** died, the file froze at its last value (usually `up`), so a status line showed green while C3 was entirely dead. A reader now treats **`broker_pid` not alive** (e.g. `kill(pid, 0)` fails) **OR** `now - written_unix > 90s` (2× the 45s refresh interval) as broker-down/unknown, regardless of the per-channel `state`.
+
+A second channel gets a `channels.<name>` entry here for free by calling `host.NotifyHealth` on edges.
 
 ## Channel lifecycle
 
+What the code actually does:
+
 ```
-boot:
-  for each channel in mappings.json:channels:
-    construct (just calls New<Name>())
-    Start(ctx, host)        # runs in a goroutine
-    block until ready or err
+boot (cmd/c3-broker/main.go):
+  br.RegisterChannel(telegram.New())
+    → NewBrokerHost(broker, ch.Name())
+    → ch.Start(ctx, host)        # SYNCHRONOUS, on the caller's goroutine
+    → on error: startup aborts (see blocker 5)
+    → on success: registration recorded
 
-shutdown (broker SIGTERM/SIGINT):
-  cancel ctx (each channel's Start should observe and unwind)
-  Stop()                    # in parallel for all channels
-  wait up to 5s for clean exit, then force kill
+shutdown (broker.ShutdownWithin):
+  1. drain the worker pool within the grace period
+  2. ch.Stop() for each channel, SERIALLY under the channel mutex
+  3. cancel the broker context
 ```
 
-The host (`channel.Host`, in `channel.go`) gives the channel:
+The order matters and is not the obvious one. Cancelling the context first, or stopping channels before draining workers, was the original bug: workers held channel references and called `SendReply` mid-flight while `Stop` tore down state, producing 20-second hangs on stale request timeouts. `broker.go` documents this at `ShutdownWithin`. Keep the order.
 
-- `host.Config(name, &cfg)` — read your config from `mappings.json:channels.<name>`.
-- `host.Emit(*Inbound) bool` — emit a normalized inbound message (see "Inbound events").
-- `host.GateInbound(*Inbound)` — run the allowlist + pairing gate; call before `Emit`.
-- `host.HandleCommand(*Inbound)` — hand a recognized bot command (e.g. `/status`) to the broker for direct handling.
-- `host.NotifyHealth(HealthEvent)` — report a fetch-health UP/DOWN edge (out-of-band alerting).
-- `host.Logf` — structured logging.
-- `host.Done()` — channel closed on shutdown.
+`Stop` may be called concurrently with an in-flight `Send*` — finish the in-flight call, then close.
 
 ## Error handling
 
-Transient transport errors (network blips, rate limits) → log, back off, keep going. Don't return from `Start`.
-
-Fatal errors (bad credentials, unsupported API version) → return from `Start`. The broker logs and continues with other channels; your channel's tools become unusable until config is fixed and the broker is restarted.
-
-For `Send*` calls, return errors verbatim — the broker forwards them back to the adapter, which surfaces them to the CLI/user. Don't swallow.
-
-For rate limits specifically, **respect provider-supplied retry-after**: Telegram's `parameters.retry_after` (in `Bad Request` responses), Slack's `Retry-After` header, etc. Sleep for that long and retry once before giving up.
+- **Transient transport errors** (network blips, rate limits) → log, back off, keep going. Do not return from `Start`.
+- **Fatal errors** (bad credentials, unsupported API version) → return from `Start`. Be aware this currently aborts broker startup entirely (blocker 5), so reserve it for genuinely unrecoverable configuration faults.
+- **`Send*` errors** → return them verbatim. The broker forwards them to the adapter, which surfaces them to the CLI and the user. Do not swallow.
+- **Rate limits** → respect provider-supplied retry-after (Telegram's `parameters.retry_after`, an HTTP `Retry-After` header, etc.). Sleep that long and retry once before giving up.
 
 ## Testing
 
-A channel ships with Go tests under the package. The host exposes `channel.MockHost(t)` that captures emitted inbound events and lets your test drive synthetic transport responses.
+There is **no `channel.MockHost`** — it does not exist in the code. Hand-roll a fake `channel.Host` in your package's tests; `fakeChannel` in `internal/broker/attach_test.go` is the closest existing pattern for the mirror-image case.
 
-For Telegram specifically, mock at the `gotgbot` boundary: don't hit the real Bot API in tests. Use `httptest.Server` for the HTTP layer and a fake getUpdates loop. The Telegram channel's existing tests demonstrate the pattern.
+For Telegram specifically, mock at the `gotgbot` boundary: never hit the real Bot API in tests. The existing tests under `internal/channel/telegram/` use `httptest.Server` for the HTTP layer and a synthetic `getUpdates` loop; there are a lot of them and they are the best available reference for what a channel's test suite should cover.
 
-## Adding a new channel — checklist
+## When this seam reopens
 
-- [ ] Package under `internal/channel/<name>/`
-- [ ] Type implements the `Channel` interface (incl. `Capabilities()` + `StopPoll()`)
-- [ ] `New()` constructor exported
+**The interface generalises when a real second channel lands in-tree and teaches us the right shape — not before.**
+
+That is the whole condition, and the reasoning is short: designing a transport-neutral interface against exactly one implementer is guessing. `channel.go` already carries the evidence — `Capabilities()` dropped an argument to avoid an import cycle, `StopPoll` and the topic methods are frankly labelled Telegram-specific, `ConvKind` was added for a second channel that has not arrived and consequently has no readers, and the `Emit` contract was reversed only when the release audit looked hard at what a `false` really meant. Every one of those is a thing we got right or wrong because of pressure from real code, not from imagining a hypothetical Slack.
+
+So the sequence is: second channel lands as a PR, it changes this interface where the interface is wrong, and *then* we know enough to say what is stable. Freezing a "general" channel API before that would freeze a guess — and a frozen guess is harder to fix than an honestly-scoped internal interface.
+
+Until then: channels are in-tree, the PR is welcome, and this document is the list of what you will have to fix on the way in.
+
+## Adding a channel — checklist
+
+- [ ] Issue opened naming the transport, before the code
+- [ ] Package under `internal/channel/<name>/` with an exported `New()`
+- [ ] Type implements `channel.Channel` (including `Capabilities()`; stub `StopPoll`/`CreateTopic`/`ValidateTopic` with an unsupported error if the transport has no equivalent)
 - [ ] Hand-wired via `br.RegisterChannel(<name>.New())` in `cmd/c3-broker/main.go` (no `registry.go`)
-- [ ] Config schema documented (under `mappings.json:channels.<name>`)
-- [ ] Inbound emission tested (mock-host captures `Inbound{}` for known transport input)
-- [ ] `GateInbound` called before `Emit`; a `false` `Emit` return resolves any staged bookkeeping
+- [ ] `GateInbound` called before every `Emit`, and its decision honored
+- [ ] `ConvKind` set on every emitted `Inbound`
+- [ ] `Emit`-false handling does **not** advance past the message (blocker 1) — and if your transport cannot redeliver, say so in the PR rather than working around it
+- [ ] Config keys survive a mappings save (blocker 3) — needs a broker-side fix, not a channel-side workaround
+- [ ] Persisted-callback conflict resolved (blocker 2) — Telegram's offset tracker must still work with your channel registered
+- [ ] Identifier mapping is reversible across a broker restart (blocker 4)
 - [ ] All `Send*` methods return errors, don't swallow
-- [ ] Rate limit handling honors provider conventions
+- [ ] Rate-limit handling honors provider conventions
 - [ ] No `fmt.Println` — use `host.Logf`
+- [ ] Tests with a hand-rolled host fake; transport mocked at its client boundary
+- [ ] Telegram still passes its full test suite with your channel registered
 
 ## Telegram channel: what's there
 
-The Telegram channel implementation lives at `internal/channel/telegram/`. Key things it does that future channels may want to reference:
+`internal/channel/telegram/` is the reference implementation. Things it does that a second channel may want to borrow:
 
-- **Long-polling getUpdates loop** with `allowed_updates` opt-in for `message`, `edited_message`, `callback_query`, `message_reaction`. Service-message types (`forum_topic_created`/`forum_topic_edited`/etc) are received but ignored in v0.1 — plumbed for future use.
-- **General topic id is `1`, not `0`.** A common confusion — topic_id 0 means "no topic" (DM, non-forum group); General is a real topic with id 1.
-- **Bot API has no `getForumTopics`.** The local `topics` registry under `mappings.json:channels.telegram.topics` is the source of truth. Topics are added when a session attaches and creates one (or claims an explicit topic_id), never opportunistically from inbound traffic.
-- **Reply threading**: when an inbound has `reply_to_message`, the channel populates `ReplyContext` with `MessageID`, `User`, `Text`. The Claude adapter renders this as `<channel reply_to_message_id="..." reply_to_text="...">` attributes.
-- **Voice handling**: voice messages emit an inbound with `Attachments[0].Kind="voice"`, `FileID=...`, and empty `Text`. The STT plugin's `OnVoiceReceived` fills in `Text`. The voice attachment is preserved so a CLI can re-download the audio if a transcript is ambiguous.
-- **Broker bot commands (`/status`, `/queue`, `/drain`)**: registered at startup via `setMyCommands`, so they autocomplete in Telegram's `/` menu. An inbound whose FIRST token is one of these commands (optionally `@<botname>`-suffixed on that token only, case-insensitive) is intercepted in the poll path **after the allowlist gate** (a stranger's command dies at the gate — silence, never a reply) — the broker answers it directly and the update is **never queued or routed to an agent** (its `update_id` is marked done so the offset can advance past it). A handled command with an EMPTY reply sends nothing (the operator-gate silent drop, or an async `/drain`/`/queue <q>` that posts its own reply from a broker goroutine). Messages carrying attachments are never intercepted (a command in a media caption would swallow the attachment). This is a distinct surface from the `/c3:status` CLI slash command. See `docs/COMMANDS.md` "Telegram bot commands" for the grammar and authorization matrix.
-- **Persisted-offset advance**: the Telegram read offset advances only to the highest contiguous `update_id` whose message has been **durably persisted** to the inbound queue (`fsync`'d), or which was a no-op (gated, dropped, `/status`, or a non-message update). An update still mid-STT or not yet persisted does not advance the offset, so a crash there means Telegram redelivers it (within its 24h retention) — loss-free by construction. STT runs at flush time so the stored line already carries the transcript; storage is per-message (the debounce/merge is a delivery-presentation concern only and does not merge stored lines). See `docs/USAGE.md` "Durable inbound queue & backlog" for the user-facing view.
+- **Long-polling `getUpdates`** with `allowed_updates` opt-in for `message`, `edited_message`, `callback_query`, `message_reaction`. Forum service-message types are received but ignored in v0.1 — plumbed for future use.
+- **General topic id is `1`, not `0`.** Topic id 0 means "no topic" (DM, non-forum group); General is a real topic with id 1.
+- **The Bot API has no `getForumTopics`.** The local `topics` registry under `mappings.json:channels.telegram.topics` is the source of truth. Topics are added when a session attaches and creates or claims one, never opportunistically from inbound traffic.
+- **Reply threading**: an inbound with `reply_to_message` populates `ReplyContext` with `MessageID`, `User`, `Text`; the Claude adapter renders it as `reply_to_message_id` / `reply_to_text` attributes on the `<channel>` block.
+- **Voice handling**: voice messages emit an inbound with `Attachments[0].Kind="voice"`, a `FileID`, and empty `Text`. The STT plugin's `OnVoiceReceived` fills in `Text`. The attachment is preserved so a CLI can re-download the audio if a transcript is ambiguous.
+- **Broker bot commands (`/status`, `/queue`, `/drain`)**: registered at startup via `setMyCommands` so they autocomplete. An inbound whose first token is one of these (optionally `@<botname>`-suffixed on that token only, case-insensitive) is intercepted in the poll path **after the allowlist gate** — a stranger's command dies at the gate in silence, never a reply. The broker answers directly and the update is never queued or routed to an agent; its `update_id` is marked done so the offset advances. A handled command with an empty reply sends nothing. Messages carrying attachments are never intercepted, so a command in a media caption cannot swallow the attachment. See `docs/COMMANDS.md` for the grammar and authorization matrix.
+- **Persisted-offset advance**: the read offset advances only to the highest contiguous `update_id` whose message has been durably persisted (`fsync`'d) to the inbound queue, or which was a no-op (gated, `/status`, or a non-message update). An update still mid-STT or not yet persisted does not advance the offset, so a crash there means Telegram redelivers it within its retention window — loss-free by construction. STT runs at flush time so the stored line already carries the transcript; storage is per-message, and the debounce/merge is a delivery-presentation concern that does not merge stored lines. See `docs/USAGE.md` "Durable inbound queue & backlog".
 
-Use these as patterns, not copy-paste templates — your transport probably has its own quirks that rate higher than Telegram's idioms.
+Treat these as patterns, not templates. Your transport has its own quirks, and where they conflict with a Telegram idiom, the quirk usually wins — that conflict is exactly the information this repo is missing.
