@@ -718,6 +718,7 @@ func (c *Channel) dispatchCallback(updateID int64, cq *gotgbot.CallbackQuery) {
 		MessageID: msg.MessageId,
 		Sender:    convertSender(&cq.From),
 		Timestamp: time.Now(),
+		ConvKind:  convKindFromChat(msg.Chat),
 		Kind:      c3types.InboundCallback,
 		Event: &c3types.InboundEvent{
 			Callback: &c3types.CallbackEvent{
@@ -890,6 +891,7 @@ func (c *Channel) dispatchReaction(updateID int64, mr *gotgbot.MessageReactionUp
 		MessageID: mr.MessageId,
 		Sender:    actor,
 		Timestamp: time.Now(),
+		ConvKind:  convKindFromChat(mr.Chat),
 		Kind:      c3types.InboundReaction,
 		Event: &c3types.InboundEvent{
 			Reaction: &c3types.ReactionEvent{
@@ -963,7 +965,11 @@ func pollResultInbound(channelName string, sp *sentPoll, pollID string, tally *p
 		MessageID: sp.MessageID,
 		Sender:    c3types.Sender{UserID: sp.OwnerUserID}, // CB-2: route-owner stamp
 		Timestamp: time.Now(),
-		Kind:      c3types.InboundPollResult,
+		// Only a bare chat id survives in sentPoll, so this is the one path
+		// that still derives the kind from the id sign — inside the channel
+		// that owns that id space.
+		ConvKind: convKindFromChatID(sp.ChatID),
+		Kind:     c3types.InboundPollResult,
 		Event: &c3types.InboundEvent{
 			PollResult: &c3types.PollResult{
 				PollID:      pollID,
@@ -1250,7 +1256,11 @@ func (c *Channel) dispatchMessage(updateID int64, msg *gotgbot.Message, edited b
 		// belong to an earlier still-in-flight update on the same message_id), and
 		// forget its poll-side dedup record so the redelivery genuinely
 		// RE-DISPATCHES instead of being dedup-skipped until the 5-minute TTL.
-		// The no-progress re-poll is paced by pollIdleBackoff.
+		// Pacing note: this re-poll is NOT paced by pollIdleBackoff. dispatchedAny
+		// is set unconditionally above, so a held dispatch reads as progress and
+		// the idle backoff at the loop end is skipped. The real pacing is the
+		// submitGraceWindow Emit already spent before refusing — 2s per held
+		// update, one getUpdates per batch.
 		c.mu.Lock()
 		c.seamRemoveLocked(in.MessageID, updateID)
 		c.mu.Unlock()

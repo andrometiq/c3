@@ -304,16 +304,39 @@ func codeBody(text string) string {
 	return text
 }
 
-// isPrivateChat heuristically determines whether an Inbound came from a
-// Telegram private chat. Telegram's Bot API uses positive chat_ids for
-// users/bots and negative chat_ids for groups/supergroups/channels.
-// In a private chat, chat_id == sender's user_id. We use chat_id sign
-// as the authoritative signal: positive = DM, negative = group.
+// isPrivateChat reports whether an Inbound arrived in a one-to-one conversation
+// rather than a group. Gate uses it to pick WHICH allowlist to check, so getting
+// it wrong here decides who is let in — this is a trust boundary, not a display
+// detail.
 //
-// Source: https://core.telegram.org/bots/api#chat — Chat.id is signed,
-// negative for groups, positive for private chats.
+// The channel is asked first. in.ConvKind is set by the channel that received
+// the message, which knows the answer for certain rather than inferring it.
+//
+// The fallback is for records the channel did not label: every line queued
+// before ConvKind existed, and any channel not yet taught to set it. There it
+// applies Telegram's chat-id sign convention — positive = private, negative =
+// group/supergroup/channel (https://core.telegram.org/bots/api#chat) — but ONLY
+// for Telegram (and for the unset-channel case, which is how in-package tests
+// and pre-existing records are shaped). That convention is a fact about
+// Telegram's id space and nobody else's: a channel whose ids are strings, or
+// unsigned, or namespaced would be classified by a rule that does not describe
+// it. So an unlabelled inbound from any OTHER channel is treated as a group,
+// which is the closed side of this gate — it demands an explicit group
+// allowlist entry instead of accepting a DM-cleared user id.
 func isPrivateChat(in *c3types.Inbound) bool {
-	return in != nil && in.ChatID > 0
+	if in == nil {
+		return false
+	}
+	switch in.ConvKind {
+	case c3types.ConvKindDM:
+		return true
+	case c3types.ConvKindGroup:
+		return false
+	}
+	if in.Channel != "" && in.Channel != "telegram" {
+		return false
+	}
+	return in.ChatID > 0
 }
 
 // Gate runs an inbound through the allowlist + pairing gate. Returns

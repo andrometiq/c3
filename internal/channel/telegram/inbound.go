@@ -32,6 +32,7 @@ func convertInbound(channel string, msg *gotgbot.Message, sttPrefix string, rich
 		MessageID: msg.MessageId,
 		Sender:    convertSender(msg.From),
 		Timestamp: time.Unix(msg.Date, 0).UTC(),
+		ConvKind:  convKindFromChat(msg.Chat),
 	}
 	if msg.MessageThreadId != 0 {
 		t := msg.MessageThreadId
