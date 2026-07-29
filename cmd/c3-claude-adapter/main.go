@@ -735,7 +735,7 @@ func (a *adapter) refireRecoverOnReconnect(ctx context.Context) {
 	if inst == "" {
 		return
 	}
-	e, ok := sessionhandoff.Read(inst)
+	e, ok := resolveTerminalHandoff(inst)
 	if !ok {
 		return // not a resumed/hook session — nothing to re-register.
 	}
@@ -1985,6 +1985,40 @@ var recoverSettleBudget = recoverRespTimeout + 2*time.Second
 // tests can shorten/lengthen it.
 var livePeekTimeout = 2 * time.Second
 
+const terminalHandoffDepthCap = 16
+
+// resolveTerminalHandoff follows the SessionStart-hook handoff chain from inst
+// to the newest provably-later conversation identity. A stable session id can
+// itself become the instance key written by the next in-app SessionStart hook,
+// so one read is not necessarily terminal. The strict timestamp increase
+// rejects stale cross-generation files. Cycle detection and a depth cap keep a
+// corrupt handoff graph bounded; both fail closed at the newest accepted entry.
+func resolveTerminalHandoff(inst string) (sessionhandoff.Entry, bool) {
+	entry, ok := sessionhandoff.Read(inst)
+	if !ok {
+		return sessionhandoff.Entry{}, false
+	}
+
+	visited := map[string]struct{}{inst: {}}
+	for depth := 0; ; depth++ {
+		nextKey := entry.StableSessionID
+		if _, seen := visited[nextKey]; seen {
+			log.Printf("recover-session: handoff chain cycle at %q — stopping at stable session %q", nextKey, entry.StableSessionID)
+			return entry, true
+		}
+		if depth >= terminalHandoffDepthCap {
+			log.Printf("recover-session: handoff chain depth cap %d reached at stable session %q — stopping", terminalHandoffDepthCap, entry.StableSessionID)
+			return entry, true
+		}
+		next, found := sessionhandoff.Read(nextKey)
+		if !found || next.UnixNano <= entry.UnixNano {
+			return entry, true
+		}
+		visited[nextKey] = struct{}{}
+		entry = next
+	}
+}
+
 // recoverSessionOnResume runs in a goroutine after hello. It WATCHES (in the
 // background, for recoverWatchBudget) for this adapter's SessionStart-hook
 // handoff (keyed on the ephemeral instance id), and the instant it appears asks
@@ -2020,7 +2054,7 @@ func (a *adapter) watchForHandoff(ctx context.Context, inst string, interval, bu
 	start := time.Now()
 	deadline := start.Add(budget)
 	for {
-		if e, ok := sessionhandoff.Read(inst); ok {
+		if e, ok := resolveTerminalHandoff(inst); ok {
 			if elapsed := time.Since(start); elapsed > recoverLateThreshold {
 				log.Printf("recover-session: handoff appeared late (+%s after hello, past the old %s window) — recovering now",
 					elapsed.Round(time.Millisecond), recoverLateThreshold)
@@ -2151,7 +2185,7 @@ func (a *adapter) recheckRecoverOnFirstActivity(ctx context.Context) {
 		if inst == "" {
 			return
 		}
-		e, ok := sessionhandoff.Read(inst)
+		e, ok := resolveTerminalHandoff(inst)
 		if !ok {
 			return
 		}
