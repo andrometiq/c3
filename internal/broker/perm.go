@@ -86,8 +86,8 @@ type pendingPerm struct {
 	// ITSELF, stamped by handlePermissionRequest, which already holds it (it
 	// routed via stub.CurrentRoute()). A verdict authorises THAT session's tool
 	// call, so it must reach that session and no other — without this the
-	// recipient is re-derived from the routes table at TAP time (deliverPermVerdict
-	// → Routes.Holder), and a route that changed hands in between (a confirmed
+	// recipient could be re-derived from the routes table after the TAP-time
+	// ownerRecipient check, and a route that changed hands in between (a confirmed
 	// force_steal, or the holder exiting and a new session attaching the topic
 	// inside permExpiryTTL) delivers one session's authorisation to another while
 	// the chat records "✅ Allowed" for an approval the asking session never got.
@@ -335,14 +335,21 @@ func (b *Broker) resolvePerm(route RouteKey, cb *c3types.CallbackEvent) bool {
 	// this route, so the prompt is dead — clear its keyboard so a live Allow button
 	// authorising a stranger's tool call does not persist in the topic, and record
 	// the expiry rather than a verdict nobody received.
-	if !b.ownerStillHolds(p.owner, route) {
+	//
+	// This check RETURNS the recipient it matched, and delivery writes to exactly
+	// that stub — the routes table is read ONCE for this verdict. Checking here and
+	// re-reading the holder inside delivery made the gate advisory: a steal landing
+	// between the two reads passed the check against the old holder and then wrote
+	// the verdict to the new one.
+	recipient, ok := b.ownerRecipient(p.owner, route)
+	if !ok {
 		log.Printf("perm STALE-OWNER chan=%s chat=%d topic=%s id=%s tool=%s actor=%d: route changed hands since the prompt was relayed — verdict NOT delivered",
 			route.Channel, route.ChatID, TopicKeyStr(route), requestID, p.toolName, cb.Actor.UserID)
 		b.answerPermCallback(route, cb.CallbackID, permAnswerOwnerChangedText, true)
 		b.editPermMessage(route, requestID, p.messageID, permExpiredText(p.toolName, p.preview, time.Now()), [][]c3types.Button{})
 		return false
 	}
-	b.deliverPermVerdict(route, requestID, behavior)
+	b.deliverPermVerdict(route, recipient, requestID, behavior)
 	b.answerPermCallback(route, cb.CallbackID, permOutcomeText(p.toolName, behavior), false)
 	b.editPermMessage(route, requestID, p.messageID, permResolvedText(p.toolName, p.preview, behavior, time.Now()), [][]c3types.Button{})
 	log.Printf("perm RESOLVED chan=%s chat=%d topic=%s id=%s tool=%s behavior=%s actor=%d",
@@ -381,28 +388,36 @@ func (b *Broker) answerPermCallback(route RouteKey, callbackID, text string, sho
 	}
 }
 
-// deliverPermVerdict pushes an OpPermissionVerdict to the route holder's conn —
-// identical to OpAskResult / OpInbound delivery (survives a same-process broker
-// reconnect via the transferred claim). Best-effort: a disconnected/absent holder
-// is logged, not fatal (CC simply keeps waiting in the TUI).
-func (b *Broker) deliverPermVerdict(route RouteKey, requestID, behavior string) {
-	if holder, claimed := b.Routes.Holder(route); claimed {
-		if conn, ok := holder.ConnValue().(*ipc.Conn); ok && conn != nil {
-			if err := conn.WriteJSON(ipc.PermissionVerdictMsg{
-				Op:        ipc.OpPermissionVerdict,
-				RequestID: requestID,
-				Behavior:  behavior,
-			}); err != nil {
-				log.Printf("perm deliver FAIL chan=%s chat=%d topic=%s id=%s: %v",
-					route.Channel, route.ChatID, TopicKeyStr(route), requestID, err)
-			}
-		} else {
-			log.Printf("perm deliver DROP chan=%s chat=%d topic=%s id=%s: holder disconnected — verdict not delivered",
-				route.Channel, route.ChatID, TopicKeyStr(route), requestID)
-		}
-	} else {
-		log.Printf("perm deliver DROP chan=%s chat=%d topic=%s id=%s: no live holder — verdict not delivered",
+// deliverPermVerdict pushes an OpPermissionVerdict to the CHECKED recipient's
+// conn — the stub ownerRecipient matched, handed in by the caller, never a fresh
+// Routes.Holder lookup. Re-deriving the recipient here reopened the gate the
+// caller had just closed: between the check and this write a confirmed
+// force_steal (or a holder exit + a new attach) could replace the holder, and
+// the verdict authorising the asking session's tool call landed in the
+// newcomer's session instead. route is carried for the log line only.
+//
+// Best-effort delivery: a disconnected recipient is logged, not fatal (CC simply
+// keeps waiting in the TUI). A nil recipient is refused — there is no session
+// this verdict has been shown to belong to.
+func (b *Broker) deliverPermVerdict(route RouteKey, recipient *Stub, requestID, behavior string) {
+	if recipient == nil {
+		log.Printf("perm deliver DROP chan=%s chat=%d topic=%s id=%s: no checked recipient — verdict not delivered",
 			route.Channel, route.ChatID, TopicKeyStr(route), requestID)
+		return
+	}
+	conn, ok := recipient.ConnValue().(*ipc.Conn)
+	if !ok || conn == nil {
+		log.Printf("perm deliver DROP chan=%s chat=%d topic=%s id=%s: recipient cli=%s pid=%d disconnected — verdict not delivered",
+			route.Channel, route.ChatID, TopicKeyStr(route), requestID, recipient.CLI, recipient.PID)
+		return
+	}
+	if err := conn.WriteJSON(ipc.PermissionVerdictMsg{
+		Op:        ipc.OpPermissionVerdict,
+		RequestID: requestID,
+		Behavior:  behavior,
+	}); err != nil {
+		log.Printf("perm deliver FAIL chan=%s chat=%d topic=%s id=%s: %v",
+			route.Channel, route.ChatID, TopicKeyStr(route), requestID, err)
 	}
 }
 
@@ -441,9 +456,22 @@ func (b *Broker) registerPerm(p *pendingPerm) bool {
 	return ok
 }
 
-// ownerStillHolds reports whether owner — the session a relayed prompt/question
-// was registered FOR — is STILL the holder of route. Shared by the perm and ask
-// resolve paths so "deliver only to the session that asked" has one definition.
+// ownerRecipient resolves the ONE session a relayed prompt/question may be
+// answered to: it reads the route's holder, checks it against owner — the
+// session the record was registered FOR — and RETURNS the stub it matched.
+// Shared by the perm and ask resolve paths so "deliver only to the session that
+// asked" has one definition.
+//
+// Returning the recipient is what makes this a gate rather than advice. It is
+// the SINGLE linearization point for a verdict: the routes table is read here,
+// once, and delivery writes to whatever this read matched. The callers used to
+// check here and then re-derive the recipient inside delivery, so a force_steal
+// that landed between the two reads passed the check against the OLD holder and
+// delivered to the NEW one. With one read there are only two orderings and both
+// are correct: a steal that linearizes BEFORE it fails the check (nothing is
+// delivered), and one that linearizes AFTER cannot change what was already
+// matched (the verdict goes to the session that was checked, never to the
+// newcomer).
 //
 // Identity is compared by stub POINTER first: a Stub is minted once per
 // connection (StubRegistry.Register) and a same-stub reattach bumps ConnID in
@@ -468,15 +496,21 @@ func (b *Broker) registerPerm(p *pendingPerm) bool {
 // gate INERT for any entry that reached the registry unowned, which is exactly
 // the state a momentarily-unclaimed route used to produce. Fail closed: a
 // verdict nobody can be shown to have asked for is not delivered.
-func (b *Broker) ownerStillHolds(owner *Stub, route RouteKey) bool {
+func (b *Broker) ownerRecipient(owner *Stub, route RouteKey) (*Stub, bool) {
 	if owner == nil {
-		return false
+		return nil, false
 	}
 	holder, claimed := b.Routes.Holder(route)
 	if !claimed || holder == nil {
-		return false
+		return nil, false
 	}
-	return holder == owner || sameLogicalSession(holder, owner)
+	if holder == owner || sameLogicalSession(holder, owner) {
+		// The HOLDER, not the recorded owner: after a routine adapter reconnect the
+		// same logical session is a fresh stub with the live conn, and the recorded
+		// owner's conn is dead. They are the same session — deliver to the live one.
+		return holder, true
+	}
+	return nil, false
 }
 
 // sweepExpiredPerms removes perms older than permExpiryTTL and best-effort clears

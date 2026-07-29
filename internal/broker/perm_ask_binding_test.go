@@ -104,6 +104,76 @@ func askFrames(conn *ipc.Conn) <-chan ipc.AskResultMsg {
 	return out
 }
 
+// TestDeliverPermVerdict_UsesTheRecipientThatWasChecked pins the second
+// owner-binding linearization point. A holder check that succeeds for session A
+// must name the recipient of that verdict permanently; a force-steal landing
+// after the check cannot retarget the write to session B.
+func TestDeliverPermVerdict_UsesTheRecipientThatWasChecked(t *testing.T) {
+	key := RouteKey{Channel: "telegram", ChatID: 42, HasTopic: false}
+	b, _, stubA, connA := bindingBroker(t, key)
+	defer b.Shutdown()
+	verdictsA := permFrames(connA)
+
+	recipient, ok := b.ownerRecipient(stubA, key)
+	if !ok || recipient != stubA {
+		t.Fatalf("test setup: owner check did not capture session A: recipient=%p ok=%v", recipient, ok)
+	}
+	_, connB := stealRoute(t, b, key)
+	verdictsB := permFrames(connB)
+
+	b.deliverPermVerdict(key, recipient, "linearized", "allow")
+
+	select {
+	case got, open := <-verdictsA:
+		if !open || got.RequestID != "linearized" || got.Behavior != "allow" {
+			t.Fatalf("the permission verdict did not reach the recipient captured by the owner check; got %+v (open=%v)", got, open)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the permission verdict was re-targeted after the owner check: a second routes-table lookup let the newcomer receive session A's verdict")
+	}
+	select {
+	case got, open := <-verdictsB:
+		if open {
+			t.Fatalf("session B received session A's permission verdict after stealing the route between check and delivery: %+v", got)
+		}
+	case <-time.After(200 * time.Millisecond):
+	}
+}
+
+// TestDeliverAskResult_UsesTheRecipientThatWasChecked is the ask-side twin of
+// TestDeliverPermVerdict_UsesTheRecipientThatWasChecked.
+func TestDeliverAskResult_UsesTheRecipientThatWasChecked(t *testing.T) {
+	key := RouteKey{Channel: "telegram", ChatID: 42, HasTopic: false}
+	b, _, stubA, connA := bindingBroker(t, key)
+	defer b.Shutdown()
+	answersA := askFrames(connA)
+
+	recipient, ok := b.ownerRecipient(stubA, key)
+	if !ok || recipient != stubA {
+		t.Fatalf("test setup: owner check did not capture session A: recipient=%p ok=%v", recipient, ok)
+	}
+	_, connB := stealRoute(t, b, key)
+	answersB := askFrames(connB)
+
+	b.deliverAskResult(key, recipient, "linearized", ipc.AskAnswer{Selected: []string{"A"}})
+
+	select {
+	case got, open := <-answersA:
+		if !open || got.AskID != "linearized" || len(got.Answer.Selected) != 1 || got.Answer.Selected[0] != "A" {
+			t.Fatalf("the ask result did not reach the recipient captured by the owner check; got %+v (open=%v)", got, open)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the ask result was re-targeted after the owner check: a second routes-table lookup let the newcomer receive session A's answer")
+	}
+	select {
+	case got, open := <-answersB:
+		if open {
+			t.Fatalf("session B received session A's ask result after stealing the route between check and delivery: %+v", got)
+		}
+	case <-time.After(200 * time.Millisecond):
+	}
+}
+
 // TestResolvePerm_TapMustMatchPromptMessage: a tap carrying a LIVE request id but
 // rendered on a different message must not spend the verdict.
 //

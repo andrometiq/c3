@@ -366,8 +366,8 @@ func parseAskData(data string) (askID string, idx int, ok bool) {
 // case the caller (flushEvent) must SUPPRESS the generic event (the tap was the
 // answer/toggle, not a fresh <channel> event). It returns false for a non-ask
 // payload, an unknown/already-resolved askID, a route mismatch, an out-of-range
-// index, or a tap that fails the binding gate (askTapBound: wrong message, or a
-// route that changed hands since the question was asked), so the generic path
+// index, or a tap that fails the binding gate (askTapRecipient: wrong message,
+// or a route that changed hands since the question was asked), so the generic path
 // proceeds; the telegram channel has already auto-acked the callback either way,
 // so Telegram stops spinning regardless.
 //
@@ -386,25 +386,31 @@ func (b *Broker) resolveAsk(route RouteKey, cb *c3types.CallbackEvent) bool {
 		return false
 	}
 	askID, action, idx := parseAskCallback(cb.Data)
-	if action != askActionNone && !b.askTapBound(route, askID, cb) {
+	if action == askActionNone {
+		return false
+	}
+	// One gate, one routes-table read: it returns the recipient every resolve path
+	// below must deliver to (see ownerRecipient / deliverAskResult).
+	recipient, bound := b.askTapRecipient(route, askID, cb)
+	if !bound {
 		return false
 	}
 	switch action {
 	case askActionIndex:
-		return b.resolveAskIndex(route, askID, idx)
+		return b.resolveAskIndex(route, recipient, askID, idx)
 	case askActionDone:
-		return b.resolveAskDone(route, askID)
+		return b.resolveAskDone(route, recipient, askID)
 	case askActionSkip:
-		return b.resolveAskSkip(route, askID)
+		return b.resolveAskSkip(route, recipient, askID)
 	default:
 		return false
 	}
 }
 
-// askTapBound gates ALL THREE resolve paths (index / done / skip) on the two
-// bindings a bare askID does not carry. One gate, run before any of them, so a
-// mis-bound tap cannot toggle a multi-select's selection state on the way to
-// being refused.
+// askTapRecipient gates ALL THREE resolve paths (index / done / skip) on the two
+// bindings a bare askID does not carry, and returns the session an answer may be
+// delivered to. One gate, run before any of them, so a mis-bound tap cannot
+// toggle a multi-select's selection state on the way to being refused.
 //
 //   - MESSAGE: the tap must come from the message the keyboard was RENDERED on.
 //     An agent can author a reply button with arbitrary callback_data
@@ -415,35 +421,43 @@ func (b *Broker) resolveAsk(route RouteKey, cb *c3types.CallbackEvent) bool {
 //     and hand the asking agent an answer no human chose. Positive mismatch ONLY:
 //     messageID is 0 between register and setMessageID (the deliberate fast-tap
 //     race) and cb.MessageID is 0 on a channel that carries none.
-//   - OWNER: the answer must reach the session that ASKED (see pendingAsk.owner).
+//   - OWNER: the answer must reach the session that ASKED (see pendingAsk.owner),
+//     and it is THIS read of the routes table — not a second one inside
+//     deliverAskResult — that names the recipient (see ownerRecipient).
 //
 // Refusing returns false, which is exactly what any unmatched "ask:" tap does
 // today — the generic event path proceeds (worker.go deliberately lets
 // unresolved ask taps through, unlike "perm:"). The ask stays REGISTERED so the
 // asking session is still answerable if it re-claims the route before
 // askExpiryTTL, and the reaper clears the keyboard if it never does.
-func (b *Broker) askTapBound(route RouteKey, askID string, cb *c3types.CallbackEvent) bool {
+//
+// An UNKNOWN askID is not refused here (the resolve path below reports it, not
+// us) and carries no recipient; the resolve paths find nothing to take, and
+// deliverAskResult refuses a nil recipient, so nothing can be delivered
+// unchecked.
+func (b *Broker) askTapRecipient(route RouteKey, askID string, cb *c3types.CallbackEvent) (*Stub, bool) {
 	owner, msgID, ok := b.Asks.bindingOf(askID)
 	if !ok {
-		return true // unknown id — the resolve path below reports it, not us
+		return nil, true
 	}
 	if msgID != 0 && cb.MessageID != 0 && msgID != cb.MessageID {
 		log.Printf("ask MSG-MISMATCH chan=%s chat=%d topic=%s ask=%s want_msg=%d got_msg=%d: tap not bound to the question message",
 			route.Channel, route.ChatID, TopicKeyStr(route), askID, msgID, cb.MessageID)
-		return false
+		return nil, false
 	}
-	if !b.ownerStillHolds(owner, route) {
+	recipient, held := b.ownerRecipient(owner, route)
+	if !held {
 		log.Printf("ask STALE-OWNER chan=%s chat=%d topic=%s ask=%s: route changed hands since the question was asked — answer NOT delivered",
 			route.Channel, route.ChatID, TopicKeyStr(route), askID)
-		return false
+		return nil, false
 	}
-	return true
+	return recipient, true
 }
 
 // resolveAskIndex handles an option tap. Single-select resolves with the chosen
 // option; multi-select toggles in place and re-renders the keyboard, keeping the
 // ask registered so later toggles / Done can resolve it.
-func (b *Broker) resolveAskIndex(route RouteKey, askID string, idx int) bool {
+func (b *Broker) resolveAskIndex(route RouteKey, recipient *Stub, askID string, idx int) bool {
 	res := b.Asks.tapIndex(askID, route, idx)
 	if !res.match {
 		// Unknown / already-resolved / expired / wrong route / out-of-range.
@@ -460,7 +474,7 @@ func (b *Broker) resolveAskIndex(route RouteKey, askID string, idx int) bool {
 		return true
 	}
 	// Single-select resolve.
-	b.deliverAskResult(route, askID, ipc.AskAnswer{Selected: []string{res.chosen}})
+	b.deliverAskResult(route, recipient, askID, ipc.AskAnswer{Selected: []string{res.chosen}})
 	b.editAskMessage(route, askID, res.messageID, askAnsweredText(res.question, res.chosen), [][]c3types.Button{})
 	log.Printf("ask RESOLVED chan=%s chat=%d topic=%s ask=%s idx=%d",
 		route.Channel, route.ChatID, TopicKeyStr(route), askID, idx)
@@ -470,7 +484,7 @@ func (b *Broker) resolveAskIndex(route RouteKey, askID string, idx int) bool {
 // resolveAskDone resolves a multi-select ask with the selected option list. (The
 // Done button only renders for a multi ask; for any other ask the selection is
 // empty, which is the correct defensive outcome.)
-func (b *Broker) resolveAskDone(route RouteKey, askID string) bool {
+func (b *Broker) resolveAskDone(route RouteKey, recipient *Stub, askID string) bool {
 	p, ok := b.Asks.take(askID)
 	if !ok {
 		return false
@@ -483,7 +497,7 @@ func (b *Broker) resolveAskDone(route RouteKey, askID string) bool {
 		return false
 	}
 	selected := selectedOptions(p)
-	b.deliverAskResult(route, askID, ipc.AskAnswer{Selected: selected})
+	b.deliverAskResult(route, recipient, askID, ipc.AskAnswer{Selected: selected})
 	b.editAskMessage(route, askID, p.messageID, askDoneText(p.question, selected), [][]c3types.Button{})
 	log.Printf("ask RESOLVED(done) chan=%s chat=%d topic=%s ask=%s selected=%d",
 		route.Channel, route.ChatID, TopicKeyStr(route), askID, len(selected))
@@ -491,7 +505,7 @@ func (b *Broker) resolveAskDone(route RouteKey, askID string) bool {
 }
 
 // resolveAskSkip resolves an ask with AskAnswer{Skipped:true}.
-func (b *Broker) resolveAskSkip(route RouteKey, askID string) bool {
+func (b *Broker) resolveAskSkip(route RouteKey, recipient *Stub, askID string) bool {
 	p, ok := b.Asks.take(askID)
 	if !ok {
 		return false
@@ -501,35 +515,42 @@ func (b *Broker) resolveAskSkip(route RouteKey, askID string) bool {
 		b.registerAsk(p)
 		return false
 	}
-	b.deliverAskResult(route, askID, ipc.AskAnswer{Skipped: true})
+	b.deliverAskResult(route, recipient, askID, ipc.AskAnswer{Skipped: true})
 	b.editAskMessage(route, askID, p.messageID, askSkippedText(p.question), [][]c3types.Button{})
 	log.Printf("ask RESOLVED(skip) chan=%s chat=%d topic=%s ask=%s",
 		route.Channel, route.ChatID, TopicKeyStr(route), askID)
 	return true
 }
 
-// deliverAskResult pushes an OpAskResult to the route holder's conn — identical to
-// OpInbound delivery (survives a same-process broker reconnect via the transferred
-// claim). Best-effort: a disconnected/absent holder is logged, not fatal (the tool
-// call will time out and recover).
-func (b *Broker) deliverAskResult(route RouteKey, askID string, answer ipc.AskAnswer) {
-	if holder, claimed := b.Routes.Holder(route); claimed {
-		if conn, ok := holder.ConnValue().(*ipc.Conn); ok && conn != nil {
-			if err := conn.WriteJSON(ipc.AskResultMsg{
-				Op:     ipc.OpAskResult,
-				AskID:  askID,
-				Answer: answer,
-			}); err != nil {
-				log.Printf("ask deliver FAIL chan=%s chat=%d topic=%s ask=%s: %v",
-					route.Channel, route.ChatID, TopicKeyStr(route), askID, err)
-			}
-		} else {
-			log.Printf("ask deliver DROP chan=%s chat=%d topic=%s ask=%s: holder disconnected — answer not delivered",
-				route.Channel, route.ChatID, TopicKeyStr(route), askID)
-		}
-	} else {
-		log.Printf("ask deliver DROP chan=%s chat=%d topic=%s ask=%s: no live holder — answer not delivered",
+// deliverAskResult pushes an OpAskResult to the CHECKED recipient's conn — the
+// stub askTapRecipient matched, handed in by the caller, never a fresh
+// Routes.Holder lookup. Re-deriving the recipient here reopened the gate the
+// caller had just closed: a claim transfer between the check and this write
+// handed the asking session's answer to whoever took the topic, and the chat
+// recorded it as answered. route is carried for the log line only.
+//
+// Best-effort delivery: a disconnected recipient is logged, not fatal (the tool
+// call will time out and recover). A nil recipient is refused — there is no
+// session this answer has been shown to belong to.
+func (b *Broker) deliverAskResult(route RouteKey, recipient *Stub, askID string, answer ipc.AskAnswer) {
+	if recipient == nil {
+		log.Printf("ask deliver DROP chan=%s chat=%d topic=%s ask=%s: no checked recipient — answer not delivered",
 			route.Channel, route.ChatID, TopicKeyStr(route), askID)
+		return
+	}
+	conn, ok := recipient.ConnValue().(*ipc.Conn)
+	if !ok || conn == nil {
+		log.Printf("ask deliver DROP chan=%s chat=%d topic=%s ask=%s: recipient cli=%s pid=%d disconnected — answer not delivered",
+			route.Channel, route.ChatID, TopicKeyStr(route), askID, recipient.CLI, recipient.PID)
+		return
+	}
+	if err := conn.WriteJSON(ipc.AskResultMsg{
+		Op:     ipc.OpAskResult,
+		AskID:  askID,
+		Answer: answer,
+	}); err != nil {
+		log.Printf("ask deliver FAIL chan=%s chat=%d topic=%s ask=%s: %v",
+			route.Channel, route.ChatID, TopicKeyStr(route), askID, err)
 	}
 }
 

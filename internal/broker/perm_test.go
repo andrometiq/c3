@@ -101,7 +101,7 @@ func permBrokerWithOperator(t *testing.T, key RouteKey) (*Broker, *permFakeChann
 
 // pendingOwner returns the session a hand-built pendingPerm/pendingAsk must name
 // as its owner. Production stamps the REQUESTING stub at registration and an
-// unowned record is refused at resolve time (ownerStillHolds), so a test record
+// unowned record is refused at resolve time (ownerRecipient), so a test record
 // that omits it is not a simpler record — it is a dead one. Prefers the route's
 // live holder (what the two production sites bind); falls back to a fresh stub
 // for registry-lifecycle tests that never claim a route.
