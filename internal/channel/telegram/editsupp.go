@@ -48,6 +48,9 @@ type editSuppressor struct {
 	ttl      time.Duration
 	order    *list.List               // back = newest, front = oldest
 	index    map[string]*list.Element // key → element holding *editBaseline
+	// armGen is a monotonic counter stamped on each react arm, so a rollback
+	// from a failed reaction can only ever withdraw its OWN arm.
+	armGen uint64
 }
 
 // userEditWindow is how far back a message can still be edited. The Bot API
@@ -85,6 +88,8 @@ type editBaseline struct {
 	// armedAt is when C3's own react tool touched this message, for entries that
 	// carry no fingerprint yet. Zero once consumed or never armed.
 	armedAt time.Time
+	// armGen identifies WHICH react installed armedAt (see disarmReact).
+	armGen uint64
 }
 
 func newEditSuppressor(capacity int, ttl time.Duration) *editSuppressor {
@@ -123,14 +128,10 @@ func editKey(chatID, msgID int64) string {
 //     nothing else could: reactions are not bounded by the edit window, and a
 //     restarted broker has no baseline to compare against.
 //
-// msgUnixDate is Telegram's own Message.Date: the ORIGINAL send time in unix
-// seconds, which does not move when a message is edited. A message with no
-// stated date (0) is never aged out — unknown is not ancient, and guessing
-// would drop a real edit on the strength of a missing field.
-//
-// A suppressed lookup does not touch the baseline: it stays keyed to the last
-// DELIVERED content.
-func (s *editSuppressor) suppressReason(chatID, msgID, updateID int64, fp string, msgUnixDate int64) string {
+// msgUnixDate and editUnixDate are Telegram's own Message.Date and
+// Message.EditDate — see editAge for how they are read. A suppressed lookup does
+// not touch the baseline: it stays keyed to the last DELIVERED content.
+func (s *editSuppressor) suppressReason(chatID, msgID, updateID int64, fp string, msgUnixDate, editUnixDate int64) string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.evictExpiredLocked()
@@ -144,15 +145,51 @@ func (s *editSuppressor) suppressReason(chatID, msgID, updateID int64, fp string
 			}
 			return "deliverable content unchanged since the last dispatch"
 		case !b.armedAt.IsZero() && now.Sub(b.armedAt) <= reactArmWindow:
-			b.armedAt = time.Time{} // one-shot: never suppress a second edit on this arm
+			b.armedAt, b.armGen = time.Time{}, 0 // one-shot: never suppress a second edit on this arm
 			return "C3's own react touched this message moments ago"
 		}
 	}
-	if age := now.Sub(time.Unix(msgUnixDate, 0)); msgUnixDate > 0 && age > userEditWindow {
-		return fmt.Sprintf("no baseline and the message is %s old, past the %s edit window — a user edit is impossible",
+	if age, ok := editAge(msgUnixDate, editUnixDate, now); ok && age > userEditWindow {
+		return fmt.Sprintf("no baseline and the message was %s old when this edit is dated, past the %s edit window — a user edit is impossible",
 			age.Round(time.Hour), userEditWindow)
 	}
 	return ""
+}
+
+// editAge measures how old the message was AT THE MOMENT IT WAS EDITED, which
+// is the quantity the edit window actually governs. ok=false means the age is
+// unknowable and the caller must not age the message out.
+//
+// Both inputs are SERVER timestamps, and when edit_date is present the answer
+// uses only those two — never the local clock. Measuring against receipt time
+// instead destroys real corrections: Telegram holds undelivered updates for up
+// to 24 hours (https://core.telegram.org/bots/api#getting-updates), so a user
+// who edits at 47h59m while C3 is down has that edit polled well past the
+// window and acknowledged as a phantom. The edit is then gone for good, which
+// is the exact failure this whole file exists to avoid causing.
+//
+// With no edit_date the fallback is receipt time. That is safe because Telegram
+// sets edit_date on a real edit — "Optional. Date the message was last edited in
+// Unix time" (https://core.telegram.org/bots/api#message) — so its ABSENCE on an
+// edited_message says the message was never actually edited, which is precisely
+// the phantom case. The incident is caught either way: a reaction-triggered
+// phantom on a 62-hour-old message reports either edit_date=now (62h > 48h,
+// suppressed) or no edit_date at all (receipt-time fallback, suppressed).
+//
+// The cost of the change, stated plainly: a phantom on a message that WAS
+// genuinely edited once, long ago, now reports a small edit-to-send gap and is
+// delivered. That is a duplicate, and duplicates are recoverable; the loss this
+// closes is not. The baseline and react-arm rules still cover that case
+// whenever this process saw the message or caused the reaction.
+func editAge(msgUnixDate, editUnixDate int64, now time.Time) (time.Duration, bool) {
+	if msgUnixDate <= 0 {
+		return 0, false // no stated send time: unknown age, not infinite age
+	}
+	sent := time.Unix(msgUnixDate, 0)
+	if editUnixDate > 0 {
+		return time.Unix(editUnixDate, 0).Sub(sent), true
+	}
+	return now.Sub(sent), true
 }
 
 // armReact records that C3's own react tool is about to touch (chat, msg), so
@@ -161,18 +198,48 @@ func (s *editSuppressor) suppressReason(chatID, msgID, updateID int64, fp string
 // fingerprint is strictly better evidence than the arm, and moving it to the
 // back of the LRU keeps it from aging out from under the reaction it is about
 // to have to explain.
-func (s *editSuppressor) armReact(chatID, msgID int64) {
+//
+// It returns a generation token for disarmReact. The token is what makes the
+// rollback safe: a second react on the same message, or a real dispatch that
+// re-baselines it, bumps the generation, so a late rollback from a FAILED
+// reaction cannot cancel an arm that a later, successful one installed.
+func (s *editSuppressor) armReact(chatID, msgID int64) uint64 {
 	key := editKey(chatID, msgID)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.evictExpiredLocked()
+	s.armGen++
 	if el, ok := s.index[key]; ok {
 		b := el.Value.(*editBaseline)
-		b.armedAt, b.insertAt = time.Now(), time.Now()
+		b.armedAt, b.insertAt, b.armGen = time.Now(), time.Now(), s.armGen
 		s.order.MoveToBack(el)
+		return s.armGen
+	}
+	s.pushLocked(&editBaseline{key: key, insertAt: time.Now(), armedAt: time.Now(), armGen: s.armGen})
+	return s.armGen
+}
+
+// disarmReact removes the arm that gen installed, if it is still the current
+// one. Called when setMessageReaction FAILED: Telegram never applied the
+// reaction, so it will never emit the echo the arm exists to absorb — and
+// leaving it installed would spend the arm on the next genuine edit instead,
+// dropping a correction on the strength of a reaction that never happened.
+//
+// It clears ONLY the arm. A fingerprint on the same entry is untouched: it was
+// recorded by a real dispatch and says nothing about the reaction.
+// A gen of 0 is the never-armed case and needs no special handling: armGen
+// counts from 1, so 0 matches only an entry no react ever touched, whose armedAt
+// is already zero — clearing it is a no-op.
+func (s *editSuppressor) disarmReact(chatID, msgID int64, gen uint64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	el, ok := s.index[editKey(chatID, msgID)]
+	if !ok {
 		return
 	}
-	s.pushLocked(&editBaseline{key: key, insertAt: time.Now(), armedAt: time.Now()})
+	if b := el.Value.(*editBaseline); b.armGen == gen {
+		b.armedAt, b.armGen = time.Time{}, 0
+	}
 }
 
 // record stores fp as the delivered-content baseline for (chat, msg) —

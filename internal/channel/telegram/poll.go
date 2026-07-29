@@ -1214,10 +1214,12 @@ func (c *Channel) dispatchMessage(updateID int64, msg *gotgbot.Message, edited b
 	// non-allowlisted senders can never populate the baseline memory.
 	if c.editSupp != nil {
 		fp := editFingerprint(in, msg)
-		// msg.Date is the ORIGINAL send time and stays put across an edit, so it
-		// dates the message, not the update — which is what the age rule needs.
+		// Both SERVER timestamps: msg.Date is the original send time (it stays put
+		// across an edit) and msg.EditDate is when the edit happened. Passing both
+		// lets the age rule measure the gap Telegram itself saw, instead of one
+		// that grows while C3 is offline (editsupp.go editAge).
 		if edited {
-			if why := c.editSupp.suppressReason(msg.Chat.Id, msg.MessageId, updateID, fp, msg.Date); why != "" {
+			if why := c.editSupp.suppressReason(msg.Chat.Id, msg.MessageId, updateID, fp, msg.Date, msg.EditDate); why != "" {
 				c.host.Logf("telegram: suppress phantom edit update=%d msg=%d chat=%d thread=%d kind=%s — %s; not re-dispatched",
 					updateID, msg.MessageId, msg.Chat.Id, msg.MessageThreadId, kind, why)
 				c.markUpdateDone(updateID)

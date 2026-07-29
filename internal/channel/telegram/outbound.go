@@ -332,10 +332,18 @@ func (c *Channel) React(args c3types.ReactArgs) error {
 	// exists for, and it is the one case where C3 knows the (chat, message_id)
 	// in advance — so it says so instead of waiting to recognize the echo from a
 	// baseline it may not have. Arming after the call would race the update.
+	var armGen uint64
 	if c.editSupp != nil {
-		c.editSupp.armReact(args.ChatID, args.MessageID)
+		armGen = c.editSupp.armReact(args.ChatID, args.MessageID)
 	}
 	if _, err := c.bot.SetMessageReaction(args.ChatID, args.MessageID, opts); err != nil {
+		// Telegram never applied the reaction, so no echo is coming. Withdraw
+		// the arm — left standing it would be spent on the next genuine edit
+		// within the window, dropping a real correction to pay for a reaction
+		// that never happened.
+		if c.editSupp != nil {
+			c.editSupp.disarmReact(args.ChatID, args.MessageID, armGen)
+		}
 		c.recordOutboundErr(err)
 		return c.scrubTokenf("telegram: SetMessageReaction: %w", err)
 	}

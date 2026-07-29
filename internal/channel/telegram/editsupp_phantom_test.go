@@ -1,6 +1,7 @@
 package telegram
 
 import (
+	"net/http"
 	"testing"
 	"time"
 
@@ -27,7 +28,7 @@ import (
 // unit tests, dated NOW so the age rule — which answers only when no baseline
 // applies — never stands in for the behavior under test.
 func suppressed(s *editSuppressor, chatID, msgID, updateID int64, fp string) bool {
-	return s.suppressReason(chatID, msgID, updateID, fp, time.Now().Unix()) != ""
+	return s.suppressReason(chatID, msgID, updateID, fp, time.Now().Unix(), 0) != ""
 }
 
 // voiceMsgAged is voiceMsg with an explicit age, for the cases that turn on how
@@ -209,7 +210,7 @@ func TestEditSuppressor_StaleArmDoesNotSuppress(t *testing.T) {
 	b.armedAt = time.Now().Add(-reactArmWindow - time.Second)
 	s.mu.Unlock()
 
-	if why := s.suppressReason(42, 300, 900, "fp-A", time.Now().Unix()); why != "" {
+	if why := s.suppressReason(42, 300, 900, "fp-A", time.Now().Unix(), 0); why != "" {
 		t.Fatalf("a stale react arm suppressed an edit (%s) — the arm covers the echo of one reaction, not everything that follows it", why)
 	}
 }
@@ -289,18 +290,135 @@ func TestDispatchMessage_BaselineRecordedEvenWhenNoSessionReceivesIt(t *testing.
 	}
 }
 
-// React must arm before it reacts. Without this the suppressor only learns about
-// C3's own reaction from the echo it is supposed to recognize.
-func TestReact_ArmsSuppressorBeforeCalling(t *testing.T) {
-	c := getFileChannel(t, `{"ok":true,"result":true}`)
+// E1 — the delayed-delivery regression. A user edits at 47h59m while C3 is down;
+// Telegram holds the update (up to 24 hours,
+// https://core.telegram.org/bots/api#getting-updates) and delivers it later.
+// Aged against RECEIPT time the message looks 72 hours old and the correction is
+// acknowledged and destroyed. Aged against the two SERVER timestamps it is what
+// it actually is: an edit made inside the window.
+func TestDispatchMessage_EditInsideWindowDeliveredLate_StillDelivered(t *testing.T) {
+	h := &fakeHost{decision: channel.GateInboundAllow}
+	c := suppressorChannel(h)
+
+	sent := time.Now().Add(-72 * time.Hour)
+	msg := voiceMsg(6680, "uniq-6680")
+	msg.Date = sent.Unix()
+	msg.EditDate = sent.Add(userEditWindow - time.Minute).Unix() // edited at 47h59m
+
+	c.offTrk.Register(801)
+	c.dispatchMessage(801, msg, true, nil)
+
+	if got := h.emitCount(); got != 1 {
+		t.Fatalf("an edit made INSIDE the window but delivered after it was suppressed (Emit=%d, want 1) — C3 being offline is not the user editing late, and acknowledging it destroys the correction permanently", got)
+	}
+}
+
+// The same server-timestamp rule still catches the incident: a reaction phantom
+// on a 62-hour-old message dated NOW is 62 hours past its send time.
+func TestDispatchMessage_PhantomDatedNowOnAnOldMessage_Suppressed(t *testing.T) {
+	h := &fakeHost{decision: channel.GateInboundAllow}
+	c := suppressorChannel(h)
+
+	sent := time.Now().Add(-62 * time.Hour)
+	msg := voiceMsg(6681, "uniq-6681")
+	msg.Date = sent.Unix()
+	msg.EditDate = time.Now().Unix() // the reaction's own timestamp
+
+	c.offTrk.Register(801)
+	c.dispatchMessage(801, msg, true, nil)
+
+	if got := h.emitCount(); got != 0 {
+		t.Fatalf("a phantom edit dated 62h after the message was sent was delivered (Emit=%d, want 0)", got)
+	}
+}
+
+// editAge unit: which clock answers, and when it refuses to answer.
+func TestEditAge_PrefersServerTimestamps(t *testing.T) {
+	now := time.Now()
+	sent := now.Add(-72 * time.Hour)
+
+	got, ok := editAge(sent.Unix(), sent.Add(time.Hour).Unix(), now)
+	if !ok || got.Round(time.Minute) != time.Hour {
+		t.Fatalf("editAge with an edit_date = %v (ok=%v), want ~1h measured server-side, not the 72h since it was sent", got, ok)
+	}
+
+	got, ok = editAge(sent.Unix(), 0, now)
+	if !ok || got.Round(time.Hour) != 72*time.Hour {
+		t.Fatalf("editAge with NO edit_date = %v (ok=%v), want the 72h receipt-time fallback", got, ok)
+	}
+
+	if _, ok = editAge(0, 0, now); ok {
+		t.Fatal("a message with no send date has an UNKNOWN age; answering anyway ages out edits on the strength of a missing field")
+	}
+}
+
+// T1 — the arm must exist while the outbound call is in flight, not merely by
+// the time React returns. The fake Bot API asks the suppressor from inside the
+// handler: if arming moved after SetMessageReaction, Telegram's echo could
+// arrive before the arm and re-run STT.
+func TestReact_ArmsSuppressorBeforeTheOutboundCall(t *testing.T) {
+	var c *Channel
+	ready := make(chan struct{})
+	observed := make(chan string, 1)
+
+	c = getFileChannelHandler(t, func(w http.ResponseWriter, _ *http.Request) {
+		<-ready // c is fully assigned before the handler reads it
+		observed <- c.editSupp.suppressReason(42, 6670, 900, "fp-A", time.Now().Unix(), 0)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true,"result":true}`))
+	})
+	c.editSupp = newEditSuppressor(8192, userEditWindow)
+	c.rate = newRateLimiter()
+	close(ready)
+
+	if err := c.React(c3types.ReactArgs{ChatID: 42, MessageID: 6670, Emoji: "\U0001F44D"}); err != nil {
+		t.Fatalf("React: %v", err)
+	}
+	if why := <-observed; why == "" {
+		t.Fatal("the suppressor was NOT armed while setMessageReaction was in flight — Telegram's echo can be polled before the arm exists, and the message is re-delivered with a fresh transcript")
+	}
+}
+
+// E2 — a reaction Telegram REJECTED produces no echo, so the arm it installed
+// must be withdrawn. Left standing it is spent on the next genuine edit instead,
+// dropping a real correction to pay for a reaction that never happened.
+func TestReact_FailedReactionWithdrawsTheArm(t *testing.T) {
+	c := getFileChannel(t, `{"ok":false,"error_code":400,"description":"Bad Request: REACTION_INVALID"}`)
 	c.editSupp = newEditSuppressor(8192, userEditWindow)
 	c.rate = newRateLimiter()
 
-	if err := c.React(c3types.ReactArgs{ChatID: 42, MessageID: 6670, Emoji: "👍"}); err != nil {
-		t.Fatalf("React: %v", err)
+	if err := c.React(c3types.ReactArgs{ChatID: 42, MessageID: 6671, Emoji: "\U0001F44D"}); err == nil {
+		t.Fatal("the fake API rejected the reaction; React reported success")
 	}
+	if why := c.editSupp.suppressReason(42, 6671, 900, "fp-A", time.Now().Unix(), 0); why != "" {
+		t.Fatalf("a failed reaction left a blanket suppression arm (%s) — no echo is coming, so the arm can only be spent on a genuine edit", why)
+	}
+}
 
-	if why := c.editSupp.suppressReason(42, 6670, 900, "fp-A", time.Now().Unix()); why == "" {
-		t.Fatal("React did not arm the suppressor for the message it reacted to — the echo Telegram sends back has no baseline to match and is re-delivered")
+// The rollback is generation-scoped: a late withdrawal from a FAILED react must
+// not cancel the arm a later, successful react installed.
+func TestEditSuppressor_DisarmDoesNotCancelANewerArm(t *testing.T) {
+	s := newEditSuppressor(10, userEditWindow)
+	stale := s.armReact(42, 300)
+	s.armReact(42, 300) // a second react, still in flight
+
+	s.disarmReact(42, 300, stale) // the first one's failure rolls back late
+
+	if why := s.suppressReason(42, 300, 900, "fp", time.Now().Unix(), 0); why == "" {
+		t.Fatal("a late rollback from the first react cancelled the SECOND react's arm — its echo is now re-delivered with a fresh transcript")
+	}
+}
+
+// …and it withdraws only the ARM. A fingerprint on the same entry was recorded
+// by a real dispatch and says nothing about the reaction.
+func TestEditSuppressor_DisarmKeepsTheFingerprint(t *testing.T) {
+	s := newEditSuppressor(10, userEditWindow)
+	s.record(42, 300, 801, "fp-A")
+	gen := s.armReact(42, 300)
+
+	s.disarmReact(42, 300, gen)
+
+	if !suppressed(s, 42, 300, 802, "fp-A") {
+		t.Fatal("rolling back a failed reaction destroyed the content baseline — every later phantom edit of that message is now re-delivered")
 	}
 }
