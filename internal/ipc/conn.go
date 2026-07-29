@@ -29,9 +29,10 @@ type Conn struct {
 // ReadFrame call, counting the terminating newline. Without a cap a peer
 // (broker, adapter, or any process that opened the socket) could stream
 // bytes without a newline and exhaust memory — and on the broker side that
-// happens BEFORE hello, i.e. before any negotiation. 4 MiB is well above any
-// legitimate frame: the largest real frames are MCP tool-call results that
-// embed Telegram message content, on the order of tens of KB.
+// happens BEFORE hello, i.e. before any negotiation. 4 MiB leaves headroom
+// above queue.Append's 1 MiB per-record bound (internal/queue.MaxRecordBytes);
+// broker fetch batching separately budgets the full response envelope below
+// this frame cap.
 const MaxFrameSize = 4 * 1024 * 1024
 
 // (Exported deliberately: docs/ADAPTERS.md publishes this number as part of the
