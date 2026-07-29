@@ -5,7 +5,8 @@
 #   e.g. scripts/package.sh linux amd64 v1.0.0 dist
 #
 # Produces: <outdir>/c3_<version>_<goos>_<goarch>.tar.gz
-# Each tarball contains the nine compiled binaries, LICENSE, and a MANIFEST.txt.
+# Each tarball contains the nine compiled binaries, the runtime STT bundle,
+# LICENSE, and a MANIFEST.txt.
 # Pure-Go cross-compile (CGO disabled), so every target builds on any host.
 #
 # Shared by .github/workflows/release.yml and the Makefile `dist` target so the
@@ -61,6 +62,10 @@ for b in $BINS; do
 done
 
 cp "$ROOT/LICENSE" "$DEST/LICENSE"
+mkdir -p "$DEST/plugins/c3/stt/stt-pkg/providers"
+cp "$ROOT/plugins/c3/stt/stt-handler.py" "$DEST/plugins/c3/stt/"
+cp "$ROOT/plugins/c3/stt/stt-pkg/stt.py" "$ROOT/plugins/c3/stt/stt-pkg/vocabulary.txt" "$DEST/plugins/c3/stt/stt-pkg/"
+cp "$ROOT/plugins/c3/stt/stt-pkg/providers/"*.py "$DEST/plugins/c3/stt/stt-pkg/providers/"
 
 # MANIFEST.txt — provenance + per-binary checksums + install hint.
 {
@@ -76,8 +81,10 @@ cp "$ROOT/LICENSE" "$DEST/LICENSE"
 		printf '  %s  %s\n' "$(sha256 "$DEST/$b$EXT")" "$b$EXT"
 	done
 	echo
-	echo "Install: place these binaries on your PATH (e.g. ~/.local/bin),"
-	echo "then follow INSTALL.md. C3's /c3:build rebuilds them from source if needed."
+	echo "Install: keep plugins/c3/stt beside the installed binaries (it is a"
+	echo "runtime asset, not source-only data). Put/symlink the binaries on PATH,"
+	echo "copy the plugins directory alongside them, then follow INSTALL.md."
+	echo "C3's /c3:build rebuilds binaries from source if needed."
 } >"$DEST/MANIFEST.txt"
 
 mkdir -p "$OUTDIR"

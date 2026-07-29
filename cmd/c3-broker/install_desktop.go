@@ -7,6 +7,15 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+
+	"github.com/Andrometiq/c3/internal/broker"
+	"github.com/Andrometiq/c3/internal/mappings"
+	"github.com/Andrometiq/c3/internal/plugin/builtins/stt"
+)
+
+var (
+	desktopExecutablePath    = os.Executable
+	desktopWriteMappingsFile = writeMappingsFile
 )
 
 // runInstallDesktop configures Claude Desktop (Windows / macOS) to load the C3
@@ -40,6 +49,11 @@ func runInstallDesktop(args []string) error {
 		// printed the explanatory note via the caller above.
 		return nil
 	}
+	releaseInstallLock, err := acquireDesktopInstallLock()
+	if err != nil {
+		return err
+	}
+	defer releaseInstallLock()
 
 	// Resolve the adapter path. Claude Desktop's docs require an ABSOLUTE
 	// command path, so we prefer the resolved PATH entry (made absolute); if the
@@ -99,6 +113,17 @@ func runInstallDesktop(args []string) error {
 		return fmt.Errorf("marshal config: %w", err)
 	}
 	out = append(out, '\n')
+	sttInstall, err := prepareSTTHandlerInstall()
+	if err != nil {
+		return err
+	}
+	// Commit mappings first. An unused valid handler path is harmless if the
+	// later Desktop config write fails; the inverse leaves Desktop configured
+	// while the broker cannot find the voice runtime. The broker singleton held
+	// by this command keeps live route/session mutations from racing this write.
+	if err := sttInstall.commit(); err != nil {
+		return err
+	}
 	// Preserve the existing file's mode (never widen a secrets-bearing 0600
 	// config); default 0644 for a fresh file. Write to a temp sibling then rename
 	// so a crash/disk-full mid-write can't truncate the config we work to protect.
@@ -113,6 +138,9 @@ func runInstallDesktop(args []string) error {
 	if err := os.Rename(tmp, cfgPath); err != nil {
 		_ = os.Remove(tmp)
 		return fmt.Errorf("write %s: %w", cfgPath, err)
+	}
+	if sttInstall.handler != "" {
+		fmt.Printf("Recorded bundled STT handler:\n  %s\n\n", sttInstall.handler)
 	}
 
 	fmt.Printf("Wrote Claude Desktop MCP config:\n  %s\n\n", cfgPath)
@@ -159,6 +187,138 @@ func runInstallDesktop(args []string) error {
 	}
 
 	return nil
+}
+
+func acquireDesktopInstallLock() (func(), error) {
+	pidFile, err := broker.PidFilePath()
+	if err != nil {
+		return nil, fmt.Errorf("resolve broker lock before Desktop install: %w", err)
+	}
+	lock, err := broker.AcquireSingleton(pidFile)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"broker is running; quit active C3 CLI/Desktop sessions before install-desktop updates mappings, then retry: %w",
+			err)
+	}
+	return lock.Release, nil
+}
+
+type sttHandlerInstall struct {
+	handler      string
+	mappingsPath string
+	mappings     *mappings.MappingsFile
+}
+
+// prepareSTTHandlerInstall validates the mappings side before the Desktop
+// config is changed. Cross-file atomicity is impossible, but a corrupt
+// mappings file or missing runtime bundle must not produce a successful-looking
+// Desktop entry whose voice path is already known to be dead.
+func prepareSTTHandlerInstall() (sttHandlerInstall, error) {
+	path, err := mappings.DefaultPath()
+	if err != nil {
+		return sttHandlerInstall{}, fmt.Errorf("resolve mappings path: %w", err)
+	}
+	mf, err := mappings.Read(path)
+	switch {
+	case err == nil:
+	case os.IsNotExist(err):
+		mf = &mappings.MappingsFile{
+			SchemaVersion: 1,
+			Channels:      map[string]mappings.ChannelConfig{},
+			Mappings:      map[string]mappings.Mapping{},
+		}
+	default:
+		return sttHandlerInstall{}, fmt.Errorf("read mappings before recording STT handler: %w", err)
+	}
+	if mf.Plugins == nil {
+		mf.Plugins = map[string]map[string]any{}
+	}
+	cfg := mf.Plugins[stt.Name]
+	if raw, exists := cfg["enabled"]; exists {
+		enabled, ok := raw.(bool)
+		if !ok {
+			return sttHandlerInstall{}, fmt.Errorf("plugins.%s.enabled is not a boolean", stt.Name)
+		}
+		if !enabled {
+			return sttHandlerInstall{}, nil
+		}
+	}
+	if raw, exists := cfg["handler_path"]; exists {
+		configured, ok := raw.(string)
+		if !ok {
+			return sttHandlerInstall{}, fmt.Errorf("plugins.%s.handler_path is not a string; refusing to overwrite it", stt.Name)
+		}
+		if strings.TrimSpace(configured) != "" {
+			return sttHandlerInstall{}, nil
+		}
+	}
+	handler := discoveredSTTHandlerPath()
+	if handler == "" {
+		return sttHandlerInstall{}, fmt.Errorf(
+			"bundled STT handler not found; keep plugins/c3/stt beside the installed C3 binaries, run from a C3 source checkout, set C3_SRC_DIR, or configure plugins.%s.handler_path explicitly",
+			stt.Name)
+	}
+	if cfg == nil {
+		cfg = map[string]any{}
+	}
+	cfg["handler_path"] = handler
+	mf.Plugins[stt.Name] = cfg
+	return sttHandlerInstall{handler: handler, mappingsPath: path, mappings: mf}, nil
+}
+
+func (p sttHandlerInstall) commit() error {
+	if p.mappings == nil {
+		return nil
+	}
+	if err := desktopWriteMappingsFile(p.mappingsPath, p.mappings); err != nil {
+		return fmt.Errorf("record bundled STT handler: %w", err)
+	}
+	return nil
+}
+
+func discoveredSTTHandlerPath() string {
+	if root, ok := discoverSourceDir(); ok {
+		path := filepath.Join(root, "plugins", "c3", "stt", "stt-handler.py")
+		if info, err := os.Stat(path); err == nil && !info.IsDir() {
+			return path
+		}
+	}
+	if exe, err := desktopExecutablePath(); err == nil {
+		if resolved, rerr := filepath.EvalSymlinks(exe); rerr == nil {
+			exe = resolved
+		}
+		path := filepath.Join(filepath.Dir(exe), "plugins", "c3", "stt", "stt-handler.py")
+		if info, err := os.Stat(path); err == nil && !info.IsDir() {
+			return path
+		}
+	}
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		path := filepath.Join(home, ".local", "share", "c3", "plugins", "c3", "stt", "stt-handler.py")
+		if info, err := os.Stat(path); err == nil && !info.IsDir() {
+			return path
+		}
+	}
+	// A source checkout outside ~/src/c3 is common during development. The
+	// installer is normally run from that checkout, so walk upward from CWD as
+	// a second, explicit source-discovery route rather than recording a path
+	// that does not exist.
+	dir, err := os.Getwd()
+	if err != nil {
+		return ""
+	}
+	for {
+		if isC3SourceDir(dir) {
+			path := filepath.Join(dir, "plugins", "c3", "stt", "stt-handler.py")
+			if info, err := os.Stat(path); err == nil && !info.IsDir() {
+				return path
+			}
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return ""
+		}
+		dir = parent
+	}
 }
 
 // exeName appends the Windows executable suffix so PATH lookups match the real

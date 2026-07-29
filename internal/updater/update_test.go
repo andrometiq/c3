@@ -19,12 +19,35 @@ import (
 // the tarball bytes for the current platform. Everything is torn down via
 // t.Cleanup — no real network is touched.
 func updateTestServer(t *testing.T, tag string, prerelease bool, corruptChecksum bool) {
+	updateTestServerFixture(t, tag, prerelease, corruptChecksum, "", "")
+}
+
+func updateTestServerMissingSTT(t *testing.T, tag string, prerelease bool, corruptChecksum bool, missingSTT string) {
+	updateTestServerFixture(t, tag, prerelease, corruptChecksum, missingSTT, "")
+}
+
+func updateTestServerEmptyBinary(t *testing.T, tag, emptyBinary string) {
+	updateTestServerFixture(t, tag, false, false, "", emptyBinary)
+}
+
+func updateTestServerFixture(t *testing.T, tag string, prerelease bool, corruptChecksum bool, missingSTT, emptyBinary string) {
 	t.Helper()
 
 	tarball := TarballName(tag)
 	entries := map[string][]byte{}
 	for _, name := range BinaryNames {
 		entries[name] = []byte("NEW-" + name + "-" + tag)
+	}
+	if emptyBinary != "" {
+		entries[emptyBinary] = nil
+	}
+	for _, name := range expectedSTTRuntimeAssets {
+		entries[filepath.Join(sttBundleRelativePath, name)] = []byte("# new " + filepath.Base(name) + "\n")
+	}
+	entries[filepath.Join(sttBundleRelativePath, "stt-handler.py")] = []byte("# new handler\n")
+	entries[filepath.Join(sttBundleRelativePath, "stt-pkg", "stt.py")] = []byte("# new runner\n")
+	if missingSTT != "" {
+		delete(entries, filepath.Join(sttBundleRelativePath, missingSTT))
 	}
 	tarBytes := makeTarGz(t, "", tarballDir(tarball), entries)
 
@@ -109,6 +132,9 @@ func TestUpdate_InstallsNewerRelease(t *testing.T) {
 		if string(got) != want {
 			t.Errorf("%s = %q, want %q", name, got, want)
 		}
+	}
+	if got, err := os.ReadFile(filepath.Join(dest, sttBundleRelativePath, "stt-handler.py")); err != nil || string(got) != "# new handler\n" {
+		t.Fatalf("updated package STT handler = %q, err=%v — self-update installed binaries but omitted the Desktop/systemd STT bundle", got, err)
 	}
 }
 
@@ -248,6 +274,65 @@ func TestUpdate_ChecksumMismatchLeavesOriginals(t *testing.T) {
 		if string(got) != "OLD-"+name {
 			t.Errorf("%s clobbered despite checksum mismatch: %q", name, got)
 		}
+	}
+}
+
+func TestUpdate_MissingSTTRuntimeAssetLeavesOriginals(t *testing.T) {
+	missing := filepath.Join("stt-pkg", "providers", "soniox-stt-async-v5.py")
+	updateTestServerMissingSTT(t, "v9.9.9", false, false, missing)
+	dest := t.TempDir()
+	seedOldBinaries(t, dest)
+	oldBundle := writeSTTBundle(t, dest, "old")
+
+	res, err := Update(context.Background(), Options{
+		CurrentVersion: "v1.0.0",
+		Client:         trustingClient(t),
+		DestDir:        dest,
+		WorkDir:        t.TempDir(),
+	})
+	if err == nil {
+		t.Fatalf("release missing %s must be refused before installation", missing)
+	}
+	if res.Installed {
+		t.Fatal("malformed STT release reported Installed=true")
+	}
+	for _, name := range BinaryNames {
+		got, readErr := os.ReadFile(filepath.Join(dest, name))
+		if readErr != nil || string(got) != "OLD-"+name {
+			t.Fatalf("%s changed before STT bundle validation: body=%q err=%v", name, got, readErr)
+		}
+	}
+	if got, readErr := os.ReadFile(filepath.Join(oldBundle, "stt-handler.py")); readErr != nil || string(got) != "old-handler" {
+		t.Fatalf("old STT bundle changed before complete runtime validation: body=%q err=%v", got, readErr)
+	}
+}
+
+func TestUpdate_UnstageableBinaryLeavesOldBundleAndBinariesUntouched(t *testing.T) {
+	updateTestServerEmptyBinary(t, "v9.9.9", "c3-broker")
+	dest := t.TempDir()
+	seedOldBinaries(t, dest)
+	oldBundle := writeSTTBundle(t, dest, "old")
+
+	res, err := Update(context.Background(), Options{
+		CurrentVersion: "v1.0.0",
+		Client:         trustingClient(t),
+		DestDir:        dest,
+		WorkDir:        t.TempDir(),
+	})
+	if err == nil {
+		t.Fatal("release with an empty binary must fail before any installed component changes")
+	}
+	if res.Installed {
+		t.Fatal("release with an unstageable binary reported Installed=true")
+	}
+	for _, name := range BinaryNames {
+		got, readErr := os.ReadFile(filepath.Join(dest, name))
+		if readErr != nil || string(got) != "OLD-"+name {
+			t.Fatalf("%s changed before every binary was staged: body=%q err=%v", name, got, readErr)
+		}
+	}
+	if got, readErr := os.ReadFile(filepath.Join(oldBundle, "stt-handler.py")); readErr != nil || string(got) != "old-handler" {
+		t.Fatalf("old STT bundle changed before every binary was staged: body=%q err=%v", got, readErr)
 	}
 }
 

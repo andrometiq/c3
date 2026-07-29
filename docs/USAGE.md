@@ -269,11 +269,14 @@ has no release identity to compare against.)
 **Manual update (one command).** Run `/c3:update` in Claude Code, or `c3-broker
 update` from any shell. It queries the latest release, downloads the tarball for
 your platform, verifies it against the release's `SHA256SUMS`, and validates all
-nine shipped binaries. It replaces the eight core binaries in place and
-refreshes `codex` only if that destination is already a verified C3 launcher;
-an absent or unrelated `codex` is never created or overwritten. Nothing is
-replaced before the whole download is verified and staged. A rare rename
-failure during replacement is reported without claiming every sibling stayed
+nine shipped binaries plus the complete, non-empty STT handler, runner,
+vocabulary, and provider layout. It replaces the eight core binaries and
+bundled STT runtime in place, and refreshes `codex` only if that destination is
+already a verified C3 launcher; an absent or unrelated `codex` is never created
+or overwritten. Nothing is replaced before the whole download and runtime
+layout are verified and every binary is staged on its destination filesystem;
+each installed component then uses an atomic rename. A rare rename failure
+during replacement is reported without claiming every sibling stayed
 untouched. `c3-broker update --check` reports current-vs-latest without
 installing.
 
@@ -299,9 +302,9 @@ binary), the new broker comes up on its own and sessions reattach — no manual
 step. Under **systemd** (`Restart=always`, see `docs/systemd/`) the unit restarts
 it; without systemd the next adapter reconnect spawns it.
 
-C3 only updates its own **binaries**. The plugin files (these slash commands,
-hooks) update through Claude Code's marketplace — run `/plugin` and update the c3
-marketplace when it offers a newer version.
+C3 updates its own **binaries and bundled STT runtime**. The other plugin files
+(slash commands and hooks) update through Claude Code's marketplace — run
+`/plugin` and update the c3 marketplace when it offers a newer version.
 
 Security notes: downloads are HTTPS-only and checksum-verification is mandatory;
 C3 never downgrades and never installs a prerelease automatically. There is no

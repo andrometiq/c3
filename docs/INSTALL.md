@@ -52,10 +52,10 @@ You need:
   6. **Promote the bot to admin** with these rights checked: **Manage Topics**, **Send Messages**, **Delete Messages**, **Pin Messages**. Everything else off.
 - **Your phone (or any Telegram client)** for pairing. Setup discovers your user id and the group's chat id automatically: you send a short code to the bot in DM, and another in the group. No id hunting.
 - **For Codex integration:** Codex CLI installed (typically via `npm install -g @openai/codex` or similar). The C3 launcher will detect it. NVM users: take note — long-running shells hash `codex` to your NVM path, so the install step below symlinks both `~/.local/bin/codex` and the NVM bin path.
-- **For voice transcription (STT plugin):** the shipped first-class STT plugin runs a chained pipeline. **Sarvam Saaras v3 is the working default** — set `SARVAM_API_KEY` and voice notes transcribe out of the box. **Gemini 3 Flash** (via OpenRouter) is an optional first-in-chain provider you can add with your own `OPENROUTER_API_KEY`; the chain tries it first and falls back to Sarvam. The plugin lives at `plugins/c3/stt/`; the broker subprocesses `python3` to run it. You need:
+- **For voice transcription (STT plugin):** the shipped first-class STT plugin runs a four-provider chain: Gemini 3 Flash (OpenRouter) → Soniox Async v5 → ElevenLabs Scribe v2 → Sarvam Saaras v3. Providers without a configured key skip immediately; the first non-empty transcript wins, and `C3_STT_CHAIN` overrides the order. The plugin lives at `plugins/c3/stt/`; the broker subprocesses `python3` to run it. You need:
   - `python3` on PATH (3.11+ recommended).
-  - API keys in `~/.claude/stt.env` — `SARVAM_API_KEY` for the Sarvam default, and optionally `OPENROUTER_API_KEY` for Gemini. Setting only one key works; the other provider is skipped.
-  - No model downloads — both providers are remote APIs.
+  - An API key for at least one provider in the location that provider documents; `~/.claude/stt.env` is loaded by the shipped handler. Setting only one key works; the other providers are skipped.
+  - No model downloads — the four bundled providers are remote APIs.
 
   If you don't need voice, set `mappings.json:plugins.stt.enabled=false` and skip the API keys. You can swap in a custom handler (whisper, local, anything that matches the argv contract) by setting `plugins.stt.handler_path` to your own script — see `docs/PLUGINS.md`.
 
@@ -99,7 +99,8 @@ C3 ships nine Go binaries:
 - `migrate-legacy` — one-shot migrator from a legacy Python-prototype config layout (only relevant if you have such a config)
 
 **Prebuilt (recommended).** Download the release tarball for your platform,
-verify it, and install the binaries into a directory on your `PATH`. There is
+verify it, and install the binaries plus their `plugins/c3/stt` runtime bundle
+into a directory on your `PATH`. There is
 **no version to edit** — `releases/latest/download/` always resolves to the
 newest published release:
 
@@ -121,14 +122,17 @@ curl -fsSL -O "$base/${pkg}.tar.gz"
 grep " ${pkg}.tar.gz$" SHA256SUMS > SHA256SUMS.this
 sha256sum -c SHA256SUMS.this || shasum -a 256 -c SHA256SUMS.this
 
-# The tarball unpacks into a ${pkg}/ directory — install the core binaries and
-# stage the optional Codex launcher off PATH for Step 5.
+# The tarball unpacks into a ${pkg}/ directory — install the core binaries,
+# their runtime STT bundle, and stage the optional Codex launcher off PATH for
+# Step 5. Do not copy only the binaries: Desktop, Grok, Antigravity, and
+# systemd do not receive Claude Code's plugin-root environment.
 tar xzf "${pkg}.tar.gz"
-mkdir -p ~/.local/bin ~/.local/libexec/c3
+mkdir -p ~/.local/bin/plugins/c3/stt ~/.local/libexec/c3
 for b in c3-broker c3-claude-adapter c3-codex-adapter c3-grok-adapter \
          c3-agy-adapter c3-desktop-adapter claude-shim migrate-legacy; do
   install -m 0755 "${pkg}/${b}" ~/.local/bin/
 done
+cp -R "${pkg}/plugins/c3/stt/." ~/.local/bin/plugins/c3/stt/
 install -m 0755 "${pkg}/codex" ~/.local/libexec/c3/codex
 ```
 
@@ -336,6 +340,8 @@ dev-channels flag / `claude-shim` (Step 4.5) — and instead register the adapte
 with Claude Desktop:
 
 ```bash
+# Quit any running C3 broker/CLI session first; the installer refuses to race
+# live mappings.json route/session writes.
 c3-broker install-desktop
 ```
 
@@ -357,10 +363,12 @@ that polls on a timer. Full walkthrough, the MSIX config trap, and caveats:
 Windows is **beta for v0.1.0**. The known Windows bugs are fixed, but apply
 these deltas instead of the Linux-only steps above:
 
-- **Binaries — prebuilt tarball or source.** The release publishes
+- **Binaries + STT runtime — prebuilt tarball or source.** The release publishes
   `c3_<version>_windows_amd64.tar.gz` and `..._windows_arm64.tar.gz`, whose
   binaries carry the `.exe` suffix; they are cross-compiled and have not had a
-  clean-room CI pass. To build instead, install **Go ≥1.25** (the portable zip
+  clean-room CI pass. Keep the archive's `plugins\c3\stt` directory beside the
+  installed `.exe` files; copying only the executables leaves voice
+  transcription with no handler. To build instead, install **Go ≥1.25** (the portable zip
   needs no admin), clone the repo into a durable dir, and run the eight core
   package installs used by `/c3:build`.
 - **PATH — edit the *User* PATH; there is no shell rc.** Easiest is the GUI:

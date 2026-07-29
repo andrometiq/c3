@@ -68,8 +68,8 @@ func CheckOnly(ctx context.Context, current string, client *http.Client) (*Resul
 // (Installed=false, error=nil) when the current build is dev, when the latest
 // release is not strictly newer, or when the latest is a prerelease/draft. On a
 // real update it downloads the platform tarball + SHA256SUMS, verifies the
-// checksum BEFORE touching anything, validates all nine shipped binaries, then
-// replaces the eight core binaries in place. The optional cmd/codex launcher is
+// checksum BEFORE touching anything, validates all nine shipped binaries plus
+// the STT bundle, then replaces the eight core binaries in place. The optional cmd/codex launcher is
 // replaced only when the existing destination is positively identified as C3's
 // launcher; an absent or unrelated `codex` is never created or overwritten.
 // Windows is refused before network or file work because
@@ -169,6 +169,10 @@ func updateForOS(ctx context.Context, opts Options, goos string) (*Result, error
 		}
 		srcPaths[fname] = p
 	}
+	bundlePath := filepath.Join(pkgDir, sttBundleRelativePath)
+	if err := validateSTTBundle(bundlePath); err != nil {
+		return res, fmt.Errorf("release tarball has invalid STT bundle: %w", err)
+	}
 
 	// Resolve the install target and swap.
 	dest := opts.DestDir
@@ -182,7 +186,15 @@ func updateForOS(ctx context.Context, opts Options, goos string) (*Result, error
 	if !codexlauncher.IsC3(filepath.Join(dest, codexName)) {
 		delete(srcPaths, codexName)
 	}
-	if err := InstallBinaries(dest, srcPaths); err != nil {
+	stagedBinaries, err := stageBinaries(dest, srcPaths)
+	if err != nil {
+		return res, err
+	}
+	defer cleanupStagedBinaries(stagedBinaries)
+	if err := InstallSTTBundle(dest, bundlePath); err != nil {
+		return res, err
+	}
+	if err := installStagedBinaries(stagedBinaries); err != nil {
 		return res, err
 	}
 	res.Installed = true

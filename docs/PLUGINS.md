@@ -180,7 +180,7 @@ There is no mock host shipped with the module. Write a small `fakeHost` implemen
 Two pieces ship together:
 
 - **Go shim** at `internal/plugin/builtins/stt/` — compiled into the broker, subscribes to `OnVoiceReceived`, reads `plugins.stt.{enabled, handler_path, timeout_seconds, python, audio_retention}` from `mappings.json`, and subprocesses a Python handler per voice message.
-- **Python pipeline** at `plugins/c3/stt/` — `stt-handler.py` plus `stt-pkg/`, which holds the chained provider runner (`stt-pkg/stt.py`) and three bundled providers (`gemini-3-flash-openrouter`, `sarvam-saaras-v3`, `elevenlabs-scribe-v2`). Default chain: Gemini first, Sarvam fallback; ElevenLabs is bundled and opt-in. `stt-pkg/vocabulary.txt` biases recognition toward domain terms. API keys are read from the provider modules' own env/file lookups.
+- **Python pipeline** at `plugins/c3/stt/` — `stt-handler.py` plus `stt-pkg/`, which holds the chained provider runner (`stt-pkg/stt.py`) and four bundled providers (`gemini-3-flash-openrouter`, `soniox-stt-async-v5`, `elevenlabs-scribe-v2`, `sarvam-saaras-v3`). The default chain tries those four in that order, skipping any provider whose key is unavailable; `C3_STT_CHAIN` overrides the order. `stt-pkg/vocabulary.txt` biases recognition toward domain terms. API keys are read from the provider modules' own env/file lookups.
 
 ### The handler contract
 
@@ -197,7 +197,9 @@ env:             C3_TELEGRAM_API_URL=<base url>   (only when a proxy base is con
 
 Two more things a handler must tolerate: `C3_TELEGRAM_API_URL` should be honoured for `getFile` and the audio download, because direct `api.telegram.org` is blocked on some networks and ignoring it will simply time out; and on the deadline the shim SIGKILLs the handler's **entire process group**, so any grandchildren it spawned die with it.
 
-The handler path resolves in exactly this order: `mappings.json:plugins.stt.handler_path` if set, else `${CLAUDE_PLUGIN_ROOT}/stt/stt-handler.py` (the bundled pipeline, when the broker is launched by Claude Code), else empty. Existence is re-checked per call, so restoring a missing handler takes effect on the next voice message with no restart.
+The handler path resolves in exactly this order: `mappings.json:plugins.stt.handler_path` if set; `${CLAUDE_PLUGIN_ROOT}/stt/stt-handler.py`; `$C3_SRC_DIR/plugins/c3/stt/stt-handler.py`; `plugins/c3/stt/stt-handler.py` beside the resolved broker executable; the documented `~/.local/share/c3` checkout; then `~/src/c3`. Every automatic candidate must exist. `install-desktop` records the resolved path so Desktop and other non-plugin hosts remain independent of cwd; a missing bundle is an install error, not a silent `handler_missing`.
+
+Self-update replaces the shipped handler/runner/provider set but preserves regular non-bundled `*.py` files in the installed provider directory. Those files are the documented drop-in extension seam, not disposable release debris.
 
 ### Failure surfacing
 
@@ -277,12 +279,19 @@ python3 plugins/c3/stt/stt-pkg/stt.py /path/to/audio.ogg --chain my-engine
 
 ### Getting your provider into the live chain
 
-Dropping the file in is necessary but not sufficient. `stt.py` takes the chain from its `--chain` argument, whose default is `gemini-3-flash-openrouter,sarvam-saaras-v3`, and the **bundled `stt-handler.py` invokes `stt.py` without passing `--chain`** — so the default is what runs in production. There is no config key and no environment variable for the chain in v0.1.0. Two ways to change it:
+Dropping the file in is necessary but not sufficient. `stt.py` resolves the
+chain from `--chain`, then `C3_STT_CHAIN`, then the shipped four-provider
+default. The bundled handler does not pass `--chain`, so set `C3_STT_CHAIN` in
+the broker environment (or in `~/.claude/stt.env`, which the handler loads) to
+include your provider without editing shipped code:
 
-1. Edit the `--chain` default in your copy of `stt-pkg/stt.py`.
-2. Point `mappings.json:plugins.stt.handler_path` at your own handler script that calls `stt.py` with the `--chain` you want. This is the fork-free route, and it keeps upstream `stt.py` untouched.
+```bash
+C3_STT_CHAIN=my-engine,gemini-3-flash-openrouter,sarvam-saaras-v3
+```
 
-Making the chain configurable from `mappings.json` is a known gap and roadmap work.
+An explicit `--chain` still wins for standalone runs. Interactive setup may
+rewrite `~/.claude/stt.env`; re-add a hand-written `C3_STT_CHAIN` line afterward
+or provide it through the service/process environment.
 
 Full provider how-to, including the bundled providers as reference adaptations: [`plugins/c3/stt/stt-pkg/README.md`](../plugins/c3/stt/stt-pkg/README.md).
 

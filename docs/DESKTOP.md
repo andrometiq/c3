@@ -23,7 +23,7 @@ Both the broker and the adapter run **locally on the Windows box** — a self-co
 
 Get the binaries either way:
 
-- **Cross-compile** from a dev machine: `make build` builds every binary; `PLATFORMS` now includes `windows/amd64` and `windows/arm64`, so `make dist` produces a Windows release tarball containing `c3-desktop-adapter.exe`.
+- **Cross-compile** from a dev machine: `make build` builds every binary; `PLATFORMS` now includes `windows/amd64` and `windows/arm64`, so `make dist` produces a Windows release tarball containing `c3-desktop-adapter.exe` and the runtime `plugins\c3\stt` bundle. Keep that bundle beside the installed executables.
 - **Build on the box:** with Go installed on Windows, `go install ./cmd/c3-broker ./cmd/c3-desktop-adapter`.
 
 You also need a configured `~/.config/c3/mappings.json` (bot token, allowlist). Run `c3-broker setup` on the box, or copy over an existing config — but read the **Telegram single-consumer** caveat below before pointing it at a token another machine already polls.
@@ -31,6 +31,10 @@ You also need a configured `~/.config/c3/mappings.json` (bot token, allowlist). 
 ## Install
 
 ### Option A — the installer (recommended)
+
+Quit any running C3 broker/CLI session first. The installer takes the broker's
+singleton lock while it updates `mappings.json`, so a live broker cannot save a
+route/session change over the handler path it just recorded.
 
 ```
 c3-broker install-desktop
@@ -46,7 +50,7 @@ It writes/merges Claude Desktop's config at the per-OS default:
 
 (The official Claude Desktop **Linux beta** landed 2026-06 — Debian/Ubuntu via Anthropic's apt repo, Arch via the `claude-desktop` / `claude-desktop-bin` AUR packages that repackage it. All read the XDG path above.) It **merges** — every other MCP server and every other key in the file is preserved; only the `mcpServers.c3` entry is added/updated. If the file is present but not valid JSON, it refuses to touch it and tells you to fix or remove it.
 
-It resolves `c3-desktop-adapter.exe` on `PATH` and writes its **absolute** path (Claude Desktop requires an absolute command path). If the binary isn't on `PATH` yet, it writes the bare name and warns you to edit it once you've built it. Re-running the installer **replaces the `c3` entry** (any `args`/`env` you hand-added to it are overwritten); every other server is untouched.
+It resolves `c3-desktop-adapter.exe` on `PATH` and writes its **absolute** path (Claude Desktop requires an absolute command path). If the binary isn't on `PATH` yet, it writes the bare name and warns you to edit it once you've built it. It also records the discovered STT handler in `mappings.json`, preserving an explicit `plugins.stt.handler_path`; if neither a release bundle nor a source checkout can be found, it fails loudly instead of installing a voice-dead configuration. An explicit `plugins.stt.enabled=false` needs no handler and is preserved. Re-running the installer **replaces the `c3` entry** (any `args`/`env` you hand-added to it are overwritten); every other server is untouched.
 
 `--config <path>` (or `--path <path>`) overrides the target file on any OS — useful to stage a config on Linux, or to target an MSIX install path (below).
 

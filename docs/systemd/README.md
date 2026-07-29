@@ -25,16 +25,17 @@ loginctl enable-linger "$USER"
 
 Verify: `systemctl --user status c3-broker` and `c3-broker status`.
 
-## IMPORTANT: STT (voice notes) needs `plugins.stt.handler_path` under systemd
+## STT (voice notes) under systemd
 
-A broker spawned by an adapter inherits `$CLAUDE_PLUGIN_ROOT` (set by Claude
-Code), which is how it locates the STT handler. A **systemd-supervised broker has
-no `$CLAUDE_PLUGIN_ROOT`**, so unless you tell it where the handler is, voice
-transcription silently turns off (broker.log shows `stt: handler ... missing`).
+A systemd-supervised broker has no `$CLAUDE_PLUGIN_ROOT`. Current C3 releases
+also resolve the handler beside the broker executable, under the documented
+`~/.local/share/c3` or `~/src/c3` checkout, or through `C3_SRC_DIR`. A prebuilt
+install must therefore keep the archive's `plugins/c3/stt` directory beside the
+binaries. `c3-broker install-desktop` records a resolved handler path for
+non-plugin hosts.
 
-Set the handler path explicitly in `~/.config/c3/mappings.json`, pointing at your
-**cloned repo** (the stable location from INSTALL step 2 — NOT the marketplace
-cache):
+You can still set the path explicitly in `~/.config/c3/mappings.json`, pointing
+at a stable checkout:
 
 ```json
 {
@@ -44,10 +45,9 @@ cache):
 }
 ```
 
-STT needs only system `python3` + ffmpeg (`ffprobe`); no Python packages, no
-venv. So only `handler_path` must be set. Then
-`systemctl --user restart c3-broker` and confirm `broker.log` shows
-`stt: registered with handler=...`.
+STT needs only system `python3` + ffmpeg (`ffprobe`); no Python packages or
+venv. Restart with `systemctl --user restart c3-broker` and confirm
+`broker.log` shows `stt: registered with handler=...`.
 
 ## How it coexists with adapter auto-spawn
 

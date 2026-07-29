@@ -9,6 +9,16 @@ import (
 	"testing"
 )
 
+var expectedSTTRuntimeAssets = []string{
+	"stt-handler.py",
+	filepath.Join("stt-pkg", "stt.py"),
+	filepath.Join("stt-pkg", "vocabulary.txt"),
+	filepath.Join("stt-pkg", "providers", "gemini-3-flash-openrouter.py"),
+	filepath.Join("stt-pkg", "providers", "soniox-stt-async-v5.py"),
+	filepath.Join("stt-pkg", "providers", "elevenlabs-scribe-v2.py"),
+	filepath.Join("stt-pkg", "providers", "sarvam-saaras-v3.py"),
+}
+
 // makeTarGz builds a gzip'd tarball at destPath containing entries (name→bytes)
 // laid out under a single top-level dir topDir/ — mirroring the release tarball
 // layout scripts/package.sh produces. Returns the raw tarball bytes too.
@@ -138,6 +148,92 @@ func TestInstallBinaries_MissingSource(t *testing.T) {
 	if got, _ := os.ReadFile(filepath.Join(dest, "c3-broker")); string(got) != "OLD" {
 		t.Errorf("original clobbered to %q on missing-source failure", got)
 	}
+}
+
+func TestInstallSTTBundle_InstallsVerifiedBundleWithoutFollowingDestinationSymlinks(t *testing.T) {
+	src := writeSTTBundle(t, t.TempDir(), "new")
+	dest := t.TempDir()
+	old := writeSTTBundle(t, dest, "old")
+	custom := filepath.Join(old, "stt-pkg", "providers", "my-custom-provider.py")
+	if err := os.WriteFile(custom, []byte("custom"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := InstallSTTBundle(dest, src); err != nil {
+		t.Fatalf("InstallSTTBundle: %v", err)
+	}
+	installed := filepath.Join(dest, sttBundleRelativePath, "stt-handler.py")
+	if got, err := os.ReadFile(installed); err != nil || string(got) != "new-handler" {
+		t.Fatalf("installed STT handler = %q, err=%v — updater copied binaries but omitted the release STT bundle", got, err)
+	}
+	if got, err := os.ReadFile(custom); err != nil || string(got) != "custom" {
+		t.Fatalf("atomic bundle replacement lost the documented custom-provider extension: body=%q err=%v", got, err)
+	}
+	provider := filepath.Join(dest, sttBundleRelativePath, "stt-pkg", "providers", "soniox-stt-async-v5.py")
+	if got, err := os.ReadFile(provider); err != nil || string(got) != "new-soniox-stt-async-v5.py" {
+		t.Fatalf("installed STT provider = %q, err=%v — bundle replacement did not install the runnable provider set", got, err)
+	}
+
+	outside := t.TempDir()
+	plugins := filepath.Join(dest, "plugins")
+	if err := os.RemoveAll(plugins); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, plugins); err != nil {
+		t.Fatal(err)
+	}
+	if err := InstallSTTBundle(dest, src); err == nil {
+		t.Fatal("symlinked bundle parent must be refused — updater must not write release files outside the binary directory")
+	}
+}
+
+func TestValidateSTTBundle_RequiresEveryRuntimeAsset(t *testing.T) {
+	for _, missing := range expectedSTTRuntimeAssets {
+		t.Run(filepath.ToSlash(missing), func(t *testing.T) {
+			src := writeSTTBundle(t, t.TempDir(), "complete")
+			if err := os.Remove(filepath.Join(src, missing)); err != nil {
+				t.Fatal(err)
+			}
+			if err := validateSTTBundle(src); err == nil {
+				t.Fatalf("bundle without %s passed validation — updater could install an STT chain that cannot run", missing)
+			}
+		})
+	}
+}
+
+func TestValidateSTTBundle_RejectsEmptyRuntimeAssets(t *testing.T) {
+	for _, empty := range expectedSTTRuntimeAssets {
+		t.Run(filepath.ToSlash(empty), func(t *testing.T) {
+			src := writeSTTBundle(t, t.TempDir(), "complete")
+			if err := os.WriteFile(filepath.Join(src, empty), nil, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := validateSTTBundle(src); err == nil {
+				t.Fatalf("bundle with empty %s passed validation — updater advertised a runnable STT runtime that cannot run", empty)
+			}
+		})
+	}
+}
+
+func writeSTTBundle(t *testing.T, root, label string) string {
+	t.Helper()
+	dir := filepath.Join(root, sttBundleRelativePath)
+	for _, name := range expectedSTTRuntimeAssets {
+		path := filepath.Join(dir, name)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		body := label + "-" + filepath.Base(name)
+		switch name {
+		case "stt-handler.py":
+			body = label + "-handler"
+		case filepath.Join("stt-pkg", "stt.py"):
+			body = label + "-runner"
+		}
+		if err := os.WriteFile(path, []byte(body), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return dir
 }
 
 func TestExtractTarGz(t *testing.T) {

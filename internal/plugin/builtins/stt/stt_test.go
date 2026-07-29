@@ -223,3 +223,79 @@ func TestRegister_DisabledInConfig_DoesNotRegister(t *testing.T) {
 		t.Error("disabled plugin should not register OnVoiceReceived")
 	}
 }
+
+func TestDefaultHandlerPath_StaleClaudePluginFallsBackToSourceTree(t *testing.T) {
+	src := t.TempDir()
+	handler := filepath.Join(src, sttHandlerRelativePath)
+	if err := os.MkdirAll(filepath.Dir(handler), 0o755); err != nil {
+		t.Fatalf("mkdir handler parent: %v", err)
+	}
+	if err := os.WriteFile(handler, []byte("# handler\n"), 0o644); err != nil {
+		t.Fatalf("write handler: %v", err)
+	}
+	t.Setenv("CLAUDE_PLUGIN_ROOT", t.TempDir()) // stale plugin install: no handler beneath it
+	t.Setenv("C3_SRC_DIR", src)
+
+	if got := defaultHandlerPath(); got != handler {
+		t.Fatalf("defaultHandlerPath() = %q, want source handler %q — stale Claude plugin root must not leave Desktop/systemd STT at handler_missing", got, handler)
+	}
+}
+
+func TestDefaultHandlerPath_PrefersPresentClaudePluginHandler(t *testing.T) {
+	pluginRoot := t.TempDir()
+	handler := filepath.Join(pluginRoot, "stt", "stt-handler.py")
+	if err := os.MkdirAll(filepath.Dir(handler), 0o755); err != nil {
+		t.Fatalf("mkdir handler parent: %v", err)
+	}
+	if err := os.WriteFile(handler, []byte("# handler\n"), 0o644); err != nil {
+		t.Fatalf("write handler: %v", err)
+	}
+	t.Setenv("CLAUDE_PLUGIN_ROOT", pluginRoot)
+	t.Setenv("C3_SRC_DIR", t.TempDir())
+
+	if got := defaultHandlerPath(); got != handler {
+		t.Fatalf("defaultHandlerPath() = %q, want Claude plugin handler %q — fallback must not replace a live Claude Code bundle", got, handler)
+	}
+}
+
+func TestDefaultHandlerPath_UsesBundleBesideReleaseBinary(t *testing.T) {
+	release := t.TempDir()
+	handler := filepath.Join(release, sttHandlerRelativePath)
+	if err := os.MkdirAll(filepath.Dir(handler), 0o755); err != nil {
+		t.Fatalf("mkdir bundled handler parent: %v", err)
+	}
+	if err := os.WriteFile(handler, []byte("# bundled handler\n"), 0o644); err != nil {
+		t.Fatalf("write bundled handler: %v", err)
+	}
+	t.Setenv("CLAUDE_PLUGIN_ROOT", "")
+	t.Setenv("C3_SRC_DIR", "")
+	t.Setenv("HOME", t.TempDir())
+	previous := sttExecutablePath
+	sttExecutablePath = func() (string, error) { return filepath.Join(release, "c3-broker"), nil }
+	t.Cleanup(func() { sttExecutablePath = previous })
+
+	if got := defaultHandlerPath(); got != handler {
+		t.Fatalf("defaultHandlerPath() = %q, want packaged handler %q — binary-only Desktop/Antigravity/Grok/systemd install lost its STT bundle", got, handler)
+	}
+}
+
+func TestDefaultHandlerPath_UsesDocumentedLocalMarketplaceCheckout(t *testing.T) {
+	home := t.TempDir()
+	handler := filepath.Join(home, ".local", "share", "c3", sttHandlerRelativePath)
+	if err := os.MkdirAll(filepath.Dir(handler), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(handler, []byte("# marketplace handler\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CLAUDE_PLUGIN_ROOT", "")
+	t.Setenv("C3_SRC_DIR", "")
+	t.Setenv("HOME", home)
+	previous := sttExecutablePath
+	sttExecutablePath = func() (string, error) { return filepath.Join(t.TempDir(), "c3-broker"), nil }
+	t.Cleanup(func() { sttExecutablePath = previous })
+
+	if got := defaultHandlerPath(); got != handler {
+		t.Fatalf("defaultHandlerPath() = %q, want documented local-marketplace handler %q", got, handler)
+	}
+}

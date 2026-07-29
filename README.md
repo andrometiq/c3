@@ -111,13 +111,13 @@ One, compiled into the broker: `stt`.
 |---|---|---|---|
 | `stt` | Transcribes Telegram voice notes into `[Transcribed voice]: …` | on | `python3`, an API key for at least one provider, and `ffmpeg` for the pre-send silence gate (optional) |
 
-It's a Go hook that shells out to a bundled Python chain. Three providers ship on disk
-(OpenRouter Gemini Flash, Sarvam Saaras, ElevenLabs Scribe); the path C3 actually invokes
-runs the first two in order and takes the first non-empty result, so the ElevenLabs provider
-is reachable only by running the Python entrypoint by hand. The handler is resolved through
-`$CLAUDE_PLUGIN_ROOT`, so on hosts that aren't Claude Code — Claude Desktop, Antigravity,
-Grok, a systemd unit — set `plugins.stt.handler_path` in your config or the plugin has
-nothing to run. Disable it with `plugins.stt.enabled = false`.
+It's a Go hook that shells out to a bundled Python chain. Four providers ship on disk and
+run in order until one returns a transcript: OpenRouter Gemini Flash, Soniox Async v5,
+ElevenLabs Scribe, then Sarvam Saaras. Providers without keys skip immediately;
+`C3_STT_CHAIN` overrides the order. The handler resolves through an explicit config path,
+Claude Code's plugin root, a source checkout, or the runtime bundle beside release
+binaries; `install-desktop` records the resolved path for non-plugin hosts. Disable it with
+`plugins.stt.enabled = false`.
 
 External or loadable plugins are not implemented: `plugins.<name>` in the config is a
 settings bag for built-ins, not a loader. See [`docs/PLUGINS.md`](docs/PLUGINS.md).

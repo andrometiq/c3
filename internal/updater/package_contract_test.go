@@ -90,6 +90,27 @@ func TestBinaryNamesMatchPackageScript(t *testing.T) {
 	}
 }
 
+func TestPackageScriptShipsSTTBundle(t *testing.T) {
+	src := packageScript(t)
+	for _, command := range []string{
+		`cp "$ROOT/plugins/c3/stt/stt-handler.py" "$DEST/plugins/c3/stt/"`,
+		`cp "$ROOT/plugins/c3/stt/stt-pkg/stt.py" "$ROOT/plugins/c3/stt/stt-pkg/vocabulary.txt" "$DEST/plugins/c3/stt/stt-pkg/"`,
+		`cp "$ROOT/plugins/c3/stt/stt-pkg/providers/"*.py "$DEST/plugins/c3/stt/stt-pkg/providers/"`,
+	} {
+		if !strings.Contains(src, command) {
+			t.Fatalf("scripts/package.sh does not ship %q — binary-only Desktop/Antigravity/Grok/systemd releases will resolve no handler", command)
+		}
+	}
+	for _, instruction := range []string{
+		"keep plugins/c3/stt beside the installed binaries",
+		"runtime asset, not source-only data",
+	} {
+		if !strings.Contains(src, instruction) {
+			t.Fatalf("release manifest does not tell binary installers to preserve the STT runtime: missing %q", instruction)
+		}
+	}
+}
+
 // TestTarballNameMatchesPackageScript pins the release-asset filename. The
 // updater downloads an asset by exact name; if package.sh's PKG pattern and
 // TarballNameFor ever disagree, every `c3-broker update` fails to find its

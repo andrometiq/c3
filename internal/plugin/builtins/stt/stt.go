@@ -81,8 +81,8 @@ type Health struct {
 	// applied. An absent key means true — matching Register.
 	Enabled bool
 	// HandlerPath is the configured plugins.stt.handler_path. Empty means the
-	// path is resolved from $CLAUDE_PLUGIN_ROOT in the BROKER's environment,
-	// which a separate status process cannot see.
+	// broker runs the automatic plugin/source/release-bundle resolution chain,
+	// whose process environment a separate status process cannot fully see.
 	HandlerPath string
 	// Detail is a one-line plain-language reading of the two fields above, or
 	// "" when there is nothing a reader needs to know.
@@ -94,10 +94,10 @@ type Health struct {
 // round-trip over defaults — so an absent or partial entry yields the same
 // answer the broker itself computed at startup.
 //
-// It deliberately does NOT stat the handler or read $CLAUDE_PLUGIN_ROOT. Both
-// belong to the broker's process, and `c3-broker status` is a different process
-// with a different environment: a status run from a plain shell would report
-// "no handler" for a broker that Claude Code started with the variable set.
+// It deliberately does NOT stat the handler or repeat automatic resolution.
+// The relevant environment and executable path belong to the broker process,
+// while `c3-broker status` is a different process: a status run from a plain
+// shell could otherwise report "no handler" for a healthy broker.
 // Replacing one wrong answer with another is not an improvement. The broker
 // logs the authoritative resolved path once at startup, so the honest thing for
 // status to do is say where the answer lives.
@@ -113,9 +113,8 @@ func Inspect(raw map[string]any) Health {
 	case !cfg.Enabled:
 		h.Detail = "off — plugins.stt.enabled=false; voice notes arrive untranscribed"
 	case cfg.HandlerPath == "":
-		h.Detail = "handler path not configured — resolved from $CLAUDE_PLUGIN_ROOT in the broker's environment. " +
-			"Hosts other than Claude Code (Desktop, Antigravity, Grok, a systemd unit) usually do not set it, " +
-			"and without it voice notes surface as [STT FAILED: handler_missing]. " +
+		h.Detail = "handler path not configured — the broker resolves Claude's plugin root, C3_SRC_DIR, " +
+			"the release bundle beside its executable, and documented source checkouts in order. " +
 			"broker.log records the resolved path at startup; set plugins.stt.handler_path to remove the ambiguity"
 	}
 	return h
@@ -551,22 +550,49 @@ func ensureSTTDefaultDirs(host plugin.Host) {
 	}
 }
 
-// defaultHandlerPath returns the path to the bundled handler shipped under
-// `plugins/c3/stt/stt-handler.py` inside the plugin install directory. The
-// plugin install root is conveyed via `$CLAUDE_PLUGIN_ROOT`, which Claude
-// Code sets when launching the c3 adapter; the adapter inherits the env
-// when it spawns the broker, so the broker sees the same root.
-//
-// Returns "" if `$CLAUDE_PLUGIN_ROOT` isn't set. Operators who run
-// `c3-broker` outside Claude Code (manual daemon, systemd unit, etc.)
-// must set `plugins.stt.handler_path` in `~/.config/c3/mappings.json`
-// explicitly — that's the only resolution rule, and the user-override
-// path always wins when set. There is intentionally no fallback to
-// pre-c3 legacy paths; behavior must be predictable from config + env.
+const sttHandlerRelativePath = "plugins/c3/stt/stt-handler.py"
+
+var sttExecutablePath = os.Executable
+
+// defaultHandlerPath finds the bundled handler when mappings.json did not
+// explicitly name one. Claude Code's plugin root is authoritative when it
+// contains the handler. Other hosts do not receive that environment, so source
+// installs fall back to C3_SRC_DIR, the bundle next to a release binary, the
+// documented local-marketplace checkout, and then ~/src/c3. install-desktop
+// records the resolved path in mappings.json, which is preferred by Register
+// and therefore remains stable for Desktop, Antigravity, Grok, and systemd
+// brokers regardless of their working directory.
 func defaultHandlerPath() string {
-	root := os.Getenv("CLAUDE_PLUGIN_ROOT")
-	if root == "" {
-		return ""
+	if root := strings.TrimSpace(os.Getenv("CLAUDE_PLUGIN_ROOT")); root != "" {
+		if path := existingHandlerPath(filepath.Join(root, "stt", "stt-handler.py")); path != "" {
+			return path
+		}
 	}
-	return filepath.Join(root, "stt", "stt-handler.py")
+	if root := strings.TrimSpace(os.Getenv("C3_SRC_DIR")); root != "" {
+		if path := existingHandlerPath(filepath.Join(root, sttHandlerRelativePath)); path != "" {
+			return path
+		}
+	}
+	if exe, err := sttExecutablePath(); err == nil {
+		if resolved, rerr := filepath.EvalSymlinks(exe); rerr == nil {
+			exe = resolved
+		}
+		if path := existingHandlerPath(filepath.Join(filepath.Dir(exe), sttHandlerRelativePath)); path != "" {
+			return path
+		}
+	}
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		if path := existingHandlerPath(filepath.Join(home, ".local", "share", "c3", sttHandlerRelativePath)); path != "" {
+			return path
+		}
+		return existingHandlerPath(filepath.Join(home, "src", "c3", sttHandlerRelativePath))
+	}
+	return ""
+}
+
+func existingHandlerPath(path string) string {
+	if info, err := os.Stat(path); err == nil && !info.IsDir() {
+		return path
+	}
+	return ""
 }
