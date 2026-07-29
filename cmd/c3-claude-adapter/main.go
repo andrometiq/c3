@@ -216,6 +216,17 @@ func setupAdapterLog() (string, error) {
 	return path, nil
 }
 
+type recoverNotice struct {
+	text  string
+	epoch uint64
+}
+
+type recoverOutcome struct {
+	attempted  bool
+	registered bool
+	recovered  bool
+}
+
 type adapter struct {
 	// notifyTx wraps the stdio transport to permit emitting custom
 	// `notifications/claude/channel` frames. Set in run() before Server.Run.
@@ -238,10 +249,13 @@ type adapter struct {
 	rtmu      sync.Mutex
 	rtPending map[string]chan ipc.RetranscribeResp
 
-	// recover-session is one-shot per session (a session resumes at most once),
-	// so a single buffered channel suffices instead of a pending map. Set by
-	// fireRecover before it writes RecoverSessionReq; resolved by
-	// dispatchRecoverSessionResult. Guarded by rsmu.
+	// recover-session permits one in-flight round-trip per adapter, so a single
+	// buffered channel suffices instead of a pending map. Set by fireRecover
+	// before it writes RecoverSessionReq; resolved by
+	// dispatchRecoverSessionResult. recoverMu serializes complete recovery
+	// attempts so rsPending's single slot can never be overwritten; rsmu guards
+	// dispatch access to that slot.
+	recoverMu sync.Mutex
 	rsmu      sync.Mutex
 	rsPending chan ipc.RecoverSessionResp
 
@@ -265,7 +279,7 @@ type adapter struct {
 	// nothing-was-sent paths, and it is set INSIDE fireRecover, one goroutine
 	// hop too late.
 	recoverStarted atomic.Bool
-	// identitySettled is closed once the first recovery attempt has FINISHED —
+	// identitySettled is closed once the current recovery epoch has FINISHED —
 	// recovered, registered, refused, failed, or timed out. It is the completion
 	// signal recoverFired was being misread as: recoverFired records ENTRY into
 	// fireRecover, and entry is not an answer. toolAttach waits on this so an
@@ -273,18 +287,21 @@ type adapter struct {
 	//
 	// Created lazily by identityGate (not in newAdapter) so an adapter built as a
 	// bare struct literal behaves identically to one from the constructor.
-	// One-shot for the process, exactly like the Codex adapter's: the FIRST
-	// attempt answers the identity question, and a later re-registration (a
-	// reconnect refire, or a retry after a send that never happened) improves the
-	// broker's records without re-opening a question that is already answered —
-	// re-arming it would let an attach block on a gate nobody is left to close.
-	idmu            sync.Mutex
-	identitySettled chan struct{}
-	settleOnce      sync.Once
+	// An in-app conversation switch reopens it with reopenIdentity; same-id
+	// reconnect registration does not.
+	idmu                sync.Mutex
+	identitySettled     chan struct{}
+	idEpoch             uint64
+	currentStableID     string
+	currentHandoffEntry sessionhandoff.Entry
 	// recoverRechecked makes the first-tools/call belt-and-suspenders recheck run
 	// at most once, so a non-resume session doesn't re-stat the handoff file on
 	// every subsequent tools/call.
 	recoverRechecked atomic.Bool
+	// switchWatchStarted guards the process-lifetime 5s watch to one goroutine,
+	// including the case where the first successful registration happens only
+	// after a broker reconnect.
+	switchWatchStarted atomic.Bool
 	// runCtx is the process-lifetime context (set in run() before the MCP server
 	// starts). The first-activity recheck fires its recover round-trip against
 	// this rather than the per-request context, which is cancelled when the
@@ -351,9 +368,11 @@ type adapter struct {
 	// tools/call however late (NO TTL): the live re-peek makes a stale stored
 	// count impossible, so the old 5-minute drop — a silent-loss-of-awareness
 	// bug on a resume idle >5min — is gone. The Telegram recover-welcome is the
-	// GUARANTEED signal; this is the best-effort CLI echo. Guarded by pnmu.
+	// GUARANTEED signal; this is the best-effort CLI echo. Each notice is stamped
+	// with idEpoch so an old conversation's banner cannot cross a switch.
+	// Guarded by pnmu.
 	pnmu                 sync.Mutex
-	pendingRecoverNotice string
+	pendingRecoverNotice recoverNotice
 }
 
 func newAdapter() *adapter {
@@ -739,9 +758,30 @@ func (a *adapter) refireRecoverOnReconnect(ctx context.Context) {
 	if !ok {
 		return // not a resumed/hook session — nothing to re-register.
 	}
-	a.recoverFired.Store(false)
-	a.recoverStarted.Store(true)
-	go a.fireRecover(ctx, e)
+	go func() {
+		if current, settled := a.currentStableIdentity(); settled && current.StableSessionID != e.StableSessionID {
+			a.beginIdentitySwitch(ctx, current.StableSessionID, e)
+			return
+		}
+
+		a.recoverMu.Lock()
+		current, settled := a.currentStableIdentity()
+		if settled && current.StableSessionID != e.StableSessionID {
+			a.recoverMu.Unlock()
+			a.beginIdentitySwitch(ctx, current.StableSessionID, e)
+			return
+		}
+		a.recoverFired.Store(false)
+		a.recoverStarted.Store(true)
+		outcome := a.fireRecoverLocked(ctx, e)
+		if outcome.attempted {
+			a.markIdentitySettled()
+		}
+		a.recoverMu.Unlock()
+		if outcome.registered {
+			a.startIdentitySwitchWatch(ctx)
+		}
+	}()
 }
 
 // wakePendingWithErr resolves every pending entry with an error.
@@ -1316,6 +1356,11 @@ func (a *adapter) buildMCPServer() *mcp.Server {
 			// Flush the deferred auto-attach-on-resume CLI notice here; it
 			// self-clears so this only emits once.
 			if method == "tools/call" {
+				// Detect an in-app conversation switch before consulting the
+				// identity gate: detection reopens the gate, so this same call
+				// waits for the new identity rather than passing the old,
+				// already-settled epoch.
+				a.checkForIdentitySwitch(ctx)
 				a.flushPendingRecoverNotice()
 				// Belt-and-suspenders for BUG #1: if the background watch hasn't
 				// yet fired the recover (the handoff landed between watch polls as
@@ -1590,6 +1635,7 @@ func (a *adapter) toolAttach(ctx context.Context, req *mcp.CallToolRequest) (*mc
 	// no-op entirely when no recovery was ever started. The first-tools/call
 	// recheck covers the first call whatever it is; this covers every LATER
 	// attach, which that once-only recheck does not.
+	a.checkForIdentitySwitch(ctx)
 	a.awaitIdentitySettled(ctx)
 	args, err := decodeArgs(req.Params.Arguments)
 	if err != nil {
@@ -1985,7 +2031,10 @@ var recoverSettleBudget = recoverRespTimeout + 2*time.Second
 // tests can shorten/lengthen it.
 var livePeekTimeout = 2 * time.Second
 
-const terminalHandoffDepthCap = 16
+const (
+	terminalHandoffDepthCap     = 16
+	identitySwitchWatchInterval = 5 * time.Second
+)
 
 // resolveTerminalHandoff follows the SessionStart-hook handoff chain from inst
 // to the newest provably-later conversation identity. A stable session id can
@@ -2019,6 +2068,133 @@ func resolveTerminalHandoff(inst string) (sessionhandoff.Entry, bool) {
 	}
 }
 
+// currentStableIdentity returns the handoff entry whose stable id the broker
+// most recently registered successfully. It stays on the previous identity
+// while a switch round-trip is in flight.
+func (a *adapter) currentStableIdentity() (sessionhandoff.Entry, bool) {
+	a.idmu.Lock()
+	defer a.idmu.Unlock()
+	if a.currentStableID == "" {
+		return sessionhandoff.Entry{}, false
+	}
+	entry := a.currentHandoffEntry
+	entry.StableSessionID = a.currentStableID
+	return entry, true
+}
+
+// setCurrentStableIdentity completes an identity transition after the broker
+// has registered the RecoverSessionReq. Callers invoke it only on an error-free
+// RecoverSessionResp, whether or not a route was recovered.
+func (a *adapter) setCurrentStableIdentity(entry sessionhandoff.Entry) {
+	a.idmu.Lock()
+	a.currentStableID = entry.StableSessionID
+	a.currentHandoffEntry = entry
+	a.idmu.Unlock()
+}
+
+// checkForIdentitySwitch performs the cheap per-tools-call probe: exactly one
+// stat of <currentStableID>.json. Only a hit is read, required to be newer than
+// the entry that established the settled identity, and chain-walked to its
+// terminal handoff.
+func (a *adapter) checkForIdentitySwitch(ctx context.Context) {
+	current, settled := a.currentStableIdentity()
+	if !settled {
+		return
+	}
+	path, err := sessionhandoff.Path(current.StableSessionID)
+	if err != nil {
+		return
+	}
+	if _, err := os.Stat(path); err != nil {
+		return
+	}
+	first, ok := sessionhandoff.Read(current.StableSessionID)
+	if !ok || first.UnixNano <= current.UnixNano {
+		return
+	}
+	terminal, ok := resolveTerminalHandoff(current.StableSessionID)
+	if !ok || terminal.StableSessionID == current.StableSessionID {
+		return
+	}
+	a.beginIdentitySwitch(ctx, current.StableSessionID, terminal)
+}
+
+// watchForIdentitySwitch keeps the post-recovery handoff watch alive for the
+// process lifetime. The no-switch cost is one absent-file stat every tick.
+func (a *adapter) watchForIdentitySwitch(ctx context.Context, interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			a.checkForIdentitySwitch(ctx)
+		}
+	}
+}
+
+func (a *adapter) startIdentitySwitchWatch(ctx context.Context) {
+	if a.switchWatchStarted.CompareAndSwap(false, true) {
+		go a.watchForIdentitySwitch(ctx, identitySwitchWatchInterval)
+	}
+}
+
+// clearConversationStateForSwitch drops every adapter-side fact belonging to
+// the previous conversation and returns its topic name for the corrective
+// unattached notice.
+func (a *adapter) clearConversationStateForSwitch() string {
+	a.amu.Lock()
+	defer a.amu.Unlock()
+	oldTopic := a.attachedTopic
+	a.lastAttach = nil
+	a.attachedTopic = ""
+	return oldTopic
+}
+
+// beginIdentitySwitch waits for the old identity epoch, then synchronously
+// establishes the new open epoch before returning. The broker round-trip runs
+// in a goroutine so the caller can immediately wait on that fresh gate. The
+// ready handshake is load-bearing: a tools/call must never observe the old,
+// already-closed gate after switch detection returns.
+func (a *adapter) beginIdentitySwitch(ctx context.Context, expectedCurrent string, terminal sessionhandoff.Entry) {
+	a.awaitIdentitySettled(ctx)
+	fireCtx := a.runCtx
+	if fireCtx == nil {
+		fireCtx = ctx
+	}
+	ready := make(chan struct{})
+	go func() {
+		a.recoverMu.Lock()
+		defer a.recoverMu.Unlock()
+
+		current, settled := a.currentStableIdentity()
+		if !settled || current.StableSessionID != expectedCurrent || current.StableSessionID == terminal.StableSessionID {
+			close(ready)
+			return
+		}
+
+		a.reopenIdentity()
+		oldTopic := a.clearConversationStateForSwitch()
+		a.dropPendingRecoverNoticeOnEpochChange()
+		a.recoverFired.Store(false)
+		a.recoverStarted.Store(true)
+		close(ready)
+
+		outcome := a.fireRecoverLocked(fireCtx, terminal)
+		if outcome.registered && !outcome.recovered {
+			a.setPendingRecoverNotice(fmt.Sprintf(
+				"session switched conversations — released topic %q (it belonged to the previous conversation); this conversation is not attached. Use attach to claim a topic.",
+				oldTopic,
+			))
+		}
+		if outcome.attempted {
+			a.markIdentitySettled()
+		}
+	}()
+	<-ready
+}
+
 // recoverSessionOnResume runs in a goroutine after hello. It WATCHES (in the
 // background, for recoverWatchBudget) for this adapter's SessionStart-hook
 // handoff (keyed on the ephemeral instance id), and the instant it appears asks
@@ -2041,7 +2217,10 @@ func (a *adapter) recoverSessionOnResume(ctx context.Context) {
 	// Mark the identity question OPEN before firing, so an attach arriving in the
 	// same instant waits for the answer instead of racing it.
 	a.recoverStarted.Store(true)
-	a.fireRecover(ctx, entry)
+	outcome := a.fireRecover(ctx, entry)
+	if outcome.registered {
+		a.startIdentitySwitchWatch(ctx)
+	}
 }
 
 // watchForHandoff polls for the handoff entry for inst every interval, up to
@@ -2073,18 +2252,34 @@ func (a *adapter) watchForHandoff(ctx context.Context, inst string, interval, bu
 	}
 }
 
-// fireRecover sends RecoverSessionReq to the broker EXACTLY ONCE per session
-// (guarded by recoverFired) and handles the response. Both the background watch
+// fireRecover serializes and sends a RecoverSessionReq EXACTLY ONCE per
+// connection/identity epoch (guarded by recoverFired) and handles the response.
+// Both the background watch
 // and the first-tools/call belt-and-suspenders recheck call it; the
 // CompareAndSwap ensures the broker never sees a duplicate recover for the same
 // session. On a Recovered response it remembers the attach (for reconnect replay)
 // and defers a CLI notice surfacing the held backlog. A late recover cannot
 // steal: the broker takes the record-only branch if the stub has since attached,
 // and skips a route held by another live session.
-func (a *adapter) fireRecover(ctx context.Context, entry sessionhandoff.Entry) {
-	if !a.recoverFired.CompareAndSwap(false, true) {
-		return // already fired (watch + first-activity recheck race) — idempotent.
+func (a *adapter) fireRecover(ctx context.Context, entry sessionhandoff.Entry) recoverOutcome {
+	a.recoverMu.Lock()
+	defer a.recoverMu.Unlock()
+	outcome := a.fireRecoverLocked(ctx, entry)
+	if outcome.attempted {
+		a.markIdentitySettled()
 	}
+	return outcome
+}
+
+// fireRecoverLocked owns rsPending for one complete broker round-trip. Caller
+// holds recoverMu and settles the current epoch after any switch-specific state
+// (notably the corrective unattached notice) has been finalized.
+func (a *adapter) fireRecoverLocked(ctx context.Context, entry sessionhandoff.Entry) recoverOutcome {
+	var outcome recoverOutcome
+	if !a.recoverFired.CompareAndSwap(false, true) {
+		return outcome // already fired (watch + first-activity recheck race) — idempotent.
+	}
+	outcome.attempted = true
 	// The CAS winner OWNS the identity question, so it answers it on EVERY exit
 	// path below — recovered, registered, refused, write-failed, timed out. A
 	// session that could not be identified is a settled answer ("nobody"), not a
@@ -2092,7 +2287,6 @@ func (a *adapter) fireRecover(ctx context.Context, entry sessionhandoff.Entry) {
 	// worse failure than an unidentified one. (The CAS loser deliberately does
 	// NOT settle — the winner is still working, and letting the loser answer for
 	// it is the exact entry-read-as-completion mistake this guards against.)
-	defer a.markIdentitySettled()
 
 	respCh := make(chan ipc.RecoverSessionResp, 1)
 	a.rsmu.Lock()
@@ -2121,7 +2315,7 @@ func (a *adapter) fireRecover(ctx context.Context, entry sessionhandoff.Entry) {
 		// answered in this window anyway, and the reconnect path re-fires.
 		a.recoverFired.Store(false)
 		log.Printf("recover-session: no broker connection — nothing sent; releasing the once-per-connection guard so a later attempt can register this session")
-		return
+		return outcome
 	}
 	if err := conn.WriteJSON(ipc.RecoverSessionReq{
 		Op: ipc.OpRecoverSession, StableSessionID: entry.StableSessionID, CWD: entry.CWD,
@@ -2130,23 +2324,26 @@ func (a *adapter) fireRecover(ctx context.Context, entry sessionhandoff.Entry) {
 		// must not stay set on a recovery that did not happen.
 		a.recoverFired.Store(false)
 		log.Printf("recover-session: write failed: %v (nothing sent — guard released for a later attempt)", err)
-		return
+		return outcome
 	}
 
 	select {
 	case <-ctx.Done():
-		return
+		return outcome
 	case <-time.After(recoverRespTimeout):
 		log.Printf("recover-session: no response within %v", recoverRespTimeout)
-		return
+		return outcome
 	case resp := <-respCh:
 		if resp.Err != "" {
 			log.Printf("recover-session: broker err: %s", resp.Err)
-			return
+			return outcome
 		}
+		a.setCurrentStableIdentity(entry)
+		outcome.registered = true
 		if !resp.Recovered {
-			return // already attached, or nothing recoverable — stay quiet.
+			return outcome // already attached, or nothing recoverable — stay quiet.
 		}
+		outcome.recovered = true
 		// Remember the recovered attach so a later broker reconnect replays it.
 		// Address the topic by its stable id + group, NOT by {Name, Group}: for a
 		// DM recover resp.Name=="dm", and a replayed attach(name="dm") can silently
@@ -2166,6 +2363,7 @@ func (a *adapter) fireRecover(ctx context.Context, entry sessionhandoff.Entry) {
 			a.setPendingRecoverNotice(text)
 		}
 	}
+	return outcome
 }
 
 // recheckRecoverOnFirstActivity is the belt-and-suspenders half of BUG #1: on the
@@ -2199,7 +2397,11 @@ func (a *adapter) recheckRecoverOnFirstActivity(ctx context.Context) {
 		// before the goroutine so the wait cannot slip past a goroutine that has
 		// not been scheduled yet.
 		a.recoverStarted.Store(true)
-		go a.fireRecover(fireCtx, e)
+		go func() {
+			if outcome := a.fireRecover(fireCtx, e); outcome.registered {
+				a.startIdentitySwitchWatch(fireCtx)
+			}
+		}()
 	}
 	// BLOCK HERE, deliberately. This used to return straight into next() as soon
 	// as the recovery had been ENTERED, which raced the RecoverSessionReq against
@@ -2229,12 +2431,36 @@ func (a *adapter) identityGate() chan struct{} {
 	return a.identitySettled
 }
 
-// markIdentitySettled answers the identity question for this process. Idempotent
-// — the first recovery attempt to finish settles it, and later re-registrations
-// (reconnect refires) do not re-open it.
+// identityEpoch returns the epoch used to stamp deferred recovery notices.
+func (a *adapter) identityEpoch() uint64 {
+	a.idmu.Lock()
+	defer a.idmu.Unlock()
+	return a.idEpoch
+}
+
+// reopenIdentity starts a new unsettled epoch for an in-app conversation
+// switch. Same-id reconnect registrations deliberately do not call it.
+func (a *adapter) reopenIdentity() uint64 {
+	a.idmu.Lock()
+	defer a.idmu.Unlock()
+	a.idEpoch++
+	a.identitySettled = make(chan struct{})
+	return a.idEpoch
+}
+
+// markIdentitySettled answers the CURRENT identity epoch. Idempotent within the
+// epoch; a later switch swaps in a fresh channel before its recovery starts.
 func (a *adapter) markIdentitySettled() {
-	gate := a.identityGate()
-	a.settleOnce.Do(func() { close(gate) })
+	a.idmu.Lock()
+	defer a.idmu.Unlock()
+	if a.identitySettled == nil {
+		a.identitySettled = make(chan struct{})
+	}
+	select {
+	case <-a.identitySettled:
+	default:
+		close(a.identitySettled)
+	}
 }
 
 // awaitIdentitySettled blocks until this session's identity question has been
@@ -2473,28 +2699,41 @@ func (a *adapter) emitRecoverNotice(text string) {
 // fallback text) to be flushed on the first active turn (see the
 // adapter.pendingRecoverNotice doc).
 func (a *adapter) setPendingRecoverNotice(text string) {
+	epoch := a.identityEpoch()
 	a.pnmu.Lock()
-	a.pendingRecoverNotice = text
+	a.pendingRecoverNotice = recoverNotice{text: text, epoch: epoch}
 	a.pnmu.Unlock()
 }
 
 // takePendingRecoverNotice atomically clears and returns the pending notice when
 // one is set. Returns ("", false) when none is pending. Once-only: a second take
 // after a successful first returns ("", false), so the notice never re-emits.
-// NO staleness drop — the notice persists until the first tools/call however
-// late; the flush live re-peeks the count, so a stale stored count is
-// impossible (the removed pendingRecoverTTL was a silent-loss-of-awareness bug).
+// A notice persists however late within one identity epoch, but is dropped when
+// an in-app switch has reopened the gate: text about the old conversation must
+// never render into the new one.
 // Split out from flush so the once-only logic is unit-testable without a live
 // notify transport.
 func (a *adapter) takePendingRecoverNotice() (string, bool) {
 	a.pnmu.Lock()
-	defer a.pnmu.Unlock()
-	text := a.pendingRecoverNotice
-	a.pendingRecoverNotice = ""
-	if text == "" {
+	notice := a.pendingRecoverNotice
+	a.pendingRecoverNotice = recoverNotice{}
+	a.pnmu.Unlock()
+	if notice.text == "" {
 		return "", false
 	}
-	return text, true
+	currentEpoch := a.identityEpoch()
+	if notice.epoch != currentEpoch {
+		log.Printf("recover-session: dropped stale pending recover notice from identity epoch %d (current epoch %d)", notice.epoch, currentEpoch)
+		return "", false
+	}
+	return notice.text, true
+}
+
+// dropPendingRecoverNoticeOnEpochChange clears the previous conversation's
+// deferred banner immediately after reopenIdentity. takePendingRecoverNotice
+// performs and logs the epoch rejection.
+func (a *adapter) dropPendingRecoverNoticeOnEpochChange() {
+	_, _ = a.takePendingRecoverNotice()
 }
 
 // peekPendingCount does a NON-DESTRUCTIVE (Ack=false) fetch_queue round-trip to
@@ -2556,9 +2795,11 @@ func (a *adapter) flushPendingRecoverNotice() {
 		return
 	}
 	name := a.currentTopicName()
-	if n, ok := a.peekPendingCount(livePeekTimeout); ok && name != "" {
-		a.emitRecoverNotice(renderResumeReattachFrame(name, n))
-		return
+	if name != "" {
+		if n, ok := a.peekPendingCount(livePeekTimeout); ok {
+			a.emitRecoverNotice(renderResumeReattachFrame(name, n))
+			return
+		}
 	}
 	a.emitRecoverNotice(stored)
 }
