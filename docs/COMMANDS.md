@@ -125,8 +125,10 @@ Consequences worth stating:
   mapping can only *rank a suggestion*; it can never drain or bind a topic.
 - **`create` needs an explicit name.** A bare `attach(create=true)` errors —
   there is no basename synthesis. Pass the name: `attach(name="<name>", create=true)`.
-- **Non-Claude hosts (Codex) have no stable session id**, so step 2 never
-  fires for them — a bare Codex `attach` always lands on the picker.
+- **Codex resolves its stable thread id from the app-server and caches it for
+  reconnect recovery.** Once that identity is settled and a prior attachment
+  exists, step 2 can therefore silently reclaim Codex's own route just as it
+  does for Claude. A first-time Codex thread still lands on the picker.
 
 ## attach — proposal flow
 

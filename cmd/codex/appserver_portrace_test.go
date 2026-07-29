@@ -108,6 +108,37 @@ func TestEnsureAppServer_ChildDeathWithNoListenerIsNotARace(t *testing.T) {
 	}
 }
 
+func TestEnsureAppServer_ChildExitReapsItsHelperProcessGroup(t *testing.T) {
+	dir := t.TempDir()
+	helperPIDFile := filepath.Join(dir, "helper-pid")
+	fake := filepath.Join(dir, "codex")
+	script := fmt.Sprintf("#!/bin/sh\nsleep 30 &\necho $! > %q\nexit 1\n", helperPIDFile)
+	if err := os.WriteFile(fake, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	port := freePort(t)
+	err := ensureAppServer(fake, filepath.Join(dir, "adapter"),
+		fmt.Sprintf("ws://127.0.0.1:%d", port), dir, "some-topic")
+	if err == nil {
+		t.Fatal("child exit unexpectedly reported success")
+	}
+	data, err := os.ReadFile(helperPIDFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	helperPID, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for syscall.Kill(helperPID, 0) == nil && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if err := syscall.Kill(helperPID, 0); err != syscall.ESRCH {
+		t.Fatalf("defect: app-server parent exited but helper pid %d survived its process-group cleanup: %v", helperPID, err)
+	}
+}
+
 // TestStartAppServer_MovesToAnotherPortAfterLosingOne pins the recovery: losing a
 // race must cost a port, not the session. Without the retry the launcher reports
 // a hard failure for a condition that resolves by simply trying the next port.
@@ -162,6 +193,41 @@ func TestStartAppServer_MovesToAnotherPortAfterLosingOne(t *testing.T) {
 	pid := appServerPID(t, got)
 	if pgid, err := syscall.Getpgid(pid); err != nil || pgid != pid {
 		t.Fatalf("defect: app-server pid %d is not isolated in its own process group (pgid=%d, err=%v); cleanup would kill only its parent and leak helpers", pid, pgid, err)
+	}
+}
+
+func TestRun_ReapsAppServerWhenTUIExits(t *testing.T) {
+	dir := t.TempDir()
+	pidFile := filepath.Join(dir, "fake-app-server-pids")
+	t.Setenv("C3_CODEX_REAL", os.Args[0])
+	t.Setenv("C3_CODEX_ADAPTER", filepath.Join(dir, "adapter"))
+	t.Setenv(fakeAppServerEnv, "1")
+	t.Setenv(fakeAppServerPIDsEnv, pidFile)
+	t.Setenv("XDG_RUNTIME_DIR", dir)
+
+	// The app-server child sees --listen and binds. The TUI child is the same
+	// re-executed test binary without --listen, so the fake init exits
+	// immediately. run must then reap the app-server process group.
+	_ = run(nil, filepath.Join(dir, "launcher"))
+	data, err := os.ReadFile(pidFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fields := strings.Fields(string(data))
+	if len(fields) != 1 {
+		t.Fatalf("setup: fake app-server pids = %q, want one", data)
+	}
+	pid, err := strconv.Atoi(fields[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = killAppServerProcessGroup(pid) })
+	deadline := time.Now().Add(2 * time.Second)
+	for syscall.Kill(pid, 0) == nil && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if err := syscall.Kill(pid, 0); err != syscall.ESRCH {
+		t.Fatalf("defect: run returned but its per-launch app-server pid %d survived: %v", pid, err)
 	}
 }
 

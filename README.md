@@ -60,7 +60,7 @@ not make it — it says the opposite, in the same place:
 
 ```text
 ⚠️ NOT held — that message was dropped.
-C3's durable queue is DISABLED for this run — it failed to open at startup, so messages that arrive while no session is attached are NOT saved and cannot be recovered.
+C3's durable queue is DISABLED for this run — it failed to open at startup, so inbound has no durable safety: anything not successfully handed to a live session is NOT saved and cannot be recovered.
 
 
 Send /status to check.

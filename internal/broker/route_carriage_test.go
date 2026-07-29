@@ -248,15 +248,18 @@ func TestInboundDelivered_StrayAckNeverDeletesTheWrongRoutesMergedBatch(t *testi
 
 	// B holds an outstanding MERGED push of three lines under the same id.
 	qrkB := queueRouteKey(keyB)
+	var recordIDsB []string
 	for _, id := range []int64{40, 41, 42} {
-		if err := b.Queue.Append(qrkB, inboundOn(-200, &tidB, id, "b")); err != nil {
+		recordID, err := b.Queue.AppendTracked(qrkB, inboundOn(-200, &tidB, id, "b"))
+		if err != nil {
 			t.Fatal(err)
 		}
+		recordIDsB = append(recordIDsB, recordID)
 	}
 	b.Workers.mu.Lock()
 	wB := b.Workers.spawnLocked(keyB)
 	b.Workers.mu.Unlock()
-	wB.recordCoveredByPush(42, "", []int64{40, 41, 42})
+	wB.recordCoveredByPush(42, "", recordIDsB)
 
 	// The agent switches to B mid-turn; A's ack lands afterwards claiming ONE line.
 	b.Routes.Claim(keyB, stub)
@@ -385,7 +388,8 @@ func TestHelloReconnect_AckForPrereconnectPushStillConsumes(t *testing.T) {
 	tid := int64(281)
 	key := MakeRouteKey("telegram", -100, &tid)
 	qrk := queueRouteKey(key)
-	if err := b.Queue.Append(qrk, inboundOn(-100, &tid, 1, "m")); err != nil {
+	recordID, err := b.Queue.AppendTracked(qrk, inboundOn(-100, &tid, 1, "m"))
+	if err != nil {
 		t.Fatal(err)
 	}
 	pid, cwd := os.Getpid(), "/proj"
@@ -404,7 +408,7 @@ func TestHelloReconnect_AckForPrereconnectPushStillConsumes(t *testing.T) {
 	b.Workers.mu.Lock()
 	w := b.Workers.spawnLocked(key)
 	b.Workers.mu.Unlock()
-	w.recordCoveredByPush(1, "", []int64{1})
+	w.recordCoveredByPush(1, "", []string{recordID})
 	old.RecordPushRoute(1, "", key)
 
 	// The adapter reconnects, then its ack for that push finally lands.

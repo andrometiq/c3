@@ -79,10 +79,9 @@ func heldReplyText(n int) string {
 // flushInbounds still marks every inbound persisted — it must, or the source
 // update_id wedges in-flight forever and ALL inbound re-polls forever — so the
 // update is acked to Telegram with nothing written anywhere. Telegram never
-// redelivers an acked update, so every message arriving with no session attached
-// is destroyed for the whole run. Keeping that silent was the defect; these
-// surfaces are the fix.
-const queueDisabledWarning = "C3's durable queue is DISABLED for this run — it failed to open at startup, so messages that arrive while no session is attached are NOT saved and cannot be recovered."
+// redelivers it, so ANY inbound that does not complete a live handoff — no
+// claim, reconnect-race write failure, or holder failure — is destroyed.
+const queueDisabledWarning = "C3's durable queue is DISABLED for this run — it failed to open at startup, so inbound has no durable safety: anything not successfully handed to a live session is NOT saved and cannot be recovered."
 
 // degradedDropLogPhrase is the phrase every dropped-message log line carries in
 // degraded mode, and the exact string docs/USAGE.md tells operators to grep

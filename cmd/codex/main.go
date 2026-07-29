@@ -83,10 +83,12 @@ func run(args []string, self string) error {
 	if requestedWS == "" {
 		requestedWS = defaultWSURL
 	}
-	wsURL, err := startAppServer(realCodex, adapterPath, requestedWS, cwd, topic)
+	appServer, err := startAppServerTracked(realCodex, adapterPath, requestedWS, cwd, topic)
 	if err != nil {
 		return err
 	}
+	defer appServer.Stop()
+	wsURL := appServer.URL
 
 	argv := []string{realCodex}
 	argv = append(argv, requiredFeatureArgs(args)...)
@@ -277,10 +279,35 @@ func tcpReachable(host string, port int, timeout time.Duration) bool {
 	return true
 }
 
+type appServerHandle struct {
+	URL  string
+	PID  int
+	done <-chan struct{}
+}
+
+func (h *appServerHandle) Stop() {
+	if h == nil || h.PID <= 0 {
+		return
+	}
+	_ = killAppServerProcessGroup(h.PID)
+	if h.done != nil {
+		<-h.done
+	}
+	_, port, err := parseWSURL(h.URL)
+	if err == nil {
+		_ = os.Remove(appServerMetaPath(port))
+	}
+}
+
 func ensureAppServer(realCodex, adapterPath, wsURL, cwd, topic string) error {
+	_, err := launchAppServer(realCodex, adapterPath, wsURL, cwd, topic)
+	return err
+}
+
+func launchAppServer(realCodex, adapterPath, wsURL, cwd, topic string) (*appServerHandle, error) {
 	host, port, err := parseWSURL(wsURL)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if tcpReachable(host, port, 500*time.Millisecond) {
 		// NEVER ADOPT. Something is listening, and reachability proves only that
@@ -305,7 +332,7 @@ func ensureAppServer(realCodex, adapterPath, wsURL, cwd, topic string) error {
 		// chooseAppServerURL should already have moved us to a free port, so
 		// reaching here means a race with another launcher or a foreign process.
 		// A failed launch is recoverable; cross-talk is not.
-		return fmt.Errorf(
+		return nil, fmt.Errorf(
 			"%s is already in use%s. Refusing to share an app-server — messages meant for "+
 				"another session would surface in this one. Retry, or set "+
 				"C3_CODEX_APP_SERVER_WS to a free ws://127.0.0.1:<port>",
@@ -333,7 +360,7 @@ func ensureAppServer(realCodex, adapterPath, wsURL, cwd, topic string) error {
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
 	if err := cmd.Start(); err != nil {
-		return err
+		return nil, err
 	}
 	// MY child, or nobody — the never-adopt rule applied to the startup window.
 	//
@@ -359,24 +386,28 @@ func ensureAppServer(realCodex, adapterPath, wsURL, cwd, topic string) error {
 	for time.Now().Before(deadline) {
 		select {
 		case <-exited:
+			// The direct child may have spawned helpers into its process group
+			// before exiting. Reap the whole group on both child-exit branches.
+			_ = killAppServerProcessGroup(cmd.Process.Pid)
 			// The child is gone. If the port is nonetheless live, someone else
 			// owns it — do NOT adopt; tell the caller to pick another port.
 			if tcpReachable(host, port, 500*time.Millisecond) {
-				return fmt.Errorf("%w: %s is held by another app-server%s",
+				return nil, fmt.Errorf("%w: %s is held by another app-server%s",
 					errAppServerLostPortRace, wsURL, appServerPortOwner(wsURL))
 			}
-			return fmt.Errorf("codex app-server for %s exited during startup — see %s",
+			return nil, fmt.Errorf("codex app-server for %s exited during startup — see %s",
 				wsURL, appServerLogPath(port))
 		default:
 		}
 		if tcpReachable(host, port, 500*time.Millisecond) {
 			writeAppServerMeta(wsURL, cwd, topic, adapterPath, cmd.Process.Pid)
-			return nil
+			return &appServerHandle{URL: wsURL, PID: cmd.Process.Pid, done: exited}, nil
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
 	_ = killAppServerProcessGroup(cmd.Process.Pid)
-	return fmt.Errorf("codex app-server did not become reachable at %s", wsURL)
+	<-exited
+	return nil, fmt.Errorf("codex app-server did not become reachable at %s", wsURL)
 }
 
 func killAppServerProcessGroup(pid int) error {
@@ -400,24 +431,33 @@ var errAppServerLostPortRace = errors.New("app-server port lost to a concurrent 
 // busy explicit override), so a retry never adopts the winner. Returns the URL
 // actually used, which is what the Codex TUI must be pointed at.
 func startAppServer(realCodex, adapterPath, requestedWS, cwd, topic string) (string, error) {
-	lock, err := acquireAppServerLaunchLock()
+	h, err := startAppServerTracked(realCodex, adapterPath, requestedWS, cwd, topic)
 	if err != nil {
 		return "", err
+	}
+	return h.URL, nil
+}
+
+func startAppServerTracked(realCodex, adapterPath, requestedWS, cwd, topic string) (*appServerHandle, error) {
+	lock, err := acquireAppServerLaunchLock()
+	if err != nil {
+		return nil, err
 	}
 	defer lock.Release()
 
 	const attempts = 5
 	for i := 0; i < attempts; i++ {
 		wsURL := chooseAppServerURL(requestedWS)
-		if err = ensureAppServer(realCodex, adapterPath, wsURL, cwd, topic); err == nil {
-			return wsURL, nil
+		var handle *appServerHandle
+		if handle, err = launchAppServer(realCodex, adapterPath, wsURL, cwd, topic); err == nil {
+			return handle, nil
 		}
 		if !errors.Is(err, errAppServerLostPortRace) {
-			return "", err
+			return nil, err
 		}
 		fmt.Fprintf(os.Stderr, "c3: %v — trying another port\n", err)
 	}
-	return "", err
+	return nil, err
 }
 
 // appServerLaunchLock is the per-user interprocess guard for the window from
@@ -428,6 +468,8 @@ type appServerLaunchLock struct {
 	file *os.File
 }
 
+var beforeAppServerLaunchFlock func()
+
 func acquireAppServerLaunchLock() (*appServerLaunchLock, error) {
 	pidFile, err := broker.PidFilePath()
 	if err != nil {
@@ -437,6 +479,9 @@ func acquireAppServerLaunchLock() (*appServerLaunchLock, error) {
 	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		return nil, fmt.Errorf("open Codex launcher lock %s: %w", path, err)
+	}
+	if beforeAppServerLaunchFlock != nil {
+		beforeAppServerLaunchFlock()
 	}
 	if err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX); err != nil {
 		_ = file.Close()

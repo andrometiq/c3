@@ -68,23 +68,20 @@ type StateDir interface {
 	Save(name string, target any) error
 }
 
-// ToolRegistry is the surface a plugin uses to expose MCP tools that
-// every adapter (Claude, Codex, etc.) sees. Add registers a tool;
-// Remove tears one down; List returns the current set. Tool names
-// should be plugin-prefixed (e.g. `stt_retranscribe`) to avoid
-// collisions across plugins.
+// ToolRegistry is the provisional registry a plugin can populate. The broker
+// currently stores these entries but no adapter lists or dispatches them; Add,
+// Remove, and List are available to in-tree code while that wiring remains
+// deliberately unimplemented. Tool names should be plugin-prefixed.
 type ToolRegistry interface {
 	Add(t Tool)
 	Remove(name string)
 	List() []Tool
 }
 
-// Tool is one MCP tool a plugin exposes. Name is the tool identifier
-// (recommend `<plugin>_<verb>` form); Description is what the agent
-// reads to decide whether to call; InputSchema is JSON Schema for the
-// arguments; Handler is invoked when an adapter forwards a tools/call
-// for this tool. The return value is serialized into the MCP response;
-// errors become MCP error frames.
+// Tool is one provisional plugin-tool registration. Name is the tool
+// identifier; Description and InputSchema describe the intended MCP surface.
+// Handler is retained with the registration but is not invoked by the current
+// broker because plugin tool listing and dispatch are not wired yet.
 type Tool struct {
 	Name        string
 	Description string

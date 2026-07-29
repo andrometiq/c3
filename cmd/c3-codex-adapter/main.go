@@ -1,5 +1,6 @@
 // c3-codex-adapter is the Codex MCP server that bridges Codex's MCP stdio
-// protocol to the C3 broker over /tmp/c3.sock (or $XDG_RUNTIME_DIR/c3.sock).
+// protocol to the C3 broker over its per-user runtime socket (for example,
+// $XDG_RUNTIME_DIR/c3.sock or the validated /tmp/c3-$UID/c3.sock fallback).
 //
 // Spec §4.4. The adapter:
 //
@@ -194,7 +195,8 @@ type adapter struct {
 	rtmu      sync.Mutex
 	rtPending map[string]chan ipc.RetranscribeResp
 
-	helloAck ipc.HelloAckMsg
+	helloAck      ipc.HelloAckMsg
+	brokerVersion atomic.Int64
 
 	// Last successful attach request — replayed on broker reconnect so a
 	// session that survives a broker restart auto-reclaims its route (D3 /
@@ -239,11 +241,11 @@ type adapter struct {
 	tidmu    sync.Mutex
 	threadID string
 
-	// identitySettled is closed once the first recovery attempt has finished,
-	// whether it recovered, registered, or refused. toolAttach waits on it so an
-	// attach is never answered before this session knows who it is.
+	// identitySettled is a per-broker-connection recovery epoch. It closes when
+	// that connection's registration finishes and is replaced synchronously
+	// before reconnect registration starts, so attach cannot overtake it.
+	idmu            sync.Mutex
 	identitySettled chan struct{}
-	settleOnce      sync.Once
 
 	// forwardCh feeds the SINGLE serial Codex-forward goroutine (codexForwardLoop,
 	// started in newAdapter). Enqueueing here instead of spawning a goroutine per
@@ -349,6 +351,7 @@ func (a *adapter) hello() error {
 		log.Print(w)
 	}
 	a.helloAck = ack
+	a.brokerVersion.Store(int64(ipc.PeerProtocolVersion(ack.ProtocolVersion)))
 	return nil
 }
 
@@ -1292,6 +1295,9 @@ func (a *adapter) toolDetach(_ context.Context, _ *mcp.CallToolRequest) (*mcp.Ca
 	conn := a.currentConn()
 	if conn == nil {
 		return toolErrorResult("broker not connected"), nil
+	}
+	if !ipc.ProtocolStateChangesCompatible(int(a.brokerVersion.Load())) {
+		return toolErrorResult("detach refused: broker protocol is outside the state-change compatibility window; restart the CLI"), nil
 	}
 	if err := conn.WriteJSON(struct {
 		Op ipc.Op `json:"op"`

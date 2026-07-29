@@ -223,7 +223,7 @@ func TestProtocolMismatch_RefusesDestructiveAndOwnershipChangingOps(t *testing.T
 	b.Workers.mu.Lock()
 	w := b.Workers.spawnLocked(keyA)
 	b.Workers.mu.Unlock()
-	w.recordCoveredByPush(7, "token-7", []int64{7})
+	w.recordCoveredByPush(7, "token-7", []string{"record-7"})
 	holder.RecordPushRoute(7, "token-7", keyA)
 	if err := peer.WriteJSON(ipc.InboundDeliveredMsg{
 		Op: ipc.OpInboundDelivered, UpdateID: 7, OK: true, Count: 1, DeliveryToken: "token-7",

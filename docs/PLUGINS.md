@@ -203,9 +203,21 @@ Self-update replaces the shipped handler/runner/provider set but preserves regul
 
 ### Failure surfacing
 
-Failures are never silent. On any failure the shim returns, *as the transcript*, the marker `[STT FAILED: <reason> — see <broker log path>]`, with `<reason>` one of `handler_missing`, `token_unavailable`, `timeout`, `killed`, `error`, `empty`.
+Failures are never silent. A transcription-stage failure returns, *as the
+transcript*, `[STT FAILED: <reason> — see <broker log path>]`, with `<reason>`
+one of `handler_missing`, `token_unavailable`, `timeout`, `killed`, `error`,
+`empty`. If the handler cannot fetch the audio, it instead returns
+`[STT FETCH FAILED: <server cause>]`; the broker reports that cause and does not
+claim the audio was saved.
 
-The worker does not forward that marker. It parses the `<reason>` token out and replaces the text with an agent-facing recovery message — `⚠️ [voice transcription failed: <reason>] The audio is saved and recoverable …` plus the `file_id`, the `download_attachment` and `retranscribe` calls that recover it, and the broker log path. So the agent learns the audio exists and how to retry, and the user never has to resend. Two reason values come from the worker rather than the shim: `no_transcript` when no `OnVoiceReceived` subscriber returned anything at all (empty string), and `stt_failed` when a subscriber returned something that isn't a parseable marker. The substitution only applies when the inbound has no other text — a voice message with a caption keeps its caption.
+The worker replaces an ordinary STT marker with an agent-facing recovery message
+that names the `file_id`, `download_attachment`, `retranscribe`, and broker log.
+It appends that message to any caption/rich text instead of clobbering the
+sender's words. A fetch-failure marker is also appended, but uses the server's
+cause and makes no saved/recoverable promise. Two ordinary reason values come
+from the worker rather than the shim: `no_transcript` when no
+`OnVoiceReceived` subscriber returned anything, and `stt_failed` for an
+unparseable failure return.
 
 Note the chain consequence: because the marker is a **non-empty string returned with a nil error**, it wins `FireOnVoiceReceived` and any `OnVoiceReceived` callback registered after STT will not run on that message. If you are writing a second voice plugin, register it *before* STT in `builtinPlugins`.
 
@@ -221,13 +233,23 @@ transcribe(audio_path: str, audio_bytes: bytes) -> str | None
 
 The loader rejects the module at load time with `provider <name> missing transcribe() function` if this symbol is absent — a loud, stderr-visible failure.
 
-**Optional — one function:**
+**Optional — two functions:**
 
 ```python
 set_vocabulary(vocab: dict) -> None
 ```
 
 Called immediately before **each** `transcribe` call when present. `vocab` is `{"terms": [{"preferred": str, "not": [str], "note": str}, ...], "context": str}`. Adapt it into whatever your API accepts — a system prompt, hotwords, a `prompt` parameter. Ignore it if your engine has no equivalent.
+
+```python
+available() -> str
+```
+
+Return `""` when the provider can run, or a short reason when credentials or
+another prerequisite are missing. An unavailable provider is skipped without
+burning retries. If the hook is absent the provider is attempted; if it raises,
+the runner also treats it as available so a faulty probe cannot hide a working
+provider.
 
 **Return contract:**
 
@@ -319,4 +341,3 @@ Documented so you can tell a gap from a bug:
 - **Plugin tool listing and dispatch.** `RegisterTools` stores; nothing reads or routes.
 - **Host-enforced `enabled` / `priority`.** Both are plugin-side conventions today.
 - **A metrics API and a shipped mock host.** Neither exists.
-- **Configurable STT chain.** Change it via `handler_path` or by editing `stt.py`'s default.

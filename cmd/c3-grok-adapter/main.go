@@ -201,7 +201,8 @@ type adapter struct {
 	rtmu      sync.Mutex
 	rtPending map[string]chan ipc.RetranscribeResp
 
-	helloAck ipc.HelloAckMsg
+	helloAck      ipc.HelloAckMsg
+	brokerVersion atomic.Int64
 
 	// Last successful attach request — replayed on broker reconnect so a
 	// session that survives a broker restart auto-reclaims its route (D3 /
@@ -273,25 +274,16 @@ type adapter struct {
 	// post-restart attach records nothing and a later Grok resume silently
 	// re-attaches to a stale topic. Claude-adapter parity (§3d2).
 	recoverFired atomic.Bool
-	// recoverStarted records that a recovery attempt has BEGUN — set
-	// synchronously by every caller BEFORE it invokes fireRecover. Never reset:
-	// it answers "is there an identity question in flight for this process?".
+	// recoverStarted records that recovery has begun. The current per-connection
+	// identitySettled epoch says whether that registration has finished.
 	// recoverFired cannot answer that — it is reset by refireRecoverOnReconnect,
 	// released on the nothing-was-sent paths, and set inside fireRecover.
 	recoverStarted atomic.Bool
-	// identitySettled is closed once the first recovery attempt has FINISHED —
-	// recovered, registered, refused, failed, or timed out. It is the completion
-	// signal recoverFired was being misread as (recoverFired records ENTRY, and
-	// entry is not an answer), and ensureStableSessionRegistered waits on it so an
-	// attach is never answered while this session still doesn't know who it is.
-	// Created lazily by identityGate so an adapter built as a bare struct literal
-	// (as the forward tests do) behaves like one from newAdapter. One-shot for the
-	// process: a later re-registration improves the broker's records without
-	// re-opening an answered question — re-arming would let an attach block on a
-	// gate nobody is left to close.
+	// identitySettled is replaced synchronously for every reconnect registration
+	// and closed only by that epoch's recovery attempt. Created lazily so bare
+	// test adapters behave like constructor-built adapters.
 	idmu            sync.Mutex
 	identitySettled chan struct{}
-	settleOnce      sync.Once
 }
 
 // grokForwardReq is one inbound queued for the serial Grok-forward goroutine.
@@ -387,6 +379,7 @@ func (a *adapter) hello() error {
 		log.Print(w)
 	}
 	a.helloAck = ack
+	a.brokerVersion.Store(int64(ipc.PeerProtocolVersion(ack.ProtocolVersion)))
 	return nil
 }
 
@@ -1750,6 +1743,9 @@ func (a *adapter) toolDetach(_ context.Context, _ *mcp.CallToolRequest) (*mcp.Ca
 	conn := a.currentConn()
 	if conn == nil {
 		return toolErrorResult("broker reconnecting — retry detach in a moment"), nil
+	}
+	if !ipc.ProtocolStateChangesCompatible(int(a.brokerVersion.Load())) {
+		return toolErrorResult("detach refused: broker protocol is outside the state-change compatibility window; restart the CLI"), nil
 	}
 	// OpRelease drops the claim; tool is named "detach" (Claude parity).
 	if err := conn.WriteJSON(struct {

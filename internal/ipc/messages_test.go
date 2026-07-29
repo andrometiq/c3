@@ -351,8 +351,12 @@ func TestInboundDeliveredAndRetranscribeRoundTrip(t *testing.T) {
 		t.Fatalf("legacy delivered wire shape must omit delivery_token: %s", withoutToken)
 	}
 	d, _ := json.Marshal(InboundDeliveredMsg{
-		Op: OpInboundDelivered, UpdateID: 42, OK: true, DeliveryToken: "broker-a-1",
+		Op: OpInboundDelivered, UpdateID: 42, OK: true, Count: 1, DeliveryToken: "broker-a-1",
 	})
+	const deliveredGolden = `{"op":"inbound_delivered","update_id":42,"ok":true,"count":1,"delivery_token":"broker-a-1"}`
+	if string(d) != deliveredGolden {
+		t.Fatalf("tokened inbound_delivered wire changed: got %s, want %s", d, deliveredGolden)
+	}
 	if op, _ := PeekOp(d); op != OpInboundDelivered {
 		t.Fatalf("delivered op = %q", op)
 	}
@@ -414,6 +418,10 @@ func TestInboundMsg_DeliveryTokenIsAdditiveAndOmitEmpty(t *testing.T) {
 	raw, err = json.Marshal(withToken)
 	if err != nil {
 		t.Fatal(err)
+	}
+	const inboundGolden = `{"op":"inbound","inbound":{"Channel":"telegram","ChatID":-100,"TopicID":null,"MessageID":42,"Sender":{"UserID":0,"Username":""},"Text":"hello","Attachments":null,"ReplyTo":null,"Timestamp":"0001-01-01T00:00:00Z"},"covered":1,"delivery_token":"broker-a-1"}`
+	if string(raw) != inboundGolden {
+		t.Fatalf("tokened inbound wire changed: got %s, want %s", raw, inboundGolden)
 	}
 	var roundTrip InboundMsg
 	if err := json.Unmarshal(raw, &roundTrip); err != nil {

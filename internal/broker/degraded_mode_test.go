@@ -109,6 +109,29 @@ func TestDegradedMode_HeldNoticeWarnsInsteadOfSayingNothingLost(t *testing.T) {
 	}
 }
 
+func TestDegradedMode_LiveWriteFailureWarnsThatMessageWasDropped(t *testing.T) {
+	fc := &fakeChannel{}
+	b := degradedBrokerWithChannel(t, fc)
+	defer b.Shutdown()
+
+	tid := int64(914)
+	key := MakeRouteKey("telegram", -100, &tid)
+	adapterEnd, brokerEnd := net.Pipe()
+	stub := &Stub{CLI: "claude", PID: os.Getpid(), ConnID: 1}
+	stub.Reattach(ipc.NewConn(brokerEnd), 1)
+	b.Routes.Claim(key, stub)
+	_ = adapterEnd.Close() // the snapshotted live connection now rejects writes
+
+	w := newRouteWorker(context.Background(), key, time.Hour, b)
+	defer w.Stop()
+	w.flushInbounds(context.Background(), heldInbound(77))
+
+	replies := fc.sendRepliesSnapshot()
+	if len(replies) != 1 || !strings.Contains(replies[0].Text, queueDisabledWarning) {
+		t.Fatalf("live write failure with no durable queue produced no operator-visible loss warning: %+v", replies)
+	}
+}
+
 // TestDegradedMode_WarningIsOnTheFiveMinuteCooldown pins the cadence choice: the
 // degraded warning takes the long Fallbacks cooldown even on an edit-capable
 // channel, where the healthy held-notice uses the 10s HeldNotices debounce.

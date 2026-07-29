@@ -73,7 +73,10 @@ The broker's socket is `c3.sock` inside a per-user runtime directory. Resolve th
 **On Unix:**
 1. `$XDG_RUNTIME_DIR` — **but only if it exists and is a directory.** Set-but-nonexistent must fall through, not be used.
 2. `/run/user/$UID` — an **unconditional probe, independent of the environment**. If it exists and is a directory, use it. Do not skip this step.
-3. `/tmp/c3-$UID/` — last resort; create it with mode `0700`.
+3. `/tmp/c3-$UID/` — last resort; create it with mode `0700`, then `lstat`
+   it and fail closed unless it is a real directory (not a symlink), owned by
+   `$UID`, with mode exactly `0700`. Never swallow the create/stat failure or
+   continue through a pre-planted path.
 
 Step 2 is not optional and is the step naive implementations miss. Whenever `XDG_RUNTIME_DIR` is unset but `/run/user/$UID` exists — a systemd unit, a cron job, `su -`, a non-login shell, any CLI not spawned from a graphical session — an adapter that jumps straight to `/tmp` will look in the wrong place while the broker listens elsewhere.
 
@@ -117,6 +120,14 @@ On a broker drop, wake every pending request with an error so the host CLI's too
 - **Nested payload objects** — the `inbound` value, the `messages` array, `capabilities` — are **`PascalCase`, byte-identical to the Go field names**: `Channel`, `ChatID`, `TopicID`, `MessageID`, `Sender`, `Text`, `Attachments`, `ReplyTo`, `Timestamp`, `Kind`, `Event`, `RichText`, `MaxMessageRunes`, and so on.
 
 This is frozen deliberately. Those Go field names *were* the on-disk queue format and the IPC wire format before explicit tags existed; the tags now pin the keys so the Go identifiers can change without moving the format. There is a one-directional golden test in the tree whose literals are the contract. **The keys will not be "tidied" to snake_case** — doing so would orphan every queued message on every user's disk.
+
+New queue lines also carry one reserved, additive top-level key:
+`_c3_queue_id`. It is a broker-private durable-line identity used to make a
+tokened live-delivery ack remove the exact original/edit occurrence it rendered.
+It is not part of `c3types.Inbound`, never appears inside an IPC `inbound`, and
+adapters must neither emit nor interpret it. Older queue readers safely ignore
+the unknown key; legacy lines without it remain readable and are never guessed
+at by a destructive ack.
 
 The failure this causes is silent and total: a blanket `rename_all = "snake_case"` (or equivalent) across your whole deserializer will parse an `inbound` frame into an **all-zero-value** message with no error. No exception, no log line, no clue. Scope your casing rules per type.
 
@@ -431,7 +442,7 @@ A **read-only peek** at any topic's durable queue. Resolves the topic by `name` 
 | request | response | purpose |
 |---|---|---|
 | `list_claims` | `claims_list` | snapshot of every live route claim: `{channel, chat_id, has_topic, topic_id?, topic_name?, group_name?, holder_cli, holder_pid, holder_cwd?, conn_id, connected}`. Dead holders are reaped and omitted. |
-| `list_health` | `health_list` | last cached fetch-health per channel: `{channel, state:"up"\|"down", since_unix?, consec?, reason?, down_for_sec?}`. |
+| `list_health` | `health_list` | last cached fetch-health per channel: top-level `{health:[…], queue_degraded?}` where `queue_degraded:true` means durable queue startup failed; each health row is `{channel, state:"up"\|"down", since_unix?, consec?, reason?, down_for_sec?}`. |
 | `list_sessions` | `list_sessions_reply` | every live adapter the broker tracks: `{cli, pid, cwd, conn_id, attached_to?, is_this_session?}`, newest first. Request carries optional `pid`/`cwd` hints for the "you are here" marker. |
 | `ping_this_session` | `ping_this_session_reply` | sends a one-shot "this is me" message to the route held by the calling user's session. Request: `{pid?, cwd}`. Response: `{ok, channel?, topic?, sent_text?, err?}`. |
 | `pair_mode_start` | `pair_mode_reply` | arms a pairing window. Request: `{target:"dm"\|"group", chat_id?}` (`chat_id` required for `group`). Response: `{ok, code?, target?, chat_id?, ttl_sec?, err?}`. |

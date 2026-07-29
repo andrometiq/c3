@@ -209,6 +209,7 @@ func (a *adapter) ensureSessionRecoverForConn(ctx context.Context, conn *ipc.Con
 		a.rcmu.Unlock()
 		return
 	}
+	a.rearmIdentity()
 	a.recoverConn = conn
 	a.rcmu.Unlock()
 	go a.startSessionRecover(ctx, conn)
@@ -228,7 +229,8 @@ func (a *adapter) recoverStarted() bool {
 // that cannot be identified is a settled answer ("unattached"), not a session
 // that blocks attaches for ten seconds.
 func (a *adapter) startSessionRecover(ctx context.Context, conn *ipc.Conn) {
-	defer a.markIdentitySettled()
+	gate := a.identityGate()
+	defer a.settleIdentity(gate)
 
 	cfg := codexForwardConfigFromEnv()
 	cfg.Timeout = recoverIdentityTimeout
@@ -345,11 +347,35 @@ func (a *adapter) dispatchRecoverSessionResult(raw []byte) {
 	}
 }
 
-// markIdentitySettled releases anything waiting on rule (b). Idempotent: the
-// FIRST attempt settles the question for the process (the thread id is cached
-// and a reconnect re-registers the same one), so later attempts never re-arm it.
+func (a *adapter) identityGate() chan struct{} {
+	a.idmu.Lock()
+	defer a.idmu.Unlock()
+	if a.identitySettled == nil {
+		a.identitySettled = make(chan struct{})
+	}
+	return a.identitySettled
+}
+
+func (a *adapter) rearmIdentity() {
+	a.idmu.Lock()
+	a.identitySettled = make(chan struct{})
+	a.idmu.Unlock()
+}
+
+// markIdentitySettled releases anything waiting on the current broker
+// connection's recovery registration.
 func (a *adapter) markIdentitySettled() {
-	a.settleOnce.Do(func() { close(a.identitySettled) })
+	a.settleIdentity(a.identityGate())
+}
+
+func (a *adapter) settleIdentity(gate chan struct{}) {
+	a.idmu.Lock()
+	defer a.idmu.Unlock()
+	select {
+	case <-gate:
+	default:
+		close(gate)
+	}
 }
 
 // awaitIdentitySettled blocks until this session's identity question has been
@@ -363,8 +389,9 @@ func (a *adapter) awaitIdentitySettled(ctx context.Context, bare bool) error {
 	if !a.recoverStarted() {
 		return nil
 	}
+	gate := a.identityGate()
 	select {
-	case <-a.identitySettled:
+	case <-gate:
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()
@@ -375,7 +402,7 @@ func (a *adapter) awaitIdentitySettled(ctx context.Context, bare bool) error {
 		log.Printf("attach: identity still resolving after %v — explicit target will wait for recovery to settle before it is sent", recoverSettleTimeout)
 	}
 	select {
-	case <-a.identitySettled:
+	case <-gate:
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()

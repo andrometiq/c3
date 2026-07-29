@@ -93,10 +93,11 @@ func TestLiveAck_ConsumesCoveredLines_NotQueueHead(t *testing.T) {
 	// A third message arrives. flushInbounds persists it, then pushes with
 	// Covered=1 and the id of the line it just appended.
 	third := inbound(tid, 3, "live-three")
-	if err := b.Queue.Append(qrk, third); err != nil {
+	thirdRecordID, err := b.Queue.AppendTracked(qrk, third)
+	if err != nil {
 		t.Fatalf("append third: %v", err)
 	}
-	w.forwardOrFallbackCovering(ctx, third, 1, []int64{third.MessageID}, true)
+	w.forwardOrFallbackCovering(ctx, third, 1, []string{thirdRecordID}, true)
 
 	if n, _ := b.Queue.Pending(qrk); n != 3 {
 		t.Fatalf("all three should still be queued until the ack; got %d", n)
@@ -142,10 +143,11 @@ func TestLiveAck_NoBacklog_ConsumesThePushedLine(t *testing.T) {
 	_, _ = liveHolder(t, b, key)
 
 	only := inbound(tid, 7, "only")
-	if err := b.Queue.Append(qrk, only); err != nil {
+	onlyRecordID, err := b.Queue.AppendTracked(qrk, only)
+	if err != nil {
 		t.Fatalf("append: %v", err)
 	}
-	w.forwardOrFallbackCovering(ctx, only, 1, []int64{only.MessageID}, true)
+	w.forwardOrFallbackCovering(ctx, only, 1, []string{onlyRecordID}, true)
 	w.handleConsume(ctx, &ConsumeJob{MessageID: only.MessageID, Count: 1})
 
 	if n, _ := b.Queue.Pending(qrk); n != 0 {
@@ -171,13 +173,14 @@ func TestLiveAck_MergedPush_ConsumesEveryCoveredLine(t *testing.T) {
 	w.forwardOrFallback(ctx, inbound(tid, 1, "held-one"), 1)
 	_, _ = liveHolder(t, b, key)
 
-	var ids []int64
+	var ids []string
 	for _, id := range []int{10, 11, 12} {
 		in := inbound(tid, id, "batch")
-		if err := b.Queue.Append(qrk, in); err != nil {
+		recordID, err := b.Queue.AppendTracked(qrk, in)
+		if err != nil {
 			t.Fatalf("append %d: %v", id, err)
 		}
-		ids = append(ids, in.MessageID)
+		ids = append(ids, recordID)
 	}
 	// The merged push presents as the last message of the batch.
 	merged := inbound(tid, 12, "batch-merged")
@@ -244,7 +247,7 @@ func TestCoveredByPush_BoundedFailTowardKeeping(t *testing.T) {
 	defer w.Stop()
 
 	for i := 1; i <= maxCoveredByPush+10; i++ {
-		w.recordCoveredByPush(int64(i), "", []int64{int64(i)})
+		w.recordCoveredByPush(int64(i), "", []string{"record"})
 	}
 	if got := len(w.coveredByPush); got != maxCoveredByPush {
 		t.Errorf("map must stay bounded at %d; got %d", maxCoveredByPush, got)
@@ -252,7 +255,7 @@ func TestCoveredByPush_BoundedFailTowardKeeping(t *testing.T) {
 	if got := len(w.coveredOrder); got != maxCoveredByPush {
 		t.Errorf("order list must stay bounded at %d; got %d", maxCoveredByPush, got)
 	}
-	if ids := w.takeCoveredByPush(1, ""); len(ids) != 1 || ids[0] != 1 {
+	if ids := w.takeCoveredByPush(1, ""); len(ids) != 1 || ids[0] != "record" {
 		t.Errorf("the oldest outstanding record must survive the cap; got %v", ids)
 	}
 	if ids := w.takeCoveredByPush(int64(maxCoveredByPush+10), ""); ids != nil {
@@ -265,15 +268,15 @@ func TestCoveredByPush_BoundedFailTowardKeeping(t *testing.T) {
 // the first record makes the first ack consume the second push's lines.
 func TestCoveredByPush_DuplicatePushIDQueuesFIFO(t *testing.T) {
 	w := &RouteWorker{}
-	w.recordCoveredByPush(7, "first", []int64{1, 7})
-	w.recordCoveredByPush(7, "second", []int64{2, 7})
+	w.recordCoveredByPush(7, "first", []string{"first-1", "first-7"})
+	w.recordCoveredByPush(7, "second", []string{"second-2", "second-7"})
 
 	first := w.takeCoveredByPush(7, "first")
 	second := w.takeCoveredByPush(7, "second")
-	if len(first) != 2 || first[0] != 1 || first[1] != 7 {
+	if len(first) != 2 || first[0] != "first-1" || first[1] != "first-7" {
 		t.Fatalf("first duplicate-key record overwritten: got %v", first)
 	}
-	if len(second) != 2 || second[0] != 2 || second[1] != 7 {
+	if len(second) != 2 || second[0] != "second-2" || second[1] != "second-7" {
 		t.Fatalf("second duplicate-key record missing/out of order: got %v", second)
 	}
 	if w.takeCoveredByPush(7, "first") != nil {
@@ -281,9 +284,61 @@ func TestCoveredByPush_DuplicatePushIDQueuesFIFO(t *testing.T) {
 	}
 }
 
+func TestLiveAck_DuplicateMessageIDAckedOutOfOrderRemovesExactRecord(t *testing.T) {
+	t.Setenv("C3_QUEUE_DIR", t.TempDir())
+	b := brokerWithChannel(t, mfWithTelegram(), &fakeChannel{})
+	defer b.Shutdown()
+
+	tid := int64(914)
+	key := MakeRouteKey("telegram", -1001234567890, &tid)
+	qrk := queueRouteKey(key)
+	w := newRouteWorker(context.Background(), key, time.Hour, b)
+	defer w.Stop()
+	ctx := context.Background()
+	pushes := capturingHolder(t, b, key)
+
+	original := inbound(tid, 7, "original")
+	originalID, err := b.Queue.AppendTracked(qrk, original)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.forwardOrFallbackCovering(ctx, original, 1, []string{originalID}, true)
+	firstPush := <-pushes
+
+	edit := inbound(tid, 7, "edited")
+	edit.Edited = true
+	editID, err := b.Queue.AppendTracked(qrk, edit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.forwardOrFallbackCovering(ctx, edit, 1, []string{editID}, true)
+	secondPush := <-pushes
+
+	if firstPush.DeliveryToken == "" || secondPush.DeliveryToken == "" || firstPush.DeliveryToken == secondPush.DeliveryToken {
+		t.Fatalf("setup: duplicate MessageID pushes need distinct delivery tokens: first=%q second=%q", firstPush.DeliveryToken, secondPush.DeliveryToken)
+	}
+
+	// The edit renders faster and acks first. MessageID/ordinal-1 matching
+	// removes the original here; the token's exact durable record must remove
+	// only the edit.
+	w.handleConsume(ctx, &ConsumeJob{MessageID: 7, Count: 1, Token: secondPush.DeliveryToken})
+	left, err := b.Queue.Peek(qrk, -1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(left) != 1 || left[0].Text != "original" {
+		t.Fatalf("DATA LOSS: out-of-order ack removed the wrong same-MessageID record; left=%+v, want only original", left)
+	}
+
+	w.handleConsume(ctx, &ConsumeJob{MessageID: 7, Count: 1, Token: firstPush.DeliveryToken})
+	if n, _ := b.Queue.Pending(qrk); n != 0 {
+		t.Fatalf("original token did not resolve its exact remaining record; pending=%d", n)
+	}
+}
+
 func TestFlushPendingAck_ClearsCoveredRecordsWithoutPendingTurn(t *testing.T) {
 	w := &RouteWorker{}
-	w.recordCoveredByPush(7, "", []int64{7})
+	w.recordCoveredByPush(7, "", []string{"record-7"})
 
 	// An outbound can clear pendingAck before the holder dies, while its
 	// delivered-ack identity record is still outstanding. Death must still clear

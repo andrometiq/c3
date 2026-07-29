@@ -418,14 +418,17 @@ func TestHandleInboundDelivered_DispatchesConsume(t *testing.T) {
 	tid := int64(914)
 	key := MakeRouteKey("telegram", -100, &tid)
 	qrk := queue.RouteKey{Channel: "telegram", ChatID: -100, TopicID: &tid}
-	_ = b.Queue.Append(qrk, &c3types.Inbound{Channel: "telegram", ChatID: -100, TopicID: &tid, MessageID: 1, Text: "m", Timestamp: time.Now()})
+	recordID, err := b.Queue.AppendTracked(qrk, &c3types.Inbound{Channel: "telegram", ChatID: -100, TopicID: &tid, MessageID: 1, Text: "m", Timestamp: time.Now()})
+	if err != nil {
+		t.Fatal(err)
+	}
 	stub := claimedHolder(t, b, key)
 	stub.SetRoute(&key)
 	stub.MarkRouteConfirmed() // live-push ack consume requires a confirmed claim (§5 tripwire)
 	b.Workers.mu.Lock()
 	w := b.Workers.spawnLocked(key)
 	b.Workers.mu.Unlock()
-	w.recordCoveredByPush(1, "", []int64{1})
+	w.recordCoveredByPush(1, "", []string{recordID})
 	// The other half of the synthetic push: the ack is routed by the route the
 	// push went out on, recorded on the stub at push time (see Stub.pushRoutes).
 	// Without it this fabricated ack matches no push and consumes nothing.

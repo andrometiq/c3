@@ -295,7 +295,7 @@ type RouteWorker struct {
 
 type coveredPushRecord struct {
 	token string
-	ids   []int64
+	ids   []string
 }
 
 type coveredPushOrder struct {
@@ -764,11 +764,11 @@ func (w *RouteWorker) flushInbounds(ctx context.Context, batch []*c3types.Inboun
 	// so the Claude delivered-ack Consumes exactly the lines this push added — not
 	// len(batch), which would over-consume and eat later backlog (I5).
 	appended := 0
-	// appendedIDs are the MessageIDs of the lines this batch actually persisted,
-	// in append order — the exact set the live push below covers. Threaded to the
-	// push so its delivered-ack can remove THESE lines instead of the queue head
-	// (see RouteWorker.coveredByPush).
-	var appendedIDs []int64
+	// appendedIDs are the queue-private durable identities of the lines this
+	// batch actually persisted, in append order — the exact set the live push
+	// below covers. Channel MessageIDs are not sufficient because an edit reuses
+	// one while creating a distinct durable line.
+	var appendedIDs []string
 	if w.broker != nil && w.broker.Queue != nil {
 		qrk := queueRouteKey(w.key)
 		for _, in := range batch {
@@ -800,7 +800,8 @@ func (w *RouteWorker) flushInbounds(ctx context.Context, batch []*c3types.Inboun
 				w.markPersisted(in)
 				continue
 			}
-			if err := w.broker.Queue.Append(qrk, in); err != nil {
+			recordID, err := w.broker.Queue.AppendTracked(qrk, in)
+			if err != nil {
 				log.Printf("queue append FAIL chan=%s chat=%d topic=%s msg=%d: %v — offset will NOT advance; Telegram redelivers — %s",
 					w.key.Channel, w.key.ChatID, TopicKeyStr(w.key), in.MessageID, err, fallbackSummary(in))
 				// C2: do NOT record the id as seen — the Append failed, so a later
@@ -828,7 +829,7 @@ func (w *RouteWorker) flushInbounds(ctx context.Context, batch []*c3types.Inboun
 				w.dedup.record(in.MessageID)
 			}
 			appended++
-			appendedIDs = append(appendedIDs, in.MessageID)
+			appendedIDs = append(appendedIDs, recordID)
 			w.markPersisted(in)
 			w.evictIfOverCap(qrk)
 		}
@@ -1118,7 +1119,7 @@ func (w *RouteWorker) forwardOrFallback(ctx context.Context, in *c3types.Inbound
 //
 // idsKnown says the caller enumerated the appended lines exactly, so
 // len(coveredIDs) — including ZERO — is authoritative for this push.
-func (w *RouteWorker) forwardOrFallbackCovering(_ context.Context, in *c3types.Inbound, covered int, coveredIDs []int64, idsKnown bool) {
+func (w *RouteWorker) forwardOrFallbackCovering(_ context.Context, in *c3types.Inbound, covered int, coveredIDs []string, idsKnown bool) {
 	holder, claimed := w.broker.Routes.Holder(w.key)
 
 	// Liveness sweep: if the holder's PID is dead (e.g. Claude Code killed
@@ -1246,9 +1247,28 @@ func (w *RouteWorker) forwardOrFallbackCovering(_ context.Context, in *c3types.I
 			Op: ipc.OpInbound, Inbound: *in, Covered: covered, Pending: pending,
 			DeliveryToken: deliveryToken,
 		}); err != nil {
-			log.Printf("deliver FAIL chan=%s chat=%d topic=%s msg=%d to cli=%s pid=%d: %v — %s",
-				w.key.Channel, w.key.ChatID, TopicKeyStr(w.key), in.MessageID,
-				holder.CLI, holder.PID, err, fallbackSummary(in))
+			if w.broker.Queue == nil {
+				log.Printf("deliver FAIL chan=%s chat=%d topic=%s msg=%d to cli=%s pid=%d: %v — %s, nothing stored — %s",
+					w.key.Channel, w.key.ChatID, TopicKeyStr(w.key), in.MessageID,
+					holder.CLI, holder.PID, err, degradedDropLogPhrase, fallbackSummary(in))
+				// The source update was already advanced and there is no durable
+				// copy. Warn on the same route, cooldown-gated like the no-claim
+				// degraded path, so a reconnect race is visible rather than loss.
+				if ch, chErr := w.broker.Channel(in.Channel); chErr == nil &&
+					(w.broker.Fallbacks == nil || w.broker.Fallbacks.ShouldSend(w.key)) {
+					if _, sendErr := ch.SendReply(c3types.ReplyArgs{
+						Channel: in.Channel, ChatID: in.ChatID, TopicID: in.TopicID,
+						Text: heldDegradedText(),
+					}); sendErr != nil {
+						log.Printf("deliver degraded-warning FAIL chan=%s chat=%d topic=%s msg=%d: %v",
+							w.key.Channel, w.key.ChatID, TopicKeyStr(w.key), in.MessageID, sendErr)
+					}
+				}
+			} else {
+				log.Printf("deliver FAIL chan=%s chat=%d topic=%s msg=%d to cli=%s pid=%d: %v — %s",
+					w.key.Channel, w.key.ChatID, TopicKeyStr(w.key), in.MessageID,
+					holder.CLI, holder.PID, err, fallbackSummary(in))
+			}
 			return
 		}
 		// Record the exact lines this push covered so the delivered-ack removes
@@ -1921,23 +1941,9 @@ func (w *RouteWorker) handleConsume(_ context.Context, job *ConsumeJob) {
 	// queued for re-delivery. RemoveIDs snapshots to .trash before rewriting and is
 	// idempotent, so an id already evicted/consumed simply matches nothing.
 	if ids := w.takeCoveredByPush(job.MessageID, job.Token); len(ids) > 0 {
-		// 1-based occurrence ordinals per id. A queue can legitimately hold two
-		// pending lines with one MessageID (an edited message re-dispatches with
-		// the same id), in which case this selects the OLDEST occurrence rather
-		// than strictly this push's line. Since the delivered-dedup exempts edits
-		// (see flushInbounds), those two lines carry the SAME id but DIFFERENT
-		// text, so this is not "the same message" — an out-of-order ack can remove
-		// the other occurrence, leaving one line queued for re-delivery. That is a
-		// recoverable DUPLICATE (both lines were pushed live in that ordering), not
-		// a destruction, and it is still a targeted removal by id rather than an
-		// unrelated head line.
-		sel := make(map[int64][]int, len(ids))
-		for _, id := range ids {
-			sel[id] = append(sel[id], len(sel[id])+1)
-		}
-		removed, err := w.broker.Queue.RemoveIDs(qrk, sel)
+		removed, err := w.broker.Queue.RemoveRecordIDs(qrk, ids)
 		if err != nil {
-			log.Printf("queue consume(live-ack, by-id) FAIL chan=%s chat=%d topic=%s msg=%d ids=%d: %v",
+			log.Printf("queue consume(live-ack, by-record) FAIL chan=%s chat=%d topic=%s msg=%d ids=%d: %v",
 				w.key.Channel, w.key.ChatID, TopicKeyStr(w.key), job.MessageID, len(ids), err)
 			return
 		}
@@ -1945,7 +1951,7 @@ func (w *RouteWorker) handleConsume(_ context.Context, job *ConsumeJob) {
 			// Not an error: a covered line can legitimately have been evicted by the
 			// retention cap or drained away between push and ack. Logged so a
 			// systematic mismatch is visible rather than silent.
-			log.Printf("queue consume(live-ack, by-id) chan=%s chat=%d topic=%s msg=%d: covered=%d removed=%d (rest already gone)",
+			log.Printf("queue consume(live-ack, by-record) chan=%s chat=%d topic=%s msg=%d: covered=%d removed=%d (rest already gone)",
 				w.key.Channel, w.key.ChatID, TopicKeyStr(w.key), job.MessageID, len(ids), len(removed))
 		}
 		return
@@ -1963,7 +1969,7 @@ func (w *RouteWorker) handleConsume(_ context.Context, job *ConsumeJob) {
 // recordCoveredByPush remembers which durable lines a live push covered, keyed
 // by its broker-minted token plus MessageID for legacy peers. Bounded;
 // worker-goroutine-only, so no lock. See RouteWorker.coveredByPush.
-func (w *RouteWorker) recordCoveredByPush(pushID int64, token string, ids []int64) {
+func (w *RouteWorker) recordCoveredByPush(pushID int64, token string, ids []string) {
 	if pushID == 0 || len(ids) == 0 {
 		return
 	}
@@ -1976,7 +1982,7 @@ func (w *RouteWorker) recordCoveredByPush(pushID int64, token string, ids []int6
 		w.coveredByPush = make(map[int64][]coveredPushRecord, maxCoveredByPush)
 	}
 	// Copy: the caller's slice is flushInbounds' batch-local buffer.
-	record := append([]int64(nil), ids...)
+	record := append([]string(nil), ids...)
 	w.coveredByPush[pushID] = append(w.coveredByPush[pushID], coveredPushRecord{token: token, ids: record})
 	w.coveredOrder = append(w.coveredOrder, coveredPushOrder{messageID: pushID, token: token})
 }
@@ -1984,7 +1990,7 @@ func (w *RouteWorker) recordCoveredByPush(pushID int64, token string, ids []int6
 // takeCoveredByPush returns and clears the exact tokened record. For a legacy
 // no-token ack it succeeds only when exactly one outstanding record matches the
 // MessageID; ambiguity leaves every record intact. Worker-goroutine-only.
-func (w *RouteWorker) takeCoveredByPush(pushID int64, token string) []int64 {
+func (w *RouteWorker) takeCoveredByPush(pushID int64, token string) []string {
 	if w.coveredByPush == nil {
 		return nil
 	}

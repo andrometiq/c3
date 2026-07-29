@@ -5,7 +5,6 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"syscall"
 )
 
 // runtimeDir returns the per-user runtime directory for the broker's socket
@@ -71,12 +70,12 @@ func validateOrCreatePrivateRuntimeDir(path string, uid uint32) (string, error) 
 	if !st.IsDir() {
 		return "", fmt.Errorf("private runtime path %s is not a directory (symlinks are not allowed)", path)
 	}
-	stat, ok := st.Sys().(*syscall.Stat_t)
+	ownerUID, ok := runtimeDirOwnerUID(st)
 	if !ok {
 		return "", fmt.Errorf("private runtime path %s has unsupported ownership metadata", path)
 	}
-	if stat.Uid != uid {
-		return "", fmt.Errorf("private runtime path %s is owned by uid %d, want %d", path, stat.Uid, uid)
+	if ownerUID != uid {
+		return "", fmt.Errorf("private runtime path %s is owned by uid %d, want %d", path, ownerUID, uid)
 	}
 	if mode := st.Mode().Perm(); mode != 0700 {
 		return "", fmt.Errorf("private runtime path %s has mode %04o, want 0700", path, mode)

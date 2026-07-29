@@ -36,14 +36,15 @@ Post-v0.1.0 publication — the stable release must exist before these can run:
 
 ## Pre-tag polish (non-blocking SEV3s from the cross-review rounds, 2026-07-29)
 
-- [ ] Mutation-coverage gap: `voiceFetchFailedOpening` is in the production opening table
+- [x] Mutation-coverage gap: `voiceFetchFailedOpening` is in the production opening table
       (`internal/broker/worker.go`) but the re-derived segment-replace unit table no longer
       exercises it — removing it would leave a `[voice download failed: …]` segment stale
       after a successful retranscribe with every test green. Add the one table row.
-      (CODEX-REVIEW-5 finding 2.)
-- [ ] The advertised nonce-less STT degradation is unreachable on Go ≥1.25 (`crypto/rand.Read`
+      (CODEX-REVIEW-5 finding 2; fixed in `cdf5704`.)
+- [x] The advertised nonce-less STT degradation is unreachable on Go ≥1.25 (`crypto/rand.Read`
       never returns an error there — it aborts the process). Fail-closed either way; align the
-      code/comment with reality or drop the branch. (CODEX-REVIEW-5 finding 1.)
+      code/comment with reality or drop the branch. (CODEX-REVIEW-5 finding 1;
+      fixed in `cdf5704`.)
 
 ## Packaging
 

@@ -149,27 +149,18 @@ type adapter struct {
 	rsPending chan ipc.RecoverSessionResp
 
 	recoverFired atomic.Bool
-	// recoverStarted records that a recovery attempt has BEGUN — set
-	// synchronously by every caller BEFORE it invokes fireRecover. Never reset:
-	// it answers "is there an identity question in flight for this process?".
-	// recoverFired cannot answer that — it is reset by refireRecoverOnReconnect,
-	// released on the nothing-was-sent paths, and set inside fireRecover.
+	// recoverStarted records that recovery has begun. The current per-connection
+	// identitySettled epoch says whether that registration has finished.
 	recoverStarted atomic.Bool
-	// identitySettled is closed once the first recovery attempt has FINISHED —
-	// recovered, registered, refused, failed, or timed out. It is the completion
-	// signal recoverFired was being misread as (recoverFired records ENTRY, and
-	// entry is not an answer), and toolAttach waits on it so an attach is never
-	// answered while this session still doesn't know who it is. Created lazily by
-	// identityGate so an adapter built as a bare struct literal behaves like one
-	// from newAdapter. One-shot for the process: a later re-registration improves
-	// the broker's records without re-opening an answered question — re-arming
-	// would let an attach block on a gate nobody is left to close.
+	// identitySettled is replaced synchronously for every reconnect registration
+	// and closed only by that epoch's recovery attempt. Created lazily so bare
+	// test adapters behave like constructor-built adapters.
 	idmu            sync.Mutex
 	identitySettled chan struct{}
-	settleOnce      sync.Once
 	runCtx          context.Context
 
-	helloAck ipc.HelloAckMsg
+	helloAck      ipc.HelloAckMsg
+	brokerVersion atomic.Int64
 
 	amu           sync.Mutex
 	lastAttach    *ipc.AttachReq
@@ -238,6 +229,7 @@ func (a *adapter) hello() error {
 		log.Print(w)
 	}
 	a.helloAck = ack
+	a.brokerVersion.Store(int64(ipc.PeerProtocolVersion(ack.ProtocolVersion)))
 	return nil
 }
 
@@ -445,17 +437,18 @@ func (a *adapter) trySessionRecover(ctx context.Context) {
 }
 
 func (a *adapter) refireRecoverOnReconnect(ctx context.Context) {
+	sid := strings.TrimSpace(os.Getenv("ANTIGRAVITY_CONVERSATION_ID"))
+	if sid == "" {
+		return
+	}
+	cwd := os.Getenv("C3_AGY_CWD")
+	if cwd == "" {
+		cwd, _ = os.Getwd()
+	}
 	a.recoverFired.Store(false)
+	a.recoverStarted.Store(true)
+	a.rearmIdentity()
 	go func() {
-		sid := strings.TrimSpace(os.Getenv("ANTIGRAVITY_CONVERSATION_ID"))
-		if sid == "" {
-			return
-		}
-		cwd := os.Getenv("C3_AGY_CWD")
-		if cwd == "" {
-			cwd, _ = os.Getwd()
-		}
-		a.recoverStarted.Store(true)
 		a.fireRecover(ctx, sid, cwd)
 	}()
 }
@@ -473,12 +466,24 @@ func (a *adapter) identityGate() chan struct{} {
 	return a.identitySettled
 }
 
-// markIdentitySettled answers the identity question for this process. Idempotent
-// — the first recovery attempt to finish settles it, and later re-registrations
-// (reconnect refires) do not re-open it.
+func (a *adapter) rearmIdentity() {
+	a.idmu.Lock()
+	a.identitySettled = make(chan struct{})
+	a.idmu.Unlock()
+}
+
 func (a *adapter) markIdentitySettled() {
-	gate := a.identityGate()
-	a.settleOnce.Do(func() { close(gate) })
+	a.settleIdentity(a.identityGate())
+}
+
+func (a *adapter) settleIdentity(gate chan struct{}) {
+	a.idmu.Lock()
+	defer a.idmu.Unlock()
+	select {
+	case <-gate:
+	default:
+		close(gate)
+	}
 }
 
 // awaitIdentitySettled blocks until this session's identity question has been
@@ -490,8 +495,9 @@ func (a *adapter) awaitIdentitySettled(ctx context.Context, bare bool) error {
 	if !a.recoverStarted.Load() {
 		return nil
 	}
+	gate := a.identityGate()
 	select {
-	case <-a.identityGate():
+	case <-gate:
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()
@@ -502,7 +508,7 @@ func (a *adapter) awaitIdentitySettled(ctx context.Context, bare bool) error {
 		log.Printf("recover-session: identity still resolving after %v — explicit target will wait for recovery to settle before it is sent", recoverSettleBudget)
 	}
 	select {
-	case <-a.identityGate():
+	case <-gate:
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()
@@ -516,6 +522,7 @@ func (a *adapter) fireRecover(ctx context.Context, stableID, cwd string) {
 	if !a.recoverFired.CompareAndSwap(false, true) {
 		return
 	}
+	gate := a.identityGate()
 	// The CAS winner OWNS the identity question, so it answers it on EVERY exit
 	// path below — recovered, registered, refused, write-failed, timed out. A
 	// session that could not be identified is a settled answer ("nobody"), not a
@@ -523,7 +530,7 @@ func (a *adapter) fireRecover(ctx context.Context, stableID, cwd string) {
 	// worse failure than an unidentified one. (The CAS loser deliberately does
 	// NOT settle — the winner is still working, and letting the loser answer for
 	// it is the exact entry-read-as-completion mistake this guards against.)
-	defer a.markIdentitySettled()
+	defer a.settleIdentity(gate)
 
 	respCh := make(chan ipc.RecoverSessionResp, 1)
 	a.rsmu.Lock()
@@ -1002,6 +1009,9 @@ func (a *adapter) toolDetach(ctx context.Context, _ *mcp.CallToolRequest) (*mcp.
 	conn := a.currentConn()
 	if conn == nil {
 		return toolErrorResult("broker reconnecting — retry detach in a moment"), nil
+	}
+	if !ipc.ProtocolStateChangesCompatible(int(a.brokerVersion.Load())) {
+		return toolErrorResult("detach refused: broker protocol is outside the state-change compatibility window; restart the CLI"), nil
 	}
 	req := ipc.ReleaseReq{Op: ipc.OpRelease}
 	if err := conn.WriteJSON(req); err != nil {

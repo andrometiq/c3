@@ -78,6 +78,9 @@ func TestStartAppServer_InterprocessFlockCoversChildReadiness(t *testing.T) {
 		url string
 		err error
 	}, 1)
+	attempted := make(chan struct{})
+	beforeAppServerLaunchFlock = func() { close(attempted) }
+	t.Cleanup(func() { beforeAppServerLaunchFlock = nil })
 	go func() {
 		url, err := startAppServer(os.Args[0], adapterPath, defaultWSURL, cwd, "topic")
 		result <- struct {
@@ -86,7 +89,11 @@ func TestStartAppServer_InterprocessFlockCoversChildReadiness(t *testing.T) {
 		}{url, err}
 	}()
 
-	time.Sleep(200 * time.Millisecond)
+	select {
+	case <-attempted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("contending launcher never reached the interprocess lock")
+	}
 	if _, err := os.Stat(started); err == nil {
 		t.Fatal("defect: a second launcher started its app-server while another process held the C3 runtime flock; choose-port → start-child → readiness is not serialized")
 	} else if !os.IsNotExist(err) {

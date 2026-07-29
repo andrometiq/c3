@@ -3,6 +3,7 @@ package queue
 import (
 	"bufio"
 	"bytes"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -63,6 +64,14 @@ type Store struct {
 	retentionDisabled bool
 }
 
+// storedInbound is the queue's private on-disk envelope. Embedding keeps every
+// frozen Inbound key at the top level; _c3_queue_id is additive, ignored by old
+// readers, and never appears on the public IPC Inbound.
+type storedInbound struct {
+	c3types.Inbound
+	RecordID string `json:"_c3_queue_id,omitempty"`
+}
+
 // NewStore creates the queue dir (0700) and returns a Store. Call
 // RecoverOnStartup once after construction to rebuild the index from disk.
 func NewStore(dir string) (*Store, error) {
@@ -91,6 +100,14 @@ func (s *Store) curPath(rk RouteKey) string   { return filepath.Join(s.dir, rk.F
 // the status index. The caller (worker) only treats the source update_id as
 // offset-eligible AFTER this returns nil.
 func (s *Store) Append(rk RouteKey, in *c3types.Inbound) error {
+	_, err := s.AppendTracked(rk, in)
+	return err
+}
+
+// AppendTracked is Append plus the durable identity of the exact line written.
+// The identity survives queue rewrites and lets a live-delivery ack remove that
+// line even when another pending edit has the same channel MessageID.
+func (s *Store) AppendTracked(rk RouteKey, in *c3types.Inbound) (string, error) {
 	// Stamp the record format version on the way to disk. Append is the ONLY
 	// place a record enters the queue, so it is the only place that has to do
 	// this — rewrite() and snapshotDropped() re-serialize records that were
@@ -104,24 +121,26 @@ func (s *Store) Append(rk RouteKey, in *c3types.Inbound) error {
 	// byte-identically to the original (the shared slices/pointers are only
 	// read during marshal). A nil `in` keeps its existing behaviour — marshals
 	// to "null" — instead of panicking on the dereference.
-	rec := in
-	if in != nil && in.V == 0 {
+	var rec *storedInbound
+	if in != nil {
 		cp := *in
-		cp.V = c3types.InboundRecordVersion
-		rec = &cp
+		if cp.V == 0 {
+			cp.V = c3types.InboundRecordVersion
+		}
+		rec = &storedInbound{Inbound: cp, RecordID: rand.Text()}
 	}
 	data, err := json.Marshal(rec)
 	if err != nil {
-		return fmt.Errorf("queue: marshal: %w", err)
+		return "", fmt.Errorf("queue: marshal: %w", err)
 	}
 	if len(data) > MaxRecordBytes {
 		if data, err = s.boundRecord(rk, rec, data); err != nil {
-			return err
+			return "", err
 		}
 	}
 	f, err := os.OpenFile(s.jsonlPath(rk), os.O_APPEND|os.O_CREATE|os.O_RDWR, 0600)
 	if err != nil {
-		return fmt.Errorf("queue: open append: %w", err)
+		return "", fmt.Errorf("queue: open append: %w", err)
 	}
 	// Self-heal a torn tail before appending. A previous Append can leave a
 	// PARTIAL line with no trailing newline: Go's poll.FD.Write loops over short
@@ -144,24 +163,27 @@ func (s *Store) Append(rk RouteKey, in *c3types.Inbound) error {
 	}
 	if _, err := f.Write(append(data, '\n')); err != nil {
 		_ = f.Close()
-		return fmt.Errorf("queue: write: %w", err)
+		return "", fmt.Errorf("queue: write: %w", err)
 	}
 	if err := f.Sync(); err != nil {
 		_ = f.Close()
-		return fmt.Errorf("queue: fsync: %w", err)
+		return "", fmt.Errorf("queue: fsync: %w", err)
 	}
 	if err := f.Close(); err != nil {
-		return fmt.Errorf("queue: close: %w", err)
+		return "", fmt.Errorf("queue: close: %w", err)
 	}
 	// fsync the parent dir so a freshly O_CREATE'd .jsonl's directory entry is
 	// durable across a power-loss crash — otherwise a crash right after Append
 	// returns nil could lose the message the broker already treated as persisted
 	// (and whose update_id it has since let the Telegram offset advance past).
 	if err := s.syncDir(); err != nil {
-		return err
+		return "", err
 	}
 	s.refreshIndex(rk)
-	return nil
+	if rec == nil {
+		return "", nil
+	}
+	return rec.RecordID, nil
 }
 
 // truncationMarker is appended to a record whose Text boundRecord had to cut. It
@@ -192,7 +214,7 @@ const truncationMarkerNoRetention = "\n\n⚠️ [C3] This message was truncated:
 // undeliverable and contagious — past 4 MiB no fetch_queue response can ever
 // carry it, and past 8 MiB it makes the whole route unparseable (see
 // pendingStats). The bound is the one place every producer passes through.
-func (s *Store) boundRecord(rk RouteKey, rec *c3types.Inbound, data []byte) ([]byte, error) {
+func (s *Store) boundRecord(rk RouteKey, rec *storedInbound, data []byte) ([]byte, error) {
 	if rec == nil {
 		return data, nil // a nil record marshals to "null"; it is never over-bound
 	}
@@ -296,7 +318,7 @@ func (s *Store) syncDir() error {
 // lines fire once each, where the loss actually happens — Consume (the cursor steps
 // past the bytes, making them permanently undeliverable) and quarantineCorrupt (the
 // bytes leave the live file).
-func (s *Store) readLines(rk RouteKey) (lines []c3types.Inbound, cursor int, err error) {
+func (s *Store) readLines(rk RouteKey) (lines []storedInbound, cursor int, err error) {
 	f, err := os.Open(s.jsonlPath(rk))
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -310,10 +332,10 @@ func (s *Store) readLines(rk RouteKey) (lines []c3types.Inbound, cursor int, err
 	for sc.Scan() {
 		line := strings.TrimSpace(sc.Text())
 		if line == "" {
-			lines = append(lines, c3types.Inbound{}) // keep line-number alignment
+			lines = append(lines, storedInbound{}) // keep line-number alignment
 			continue
 		}
-		var in c3types.Inbound
+		var in storedInbound
 		if jerr := json.Unmarshal([]byte(line), &in); jerr != nil {
 			// Corrupt line: keep a placeholder so the cursor's line-number stays
 			// aligned with the file, but mark it skippable via a zero MessageID
@@ -324,7 +346,7 @@ func (s *Store) readLines(rk RouteKey) (lines []c3types.Inbound, cursor int, err
 			// so quarantineCorrupt can copy them into .trash/ before a rewrite
 			// discards them. Never read .Text off a raw lines[] element without
 			// checking the sentinel first; every current reader does.
-			lines = append(lines, c3types.Inbound{Channel: corruptSentinel, Text: line})
+			lines = append(lines, storedInbound{Inbound: c3types.Inbound{Channel: corruptSentinel, Text: line}})
 			continue
 		}
 		lines = append(lines, in)
@@ -380,7 +402,7 @@ func (s *Store) countPendingLines(rk RouteKey) (int, error) {
 }
 
 // pendingFrom returns the non-corrupt lines after the cursor.
-func pendingFrom(lines []c3types.Inbound, cursor int) []c3types.Inbound {
+func pendingFrom(lines []storedInbound, cursor int) []c3types.Inbound {
 	if cursor < 0 {
 		cursor = 0
 	}
@@ -392,7 +414,7 @@ func pendingFrom(lines []c3types.Inbound, cursor int) []c3types.Inbound {
 		if in.Channel == corruptSentinel {
 			continue
 		}
-		out = append(out, in)
+		out = append(out, in.Inbound)
 	}
 	return out
 }
@@ -438,7 +460,7 @@ func (s *Store) Consume(rk RouteKey, n int) ([]c3types.Inbound, error) {
 			stepped++
 			continue // step over corrupt lines, don't return them
 		}
-		out = append(out, in)
+		out = append(out, in.Inbound)
 	}
 	// Stepping the cursor over an unparseable line is the moment that line becomes
 	// permanently undeliverable, so it must never be silent. The cursor only moves
@@ -555,7 +577,7 @@ func (s *Store) EvictOverCap(rk RouteKey) (int, error) {
 	// inflate the count (over-evicting) and desync the rewritten file's length
 	// from newCursor (risking double-serve or skip). Project lines→real and map
 	// the cursor into the same corrupt-free coordinate space.
-	real := make([]c3types.Inbound, 0, len(lines))
+	real := make([]storedInbound, 0, len(lines))
 	cursorReal := 0 // cursor mapped into the corrupt-free index space
 	var corrupt []string
 	for i, in := range lines {
@@ -657,7 +679,7 @@ func (s *Store) RefreshText(rk RouteKey, messageID int64, newText string) (bool,
 	// Project lines→real (corrupt-free) and map the cursor into that index space,
 	// mirroring EvictOverCap so a rewrite that drops corrupt lines doesn't desync
 	// the cursor from the rewritten file.
-	real := make([]c3types.Inbound, 0, len(lines))
+	real := make([]storedInbound, 0, len(lines))
 	cursorReal := 0
 	var corrupt []string
 	for i, in := range lines {
@@ -740,14 +762,48 @@ func (s *Store) RemoveIDs(rk RouteKey, sel map[int64][]int) (removed []c3types.I
 	if len(sel) == 0 {
 		return nil, nil // nothing requested — clean no-op, no file I/O
 	}
+	// Project the caller's ordinal lists into per-id ordinal SETS. The caller's
+	// frozen selection is never mutated (phase 2 reuses it across a re-issue).
+	want := make(map[int64]map[int]bool, len(sel))
+	for id, ords := range sel {
+		set := make(map[int]bool, len(ords))
+		for _, o := range ords {
+			set[o] = true
+		}
+		want[id] = set
+	}
+	seen := make(map[int64]int)
+	return s.removeRecords(rk, func(in storedInbound) bool {
+		seen[in.MessageID]++
+		return want[in.MessageID][seen[in.MessageID]]
+	})
+}
+
+// RemoveRecordIDs removes exactly the pending queue lines named by their
+// broker-private durable identities. Missing, already-consumed, and legacy
+// untracked records are clean no-ops: uncertainty must leave a duplicate, never
+// delete a different line.
+func (s *Store) RemoveRecordIDs(rk RouteKey, ids []string) ([]c3types.Inbound, error) {
+	want := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		if id != "" {
+			want[id] = true
+		}
+	}
+	if len(want) == 0 {
+		return nil, nil
+	}
+	return s.removeRecords(rk, func(in storedInbound) bool {
+		return in.RecordID != "" && want[in.RecordID]
+	})
+}
+
+func (s *Store) removeRecords(rk RouteKey, match func(storedInbound) bool) (removed []c3types.Inbound, err error) {
 	lines, cursor, err := s.readLines(rk)
 	if err != nil || len(lines) == 0 {
 		return nil, err
 	}
-	// Project lines→real (corrupt-free) and map the cursor into that index space,
-	// mirroring RefreshText/EvictOverCap so a rewrite that drops corrupt lines does
-	// not desync the cursor from the rewritten file.
-	real := make([]c3types.Inbound, 0, len(lines))
+	real := make([]storedInbound, 0, len(lines))
 	cursorReal := 0
 	var corrupt []string
 	for i, in := range lines {
@@ -760,33 +816,19 @@ func (s *Store) RemoveIDs(rk RouteKey, sel map[int64][]int) (removed []c3types.I
 		}
 		real = append(real, in)
 	}
-	// Project the caller's ordinal lists into per-id ordinal SETS. The caller's
-	// frozen selection is never mutated (phase 2 reuses it across a re-issue).
-	want := make(map[int64]map[int]bool, len(sel))
-	for id, ords := range sel {
-		set := make(map[int]bool, len(ords))
-		for _, o := range ords {
-			set[o] = true
-		}
-		want[id] = set
-	}
-	// Walk the still-pending (cursor-onward) real lines in file order, counting
-	// each id's occurrences as we go and partitioning into removed (this
-	// occurrence's ordinal was selected) vs kept. The consumed region
-	// (real[:cursorReal]) is preserved verbatim.
-	kept := make([]c3types.Inbound, 0, len(real))
+	kept := make([]storedInbound, 0, len(real))
 	kept = append(kept, real[:cursorReal]...)
-	seen := make(map[int64]int)
+	removedStored := make([]storedInbound, 0)
 	for idx := cursorReal; idx < len(real); idx++ {
 		in := real[idx]
-		seen[in.MessageID]++
-		if want[in.MessageID][seen[in.MessageID]] {
-			removed = append(removed, in)
+		if match(in) {
+			removedStored = append(removedStored, in)
+			removed = append(removed, in.Inbound)
 			continue
 		}
 		kept = append(kept, in)
 	}
-	if len(removed) == 0 {
+	if len(removedStored) == 0 {
 		return nil, nil // no pending line matched — mutate nothing (idempotent)
 	}
 	// Snapshot the removed lines into .trash/ BEFORE the live rewrite discards them,
@@ -794,7 +836,7 @@ func (s *Store) RemoveIDs(rk RouteKey, sel map[int64][]int) (removed []c3types.I
 	// snapshot failure returns before the rewrite, so the live queue is untouched
 	// (fail-toward-keeping); a crash between snapshot and rewrite leaves the lines in
 	// both places — a harmless duplicate GC'd later.
-	if err := s.snapshotDropped(rk, removed); err != nil {
+	if err := s.snapshotDropped(rk, removedStored); err != nil {
 		return nil, err
 	}
 	if err := s.quarantineCorrupt(rk, corrupt); err != nil {
@@ -1020,11 +1062,11 @@ func (s *Store) retirePair(rk RouteKey) error {
 // same crash-safe pattern as rewrite) BEFORE the live rewrite discards them.
 // Corrupt placeholder lines carry no recoverable content and are skipped; an
 // empty (or all-corrupt) dropped set is a no-op.
-func (s *Store) snapshotDropped(rk RouteKey, dropped []c3types.Inbound) error {
+func (s *Store) snapshotDropped(rk RouteKey, dropped []storedInbound) error {
 	if s.retentionDisabled {
 		return nil // retention off (item G): no .trash/ to snapshot into; EvictOverCap drops the lines.
 	}
-	real := make([]c3types.Inbound, 0, len(dropped))
+	real := make([]storedInbound, 0, len(dropped))
 	for _, in := range dropped {
 		if in.Channel == corruptSentinel {
 			continue
@@ -1271,7 +1313,7 @@ func (s *Store) sweepTrashCaps(now time.Time, ttl time.Duration, maxBytes int64,
 
 // rewrite atomically replaces the jsonl with the given lines (the cap valve
 // EvictOverCap, the STT-fix RefreshText, and the drain primitive RemoveIDs).
-func (s *Store) rewrite(rk RouteKey, lines []c3types.Inbound) error {
+func (s *Store) rewrite(rk RouteKey, lines []storedInbound) error {
 	tmp := s.jsonlPath(rk) + ".tmp"
 	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0600)
 	if err != nil {

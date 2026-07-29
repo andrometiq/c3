@@ -226,7 +226,8 @@ type adapter struct {
 	recoverFired atomic.Bool
 	runCtx       context.Context
 
-	helloAck ipc.HelloAckMsg
+	helloAck      ipc.HelloAckMsg
+	brokerVersion atomic.Int64
 
 	amu           sync.Mutex
 	lastAttach    *ipc.AttachReq
@@ -292,6 +293,7 @@ func (a *adapter) hello() error {
 		log.Print(w)
 	}
 	a.helloAck = ack
+	a.brokerVersion.Store(int64(ipc.PeerProtocolVersion(ack.ProtocolVersion)))
 	return nil
 }
 
@@ -997,6 +999,9 @@ func (a *adapter) toolDetach(ctx context.Context, _ *mcp.CallToolRequest) (*mcp.
 	conn := a.currentConn()
 	if conn == nil {
 		return toolErrorResult("broker reconnecting — retry detach in a moment"), nil
+	}
+	if !ipc.ProtocolStateChangesCompatible(int(a.brokerVersion.Load())) {
+		return toolErrorResult("detach refused: broker protocol is outside the state-change compatibility window; restart the CLI"), nil
 	}
 	req := ipc.ReleaseReq{Op: ipc.OpRelease}
 	if err := conn.WriteJSON(req); err != nil {

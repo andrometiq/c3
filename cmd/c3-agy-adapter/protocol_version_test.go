@@ -118,6 +118,24 @@ func TestHello_CarriesVersion_AndSurvivesMismatchedAck(t *testing.T) {
 	}
 }
 
+func TestDetach_IncompatibleBrokerRefusesWithoutClearingReplay(t *testing.T) {
+	c1, c2 := net.Pipe()
+	defer c1.Close()
+	defer c2.Close()
+	a := newAdapter()
+	a.conn = ipc.NewConn(c1)
+	go func() { _, _ = ipc.NewConn(c2).ReadFrame() }()
+	a.brokerVersion.Store(int64(ipc.CompatibleProtocolMax + 1))
+	a.lastAttach = &ipc.AttachReq{Op: ipc.OpAttach, Name: "kept"}
+	res, err := a.toolDetach(context.Background(), nil)
+	if err != nil || !res.IsError {
+		t.Fatalf("incompatible detach reported success: result=%+v err=%v", res, err)
+	}
+	if a.lastAttach == nil {
+		t.Fatal("incompatible detach cleared replay state even though the broker retained the claim")
+	}
+}
+
 // An ack from a broker that predates versioning (no field) is v1 — no warning.
 func TestHello_LegacyAckNoVersion_NoWarning(t *testing.T) {
 	sink := captureProtoLog(t)

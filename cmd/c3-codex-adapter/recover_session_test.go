@@ -630,3 +630,43 @@ func TestRenderCodexRecoverNotice_NamesTheTopicAndTheHeldBacklog(t *testing.T) {
 		t.Error("a non-recovery must not announce an attach")
 	}
 }
+
+func TestReconnectRecoveryRearmsIdentitySettlement(t *testing.T) {
+	a := newAdapter()
+	old := a.identityGate()
+	a.markIdentitySettled()
+	a.tidmu.Lock()
+	a.threadID = "thread-reconnect"
+	a.tidmu.Unlock()
+	c1, c2 := net.Pipe()
+	defer c1.Close()
+	defer c2.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	requestSeen := make(chan struct{})
+	go func() {
+		_, _ = ipc.NewConn(c2).ReadFrame()
+		close(requestSeen)
+	}()
+	a.ensureSessionRecoverForConn(ctx, ipc.NewConn(c1))
+	current := a.identityGate()
+	if old == current {
+		t.Fatal("reconnect recovery reused the permanently closed identity gate")
+	}
+	select {
+	case <-current:
+		t.Fatal("reconnect identity epoch was already settled before re-registration")
+	default:
+	}
+	select {
+	case <-requestSeen:
+	case <-time.After(time.Second):
+		t.Fatal("reconnect recovery did not send registration")
+	}
+	cancel()
+	select {
+	case <-current:
+	case <-time.After(time.Second):
+		t.Fatal("current reconnect identity epoch did not settle")
+	}
+}

@@ -278,6 +278,121 @@ func TestRemoveIDs_DuplicateMessageIDByOccurrence(t *testing.T) {
 	}
 }
 
+func TestAppendTracked_RecordIdentitySurvivesEveryRewrite(t *testing.T) {
+	tests := []struct {
+		name    string
+		prepare func(*testing.T, *Store, RouteKey)
+		rewrite func(*testing.T, *Store, RouteKey)
+	}{
+		{
+			name: "RefreshText",
+			rewrite: func(t *testing.T, s *Store, rk RouteKey) {
+				t.Helper()
+				if ok, err := s.RefreshText(rk, 7, "first-refreshed"); err != nil || !ok {
+					t.Fatalf("RefreshText = %v, %v", ok, err)
+				}
+			},
+		},
+		{
+			name: "RemoveIDs",
+			prepare: func(t *testing.T, s *Store, rk RouteKey) {
+				t.Helper()
+				if err := s.Append(rk, msg(99, "remove-me")); err != nil {
+					t.Fatal(err)
+				}
+			},
+			rewrite: func(t *testing.T, s *Store, rk RouteKey) {
+				t.Helper()
+				if _, err := s.RemoveIDs(rk, map[int64][]int{99: {1}}); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "EvictOverCap",
+			prepare: func(t *testing.T, s *Store, rk RouteKey) {
+				t.Helper()
+				old := msg(99, "evict-me")
+				old.Timestamp = time.Now().Add(-MaxAge - time.Hour)
+				if err := s.Append(rk, old); err != nil {
+					t.Fatal(err)
+				}
+			},
+			rewrite: func(t *testing.T, s *Store, rk RouteKey) {
+				t.Helper()
+				if dropped, err := s.EvictOverCap(rk); err != nil || dropped != 1 {
+					t.Fatalf("EvictOverCap = %d, %v", dropped, err)
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := newStore(t)
+			rk := RouteKey{Channel: "telegram", ChatID: -100}
+			if tt.prepare != nil {
+				tt.prepare(t, s, rk)
+			}
+			firstID, err := s.AppendTracked(rk, msg(7, "first"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			secondID, err := s.AppendTracked(rk, msg(7, "second"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if firstID == "" || secondID == "" || firstID == secondID {
+				t.Fatalf("defect: tracked queue identities are not distinct and non-empty: first=%q second=%q", firstID, secondID)
+			}
+
+			tt.rewrite(t, s, rk)
+			removed, err := s.RemoveRecordIDs(rk, []string{secondID})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(removed) != 1 || removed[0].Text != "second" {
+				t.Fatalf("defect: %s dropped the exact durable identity; removing the second duplicate got %+v", tt.name, removed)
+			}
+			left, err := s.Peek(rk, -1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(left) != 1 || left[0].MessageID != 7 || (left[0].Text != "first" && left[0].Text != "first-refreshed") {
+				t.Fatalf("defect: exact removal after %s removed the wrong same-MessageID occurrence; left=%+v", tt.name, left)
+			}
+			if _, err := s.RemoveRecordIDs(rk, []string{firstID}); err != nil {
+				t.Fatal(err)
+			}
+			if n, _ := s.Pending(rk); n != 0 {
+				t.Fatalf("first durable identity no longer resolves after %s; pending=%d", tt.name, n)
+			}
+		})
+	}
+}
+
+func TestAppendTracked_PrivateIdentityIsOldReaderCompatible(t *testing.T) {
+	s := newStore(t)
+	dir := QueueDir()
+	rk := RouteKey{Channel: "telegram", ChatID: -100}
+	want := msg(7, "body")
+	recordID, err := s.AppendTracked(rk, want)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := rawJSONL(t, dir, rk)
+	if len(lines) != 1 || !strings.Contains(lines[0], `"_c3_queue_id":"`+recordID+`"`) {
+		t.Fatalf("tracked line does not carry its private durable identity: %v", lines)
+	}
+	var oldReader c3types.Inbound
+	if err := json.Unmarshal([]byte(lines[0]), &oldReader); err != nil {
+		t.Fatalf("old Inbound reader rejected additive queue identity: %v", err)
+	}
+	if oldReader.MessageID != want.MessageID || oldReader.Text != want.Text {
+		t.Fatalf("old Inbound reader changed the public record: got %+v want msg=%d text=%q", oldReader, want.MessageID, want.Text)
+	}
+}
+
 // TestRemoveIDs_CorruptLineSteppedOver: a corrupt line in pending is never removed,
 // never counted, and is stripped by the rewrite; the surrounding real lines are
 // handled correctly.

@@ -92,6 +92,7 @@ func (a *adapter) fireRecover(ctx context.Context, stableID, cwd string) {
 	if !a.recoverFired.CompareAndSwap(false, true) {
 		return
 	}
+	gate := a.identityGate()
 	// The CAS winner OWNS the identity question, so it answers it on EVERY exit
 	// path below — recovered, registered, refused, write-failed, timed out. A
 	// session that could not be identified is a settled answer ("nobody"), not a
@@ -99,7 +100,7 @@ func (a *adapter) fireRecover(ctx context.Context, stableID, cwd string) {
 	// worse failure than an unidentified one. (The CAS loser deliberately does
 	// NOT settle — the winner is still working, and letting the loser answer for
 	// it is the exact entry-read-as-completion mistake this guards against.)
-	defer a.markIdentitySettled()
+	defer a.settleIdentity(gate)
 
 	// Ensure inject targets this session.
 	if a.leader != nil {
@@ -248,15 +249,16 @@ func (a *adapter) emitRecoverNotice(text string) {
 // record-only branch when the replay restored the route (and the gated
 // own-route recover when the replay's proposal was discarded).
 func (a *adapter) refireRecoverOnReconnect(ctx context.Context) {
+	sid := a.stableSessionID()
+	if sid == "" {
+		return
+	}
+	cwd := a.cwd()
 	a.recoverFired.Store(false)
+	a.recoverStarted.Store(true)
+	a.rearmIdentity()
 	go func() {
-		sid := a.stableSessionID()
-		if sid == "" {
-			return // no session id resolvable — nothing to re-register yet;
-			// the next attach's ensureStableSessionRegistered retries.
-		}
-		a.recoverStarted.Store(true)
-		a.fireRecover(ctx, sid, a.cwd())
+		a.fireRecover(ctx, sid, cwd)
 	}()
 }
 
@@ -300,12 +302,24 @@ func (a *adapter) identityGate() chan struct{} {
 	return a.identitySettled
 }
 
-// markIdentitySettled answers the identity question for this process. Idempotent
-// — the first recovery attempt to finish settles it, and later re-registrations
-// (reconnect refires) do not re-open it.
+func (a *adapter) rearmIdentity() {
+	a.idmu.Lock()
+	a.identitySettled = make(chan struct{})
+	a.idmu.Unlock()
+}
+
 func (a *adapter) markIdentitySettled() {
-	gate := a.identityGate()
-	a.settleOnce.Do(func() { close(gate) })
+	a.settleIdentity(a.identityGate())
+}
+
+func (a *adapter) settleIdentity(gate chan struct{}) {
+	a.idmu.Lock()
+	defer a.idmu.Unlock()
+	select {
+	case <-gate:
+	default:
+		close(gate)
+	}
 }
 
 // awaitIdentitySettled blocks until this session's identity question has been
@@ -317,8 +331,9 @@ func (a *adapter) awaitIdentitySettled(ctx context.Context, bare bool) error {
 	if !a.recoverStarted.Load() {
 		return nil
 	}
+	gate := a.identityGate()
 	select {
-	case <-a.identityGate():
+	case <-gate:
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()
@@ -329,7 +344,7 @@ func (a *adapter) awaitIdentitySettled(ctx context.Context, bare bool) error {
 		log.Printf("recover-session: identity still resolving after %v — explicit target will wait for recovery to settle before it is sent", recoverSettleBudget)
 	}
 	select {
-	case <-a.identityGate():
+	case <-gate:
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()

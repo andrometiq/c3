@@ -276,15 +276,20 @@ func TestHandleInboundDelivered_MergedBatchConsumesAllCovered(t *testing.T) {
 	tid := int64(914)
 	key := MakeRouteKey("telegram", -100, &tid)
 	qrk := queue.RouteKey{Channel: "telegram", ChatID: -100, TopicID: &tid}
+	var recordIDs []string
 	for i := int64(1); i <= 5; i++ {
-		_ = b.Queue.Append(qrk, &c3types.Inbound{Channel: "telegram", ChatID: -100, TopicID: &tid, MessageID: i, Text: "m", Timestamp: time.Now()})
+		recordID, err := b.Queue.AppendTracked(qrk, &c3types.Inbound{Channel: "telegram", ChatID: -100, TopicID: &tid, MessageID: i, Text: "m", Timestamp: time.Now()})
+		if err != nil {
+			t.Fatal(err)
+		}
+		recordIDs = append(recordIDs, recordID)
 	}
 	// Install the worker and the exact identities represented by this synthetic
 	// merged push. A count-only ack is deliberately non-destructive.
 	b.Workers.mu.Lock()
 	w := b.Workers.spawnLocked(key)
 	b.Workers.mu.Unlock()
-	w.recordCoveredByPush(3, "", []int64{1, 2, 3})
+	w.recordCoveredByPush(3, "", recordIDs[:3])
 	stub := claimedHolder(t, b, key)
 	stub.SetRoute(&key)
 	stub.MarkRouteConfirmed() // live-push ack consume requires a confirmed claim (§5 tripwire)

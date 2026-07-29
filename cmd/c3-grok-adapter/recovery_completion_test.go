@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"net"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -369,5 +370,46 @@ func TestToolAttach_ExplicitTargetWaitsPastBareBudgetUntilIdentitySettles(t *tes
 	case <-done:
 	case <-time.After(time.Second):
 		t.Fatal("explicit attach did not return after the broker response")
+	}
+}
+
+func TestReconnectRecoveryRearmsIdentitySettlement(t *testing.T) {
+	t.Setenv("C3_GROK_SESSION_ID", "session-reconnect")
+	a := newAdapter()
+	old := a.identityGate()
+	a.markIdentitySettled()
+	c1, c2 := net.Pipe()
+	defer c1.Close()
+	defer c2.Close()
+	a.bmu.Lock()
+	a.conn = ipc.NewConn(c1)
+	a.bmu.Unlock()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	requestSeen := make(chan struct{})
+	go func() {
+		_, _ = ipc.NewConn(c2).ReadFrame()
+		close(requestSeen)
+	}()
+	a.refireRecoverOnReconnect(ctx)
+	current := a.identityGate()
+	if old == current {
+		t.Fatal("reconnect recovery reused the permanently closed identity gate")
+	}
+	select {
+	case <-current:
+		t.Fatal("reconnect identity epoch was already settled before re-registration")
+	default:
+	}
+	select {
+	case <-requestSeen:
+	case <-time.After(time.Second):
+		t.Fatal("reconnect recovery did not send registration")
+	}
+	cancel()
+	select {
+	case <-current:
+	case <-time.After(time.Second):
+		t.Fatal("current reconnect identity epoch did not settle")
 	}
 }
