@@ -308,7 +308,20 @@ func (b *Broker) handleRecoverSession(conn *ipc.Conn, stub *Stub, raw []byte) {
 		_ = conn.WriteJSON(ipc.RecoverSessionResp{Op: ipc.OpRecoverSessionResult, Err: "bad recover_session"})
 		return
 	}
+	prev := stub.StableSessionIDValue()
+	switched := prev != "" && prev != req.StableSessionID
 	stub.SetStableSessionID(req.StableSessionID)
+	if switched {
+		if cur := stub.CurrentRoute(); cur != nil {
+			b.Routes.ReleaseAllByConnID(stub.ConnID)
+			stub.SetRoute(nil)
+			log.Printf("recover: identity switch conn=%d %s → %s — released %s, recovering the new session's topic",
+				stub.ConnID, prev, req.StableSessionID, routeKeyStr(*cur))
+		}
+		// A detach barrier records a user action in the previous conversation.
+		// Switching identities must not carry it into the new conversation.
+		stub.SetExplicitlyDetached(false)
+	}
 	resp := ipc.RecoverSessionResp{Op: ipc.OpRecoverSessionResult}
 	if cur := stub.CurrentRoute(); cur != nil {
 		// Attach-first: a fresh session already claimed a route (by cwd) before
