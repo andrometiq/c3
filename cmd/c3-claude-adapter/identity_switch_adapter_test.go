@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -134,7 +135,10 @@ func waitForIdentityGate(t *testing.T, gate chan struct{}, defect string) {
 	}
 }
 
-type reconnectSwitchChannel struct{}
+type reconnectSwitchChannel struct {
+	mu        sync.Mutex
+	validated []int64
+}
 
 func (*reconnectSwitchChannel) Name() string { return "telegram" }
 func (*reconnectSwitchChannel) Start(context.Context, channel.Host) error {
@@ -155,7 +159,23 @@ func (*reconnectSwitchChannel) StopPoll(int64, int64) (*c3types.PollResult, erro
 	return &c3types.PollResult{}, nil
 }
 func (*reconnectSwitchChannel) CreateTopic(int64, string) (int64, error) { return 0, nil }
-func (*reconnectSwitchChannel) ValidateTopic(int64, int64) error         { return nil }
+func (c *reconnectSwitchChannel) ValidateTopic(_ int64, topicID int64) error {
+	c.mu.Lock()
+	c.validated = append(c.validated, topicID)
+	c.mu.Unlock()
+	return nil
+}
+
+func (c *reconnectSwitchChannel) validatedTopic(topicID int64) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, got := range c.validated {
+		if got == topicID {
+			return true
+		}
+	}
+	return false
+}
 
 func reconnectSwitchMappings() *mappings.MappingsFile {
 	enabled := true
@@ -191,10 +211,57 @@ func reconnectSwitchMappings() *mappings.MappingsFile {
 	return mf
 }
 
-// T12 reproduces the broker-restart race from F1 end to end. The adapter holds
-// A's replay request, but the handoff already resolves to B when it connects to
-// a fresh broker. B must recover its own attachment without A ever being
-// replayed onto the identity-empty fresh stub.
+func wireReconnectTestBroker(t *testing.T, a *adapter, b *c3broker.Broker) {
+	t.Helper()
+	a.connectBrokerFn = func() error {
+		adapterSide, brokerSide := net.Pipe()
+		a.bmu.Lock()
+		a.conn = ipc.NewConn(adapterSide)
+		a.bmu.Unlock()
+		go b.HandleConn(brokerSide)
+		return nil
+	}
+}
+
+func waitForStableIdentity(t *testing.T, a *adapter, stableID string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if current, settled := a.currentStableIdentity(); settled && current.StableSessionID == stableID {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	current, settled := a.currentStableIdentity()
+	t.Fatalf("reconnect did not register terminal identity %q: settled=%v current=%+v", stableID, settled, current)
+}
+
+func requireReconnectSwitchIntegrity(t *testing.T, b *c3broker.Broker) {
+	t.Helper()
+	attachmentB, ok := b.Mappings().LookupSessionAttachment("conversation-b")
+	if !ok || attachmentB.TopicID == nil || *attachmentB.TopicID != 412 {
+		t.Fatalf("reconnect replay corrupted conversation B's attachment with conversation A's topic: got %+v ok=%v", attachmentB, ok)
+	}
+	attachmentA, ok := b.Mappings().LookupSessionAttachment("conversation-a")
+	if !ok || attachmentA.TopicID == nil || *attachmentA.TopicID != 281 || attachmentA.Detached {
+		t.Fatalf("reconnect switch damaged conversation A's independent attachment record: got %+v ok=%v", attachmentA, ok)
+	}
+
+	topicA := int64(281)
+	keyA := c3broker.MakeRouteKey("telegram", -100, &topicA)
+	topicB := int64(412)
+	keyB := c3broker.MakeRouteKey("telegram", -200, &topicB)
+	if _, held := b.Routes.Holder(keyA); held {
+		t.Fatal("reconnect identity switch left conversation A's stale replay claim alive on the fresh broker")
+	}
+	if holder, held := b.Routes.Holder(keyB); !held || holder.StableSessionIDValue() != "conversation-b" {
+		t.Fatalf("fresh broker did not recover conversation B's own topic: held=%v holder=%+v", held, holder)
+	}
+}
+
+// T12 reproduces the broker-restart race from F1 end to end through the real
+// recoverBroker entry point. This pins the production call-site ordering, not
+// only restoreSessionAfterReconnect in isolation.
 func TestRecoverBroker_IdentitySwitchSkipsStaleReplayAndPreservesAttachments(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
@@ -205,28 +272,20 @@ func TestRecoverBroker_IdentitySwitchSkipsStaleReplayAndPreservesAttachments(t *
 
 	freshBroker := c3broker.New(reconnectSwitchMappings())
 	t.Cleanup(freshBroker.Shutdown)
-	if err := freshBroker.RegisterChannel(&reconnectSwitchChannel{}); err != nil {
+	testChannel := &reconnectSwitchChannel{}
+	if err := freshBroker.RegisterChannel(testChannel); err != nil {
 		t.Fatalf("register reconnect test channel: %v", err)
 	}
-
-	adapterSide, brokerSide := net.Pipe()
-	t.Cleanup(func() {
-		_ = adapterSide.Close()
-		_ = brokerSide.Close()
-	})
-	go freshBroker.HandleConn(brokerSide)
-
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	a := newAdapter()
 	a.runCtx = ctx
-	a.bmu.Lock()
-	a.conn = ipc.NewConn(adapterSide)
-	a.bmu.Unlock()
-	if err := a.hello(); err != nil {
-		t.Fatalf("fresh broker hello: %v", err)
-	}
-	go a.brokerReader(ctx)
+	wireReconnectTestBroker(t, a, freshBroker)
+	t.Cleanup(func() {
+		if conn := a.currentConn(); conn != nil {
+			_ = conn.Close()
+		}
+	})
 
 	establishSettledIdentity(a, sessionhandoff.Entry{
 		StableSessionID: "conversation-a", CWD: "/projects/a", UnixNano: 10,
@@ -235,28 +294,224 @@ func TestRecoverBroker_IdentitySwitchSkipsStaleReplayAndPreservesAttachments(t *
 	a.rememberAttach(rememberedIdentityReq("/projects/a", -100, &topicA, "main"))
 	a.setAttachedTopic("topic-a")
 
+	if !a.recoverBroker(ctx) {
+		t.Fatal("recoverBroker aborted before reconnecting to the fresh broker")
+	}
+	go a.brokerReader(ctx)
+	waitForStableIdentity(t, a, "conversation-b")
+	requireReconnectSwitchIntegrity(t, freshBroker)
+	if testChannel.validatedTopic(281) {
+		t.Fatal("recoverBroker replayed conversation A before resolving terminal identity B; production reconnect ordering regressed")
+	}
+}
+
+// T13 drives the real fireRecoverLocked response-timeout exit, then attaches A
+// while currentStableID is still empty. After the handoff advances to B and the
+// broker reconnects, A's stamped replay must not be restored or recorded under
+// B.
+func TestRecoverBroker_UnsettledTimeoutDoesNotReplayPreviousConversation(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("C3_QUEUE_DIR", t.TempDir())
+	t.Setenv("CLAUDE_CODE_SESSION_ID", "spawn")
+	writeIdentityHandoff(t, "spawn", "conversation-a", 10)
+
+	oldTimeout := recoverRespTimeout
+	recoverRespTimeout = 25 * time.Millisecond
+	t.Cleanup(func() { recoverRespTimeout = oldTimeout })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	a := newAdapter()
+	a.runCtx = ctx
+	stalledBroker := newRecoveryBroker(t, a)
+	a.recoverStarted.Store(true)
+	outcomeCh := make(chan recoverOutcome, 1)
+	go func() {
+		outcomeCh <- a.fireRecover(ctx, sessionhandoff.Entry{
+			StableSessionID: "conversation-a", CWD: "/projects/a", UnixNano: 10,
+		})
+	}()
+	if op, ok := stalledBroker.nextOp(t, 5*time.Second); !ok || op != ipc.OpRecoverSession {
+		t.Fatalf("T13 precondition: timeout recovery never reached the broker: op=%q ok=%v", op, ok)
+	}
+	select {
+	case outcome := <-outcomeCh:
+		if !outcome.attempted || outcome.registered {
+			t.Fatalf("T13 precondition: response-timeout path did not leave identity attempted-but-unregistered: %+v", outcome)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("T13 precondition: fireRecoverLocked did not take the response-timeout exit")
+	}
+	if _, settled := a.currentStableIdentity(); settled {
+		t.Fatal("T13 precondition: timeout unexpectedly registered currentStableID")
+	}
+
+	topicA := int64(281)
+	a.rememberAttach(rememberedIdentityReq("/projects/a", -100, &topicA, "main"))
+	a.setAttachedTopic("topic-a")
+	a.amu.Lock()
+	stamp := a.lastAttachStableID
+	a.amu.Unlock()
+	if stamp != "conversation-a" {
+		t.Fatalf("T13 precondition: attach made after failed recovery was stamped %q, want conversation-a", stamp)
+	}
+	writeIdentityHandoff(t, "conversation-a", "conversation-b", 20)
+
+	freshBroker := c3broker.New(reconnectSwitchMappings())
+	t.Cleanup(freshBroker.Shutdown)
+	testChannel := &reconnectSwitchChannel{}
+	if err := freshBroker.RegisterChannel(testChannel); err != nil {
+		t.Fatalf("register reconnect test channel: %v", err)
+	}
+	wireReconnectTestBroker(t, a, freshBroker)
+	if !a.recoverBroker(ctx) {
+		t.Fatal("T13 recoverBroker aborted before reconnecting to the fresh broker")
+	}
+	go a.brokerReader(ctx)
+	waitForStableIdentity(t, a, "conversation-b")
+	requireReconnectSwitchIntegrity(t, freshBroker)
+	if testChannel.validatedTopic(281) {
+		t.Fatal("T13 corruption guard failed: unsettled reconnect dispatched conversation A's stale replay while terminal identity was B")
+	}
+}
+
+// N2: restoreSessionAfterReconnect is called on brokerReader. Even when an
+// older recover owns recoverMu, restore must return so that same reader can
+// drain and dispatch the response that releases the lock holder.
+func TestReconnectIdentitySwitch_DoesNotBlockBrokerReaderDispatch(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("CLAUDE_CODE_SESSION_ID", "spawn")
+	writeIdentityHandoff(t, "spawn", "conversation-a", 10)
+	writeIdentityHandoff(t, "conversation-a", "conversation-b", 20)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	a := newAdapter()
+	a.runCtx = ctx
+	establishSettledIdentity(a, sessionhandoff.Entry{
+		StableSessionID: "conversation-a", CWD: "/projects/a", UnixNano: 10,
+	})
+	a.rememberAttach(ipc.AttachReq{Op: ipc.OpAttach, Name: "topic-a"})
+	a.setAttachedTopic("topic-a")
+
+	adapterSide, brokerSide := net.Pipe()
+	t.Cleanup(func() {
+		_ = adapterSide.Close()
+		_ = brokerSide.Close()
+	})
+	a.bmu.Lock()
+	a.conn = ipc.NewConn(adapterSide)
+	a.bmu.Unlock()
+	peer := ipc.NewConn(brokerSide)
+
+	response := make(chan ipc.RecoverSessionResp, 1)
+	a.rsmu.Lock()
+	a.rsPending = response
+	a.rsmu.Unlock()
+
+	a.recoverMu.Lock() // an older round-trip is waiting for brokerReader
+	locked := true
+	t.Cleanup(func() {
+		if locked {
+			a.recoverMu.Unlock()
+		}
+	})
+
+	readerErr := make(chan error, 1)
+	go func() {
+		a.restoreSessionAfterReconnect(ctx)
+		raw, err := a.currentConn().ReadFrame()
+		if err == nil {
+			a.dispatchRecoverSessionResult(raw)
+		}
+		readerErr <- err
+	}()
+	go func() {
+		_ = peer.WriteJSON(ipc.RecoverSessionResp{Op: ipc.OpRecoverSessionResult})
+	}()
+
+	select {
+	case <-response:
+		// Dispatch stayed live while the switch goroutine waited on recoverMu.
+	case <-time.After(300 * time.Millisecond):
+		t.Fatal("reconnect identity switch blocked brokerReader on recoverMu; it could not dispatch the response that releases the in-flight recovery")
+	}
+	select {
+	case err := <-readerErr:
+		if err != nil {
+			t.Fatalf("brokerReader liveness probe failed to read the response: %v", err)
+		}
+	case <-time.After(300 * time.Millisecond):
+		t.Fatal("restoreSessionAfterReconnect did not return control to brokerReader while a switch was in flight")
+	}
+
+	a.recoverMu.Unlock()
+	locked = false
+}
+
+// N4 pins §3d2: reconnect demotes recoverFired from once-per-process to
+// once-per-connection. A same-identity fresh broker must receive a new
+// RecoverSessionReq even though the previous connection already fired one.
+func TestReconnectSameIdentity_ResetsRecoverFiredAndReregisters(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("CLAUDE_CODE_SESSION_ID", "spawn")
+	writeIdentityHandoff(t, "spawn", "conversation-a", 10)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	a := newAdapter()
+	a.runCtx = ctx
+	broker := newRecoveryBroker(t, a)
+	establishSettledIdentity(a, sessionhandoff.Entry{
+		StableSessionID: "conversation-a", CWD: "/projects/a", UnixNano: 10,
+	})
+
 	a.restoreSessionAfterReconnect(ctx)
-	newGate := a.identityGate()
-	waitForIdentityGate(t, newGate, "reconnect switch recovery did not settle")
+	select {
+	case raw := <-broker.frames:
+		var req ipc.RecoverSessionReq
+		if err := json.Unmarshal(raw, &req); err != nil || req.Op != ipc.OpRecoverSession || req.StableSessionID != "conversation-a" {
+			t.Fatalf("same-identity reconnect sent the wrong re-registration frame: req=%+v err=%v", req, err)
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("same-identity reconnect did not reset recoverFired; the fresh broker never received this session's stable identity")
+	}
+	answerRecover(t, a)
+}
 
-	attachmentB, ok := freshBroker.Mappings().LookupSessionAttachment("conversation-b")
-	if !ok || attachmentB.TopicID == nil || *attachmentB.TopicID != 412 {
-		t.Fatalf("reconnect replay corrupted conversation B's attachment with conversation A's topic: got %+v ok=%v", attachmentB, ok)
-	}
-	attachmentA, ok := freshBroker.Mappings().LookupSessionAttachment("conversation-a")
-	if !ok || attachmentA.TopicID == nil || *attachmentA.TopicID != 281 || attachmentA.Detached {
-		t.Fatalf("reconnect switch damaged conversation A's independent attachment record: got %+v ok=%v", attachmentA, ok)
-	}
+func TestReconnectRefire_ReresolvesBeforeAsyncDispatch(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("CLAUDE_CODE_SESSION_ID", "spawn")
+	writeIdentityHandoff(t, "spawn", "conversation-b", 20)
 
-	keyA := c3broker.MakeRouteKey("telegram", -100, &topicA)
-	topicB := int64(412)
-	keyB := c3broker.MakeRouteKey("telegram", -200, &topicB)
-	if _, held := freshBroker.Routes.Holder(keyA); held {
-		t.Fatal("reconnect identity switch left conversation A's stale replay claim alive on the fresh broker")
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	a := newAdapter()
+	a.runCtx = ctx
+	broker := newRecoveryBroker(t, a)
+	establishSettledIdentity(a, sessionhandoff.Entry{
+		StableSessionID: "conversation-b", CWD: "/projects/b", UnixNano: 20,
+	})
+
+	// Simulate restoreSessionAfterReconnect having captured A immediately before
+	// a newer SessionStart hook advanced the terminal identity to B.
+	a.refireResolvedHandoffOnReconnect(ctx, sessionhandoff.Entry{
+		StableSessionID: "conversation-a", CWD: "/projects/a", UnixNano: 10,
+	})
+	select {
+	case raw := <-broker.frames:
+		var req ipc.RecoverSessionReq
+		if err := json.Unmarshal(raw, &req); err != nil {
+			t.Fatalf("decode reconnect re-registration: %v", err)
+		}
+		if req.StableSessionID != "conversation-b" {
+			t.Fatalf("async reconnect refire used stale pre-goroutine identity %q and would switch the session backward from B to A", req.StableSessionID)
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("async reconnect refire did not re-register the latest terminal identity")
 	}
-	if holder, held := freshBroker.Routes.Holder(keyB); !held || holder.StableSessionIDValue() != "conversation-b" {
-		t.Fatalf("fresh broker did not recover conversation B's own topic: held=%v holder=%+v", held, holder)
-	}
+	answerRecover(t, a)
 }
 
 // T9: the process-lifetime watch detects a later hook, opens a fresh identity
@@ -393,7 +648,7 @@ func TestPendingRecoverNotice_DroppedOnEpochChange(t *testing.T) {
 		waitForIdentityGate(t, newGate, "unattached switch did not settle its identity epoch")
 
 		text, ok := a.takePendingRecoverNotice()
-		want := `session switched conversations — released topic "old-topic" (it belonged to the previous conversation); this conversation is not attached. Use attach to claim a topic.`
+		want := `session switched conversations — released topic "old-topic"; this conversation is not attached. Use attach to claim a topic.`
 		if !ok || text != want {
 			t.Fatalf("unattached switch did not replace the stale banner with the corrective notice: ok=%v text=%q", ok, text)
 		}
@@ -427,18 +682,21 @@ func TestPendingRecoverNotice_DroppedOnEpochChange(t *testing.T) {
 		waitForIdentityGate(t, newGate, "failed switch recovery wedged the reopened identity gate")
 
 		text, ok := a.takePendingRecoverNotice()
-		want := `session switched conversations — released topic "old-topic" (it belonged to the previous conversation); this conversation is not attached. Use attach to claim a topic.`
+		want := `session switched conversations — topic "old-topic" state is unknown; this session is not attached. Use attach to claim a topic.`
 		if !ok || text != want {
 			t.Fatalf("failed switch recovery left the now-unattached session without its corrective notice: ok=%v text=%q", ok, text)
+		}
+		if strings.Contains(text, "released") {
+			t.Fatalf("failed switch recovery claimed a broker-side release that never happened: %q", text)
 		}
 	})
 
 	t.Run("unknown old topic does not render empty quotes", func(t *testing.T) {
-		text := renderIdentitySwitchUnattachedNotice("")
+		text := renderIdentitySwitchUnattachedNotice("", true)
 		if strings.Contains(text, `topic ""`) {
 			t.Fatalf("corrective notice rendered an empty old-topic name: %q", text)
 		}
-		if !strings.Contains(text, "previous conversation's topic was released") {
+		if !strings.Contains(text, "previous topic was released") {
 			t.Fatalf("corrective notice did not explain the unnamed previous topic release: %q", text)
 		}
 	})

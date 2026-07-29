@@ -17,6 +17,17 @@ import (
 	"github.com/Andrometiq/c3/internal/mappings"
 )
 
+// recoverRouteIdentity records the stable identity under which an automatic
+// route carriage happened. Manual attach-before-recover remains unconstrained:
+// its first RecoverSessionReq is the operation that names the conversation.
+// Reconnect transfers and adapter replay are different — they carry old state
+// forward automatically, so an absent or different identity must never be
+// recorded under the identity now registering.
+type recoverRouteIdentity struct {
+	stableID     string
+	requireMatch bool
+}
+
 // HandleConn drives one adapter connection through its lifecycle. Owns the
 // connection — closes it on return.
 func (b *Broker) HandleConn(nc net.Conn) {
@@ -59,6 +70,7 @@ func (b *Broker) HandleConn(nc net.Conn) {
 	// new stub and racing the original's claims. Per the "broker is the
 	// authority" principle, claims survive conn drops as long as PID lives.
 	var stub *Stub
+	var routeIdentity recoverRouteIdentity
 	if existing := b.Routes.FindByLogicalSession(hello.CLI, hello.PID, hello.CWD); existing != nil {
 		stub = b.Stubs.Register(hello.CLI, hello.PID, hello.CWD, conn)
 		oldConnID := existing.ConnID
@@ -97,6 +109,10 @@ func (b *Broker) HandleConn(nc net.Conn) {
 		case 1:
 			k := transferred[0]
 			stub.SetRoute(&k)
+			routeIdentity = recoverRouteIdentity{
+				stableID:     existing.StableSessionIDValue(),
+				requireMatch: true,
+			}
 			if existing.RouteConfirmed() {
 				stub.MarkRouteConfirmed()
 			}
@@ -179,7 +195,32 @@ func (b *Broker) HandleConn(nc net.Conn) {
 		}
 		switch op {
 		case ipc.OpAttach:
+			before := stub.CurrentRoute()
+			var beforeKey RouteKey
+			hadBefore := before != nil
+			if hadBefore {
+				beforeKey = *before
+			}
+			stableAtAttach := stub.StableSessionIDValue()
+			var attachReq ipc.AttachReq
+			_ = json.Unmarshal(raw, &attachReq)
 			b.handleAttach(conn, stub, raw)
+			if after := stub.CurrentRoute(); after != nil {
+				routeChanged := !hadBefore || beforeKey != *after
+				if attachReq.Replay {
+					// A replay is automatic old-state carriage, including when it
+					// lands on an identity-empty fresh stub.
+					routeIdentity = recoverRouteIdentity{stableID: stableAtAttach, requireMatch: true}
+				} else if routeChanged {
+					// Preserve D4's attach-first ruling: a human-driven attach
+					// made before the first stable id is known may be recorded by
+					// that first recover op.
+					routeIdentity = recoverRouteIdentity{
+						stableID:     stableAtAttach,
+						requireMatch: stableAtAttach != "",
+					}
+				}
+			}
 		case ipc.OpListTopics:
 			b.handleListTopics(conn)
 		case ipc.OpListClaims:
@@ -188,6 +229,7 @@ func (b *Broker) HandleConn(nc net.Conn) {
 			b.handleHealth(conn)
 		case ipc.OpRelease:
 			b.handleRelease(stub)
+			routeIdentity = recoverRouteIdentity{}
 		case ipc.OpToolCall:
 			b.handleToolCall(conn, stub, raw)
 		case ipc.OpAskRegister:
@@ -201,7 +243,7 @@ func (b *Broker) HandleConn(nc net.Conn) {
 		case ipc.OpRetranscribe:
 			b.handleRetranscribe(conn, stub, raw)
 		case ipc.OpRecoverSession:
-			b.handleRecoverSession(conn, stub, raw)
+			b.handleRecoverSession(conn, stub, raw, &routeIdentity)
 		case ipc.OpInboundDelivered:
 			b.handleInboundDelivered(stub, raw)
 		case ipc.OpPairModeStart:
@@ -287,9 +329,11 @@ func (b *Broker) handleRelease(stub *Stub) {
 // stub's own connection, so the broker maps stub→stable-id directly. It then
 // takes ONE of two dual-path-recording branches:
 //
-//   - Stub ALREADY attached (a fresh session bound by cwd before this arrived):
-//     RECORD the current route under the stable id (so a FUTURE resume can
-//     recover it) — do NOT re-claim or steal. resp.Recovered stays false.
+//   - Stub ALREADY attached: RECORD the current route under the stable id only
+//     when it was a manual attach-before-recover or was carried under this same
+//     stable id. An automatically transferred/replayed route stamped for a
+//     different or absent id is an identity switch: release it without a
+//     tombstone, then recover the new identity's own route.
 //   - Stub NOT attached: attempt recoverSession — re-claim the route the stable
 //     id was last attached to, when recoverable and not held by another live
 //     session. On success, report it + the held backlog count so the adapter
@@ -302,21 +346,41 @@ func (b *Broker) handleRelease(stub *Stub) {
 //
 // Fail-closed: a malformed request or an empty stable id records nothing and
 // recovers nothing.
-func (b *Broker) handleRecoverSession(conn *ipc.Conn, stub *Stub, raw []byte) {
+func (b *Broker) handleRecoverSession(conn *ipc.Conn, stub *Stub, raw []byte, routeIdentity *recoverRouteIdentity) {
 	var req ipc.RecoverSessionReq
 	if err := json.Unmarshal(raw, &req); err != nil || req.StableSessionID == "" {
 		_ = conn.WriteJSON(ipc.RecoverSessionResp{Op: ipc.OpRecoverSessionResult, Err: "bad recover_session"})
 		return
 	}
 	prev := stub.StableSessionIDValue()
-	switched := prev != "" && prev != req.StableSessionID
+	routeIdentityMismatch := routeIdentity != nil &&
+		routeIdentity.requireMatch &&
+		routeIdentity.stableID != req.StableSessionID
+	switched := (prev != "" && prev != req.StableSessionID) || routeIdentityMismatch
 	stub.SetStableSessionID(req.StableSessionID)
+	defer func() {
+		if routeIdentity == nil {
+			return
+		}
+		if stub.CurrentRoute() == nil {
+			*routeIdentity = recoverRouteIdentity{}
+			return
+		}
+		*routeIdentity = recoverRouteIdentity{stableID: req.StableSessionID, requireMatch: true}
+	}()
 	if switched {
 		if cur := stub.CurrentRoute(); cur != nil {
 			b.Routes.ReleaseAllByConnID(stub.ConnID)
 			stub.SetRoute(nil)
+			from := prev
+			if routeIdentityMismatch {
+				from = routeIdentity.stableID
+			}
+			if from == "" {
+				from = "<unregistered>"
+			}
 			log.Printf("recover: identity switch conn=%d %s → %s — released %s, recovering the new session's topic",
-				stub.ConnID, prev, req.StableSessionID, routeKeyStr(*cur))
+				stub.ConnID, from, req.StableSessionID, routeKeyStr(*cur))
 		}
 		// A detach barrier records a user action in the previous conversation.
 		// Switching identities must not carry it into the new conversation.

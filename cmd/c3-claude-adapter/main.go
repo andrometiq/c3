@@ -225,6 +225,7 @@ type recoverOutcome struct {
 	attempted  bool
 	registered bool
 	recovered  bool
+	processed  bool
 }
 
 type adapter struct {
@@ -236,6 +237,10 @@ type adapter struct {
 	bmu    sync.Mutex
 	conn   *ipc.Conn
 	connID uint64
+	// connectBrokerFn is an optional dial seam used by reconnect-path tests to
+	// inject an in-memory broker connection while still driving recoverBroker's
+	// production control flow. Nil in production.
+	connectBrokerFn func() error
 
 	// Pending tool calls awaiting broker response, keyed by request id.
 	pmu     sync.Mutex
@@ -275,7 +280,7 @@ type adapter struct {
 	// gate cannot race past a goroutine that has not run yet). Never reset: it
 	// answers "is there an identity question in flight for this process?", which
 	// is the only thing awaitIdentitySettled needs. recoverFired cannot serve that
-	// role — it is reset by refireRecoverOnReconnect and released on the
+	// role — it is reset by reconnect re-registration and released on the
 	// nothing-was-sent paths, and it is set INSIDE fireRecover, one goroutine
 	// hop too late.
 	recoverStarted atomic.Bool
@@ -331,8 +336,13 @@ type adapter struct {
 	// Last successful attach request — replayed on broker reconnect so a
 	// session that survives a broker restart auto-reclaims its route. Nil
 	// if the user hasn't attached yet (or detached).
-	amu        sync.Mutex
-	lastAttach *ipc.AttachReq
+	amu sync.Mutex
+	// lastAttachStableID attributes lastAttach to the conversation under which
+	// it was made. Empty means no stable identity could be established at attach
+	// time; once a terminal handoff exists, such an attach is never replayed
+	// blindly.
+	lastAttach         *ipc.AttachReq
+	lastAttachStableID string
 	// attachedTopic is the human-readable name of the currently-attached topic
 	// (attached.Name / resp.Name at attach time). Read when rendering the backlog
 	// and pending-fetch nudges so a human can see WHICH topic a fetch_queue would
@@ -456,8 +466,8 @@ func (a *adapter) hello() error {
 // brokerReader runs in a goroutine, draining frames from the broker. On any
 // read error, runs the recovery loop (exponential backoff, no give-up) until
 // either ctx is canceled or we re-establish a usable connection. After
-// recovery, replays the last successful attach so the route claim is
-// re-established without user intervention.
+// recovery, it replays the last successful attach only when that attach belongs
+// to the terminal conversation identity.
 func (a *adapter) brokerReader(ctx context.Context) {
 	for {
 		conn := a.currentConn()
@@ -530,7 +540,11 @@ func (a *adapter) reconnectBroker() error {
 	}
 	a.bmu.Unlock()
 
-	if err := a.connectBroker(); err != nil {
+	connect := a.connectBroker
+	if a.connectBrokerFn != nil {
+		connect = a.connectBrokerFn
+	}
+	if err := connect(); err != nil {
 		return err
 	}
 	return a.hello()
@@ -627,9 +641,25 @@ func (a *adapter) clearBrokerDownAdvisory() {
 }
 
 // rememberAttach stores the last successful attach request for replay on
-// reconnect. The pointer captures all dimensions (target/name/topic_id/
-// group/create) the user originally chose.
+// reconnect and attributes it to the best stable identity available now. A
+// settled broker registration wins; after an attempted-but-unregistered
+// recovery, the terminal handoff still identifies the conversation under which
+// a manual attach was made.
 func (a *adapter) rememberAttach(req ipc.AttachReq) {
+	stableID := ""
+	if current, settled := a.currentStableIdentity(); settled {
+		stableID = current.StableSessionID
+	} else if terminal, found := reconnectTerminalHandoff(); found {
+		stableID = terminal.StableSessionID
+	}
+	a.rememberAttachForIdentity(req, stableID)
+}
+
+// rememberAttachForIdentity is the explicit-stamp form used by call sites that
+// already know the identity governing the operation. In particular, toolAttach
+// captures it before writing the request, so a hook that lands while the attach
+// is in flight cannot relabel the remembered route as the new conversation.
+func (a *adapter) rememberAttachForIdentity(req ipc.AttachReq, stableID string) {
 	a.amu.Lock()
 	defer a.amu.Unlock()
 	cp := req
@@ -641,6 +671,7 @@ func (a *adapter) rememberAttach(req ipc.AttachReq) {
 	// proposal, not be silently evicted. So never remember the steal.
 	cp.Steal = false
 	a.lastAttach = &cp
+	a.lastAttachStableID = stableID
 }
 
 // setAttachedTopic records the human-readable name of the currently-attached
@@ -711,27 +742,60 @@ func resolvedAttachReq(req ipc.AttachReq, attached ipc.AttachedMsg) ipc.AttachRe
 	return rememberedIdentityReq(req.CWD, attached.ChatID, attached.TopicID, attached.Group)
 }
 
-// replayLastAttach sends the saved attach request to the (just-reconnected)
-// broker. Best-effort — failures are logged to stderr and not surfaced.
-// The broker will respond with AttachedMsg which brokerReader processes
-// (no pending channel registered, so the response is discarded). The point
-// is to re-establish the route claim, not to confirm.
-func (a *adapter) replayLastAttach() {
+type reconnectReplayDecision struct {
+	switchIdentity bool
+	expected       string
+	allowUnsettled bool
+}
+
+// replayLastAttach resolves the terminal handoff once, then either sends the
+// remembered attach or returns the identity switch reconnect recovery must run.
+// Tests that exercise replay directly may discard the return values.
+func (a *adapter) replayLastAttach() (sessionhandoff.Entry, bool, reconnectReplayDecision) {
+	entry, found := reconnectTerminalHandoff()
+	return entry, found, a.replayLastAttachResolved(entry, found)
+}
+
+// replayLastAttachResolved sends the saved attach request to the
+// (just-reconnected) broker only when its stable-identity stamp matches the
+// resolved terminal handoff. With no handoff record, this is a genuinely
+// non-resumed session and replay remains unchanged. amu stays held through the
+// write: a concurrent switch must either clear the attach first or write its
+// recovery after this replay, never recover the new identity and then append a
+// stale replay behind it.
+func (a *adapter) replayLastAttachResolved(entry sessionhandoff.Entry, found bool) reconnectReplayDecision {
+	current, settled := a.currentStableIdentity()
 	a.amu.Lock()
+	defer a.amu.Unlock()
+	if found && settled && current.StableSessionID != entry.StableSessionID {
+		return reconnectReplayDecision{
+			switchIdentity: true,
+			expected:       current.StableSessionID,
+		}
+	}
 	req := a.lastAttach
-	a.amu.Unlock()
 	if req == nil {
-		return
+		return reconnectReplayDecision{}
+	}
+	if found && (a.lastAttachStableID == "" || a.lastAttachStableID != entry.StableSessionID) {
+		log.Printf("recover-session: skipped attach replay stamped for %q; terminal identity is %q",
+			a.lastAttachStableID, entry.StableSessionID)
+		return reconnectReplayDecision{
+			switchIdentity: true,
+			expected:       a.lastAttachStableID,
+			allowUnsettled: !settled,
+		}
 	}
 	if conn := a.currentConn(); conn != nil {
 		replay := *req
 		replay.Replay = true
 		if err := conn.WriteJSON(replay); err != nil {
 			log.Printf("replay attach failed: %v", err)
-			return
+			return reconnectReplayDecision{}
 		}
 		log.Printf("replayed attach (target=%q name=%q)", req.Target, req.Name)
 	}
+	return reconnectReplayDecision{}
 }
 
 // reconnectTerminalHandoff resolves the current terminal identity once, before
@@ -745,53 +809,46 @@ func reconnectTerminalHandoff() (sessionhandoff.Entry, bool) {
 	return resolveTerminalHandoff(inst)
 }
 
-// restoreSessionAfterReconnect restores adapter state onto a FRESH broker
-// connection. Same identity: preserve the deliberate replay-before-recover
-// ordering so the fresh stub reclaims the live route, then records it under the
-// known id. Switched identity: never replay the previous conversation's attach;
-// start the switch sequence first, which synchronously clears stale conversation
-// state and opens the new gate before its asynchronous recovery round-trip.
+// restoreSessionAfterReconnect restores adapter state onto a fresh broker
+// connection. Same identity: preserve replay-before-recover so the fresh stub
+// reclaims the live route, then records it under the known id. Switched or
+// unattributable identity: never replay the remembered attach; schedule the
+// switch off this caller because recoverBroker runs on brokerReader, which must
+// stay free to dispatch the response that recovery awaits.
 func (a *adapter) restoreSessionAfterReconnect(ctx context.Context) {
-	entry, found := reconnectTerminalHandoff()
-	if found {
-		if current, settled := a.currentStableIdentity(); settled && current.StableSessionID != entry.StableSessionID {
-			log.Printf("recover-session: reconnect resolved identity switch %s → %s — skipping stale attach replay", current.StableSessionID, entry.StableSessionID)
-			a.refireResolvedHandoffOnReconnect(ctx, entry)
-			return
-		}
+	entry, found, decision := a.replayLastAttach()
+	if decision.switchIdentity {
+		log.Printf("recover-session: reconnect resolved identity switch %s → %s — skipping stale attach replay", decision.expected, entry.StableSessionID)
+		go a.beginIdentitySwitchMode(ctx, decision.expected, entry, decision.allowUnsettled)
+		return
 	}
-
-	a.replayLastAttach()
 	if found {
 		a.refireResolvedHandoffOnReconnect(ctx, entry)
 	}
 }
 
-// refireRecoverOnReconnect re-resolves and re-registers this session's stable id
-// on a fresh broker connection. Kept as the direct reconnect entry point for
-// tests and callers outside recoverBroker; recoverBroker itself resolves before
-// replay via restoreSessionAfterReconnect.
-func (a *adapter) refireRecoverOnReconnect(ctx context.Context) {
-	entry, found := reconnectTerminalHandoff()
-	if !found {
-		return
-	}
-	a.refireResolvedHandoffOnReconnect(ctx, entry)
-}
-
 // refireResolvedHandoffOnReconnect re-registers one already-resolved terminal
-// handoff. A switch begins synchronously (its broker wait remains asynchronous)
-// so stale conversation state is gone before reconnect recovery returns to the
-// broker reader. Same-id re-registration stays in a goroutine because that
-// round-trip is answered by the broker reader itself.
+// handoff. The entire sequence runs off the caller: recoverBroker is invoked by
+// brokerReader, and even the pre-round-trip waits on identitySettled/recoverMu
+// can depend on responses only brokerReader is able to dispatch.
 func (a *adapter) refireResolvedHandoffOnReconnect(ctx context.Context, entry sessionhandoff.Entry) {
-	if current, settled := a.currentStableIdentity(); settled && current.StableSessionID != entry.StableSessionID {
-		a.beginIdentitySwitch(ctx, current.StableSessionID, entry)
-		return
-	}
-
 	go func() {
+		// The resolved entry was captured on brokerReader before this goroutine
+		// ran. A SessionStart hook can advance the chain in between; re-resolve
+		// here so this async arm can never switch a newer current identity back
+		// to the stale snapshot.
+		if latest, found := reconnectTerminalHandoff(); found {
+			entry = latest
+		}
+		if current, settled := a.currentStableIdentity(); settled && current.StableSessionID != entry.StableSessionID {
+			a.beginIdentitySwitch(ctx, current.StableSessionID, entry)
+			return
+		}
+
 		a.recoverMu.Lock()
+		if latest, found := reconnectTerminalHandoff(); found {
+			entry = latest
+		}
 		current, settled := a.currentStableIdentity()
 		if settled && current.StableSessionID != entry.StableSessionID {
 			a.recoverMu.Unlock()
@@ -1664,6 +1721,12 @@ func (a *adapter) toolAttach(ctx context.Context, req *mcp.CallToolRequest) (*mc
 	// attach, which that once-only recheck does not.
 	a.checkForIdentitySwitch(ctx)
 	a.awaitIdentitySettled(ctx)
+	attachStableID := ""
+	if current, settled := a.currentStableIdentity(); settled {
+		attachStableID = current.StableSessionID
+	} else if terminal, found := reconnectTerminalHandoff(); found {
+		attachStableID = terminal.StableSessionID
+	}
 	args, err := decodeArgs(req.Params.Arguments)
 	if err != nil {
 		return nil, fmt.Errorf("invalid params: %w", err)
@@ -1725,7 +1788,7 @@ func (a *adapter) toolAttach(ctx context.Context, req *mcp.CallToolRequest) (*mc
 		if attached.OK {
 			// §3d1: remember the RESOLVED identity for a bare attach so a
 			// post-broker-restart replay re-binds the same topic explicitly.
-			a.rememberAttach(resolvedAttachReq(attachReq, attached))
+			a.rememberAttachForIdentity(resolvedAttachReq(attachReq, attached), attachStableID)
 			// Track the resolved topic name for the fetch_queue nudges (§5).
 			a.setAttachedTopic(attached.Name)
 			// Side-effect surface: write OSC-0 title-bar escape to
@@ -1765,6 +1828,7 @@ func (a *adapter) toolDetach(_ context.Context, _ *mcp.CallToolRequest) (*mcp.Ca
 	}
 	a.amu.Lock()
 	a.lastAttach = nil
+	a.lastAttachStableID = ""
 	a.attachedTopic = ""
 	a.amu.Unlock()
 	// Restore the terminal-emulator's default title — see
@@ -2038,8 +2102,11 @@ const (
 	// recoverLateThreshold marks a handoff as "late" for logging — past the old
 	// fixed window that used to silently lose it. Purely diagnostic.
 	recoverLateThreshold = 10 * time.Second
-	recoverRespTimeout   = 10 * time.Second
 )
+
+// recoverRespTimeout bounds the broker round-trip. A var keeps the real timeout
+// path testable without a ten-second unit test.
+var recoverRespTimeout = 10 * time.Second
 
 // recoverSettleBudget bounds how long an identity-dependent call (the first
 // tools/call, and every `attach`) waits for the recovery round-trip to FINISH.
@@ -2175,18 +2242,25 @@ func (a *adapter) clearConversationStateForSwitch() string {
 	defer a.amu.Unlock()
 	oldTopic := a.attachedTopic
 	a.lastAttach = nil
+	a.lastAttachStableID = ""
 	a.attachedTopic = ""
 	return oldTopic
 }
 
-func renderIdentitySwitchUnattachedNotice(oldTopic string) string {
-	if oldTopic == "" {
-		return "session switched conversations — the previous conversation's topic was released; this conversation is not attached. Use attach to claim a topic."
+func renderIdentitySwitchUnattachedNotice(oldTopic string, released bool) string {
+	if released {
+		if oldTopic == "" {
+			return "session switched conversations — the previous topic was released; this conversation is not attached. Use attach to claim a topic."
+		}
+		return fmt.Sprintf(
+			"session switched conversations — released topic %q; this conversation is not attached. Use attach to claim a topic.",
+			oldTopic,
+		)
 	}
-	return fmt.Sprintf(
-		"session switched conversations — released topic %q (it belonged to the previous conversation); this conversation is not attached. Use attach to claim a topic.",
-		oldTopic,
-	)
+	if oldTopic == "" {
+		return "session switched conversations — previous topic state is unknown; this session is not attached. Use attach to claim a topic."
+	}
+	return fmt.Sprintf("session switched conversations — topic %q state is unknown; this session is not attached. Use attach to claim a topic.", oldTopic)
 }
 
 // beginIdentitySwitch waits for the old identity epoch, then synchronously
@@ -2195,6 +2269,15 @@ func renderIdentitySwitchUnattachedNotice(oldTopic string) string {
 // ready handshake is load-bearing: a tools/call must never observe the old,
 // already-closed gate after switch detection returns.
 func (a *adapter) beginIdentitySwitch(ctx context.Context, expectedCurrent string, terminal sessionhandoff.Entry) {
+	a.beginIdentitySwitchMode(ctx, expectedCurrent, terminal, false)
+}
+
+// beginIdentitySwitchMode also handles reconnect after an earlier recovery
+// attempt settled without registering currentStableID. In that state the
+// remembered attach's identity stamp is the only trustworthy description of
+// the previous conversation, so allowUnsettled permits replacing it with the
+// terminal handoff identity.
+func (a *adapter) beginIdentitySwitchMode(ctx context.Context, expectedCurrent string, terminal sessionhandoff.Entry, allowUnsettled bool) {
 	a.awaitIdentitySettled(ctx)
 	fireCtx := a.runCtx
 	if fireCtx == nil {
@@ -2206,7 +2289,12 @@ func (a *adapter) beginIdentitySwitch(ctx context.Context, expectedCurrent strin
 		defer a.recoverMu.Unlock()
 
 		current, settled := a.currentStableIdentity()
-		if !settled || current.StableSessionID != expectedCurrent || current.StableSessionID == terminal.StableSessionID {
+		if settled {
+			if current.StableSessionID != expectedCurrent || current.StableSessionID == terminal.StableSessionID {
+				close(ready)
+				return
+			}
+		} else if !allowUnsettled {
 			close(ready)
 			return
 		}
@@ -2220,7 +2308,7 @@ func (a *adapter) beginIdentitySwitch(ctx context.Context, expectedCurrent strin
 
 		outcome := a.fireRecoverLocked(fireCtx, terminal)
 		if !outcome.recovered {
-			a.setPendingRecoverNotice(renderIdentitySwitchUnattachedNotice(oldTopic))
+			a.setPendingRecoverNotice(renderIdentitySwitchUnattachedNotice(oldTopic, outcome.processed))
 		}
 		if outcome.attempted {
 			a.markIdentitySettled()
@@ -2365,6 +2453,9 @@ func (a *adapter) fireRecoverLocked(ctx context.Context, entry sessionhandoff.En
 	case <-ctx.Done():
 		return outcome
 	case <-time.After(recoverRespTimeout):
+		// The broker handles a complete local-socket request before it writes the
+		// response, so any switch release already happened on this timeout path.
+		outcome.processed = true
 		log.Printf("recover-session: no response within %v", recoverRespTimeout)
 		return outcome
 	case resp := <-respCh:
@@ -2372,6 +2463,7 @@ func (a *adapter) fireRecoverLocked(ctx context.Context, entry sessionhandoff.En
 			log.Printf("recover-session: broker err: %s", resp.Err)
 			return outcome
 		}
+		outcome.processed = true
 		a.setCurrentStableIdentity(entry)
 		outcome.registered = true
 		if !resp.Recovered {
@@ -2385,7 +2477,7 @@ func (a *adapter) fireRecoverLocked(ctx context.Context, entry sessionhandoff.En
 		// precisely because such topics occur). rememberedIdentityReq maps
 		// resp.TopicID==nil → {Target:"dm"} and a topic → {TopicID, Group}, which a
 		// fresh broker re-claims via attachByTopicID (item B, shared with item C).
-		a.rememberAttach(rememberedIdentityReq(entry.CWD, resp.ChatID, resp.TopicID, resp.Group))
+		a.rememberAttachForIdentity(rememberedIdentityReq(entry.CWD, resp.ChatID, resp.TopicID, resp.Group), entry.StableSessionID)
 		// Track the recovered topic name for the fetch_queue nudges (§5).
 		a.setAttachedTopic(resp.Name)
 		log.Printf("recover-session: auto-attached to %q (queued=%d)", resp.Name, resp.QueuedCount)

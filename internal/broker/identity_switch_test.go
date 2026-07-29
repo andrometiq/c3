@@ -2,6 +2,7 @@ package broker
 
 import (
 	"encoding/json"
+	"os"
 	"testing"
 	"time"
 
@@ -245,4 +246,80 @@ func TestRecoverSession_SameIDRefire_RecordOnlyUnchanged(t *testing.T) {
 		t.Fatalf("same-id record-only refire disturbed the existing claim: held=%v holder=%+v", held, holder)
 	}
 	requireSwitchAttachment(t, b, switchSessionA, 281, false)
+}
+
+// T14: the first connection attached A before any stable id registered, then
+// dropped while its PID stayed alive. Hello transfers that anonymous claim to
+// the reconnect stub. Recovering B must treat the carried identity as a
+// mismatch, release A without tombstoning it, and recover B instead of taking
+// record-only and overwriting B's durable attachment.
+func TestRecoverSession_ReconnectTransferWithoutIdentity_DoesNotRecordOldRouteUnderNewID(t *testing.T) {
+	b := brokerWithChannel(t, identitySwitchMappings(true), &fakeChannel{})
+	defer b.Shutdown()
+	pid := os.Getpid()
+	cwd := "/projects/claim-transfer"
+
+	first, closeFirst := peerPair(t, b)
+	if err := first.WriteJSON(ipc.HelloMsg{Op: ipc.OpHello, CLI: "claude", PID: pid, CWD: cwd}); err != nil {
+		t.Fatalf("first hello: %v", err)
+	}
+	if _, err := first.ReadFrame(); err != nil {
+		t.Fatalf("first hello ack: %v", err)
+	}
+	topicA := int64(281)
+	if err := first.WriteJSON(ipc.AttachReq{
+		Op: ipc.OpAttach, TopicID: &topicA, ChatID: -100, Group: "main", CWD: cwd,
+	}); err != nil {
+		t.Fatalf("attach conversation A before identity: %v", err)
+	}
+	raw, err := first.ReadFrame()
+	if err != nil {
+		t.Fatalf("read attach A response: %v", err)
+	}
+	var attached ipc.AttachedMsg
+	if err := json.Unmarshal(raw, &attached); err != nil || !attached.OK {
+		t.Fatalf("precondition: anonymous A attach failed: attached=%+v err=%v", attached, err)
+	}
+	closeFirst()
+
+	keyA := switchRoute(281, -100)
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		holder, held := b.Routes.Holder(keyA)
+		if held && !holder.IsConnected() {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("precondition: A's claim did not enter reconnectable disconnected state: held=%v holder=%+v", held, holder)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	second, closeSecond := peerPair(t, b)
+	defer closeSecond()
+	if err := second.WriteJSON(ipc.HelloMsg{Op: ipc.OpHello, CLI: "claude", PID: pid, CWD: cwd}); err != nil {
+		t.Fatalf("reconnect hello: %v", err)
+	}
+	if _, err := second.ReadFrame(); err != nil {
+		t.Fatalf("reconnect hello ack: %v", err)
+	}
+	if holder, held := b.Routes.Holder(keyA); !held || holder.StableSessionIDValue() != "" {
+		t.Fatalf("precondition: reconnect did not transfer A's anonymous route: held=%v holder=%+v", held, holder)
+	}
+
+	resp := recoverIdentityOnPeer(t, second, switchSessionB)
+	saB, ok := b.Mappings().LookupSessionAttachment(switchSessionB)
+	if !ok || saB.TopicID == nil || *saB.TopicID != 412 {
+		t.Fatalf("claim-transfer corruption: recover(B) recorded conversation A's topic under B: got %+v ok=%v", saB, ok)
+	}
+	if !resp.Recovered || resp.TopicID == nil || *resp.TopicID != 412 {
+		t.Fatalf("claim-transfer switch did not release anonymous A and recover conversation B's topic: %+v", resp)
+	}
+	requireSwitchAttachment(t, b, switchSessionA, 281, false)
+	if _, held := b.Routes.Holder(keyA); held {
+		t.Fatal("claim-transfer switch left conversation A's anonymous route claimed under B")
+	}
+	if holder, held := b.Routes.Holder(switchRoute(412, -200)); !held || holder.StableSessionIDValue() != switchSessionB {
+		t.Fatalf("claim-transfer switch did not leave B holding its own route: held=%v holder=%+v", held, holder)
+	}
 }
