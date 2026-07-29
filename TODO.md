@@ -6,6 +6,13 @@ public push. Shipped history is in git; future and unbuilt work lives in
 
 ## Release gates
 
+- [ ] **Full release-readiness audit — AFTER the maintainer's final go-ahead, BEFORE the
+      v0.1.0 tag.** The pre-rc1 audit no longer holds: the code has changed substantially
+      since (loss-path fixes, identity fixes, degraded mode, port race, recovery ordering).
+      Deliberately NOT run for release candidates — final tag only. Expect findings; fix
+      only what is genuinely required, then push and tag. (Maintainer's instruction,
+      2026-07-27.)
+
 Need a live human tap — run these in a real Telegram session before the tag:
 
 - [ ] `ask` live-verify: button tap → choice returns to Claude
