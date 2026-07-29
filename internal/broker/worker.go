@@ -161,8 +161,15 @@ type ConsumeJob struct {
 // line was refreshed) returns via ResultCh.
 type RefreshTextJob struct {
 	MessageID int64
-	NewText   string
-	ResultCh  chan<- RefreshResult
+	// FileID identifies WHICH voice attachment this refresh is for. Without it
+	// the job proved only that some message had that id, so a record could be
+	// rewritten on the strength of an unrelated voice's file_id (C3 review 4, R3).
+	FileID string
+	// Transcript is the raw new transcript. The worker composes the stored form
+	// itself, so what it writes back is in the same authored shape it recognizes
+	// — which is what makes a second refresh possible.
+	Transcript string
+	ResultCh   chan<- RefreshResult
 }
 
 // RefreshResult carries whether a queued line was refreshed back to the handler.
@@ -1943,20 +1950,42 @@ func (w *RouteWorker) handleRefreshText(_ context.Context, job *RefreshTextJob) 
 		return
 	}
 	qrk := queueRouteKey(w.key)
-	// Store.RefreshText replaces the ENTIRE stored text, so it is only safe when
-	// C3's own single-voice write IS that entire text. A rich message's block
-	// markers, a caption, or a second attachment's transcript all live in the
-	// same field, and replacing wholesale destroyed them (Codex review 3,
-	// finding 4). Checked here rather than in the store: the store has no idea
-	// what C3 authored, and this runs on the route's single owner so the read is
-	// race-free against its own rewrite.
-	if rec, ok := w.queuedRecord(qrk, job.MessageID); ok && !wholeTextIsC3sVoiceWrite(rec, w.sttPrefix(w.key.Channel)) {
-		log.Printf("retranscribe refresh chan=%s chat=%d topic=%s msg=%d: SKIPPED — the stored message carries text C3 did not author alone (%d attachment(s)); a whole-text replace would destroy the caption / rich markers / other attachments' outcomes. The transcript is still returned to the agent.",
-			w.key.Channel, w.key.ChatID, TopicKeyStr(w.key), job.MessageID, len(rec.Attachments))
+	// Store.RefreshText replaces the ENTIRE stored text, and that field is shared:
+	// a caption, a rich message's block markers, and every other attachment's
+	// outcome live in it too. So the refresh must prove two things before it
+	// writes, and then write as little as possible.
+	//
+	//  1. OWNERSHIP by file identity, not by how the text happens to read. A
+	//     textual prefix is not provenance — a user's own caption can open with
+	//     the transcript prefix, and matching on it let retranscribe overwrite
+	//     the user's words (C3 review 4, R3a). The record must actually carry the
+	//     voice attachment this refresh is for (R3b).
+	//  2. SEGMENT targeting. C3 appends its outcome, so its write is the trailing
+	//     segment; everything before it belongs to someone else and is preserved.
+	//
+	// Checked here rather than in the store: the store has no idea what C3
+	// authored, and this runs on the route's single owner so the read cannot race
+	// its own rewrite.
+	rec, found := w.queuedRecord(qrk, job.MessageID)
+	if !found {
+		// Nothing queued under that id — a clean no-op, exactly as before.
 		job.ResultCh <- RefreshResult{Refreshed: false}
 		return
 	}
-	refreshed, err := w.broker.Queue.RefreshText(qrk, job.MessageID, job.NewText)
+	if !recordOwnsVoice(rec, job.FileID) {
+		log.Printf("retranscribe refresh chan=%s chat=%d topic=%s msg=%d file_id=%s: SKIPPED — that message does not carry exactly this one voice attachment (%d attachment(s)); refreshing it would rewrite a message this transcript is not about. The transcript is still returned to the agent.",
+			w.key.Channel, w.key.ChatID, TopicKeyStr(w.key), job.MessageID, job.FileID, len(rec.Attachments))
+		job.ResultCh <- RefreshResult{Refreshed: false}
+		return
+	}
+	newText, ok := replaceC3VoiceSegment(rec.Text, w.sttPrefix(w.key.Channel), job.Transcript)
+	if !ok {
+		log.Printf("retranscribe refresh chan=%s chat=%d topic=%s msg=%d file_id=%s: SKIPPED — the stored text contains no segment C3 wrote for this voice, so there is nothing to replace without overwriting someone else's words. The transcript is still returned to the agent.",
+			w.key.Channel, w.key.ChatID, TopicKeyStr(w.key), job.MessageID, job.FileID)
+		job.ResultCh <- RefreshResult{Refreshed: false}
+		return
+	}
+	refreshed, err := w.broker.Queue.RefreshText(qrk, job.MessageID, newText)
 	if err != nil {
 		log.Printf("retranscribe refresh FAIL chan=%s chat=%d topic=%s msg=%d: %v",
 			w.key.Channel, w.key.ChatID, TopicKeyStr(w.key), job.MessageID, err)
@@ -1988,25 +2017,79 @@ func (w *RouteWorker) queuedRecord(qrk queue.RouteKey, messageID int64) (c3types
 	return c3types.Inbound{}, false
 }
 
-// wholeTextIsC3sVoiceWrite reports whether rec.Text is entirely something C3
-// itself wrote about a single voice attachment — the only shape a whole-text
-// replace cannot damage.
+// recordOwnsVoice reports whether rec is the message this refresh is about:
+// it carries the named file_id AS A VOICE attachment, and exactly one voice
+// attachment in total.
 //
-// The openings below are the complete set C3 authors as a voice message's whole
-// text: a transcript, an STT failure, and the two fetch-refusal markers. Anything
-// else in front of them — the sender's caption, a rich message's "[photo]" block
-// marker, another attachment's transcript — means the field is shared, and
-// sharing it is exactly what makes a wholesale replace destructive.
-func wholeTextIsC3sVoiceWrite(rec c3types.Inbound, sttPrefix string) bool {
-	if len(rec.Attachments) != 1 {
+// The identity check is what a textual prefix could never provide. The
+// single-voice requirement is what makes the segment below unambiguous — C3
+// appends one outcome per voice in attachment order, so with two voices the
+// trailing segment cannot be attributed to either from the text alone.
+func recordOwnsVoice(rec c3types.Inbound, fileID string) bool {
+	if fileID == "" {
 		return false
 	}
-	for _, opening := range []string{sttPrefix, sttFailureOpening, voiceTooBigOpening, voiceFetchFailedOpening} {
-		if opening != "" && strings.HasPrefix(rec.Text, opening) {
-			return true
+	voices, matched := 0, false
+	for _, a := range rec.Attachments {
+		if a.Kind != "voice" {
+			continue
+		}
+		voices++
+		if a.FileID == fileID {
+			matched = true
 		}
 	}
-	return false
+	return voices == 1 && matched
+}
+
+// c3VoiceOpenings is the complete set of things C3 writes to open its own
+// segment about a voice attachment: a transcript, an STT failure, and the two
+// fetch-refusal markers.
+func c3VoiceOpenings(sttPrefix string) []string {
+	return []string{sttPrefix, sttFailureOpening, voiceTooBigOpening, voiceFetchFailedOpening}
+}
+
+// replaceC3VoiceSegment rewrites ONLY the trailing segment C3 authored, leaving
+// everything before it untouched, and writes the replacement in the SAME
+// authored shape so the next refresh can find it again.
+//
+// C3 appends its outcome (appendVoiceMarker joins with a newline), so its write
+// runs from the LAST authored opening that begins a line through to the end.
+// Anchoring on a line start matters: a transcript can contain anything, and an
+// opening that appears mid-sentence is the speaker's words, not a segment.
+//
+// Writing back WITH the prefix is what makes refresh repeatable. Storing the
+// raw transcript left nothing to recognize, so a second retranscribe could never
+// refresh again and the first refreshed text was stuck in the queue forever
+// (C3 review 4, R3c).
+//
+// Residual: if C3's own transcript CONTAINS a line that begins with one of these
+// openings — the speaker said "[Transcribed voice]:" and STT laid it on its own
+// line — the split lands inside C3's previous segment and only its tail is
+// replaced. The blast radius is that suffix of C3's own earlier write; text that
+// arrived with the message is never touched.
+func replaceC3VoiceSegment(text, sttPrefix, transcript string) (string, bool) {
+	best := -1
+	for _, opening := range c3VoiceOpenings(sttPrefix) {
+		if opening == "" {
+			continue
+		}
+		for i := 0; ; {
+			j := strings.Index(text[i:], opening)
+			if j < 0 {
+				break
+			}
+			at := i + j
+			if (at == 0 || text[at-1] == '\n') && at > best {
+				best = at
+			}
+			i = at + 1
+		}
+	}
+	if best < 0 {
+		return "", false
+	}
+	return text[:best] + sttPrefix + transcript, true
 }
 
 // deliveredDedup is a bounded FIFO set of recently-delivered MessageIDs for this

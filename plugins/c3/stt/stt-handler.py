@@ -57,6 +57,21 @@ if _LOG_DIR:
     os.makedirs(_LOG_DIR, exist_ok=True)
 os.makedirs(INBOX_DIR, exist_ok=True)
 
+def _one_line(text):
+    """Collapse text onto a single line so it can never start a new one.
+
+    Anything reaching stderr may carry server- or provider-controlled bytes;
+    a bare newline in it would let that text begin a line of its own."""
+    return str(text).replace('\\', '\\\\').replace('\r', '\\r').replace('\n', '\\n')
+
+
+class _SingleLineFormatter(logging.Formatter):
+    """A Formatter whose every record occupies exactly one line."""
+
+    def format(self, record):
+        return _one_line(super().format(record))
+
+
 _LOG_FORMAT  = '%(asctime)s %(levelname)s %(message)s'
 _LOG_DATEFMT = '%Y-%m-%d %H:%M:%S'
 try:
@@ -70,12 +85,16 @@ except Exception:
     # File handler couldn't be opened (read-only FS, perms, race, etc.).
     # Fall back to stderr — the broker pipes our stderr into broker.log,
     # so logs still land somewhere the operator can find.
-    logging.basicConfig(
-        stream=sys.stderr,
-        level=logging.DEBUG,
-        format=_LOG_FORMAT,
-        datefmt=_LOG_DATEFMT,
-    )
+    #
+    # BELT (C3 review 4, R1): on this fallback our log records share the stream
+    # the shim parses for fetch reports, and a record can carry server-controlled
+    # text. So every record is forced onto ONE line with a non-marker prefix — it
+    # can neither begin with the marker nor smuggle a newline that starts a new
+    # line with it. The nonce is the actual guarantee; this removes the chance.
+    _stderr_handler = logging.StreamHandler(sys.stderr)
+    _stderr_handler.setFormatter(_SingleLineFormatter(
+        '[stt-handler] ' + _LOG_FORMAT, datefmt=_LOG_DATEFMT))
+    logging.basicConfig(level=logging.DEBUG, handlers=[_stderr_handler])
 
 # ── Load API keys ─────────────────────────────────────────────────────────────
 
@@ -126,16 +145,25 @@ def tg(token, method, **params):
 FETCH_ERROR_MARKER = 'C3-STT-FETCH-ERROR-v1 '
 
 
+# The shim generates a fresh random nonce per invocation and passes it here. It
+# is what makes a report PROVENANT rather than merely well-formed: stderr is a
+# shared stream that also carries server descriptions (via the logging fallback)
+# and provider HTTP bodies (copied from the STT subprocess), so a marker line
+# alone proves nothing — a server can put one inside its own error text. It
+# cannot put THIS run's nonce there, having never seen it.
+FETCH_ERROR_NONCE = os.environ.get('C3_STT_FETCH_NONCE', '')
+
+
 def emit_fetch_error(cause):
     """Report a fetch failure to the Go shim. Called FIRST on any fetch error,
     before anything else that could raise, so a later crash cannot swallow it."""
     try:
-        line = FETCH_ERROR_MARKER + json.dumps(str(cause))
+        payload = json.dumps({'nonce': FETCH_ERROR_NONCE, 'cause': str(cause)})
     except Exception:
-        line = FETCH_ERROR_MARKER + json.dumps('unprintable fetch error')
+        payload = json.dumps({'nonce': FETCH_ERROR_NONCE, 'cause': 'unprintable fetch error'})
     # Leading newline guarantees the marker starts a line even if earlier output
     # left the stream mid-line; the shim matches only at line start.
-    sys.stderr.write('\n' + line + '\n')
+    sys.stderr.write('\n' + FETCH_ERROR_MARKER + payload + '\n')
     sys.stderr.flush()
 
 
@@ -226,7 +254,11 @@ def run_stt(audio_path, extra_env, timeout=270):
     if result.returncode != 0 or not transcript:
         stderr_out = result.stderr.strip()
         logging.error(f'STT failed (rc={result.returncode}): {stderr_out}')
-        print(stderr_out, file=sys.stderr)
+        # The provider's stderr can embed a server-controlled HTTP body. The
+        # unescaped copy above goes to OUR log file; the copy that shares the
+        # shim's stream is flattened onto one prefixed line so it cannot begin a
+        # line with the fetch marker (C3 review 4, R1 route b).
+        print('[stt-provider] ' + _one_line(stderr_out), file=sys.stderr)
         return None
     return transcript
 

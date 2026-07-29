@@ -720,41 +720,121 @@ func TestHandleRetranscribe_STTFailureMarker_IsAnErrorNotATranscript(t *testing.
 	}
 }
 
-// wholeTextIsC3sVoiceWrite is the guard that keeps the in-place refresh from
-// replacing text C3 did not author alone.
-func TestWholeTextIsC3sVoiceWrite(t *testing.T) {
-	const prefix = "[Transcribed voice]: "
-	voice := []c3types.Attachment{{Kind: "voice", FileID: "V1"}}
+// R3b — OWNERSHIP is a file identity, never a way the text reads.
+func TestRecordOwnsVoice(t *testing.T) {
+	voice := c3types.Attachment{Kind: "voice", FileID: "V1"}
+	photo := c3types.Attachment{Kind: "photo", FileID: "P1"}
 
 	for _, tc := range []struct {
-		name string
-		rec  c3types.Inbound
-		want bool
+		name   string
+		rec    c3types.Inbound
+		fileID string
+		want   bool
 	}{
-		{"C3's own transcript", c3types.Inbound{Text: prefix + "hello", Attachments: voice}, true},
-		{"C3's own STT failure", c3types.Inbound{Text: sttFailureOpening + " no_transcript] …", Attachments: voice}, true},
-		{"C3's own too-big marker", c3types.Inbound{Text: voiceTooBigOpening + " …", Attachments: voice}, true},
-		{"C3's own fetch-failed marker", c3types.Inbound{Text: voiceFetchFailedOpening + " …", Attachments: voice}, true},
-		{"a caption in front", c3types.Inbound{Text: "caption\n" + prefix + "hello", Attachments: voice}, false},
-		{"rich block markers in front", c3types.Inbound{Text: "[photo]\n\n" + prefix + "hello", Attachments: voice}, false},
-		{"more than one attachment", c3types.Inbound{Text: prefix + "hello", Attachments: []c3types.Attachment{{Kind: "photo"}, {Kind: "voice"}}}, false},
-		{"text C3 never wrote", c3types.Inbound{Text: "just the user talking", Attachments: voice}, false},
+		{"the voice this refresh is for", c3types.Inbound{Attachments: []c3types.Attachment{voice}}, "V1", true},
+		{"a different voice's file_id", c3types.Inbound{Attachments: []c3types.Attachment{voice}}, "V9", false},
+		{"a photo-only record", c3types.Inbound{Attachments: []c3types.Attachment{photo}}, "V1", false},
+		{"no file_id at all", c3types.Inbound{Attachments: []c3types.Attachment{voice}}, "", false},
+		{"two voices — which segment is whose is unknowable", c3types.Inbound{Attachments: []c3types.Attachment{voice, {Kind: "voice", FileID: "V2"}}}, "V1", false},
+		{"the voice alongside a photo", c3types.Inbound{Attachments: []c3types.Attachment{photo, voice}}, "V1", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := wholeTextIsC3sVoiceWrite(tc.rec, prefix); got != tc.want {
-				t.Fatalf("wholeTextIsC3sVoiceWrite(%q, %d attachment(s)) = %v, want %v — a whole-text replace destroys everything it does not own",
-					tc.rec.Text, len(tc.rec.Attachments), got, tc.want)
+			if got := recordOwnsVoice(tc.rec, tc.fileID); got != tc.want {
+				t.Fatalf("recordOwnsVoice(%+v, %q) = %v, want %v — a refresh that cannot prove the message is about this voice can rewrite one it is not",
+					tc.rec.Attachments, tc.fileID, got, tc.want)
 			}
 		})
 	}
 }
 
-// The guard has to be WIRED IN, not merely correct: a queued message whose text
-// C3 did not author alone must come back from retranscribe unchanged. Store
-// .RefreshText replaces the whole field, so without this the caption, the rich
-// block markers, and every other attachment's outcome are destroyed by a
-// successful retranscribe of one voice.
-func TestHandleRetranscribe_DoesNotDestroyAMessageItDoesNotOwnEntirely(t *testing.T) {
+// R3a/R3c — only C3's own trailing segment is replaced, and it is written back
+// in the shape that lets the NEXT refresh find it.
+func TestReplaceC3VoiceSegment(t *testing.T) {
+	const prefix = "[Transcribed voice]: "
+
+	for _, tc := range []struct {
+		name, text, want string
+		ok               bool
+	}{
+		{
+			name: "C3's write is the whole text",
+			text: prefix + "old words",
+			want: prefix + "NEW", ok: true,
+		},
+		{
+			// R3a: the user's caption opens with the transcript prefix. Matching
+			// on a prefix alone let retranscribe replace the user's own words.
+			name: "a user caption that opens exactly like a transcript",
+			text: prefix + "the user's own caption\n" + prefix + "old words",
+			want: prefix + "the user's own caption\n" + prefix + "NEW", ok: true,
+		},
+		{
+			name: "rich block markers in front",
+			text: "[photo]\n\n[voice_note]\n" + prefix + "old words",
+			want: "[photo]\n\n[voice_note]\n" + prefix + "NEW", ok: true,
+		},
+		{
+			name: "a failure placeholder is C3's segment too",
+			text: "caption\n" + sttFailureOpening + " no_transcript] …",
+			want: "caption\n" + prefix + "NEW", ok: true,
+		},
+		{
+			name: "a refusal marker is C3's segment too",
+			text: "caption\n" + voiceTooBigOpening + " …]",
+			want: "caption\n" + prefix + "NEW", ok: true,
+		},
+		{
+			// A multi-line transcript must not be split on its own newlines.
+			name: "C3's transcript spans several lines",
+			text: "caption\n" + prefix + "line one\nline two\nline three",
+			want: "caption\n" + prefix + "NEW", ok: true,
+		},
+		{
+			// An opening mid-sentence is the speaker's words, not a segment.
+			name: "the prefix appears mid-line inside speech",
+			text: prefix + "he said " + prefix + "quote unquote",
+			want: prefix + "NEW", ok: true,
+		},
+		{
+			name: "nothing C3 wrote", text: "just the user talking", ok: false,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := replaceC3VoiceSegment(tc.text, prefix, "NEW")
+			if ok != tc.ok {
+				t.Fatalf("replaceC3VoiceSegment(%q) ok=%v, want %v", tc.text, ok, tc.ok)
+			}
+			if ok && got != tc.want {
+				t.Fatalf("replaceC3VoiceSegment(%q)\n got %q\nwant %q — everything before C3's own segment belongs to someone else", tc.text, got, tc.want)
+			}
+		})
+	}
+}
+
+// R3c — the shape written back must be the shape recognized, or refresh works
+// exactly once and the queue keeps the first refreshed text forever.
+func TestReplaceC3VoiceSegment_IsRepeatable(t *testing.T) {
+	const prefix = "[Transcribed voice]: "
+
+	once, ok := replaceC3VoiceSegment("caption\n"+prefix+"first", prefix, "second")
+	if !ok {
+		t.Fatal("first refresh found no segment")
+	}
+	twice, ok := replaceC3VoiceSegment(once, prefix, "third")
+	if !ok {
+		t.Fatalf("second refresh found no segment in %q — the first one stored a shape it cannot recognize, so the queued text is stuck at the first refresh forever", once)
+	}
+	if twice != "caption\n"+prefix+"third" {
+		t.Fatalf("second refresh produced %q, want the caption plus the newest transcript", twice)
+	}
+}
+
+// The guard has to be WIRED IN, not merely correct. A rich photo+voice message
+// IS refreshable — the voice is identified and only C3's own trailing segment is
+// rewritten — but everything that arrived with the message must survive it.
+// Store.RefreshText replaces the whole field, so without the segment rule a
+// successful retranscribe of one voice wipes the block markers with it.
+func TestHandleRetranscribe_RefreshPreservesEverythingItDoesNotOwn(t *testing.T) {
 	t.Setenv("C3_QUEUE_DIR", t.TempDir())
 	pc := &probeChannel{fakeChannel: &fakeChannel{}, size: 100}
 	b := brokerWithProbe(t, pc)
@@ -797,7 +877,141 @@ func TestHandleRetranscribe_DoesNotDestroyAMessageItDoesNotOwnEntirely(t *testin
 	if len(fresp.Messages) != 1 {
 		t.Fatalf("fetch_queue returned %d messages, want 1", len(fresp.Messages))
 	}
+	got := fresp.Messages[0].Text
+	if !strings.HasPrefix(got, "[photo]\n\n") {
+		t.Fatalf("the queued message was rewritten to %q — the rich block markers that arrived with it were destroyed; only C3's own trailing segment may be replaced", got)
+	}
+	if !strings.Contains(got, "fresh transcript") {
+		t.Fatalf("the refreshed transcript never landed; stored text = %q", got)
+	}
+	if strings.Contains(got, "the original words") {
+		t.Fatalf("C3's own previous segment was left behind alongside the new one; stored text = %q", got)
+	}
+}
+
+// R3a, end to end: a single voice whose USER CAPTION opens exactly like a
+// transcript. The old predicate accepted it and retranscribe replaced the user's
+// words with the new transcript.
+func TestHandleRetranscribe_DoesNotOverwriteACaptionThatLooksLikeATranscript(t *testing.T) {
+	t.Setenv("C3_QUEUE_DIR", t.TempDir())
+	pc := &probeChannel{fakeChannel: &fakeChannel{}, size: 100}
+	b := brokerWithProbe(t, pc)
+	defer b.Shutdown()
+	b.Plugins.OnVoiceReceived(func(context.Context, c3types.VoicePayload) (string, error) {
+		return "fresh transcript", nil
+	})
+
+	tid := int64(914)
+	key := MakeRouteKey("telegram", -100, &tid)
+	qrk := queue.RouteKey{Channel: "telegram", ChatID: -100, TopicID: &tid}
+	const caption = "[Transcribed voice]: this is the user's own caption"
+	_ = b.Queue.Append(qrk, &c3types.Inbound{
+		Channel: "telegram", ChatID: -100, TopicID: &tid, MessageID: 5,
+		Text:        caption + "\n[Transcribed voice]: the original transcript",
+		Attachments: []c3types.Attachment{{Kind: "voice", FileID: "V1"}},
+		Timestamp:   time.Now(),
+	})
+
+	stub := claimedHolder(t, b, key)
+	stub.SetRoute(&key)
+	agentSide, brokerSide := newConnPair(t)
+	raw, _ := json.Marshal(ipc.RetranscribeReq{Op: ipc.OpRetranscribe, ID: "1", FileID: "V1", MessageID: 5})
+	go b.handleRetranscribe(brokerSide, stub, raw)
+	if resp := readRetranscribeResp(t, agentSide); resp.Text != "fresh transcript" {
+		t.Fatalf("retranscribe text = %q", resp.Text)
+	}
+
+	fraw, _ := json.Marshal(ipc.FetchQueueReq{Op: ipc.OpFetchQueue, ID: "2", All: true, Ack: false})
+	go b.handleFetchQueue(brokerSide, stub, fraw)
+	fresp := readFetchResp(t, agentSide)
+	got := fresp.Messages[0].Text
+	if !strings.HasPrefix(got, caption) {
+		t.Fatalf("the user's caption was destroyed; stored text = %q, want it to still open with %q", got, caption)
+	}
+	if !strings.Contains(got, "fresh transcript") {
+		t.Fatalf("the refreshed transcript never landed; stored text = %q", got)
+	}
+}
+
+// R3b, end to end: a record the transcript is NOT about must not be rewritten,
+// even when the agent supplies a valid voice file_id and that message's id.
+func TestHandleRetranscribe_RefusesAMessageThatDoesNotCarryThatVoice(t *testing.T) {
+	t.Setenv("C3_QUEUE_DIR", t.TempDir())
+	pc := &probeChannel{fakeChannel: &fakeChannel{}, size: 100}
+	b := brokerWithProbe(t, pc)
+	defer b.Shutdown()
+	b.Plugins.OnVoiceReceived(func(context.Context, c3types.VoicePayload) (string, error) {
+		return "fresh transcript", nil
+	})
+
+	tid := int64(914)
+	key := MakeRouteKey("telegram", -100, &tid)
+	qrk := queue.RouteKey{Channel: "telegram", ChatID: -100, TopicID: &tid}
+	const stored = "[Transcribed voice]: a caption on a photo-only message"
+	_ = b.Queue.Append(qrk, &c3types.Inbound{
+		Channel: "telegram", ChatID: -100, TopicID: &tid, MessageID: 5,
+		Text:        stored,
+		Attachments: []c3types.Attachment{{Kind: "photo", FileID: "P1"}},
+		Timestamp:   time.Now(),
+	})
+
+	stub := claimedHolder(t, b, key)
+	stub.SetRoute(&key)
+	agentSide, brokerSide := newConnPair(t)
+	// A perfectly valid voice file_id — for a voice this message does not carry.
+	raw, _ := json.Marshal(ipc.RetranscribeReq{Op: ipc.OpRetranscribe, ID: "1", FileID: "V-ELSEWHERE", MessageID: 5})
+	go b.handleRetranscribe(brokerSide, stub, raw)
+	_ = readRetranscribeResp(t, agentSide)
+
+	fraw, _ := json.Marshal(ipc.FetchQueueReq{Op: ipc.OpFetchQueue, ID: "2", All: true, Ack: false})
+	go b.handleFetchQueue(brokerSide, stub, fraw)
+	fresp := readFetchResp(t, agentSide)
 	if got := fresp.Messages[0].Text; got != stored {
-		t.Fatalf("the queued message was rewritten to %q; want it untouched (%q) — a whole-text replace destroys the photo marker and any other attachment's outcome", got, stored)
+		t.Fatalf("a message that carries no such voice was rewritten to %q; want %q untouched — the refresh proved nothing about which message this transcript belongs to", got, stored)
+	}
+}
+
+// R3c, end to end: refresh twice. The first refresh used to store the raw
+// transcript, leaving nothing recognizable, so the second could never land.
+func TestHandleRetranscribe_RefreshIsRepeatable(t *testing.T) {
+	t.Setenv("C3_QUEUE_DIR", t.TempDir())
+	pc := &probeChannel{fakeChannel: &fakeChannel{}, size: 100}
+	b := brokerWithProbe(t, pc)
+	defer b.Shutdown()
+	var n atomic.Int64
+	b.Plugins.OnVoiceReceived(func(context.Context, c3types.VoicePayload) (string, error) {
+		if n.Add(1) == 1 {
+			return "first refresh", nil
+		}
+		return "second refresh", nil
+	})
+
+	tid := int64(914)
+	key := MakeRouteKey("telegram", -100, &tid)
+	qrk := queue.RouteKey{Channel: "telegram", ChatID: -100, TopicID: &tid}
+	_ = b.Queue.Append(qrk, &c3types.Inbound{
+		Channel: "telegram", ChatID: -100, TopicID: &tid, MessageID: 5,
+		Text:        sttFailureOpening + " no_transcript] …",
+		Attachments: []c3types.Attachment{{Kind: "voice", FileID: "V1"}},
+		Timestamp:   time.Now(),
+	})
+
+	stub := claimedHolder(t, b, key)
+	stub.SetRoute(&key)
+	agentSide, brokerSide := newConnPair(t)
+
+	for i, id := range []string{"1", "2"} {
+		raw, _ := json.Marshal(ipc.RetranscribeReq{Op: ipc.OpRetranscribe, ID: id, FileID: "V1", MessageID: 5})
+		go b.handleRetranscribe(brokerSide, stub, raw)
+		if resp := readRetranscribeResp(t, agentSide); resp.Err != "" {
+			t.Fatalf("retranscribe %d errored: %q", i+1, resp.Err)
+		}
+	}
+
+	fraw, _ := json.Marshal(ipc.FetchQueueReq{Op: ipc.OpFetchQueue, ID: "3", All: true, Ack: false})
+	go b.handleFetchQueue(brokerSide, stub, fraw)
+	fresp := readFetchResp(t, agentSide)
+	if got := fresp.Messages[0].Text; !strings.Contains(got, "second refresh") {
+		t.Fatalf("stored text = %q, want the SECOND refresh — storing the raw transcript left no shape to recognize, so refresh worked exactly once", got)
 	}
 }

@@ -23,6 +23,8 @@ package stt
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -230,23 +232,59 @@ func sttFetchFailureMarker(detail string) string {
 	return FetchFailedPrefix + detail + "]"
 }
 
+// fetchNonceEnvVar carries this invocation's shared secret to the handler.
+const fetchNonceEnvVar = "C3_STT_FETCH_NONCE"
+
+// fetchReport is the handler's structured fetch-error payload.
+type fetchReport struct {
+	Nonce string `json:"nonce"`
+	Cause string `json:"cause"`
+}
+
+// newFetchNonce mints the per-invocation secret that gives a fetch report its
+// PROVENANCE. Crypto-random and never reused, so it cannot be predicted by
+// anything that produced its bytes before this run started.
+func newFetchNonce() (string, error) {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b[:]), nil
+}
+
 // fetchFailureDetail returns the handler's reported fetch cause from its stderr,
-// or "" when the failure was not a fetch failure. It scans the WHOLE stderr, not
-// the logged tail, and matches ONLY whole lines that BEGIN with the marker. The
-// last such line wins — the handler emits at most one per run, and a later
-// report is the more recent truth.
-func fetchFailureDetail(stderr string) string {
+// or "" when the failure was not an authenticated fetch failure. It scans the
+// WHOLE stderr (not the logged tail), matches ONLY whole lines BEGINNING with
+// the marker, and accepts a line only when its nonce is THIS run's.
+//
+// The nonce is the load-bearing check, and structure alone was not enough:
+// stderr is a SHARED stream. On the handler's stderr logging fallback a raw
+// server description is written unencoded, and provider stderr — which can embed
+// a server-controlled HTTP body — is copied through it. Either can contain a
+// newline followed by a perfectly well-formed marker line, and the later line
+// would win. A server can author a marker; it cannot author a secret it has
+// never seen (C3 review 4, R1).
+//
+// The last authenticated line wins: the handler emits at most one per run, and a
+// later report is the more recent truth.
+func fetchFailureDetail(stderr, nonce string) string {
+	if nonce == "" {
+		return "" // no secret to check against: nothing here can be authenticated
+	}
 	out := ""
 	for _, line := range strings.Split(stderr, "\n") {
 		rest, ok := strings.CutPrefix(line, fetchErrorMarker)
 		if !ok {
 			continue // not a marker line: anchored at line start, never mid-line
 		}
-		var cause string
-		if err := json.Unmarshal([]byte(strings.TrimRight(rest, "\r")), &cause); err != nil {
+		var rep fetchReport
+		if err := json.Unmarshal([]byte(strings.TrimRight(rest, "\r")), &rep); err != nil {
 			continue // not our encoding; refuse to guess at its meaning
 		}
-		if cause = strings.TrimSpace(cause); cause != "" {
+		if rep.Nonce != nonce {
+			continue // well-formed but unauthenticated — someone else's words
+		}
+		if cause := strings.TrimSpace(rep.Cause); cause != "" {
 			out = cause
 		}
 	}
@@ -303,7 +341,15 @@ func runHandler(ctx context.Context, host plugin.Host, cfg Config, token, apiBas
 	// Rolling-window audio retention: the handler keeps the newest N .oga in its
 	// inbox and prunes older ones after each transcription (recent audio stays
 	// available for retranscribe/testing). N is passed from config.
-	cmd.Env = handlerEnv(apiBaseURL, apiBaseAnswered, cfg.AudioRetention)
+	// One fresh secret per invocation. If it cannot be minted we run WITHOUT one,
+	// which makes every fetch report unauthenticated and therefore ignored: a
+	// generic transcription failure is the honest degradation, never an
+	// unauthenticated cause dressed up as the server's word.
+	nonce, nerr := newFetchNonce()
+	if nerr != nil {
+		host.Logf("stt: msg=%d could not mint a fetch-report nonce (%v); fetch causes will not be authenticated this run", p.MessageID, nerr)
+	}
+	cmd.Env = handlerEnv(apiBaseURL, apiBaseAnswered, nonce, cfg.AudioRetention)
 
 	// I-7: kill the whole process group on the ctx deadline, not just the direct
 	// child. Setpgid makes stt-handler.py the leader of its OWN process group, so
@@ -357,7 +403,7 @@ func runHandler(ctx context.Context, host plugin.Host, cfg Config, token, apiBas
 		// "[STT FAILED: error]" is what let the server's specific answer reach
 		// the agent as a generic "transcription failed / try again", so the
 		// cause travels upward intact instead.
-		if detail := fetchFailureDetail(stderr.String()); detail != "" {
+		if detail := fetchFailureDetail(stderr.String(), nonce); detail != "" {
 			host.Logf("stt: msg=%d fetch failed before transcription: %s", p.MessageID, detail)
 			return sttFetchFailureMarker(detail), nil
 		}
@@ -449,9 +495,19 @@ func readTelegramConn(host plugin.Host) (token, apiBaseURL string, answered bool
 //
 // When the channel could NOT answer, the environment is inherited untouched —
 // that is the pre-existing behavior for a transport with no live accessor.
-func handlerEnv(base string, answered bool, retention int) []string {
+func handlerEnv(base string, answered bool, nonce string, retention int) []string {
 	env := os.Environ()
-	if answered {
+	// A base is installed whenever we HAVE one — whether the live channel gave
+	// it or readTelegramConn resolved it from env/mappings. Gating the install on
+	// `answered` dropped the configured api_base_url for any transport without a
+	// live accessor, silently sending the handler to api.telegram.org instead of
+	// the operator's proxy (C3 review 4, R2).
+	//
+	// The strip is what makes an ANSWER of "" mean api.telegram.org: Python reads
+	// its default only when the variable is ABSENT, and it also keeps a stale
+	// inherited value from sitting beside the new one where libc, not us, picks
+	// the winner. No base and no answer ⇒ inherit untouched.
+	if answered || base != "" {
 		kept := env[:0]
 		for _, kv := range env {
 			if !strings.HasPrefix(kv, apiURLEnvVar+"=") {
@@ -463,7 +519,9 @@ func handlerEnv(base string, answered bool, retention int) []string {
 			env = append(env, apiURLEnvVar+"="+base)
 		}
 	}
-	return append(env, "STT_AUDIO_RETENTION="+strconv.Itoa(retention))
+	return append(env,
+		fetchNonceEnvVar+"="+nonce,
+		"STT_AUDIO_RETENTION="+strconv.Itoa(retention))
 }
 
 // apiURLEnvVar is the variable stt-handler.py reads its Bot-API base from.

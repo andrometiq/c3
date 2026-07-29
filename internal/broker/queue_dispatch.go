@@ -233,7 +233,12 @@ func (b *Broker) handleRetranscribe(conn *ipc.Conn, stub *Stub, raw []byte) {
 	refreshed := false
 	if req.MessageID != 0 && route != nil && b.Workers != nil && b.Queue != nil {
 		resultCh := make(chan RefreshResult, 1)
-		job := Job{Kind: JobRefreshText, Refresh: &RefreshTextJob{MessageID: req.MessageID, NewText: transcript, ResultCh: resultCh}}
+		job := Job{Kind: JobRefreshText, Refresh: &RefreshTextJob{
+			MessageID:  req.MessageID,
+			FileID:     req.FileID,
+			Transcript: transcript,
+			ResultCh:   resultCh,
+		}}
 		if b.Workers.Submit(*route, job) {
 			select {
 			case res := <-resultCh:

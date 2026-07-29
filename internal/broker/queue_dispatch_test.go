@@ -195,8 +195,11 @@ func TestHandleRetranscribe_RefreshesQueuedMessageInPlace(t *testing.T) {
 	for _, m := range fresp.Messages {
 		switch m.MessageID {
 		case 5:
-			if m.Text != "fresh transcript" {
-				t.Fatalf("queued msg 5 text = %q, want refreshed 'fresh transcript'", m.Text)
+			// Stored in the SAME authored shape C3 recognizes (prefix included),
+			// which is what lets a LATER retranscribe find and replace it again.
+			// Storing the bare transcript made refresh a one-shot.
+			if m.Text != "[Transcribed voice]: fresh transcript" {
+				t.Fatalf("queued msg 5 text = %q, want the refreshed transcript in C3's authored shape", m.Text)
 			}
 		case 6:
 			if m.Text != "other" {
