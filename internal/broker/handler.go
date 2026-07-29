@@ -963,6 +963,9 @@ func (b *Broker) handlePingThisSession(conn *ipc.Conn, raw []byte) {
 			if s.CurrentRoute() == nil {
 				continue
 			}
+			if req.CWD == "" || !completeIdentity(s.CLI, s.PID) {
+				continue
+			}
 			if s.CWD != req.CWD {
 				continue
 			}

@@ -167,6 +167,61 @@ func TestPing_NoPIDMatch_NoCWDMatch_NotAttached(t *testing.T) {
 	}
 }
 
+// TestPing_CWDFallback_RefusesTwoEmptyCWDs pins the identity guard on the
+// tertiary match. An empty path is not evidence that a transient caller and an
+// attached session are the same session; os.Getwd can fail independently in
+// both processes.
+func TestPing_CWDFallback_RefusesTwoEmptyCWDs(t *testing.T) {
+	mf := mfWithTelegram()
+	fc := &fakeChannel{}
+	b := brokerWithChannel(t, mf, fc)
+	defer b.Shutdown()
+
+	stub := b.Stubs.Register("claude", 100, "", nil)
+	tid := int64(281)
+	r := MakeRouteKey("telegram", -100, &tid)
+	if !b.tryClaim(nil, stub, r, "c3", false, false) {
+		t.Fatal("stub: claim failed")
+	}
+	waitForReplies(fc, 1)
+	beforePing := len(fc.sendRepliesSnapshot())
+
+	resp := pingOverIPC(t, b, 0, "")
+	if resp.OK {
+		t.Fatalf("two empty CWDs compared equal in the ping fallback, targeting an unrelated session: %+v", resp)
+	}
+	if got := len(fc.sendRepliesSnapshot()); got != beforePing {
+		t.Fatalf("the empty-CWD fallback sent to an unrelated session: replies before=%d after=%d", beforePing, got)
+	}
+}
+
+// TestPing_CWDFallback_RefusesIncompleteStubIdentity ensures that a path alone
+// cannot make an anonymous adapter the user's session. A fallback target still
+// has to have the CLI+PID identity required everywhere else claims persist.
+func TestPing_CWDFallback_RefusesIncompleteStubIdentity(t *testing.T) {
+	mf := mfWithTelegram()
+	fc := &fakeChannel{}
+	b := brokerWithChannel(t, mf, fc)
+	defer b.Shutdown()
+
+	stub := b.Stubs.Register("", 0, "/shared", nil)
+	tid := int64(281)
+	r := MakeRouteKey("telegram", -100, &tid)
+	if !b.tryClaim(nil, stub, r, "c3", false, false) {
+		t.Fatal("stub: claim failed")
+	}
+	waitForReplies(fc, 1)
+	beforePing := len(fc.sendRepliesSnapshot())
+
+	resp := pingOverIPC(t, b, 0, "/shared")
+	if resp.OK {
+		t.Fatalf("a matching CWD promoted an incomplete stub identity into the caller's session: %+v", resp)
+	}
+	if got := len(fc.sendRepliesSnapshot()); got != beforePing {
+		t.Fatalf("the CWD fallback sent to an anonymous adapter: replies before=%d after=%d", beforePing, got)
+	}
+}
+
 // TestListSessions_MarksThisSession_ByCLIAncestor: the same pid-split breaks
 // /c3:sessions IsThisSession. A stub under adapter pid 9823 must be marked
 // IsThisSession when the caller's req.PID is the resolved claude pid 9801.
