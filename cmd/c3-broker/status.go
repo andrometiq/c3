@@ -13,6 +13,11 @@ import (
 	"github.com/Andrometiq/c3/internal/version"
 )
 
+var (
+	statusFetchHealth = fetchHealthList
+	statusFetchClaims = fetchClaimsList
+)
+
 // runStatus prints a read-only health check.
 //
 // Sections:
@@ -127,26 +132,31 @@ func runStatus() error {
 	// reported yet)".
 	fmt.Fprintln(&b)
 	fmt.Fprintln(&b, "Channel health:")
-	if healthList, err := fetchHealthList(); err != nil {
+	if healthList, err := statusFetchHealth(); err != nil {
 		fmt.Fprintf(&b, "  (broker unreachable: %v)\n", err)
-	} else if len(healthList.Health) == 0 {
-		fmt.Fprintln(&b, "  (no health events reported yet)")
 	} else {
-		for _, h := range healthList.Health {
-			ch := h.Channel
-			if ch == "" {
-				ch = "channel"
-			}
-			if h.State == "down" {
-				since := time.Unix(h.SinceUnix, 0).Format("15:04")
-				reason := h.Reason
-				if reason == "" {
-					reason = "transport failures"
+		if healthList.QueueDegraded {
+			fmt.Fprintln(&b, "  ⚠ durable queue: DISABLED — messages arriving without an attached session are not saved and cannot be recovered")
+		}
+		if len(healthList.Health) == 0 {
+			fmt.Fprintln(&b, "  (no health events reported yet)")
+		} else {
+			for _, h := range healthList.Health {
+				ch := h.Channel
+				if ch == "" {
+					ch = "channel"
 				}
-				fmt.Fprintf(&b, "  • %s fetch: DOWN since %s (%d consecutive %s, down %s)\n",
-					ch, since, h.Consec, reason, (time.Duration(h.DownForSec) * time.Second).String())
-			} else {
-				fmt.Fprintf(&b, "  • %s fetch: UP\n", ch)
+				if h.State == "down" {
+					since := time.Unix(h.SinceUnix, 0).Format("15:04")
+					reason := h.Reason
+					if reason == "" {
+						reason = "transport failures"
+					}
+					fmt.Fprintf(&b, "  • %s fetch: DOWN since %s (%d consecutive %s, down %s)\n",
+						ch, since, h.Consec, reason, (time.Duration(h.DownForSec) * time.Second).String())
+				} else {
+					fmt.Fprintf(&b, "  • %s fetch: UP\n", ch)
+				}
 			}
 		}
 	}
@@ -156,7 +166,7 @@ func runStatus() error {
 	// note that fact instead of the old apologetic placeholder.
 	fmt.Fprintln(&b)
 	fmt.Fprintln(&b, "Live claims:")
-	if claimsList, err := fetchClaimsList(); err != nil {
+	if claimsList, err := statusFetchClaims(); err != nil {
 		fmt.Fprintf(&b, "  (broker unreachable: %v)\n", err)
 	} else if len(claimsList.Claims) == 0 {
 		fmt.Fprintln(&b, "  (no claims)")

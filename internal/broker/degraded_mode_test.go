@@ -2,6 +2,7 @@ package broker
 
 import (
 	"context"
+	"encoding/json"
 	"net"
 	"os"
 	"path/filepath"
@@ -298,6 +299,55 @@ func TestStatus_ReportsDegradedQueue(t *testing.T) {
 	if !strings.Contains(dmReply, queueDisabledWarning) {
 		t.Fatalf("the global /status summary never mentions that the durable queue is disabled. Reply was:\n%s", dmReply)
 	}
+}
+
+// TestHealthList_DegradedQueueStateCannotDisappear pins the running broker's
+// contribution to `c3-broker status`. Removing QueueDegraded from handleHealth
+// makes the CLI process indistinguishable from an old/healthy broker, so the
+// persistent warning disappears even though Queue is nil.
+func TestHealthList_DegradedQueueStateCannotDisappear(t *testing.T) {
+	degradeQueueDir(t)
+	b := New(mfWithTelegram())
+	defer b.Shutdown()
+	if b.Queue != nil {
+		t.Fatal("setup did not trigger queue.NewStore startup failure; health_list test would be vacuous")
+	}
+	got, raw := readHealthList(t, b)
+	if !got.QueueDegraded {
+		t.Fatalf("health_list omitted queue_degraded=true while Broker.Queue is nil, so c3-broker status cannot persist the startup failure. Frame: %s", raw)
+	}
+}
+
+func TestHealthList_HealthyQueueDoesNotCryWolf(t *testing.T) {
+	t.Setenv("C3_QUEUE_DIR", t.TempDir())
+	b := New(mfWithTelegram())
+	defer b.Shutdown()
+	if b.Queue == nil {
+		t.Fatal("setup unexpectedly disabled the durable queue; healthy control would be vacuous")
+	}
+	got, raw := readHealthList(t, b)
+	if got.QueueDegraded {
+		t.Fatalf("health_list reports queue_degraded=true while the durable queue is open, training operators to ignore the real warning. Frame: %s", raw)
+	}
+}
+
+func readHealthList(t *testing.T, b *Broker) (ipc.HealthListMsg, []byte) {
+	t.Helper()
+	clientSide, brokerSide := net.Pipe()
+	defer clientSide.Close()
+	defer brokerSide.Close()
+	clientConn := ipc.NewConn(clientSide)
+	go b.handleHealth(ipc.NewConn(brokerSide))
+
+	raw, err := clientConn.ReadFrame()
+	if err != nil {
+		t.Fatalf("read health_list: %v", err)
+	}
+	var got ipc.HealthListMsg
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("decode health_list: %v", err)
+	}
+	return got, raw
 }
 
 // TestDocsQuoteTheRealNotices holds the public docs to the claim README.md makes

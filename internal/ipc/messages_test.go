@@ -424,6 +424,33 @@ func TestInboundMsg_DeliveryTokenIsAdditiveAndOmitEmpty(t *testing.T) {
 	}
 }
 
+func TestHealthListMsg_QueueDegradedIsAdditiveAndOmitEmpty(t *testing.T) {
+	healthy, err := json.Marshal(HealthListMsg{Op: OpHealthList, Health: []HealthEntry{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if containsJSONField(string(healthy), "queue_degraded") {
+		t.Fatalf("healthy/legacy health_list wire shape must omit queue_degraded: %s", healthy)
+	}
+
+	degraded, err := json.Marshal(HealthListMsg{Op: OpHealthList, Health: []HealthEntry{}, QueueDegraded: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const want = `{"op":"health_list","health":[],"queue_degraded":true}`
+	if string(degraded) != want {
+		t.Fatalf("degraded health_list wire changed: got %s, want %s", degraded, want)
+	}
+
+	var decoded HealthListMsg
+	if err := json.Unmarshal(degraded, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if !decoded.QueueDegraded {
+		t.Fatalf("queue_degraded=true disappeared on decode: %+v", decoded)
+	}
+}
+
 func TestAttachedMsgCarriesBacklog(t *testing.T) {
 	m := AttachedMsg{
 		Op: OpAttached, OK: true, QueuedCount: 2,

@@ -438,6 +438,10 @@ type ListHealthReq struct {
 type HealthListMsg struct {
 	Op     Op            `json:"op"` // = OpHealthList
 	Health []HealthEntry `json:"health"`
+	// QueueDegraded is true when this broker failed to open its durable queue at
+	// startup and kept running in loud-degrade mode. Additive + omitempty lets
+	// an older status client ignore it and preserves the healthy/legacy frame.
+	QueueDegraded bool `json:"queue_degraded,omitempty"`
 }
 
 // HealthEntry is one channel's last-known fetch-health for status rendering.

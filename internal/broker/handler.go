@@ -822,7 +822,10 @@ func (b *Broker) handleListClaims(conn *ipc.Conn) {
 // fetch-health (the last HealthEvent per channel). Used by `c3-broker status`
 // to render the "Channel health:" line. Mirrors handleListClaims.
 func (b *Broker) handleHealth(conn *ipc.Conn) {
-	resp := ipc.HealthListMsg{Op: ipc.OpHealthList}
+	resp := ipc.HealthListMsg{
+		Op:            ipc.OpHealthList,
+		QueueDegraded: b.Queue == nil,
+	}
 	for ch, ev := range b.lastHealthSnapshot() {
 		entry := ipc.HealthEntry{
 			Channel:   ch,
