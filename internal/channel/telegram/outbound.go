@@ -404,8 +404,10 @@ func (c *Channel) AttachmentSize(fileID string) (int64, error) {
 	return f.FileSize, nil
 }
 
-// DownloadAttachment fetches a Telegram file by file_id and saves it to a
-// local cache dir. Returns the local path. Bot API caps at 20MB.
+// DownloadAttachment fetches a Telegram file by file_id and saves it to a local
+// cache dir and returns the local path. It applies no size ceiling of its own —
+// getFile above is the size check, and whatever the bot server agreed to serve
+// is fetched (see getFileErr).
 //
 // Local cache layout:
 //

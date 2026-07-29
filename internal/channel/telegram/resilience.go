@@ -162,6 +162,15 @@ func (c *Channel) requestOptsFor(method string) *gotgbot.RequestOpts {
 	}
 }
 
+// APIBaseURL is activeEndpointURL exported for out-of-package callers that must
+// talk to the SAME Bot-API host this channel is currently using — today the STT
+// plugin, whose handler performs its own getFile. Reading api_base_url from
+// mappings instead would ignore both C3_TELEGRAM_API_URL and any failover
+// advance, so a probe that succeeded here could be followed by a fetch against a
+// different, unreachable endpoint (Codex review 2, finding 1). "" means the
+// gotgbot default base, api.telegram.org.
+func (c *Channel) APIBaseURL() string { return c.activeEndpointURL() }
+
 // activeEndpointURL returns the current Bot-API base, "" meaning gotgbot's
 // default. It is defensive against an unbuilt endpoints slice (e.g. a *Channel
 // constructed directly in a unit test, bypassing Start): an empty list resolves

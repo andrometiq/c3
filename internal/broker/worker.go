@@ -3,6 +3,7 @@ package broker
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"strings"
@@ -419,7 +420,7 @@ func (w *RouteWorker) run(ctx context.Context) {
 				// CB-1: a synthesized channel EVENT (poll_result / reaction /
 				// callback) must NEVER share a debounce batch with text. Merging
 				// it would (a) drop its Kind/Event through mergeBatch's text-only
-				// copy and (b) run hasVoice/STT over a non-voice event. So: flush
+				// copy and (b) run voice/STT over a non-voice event. So: flush
 				// any buffered text first, then forward the event ALONE, bypassing
 				// the debounce buffer and the STT path entirely.
 				if job.Inbound.IsEvent() {
@@ -459,6 +460,69 @@ func (w *RouteWorker) run(ctx context.Context) {
 			}
 		}
 	}
+}
+
+// voiceOutcome is what one voice attachment produced. Exactly one of transcript
+// and marker is normally set; both empty means the STT chain ran and failed,
+// which the caller renders with sttFailureText.
+type voiceOutcome struct {
+	transcript string // a real transcript
+	marker     string // agent-surface text when the audio never arrived at all
+	notice     string // human-facing notice, "" when there is nothing to say
+	raw        string // the plugin's raw return, for sttFailureReason
+}
+
+// voiceOutcome fetches and transcribes ONE voice attachment.
+//
+// Two things can refuse the audio, and both must reach the same honest
+// surfaces. The bot server can refuse the preflight ask (voicegate.go), and the
+// STT handler — which performs its OWN getFile, so the preflight cannot speak
+// for it — can have its fetch fail afterwards. That second case used to collapse
+// into "[STT FAILED: error]" and then into the generic "transcription failed /
+// the audio is saved and recoverable" text, which is false on every clause when
+// nothing was ever downloaded (Codex review 2, finding 1). It now carries the
+// server's own words into the same refusal surfaces the preflight uses.
+func (w *RouteWorker) voiceOutcome(ctx context.Context, in *c3types.Inbound, att c3types.Attachment) voiceOutcome {
+	// Ask the bot server whether it will hand this file over, BEFORE the STT
+	// chain. The ask is the same getFile the chain opens with, so a refusal here
+	// is a refusal there — and reporting it costs one bodyless call instead of
+	// two HTTP 400s under a message that names the wrong subsystem.
+	if marker, notice, refuse := w.broker.voiceFetchRefusal(in.Channel, att); refuse {
+		log.Printf("stt SKIPPED chan=%s chat=%d topic=%s msg=%d file_id=%s: the bot server will not serve this file (%d bytes stated) — handler not run: %s",
+			w.key.Channel, w.key.ChatID, TopicKeyStr(w.key), in.MessageID, att.FileID, att.Size, marker)
+		return voiceOutcome{marker: marker, notice: notice}
+	}
+	// Per-call deadline so a hung download can't block the worker goroutine (and
+	// the JobFetch/JobConsume jobs queued behind it). cancel() runs immediately
+	// (not deferred) because this runs in a per-attachment loop — a deferred
+	// cancel would leak every iteration's timer until flushInbounds returns. A ""
+	// result (incl. on timeout) flows to the sttFailureText placeholder path.
+	sttCtx, cancel := context.WithTimeout(ctx, sttFlushTimeout)
+	raw := w.broker.Plugins.FireOnVoiceReceived(sttCtx, c3types.VoicePayload{
+		Channel:   in.Channel,
+		ChatID:    in.ChatID,
+		TopicID:   in.TopicID,
+		MessageID: in.MessageID,
+		FileID:    att.FileID,
+		MIME:      att.MIME,
+		Size:      att.Size,
+	})
+	cancel()
+
+	if detail, ok := sttFetchFailure(raw); ok {
+		cause := errors.New(detail)
+		log.Printf("stt FETCH FAILED chan=%s chat=%d topic=%s msg=%d file_id=%s: %s — reporting the server's own error, not a transcription failure",
+			w.key.Channel, w.key.ChatID, TopicKeyStr(w.key), in.MessageID, att.FileID, detail)
+		return voiceOutcome{
+			marker: voiceFetchFailedAgentText(cause),
+			notice: voiceFetchFailedNotice(cause),
+			raw:    raw,
+		}
+	}
+	if raw != "" && !isSTTFailureMarker(raw) {
+		return voiceOutcome{transcript: raw, raw: raw}
+	}
+	return voiceOutcome{raw: raw}
 }
 
 // sttFlushTimeout bounds each per-inbound voice STT call made by flushInbounds.
@@ -501,60 +565,60 @@ func (w *RouteWorker) flushInbounds(ctx context.Context, batch []*c3types.Inboun
 			// event. The run loop already diverts events to flushEvent, so a
 			// batch here is all ordinary messages — this guard makes that
 			// invariant explicit and survives any future caller change.
-			if in.IsEvent() || !hasVoice(in) {
+			voices := voiceAttachments(in)
+			if in.IsEvent() || len(voices) == 0 {
 				continue
 			}
-			payload := c3types.VoicePayload{
-				Channel:   in.Channel,
-				ChatID:    in.ChatID,
-				TopicID:   in.TopicID,
-				MessageID: in.MessageID,
-				FileID:    in.Attachments[0].FileID,
-				MIME:      in.Attachments[0].MIME,
-				Size:      in.Attachments[0].Size,
+			// EVERY voice attachment is handled, at whatever position it sits.
+			// The FIRST one keeps the long-standing single-voice semantics (a
+			// transcript becomes the agent surface); each additional one APPENDS
+			// its own transcript or marker, so a rich message carrying two voice
+			// blocks surfaces both instead of silently dropping the rest.
+			var echoTranscript, failNotice string
+			for n, att := range voices {
+				o := w.voiceOutcome(ctx, in, att)
+				switch {
+				case o.marker != "":
+					// APPENDED, never conditional on the text being empty: the
+					// refusal is the one thing the agent must not miss, and a
+					// caption or a rich-voice "[voice_note]" marker would otherwise
+					// swallow it entirely. The sender's own words are kept.
+					in.Text = appendVoiceMarker(in.Text, o.marker)
+				case o.transcript != "":
+					// APPENDED for the same reason a refusal is: whatever text
+					// arrived with the message is the sender's, or the rich
+					// decoder's own block markers. Replacing it destroyed the
+					// "[photo]" half of a photo-then-voice rich message, and a
+					// plain voice note's caption before that. appendVoiceMarker
+					// returns the transcript alone when there was nothing there,
+					// which is every ordinary voice note.
+					in.Text = appendVoiceMarker(in.Text, w.sttPrefix(in.Channel)+o.transcript)
+				case n == 0 && in.Text == "":
+					// Deliberately still guarded on empty text for the FIRST
+					// voice: a captioned note whose STT merely failed keeps the
+					// caption alone (worker_test.go pins that call), and the
+					// human notice carries the news. Additional attachments get
+					// no such luxury — dropping them entirely is the defect.
+					// Self-documenting failure: the text the AGENT sees becomes a
+					// recovery instruction (it names THIS attachment's file_id + how
+					// to fetch / retry), not a dead end. The audio is durably queued
+					// and recoverable; the user never re-forwards. This fires on BOTH
+					// the empty-transcript path (no STT plugin / timeout) AND a
+					// non-empty "[STT FAILED: <reason>]" marker from the builtin — the
+					// marker only names the log, so we replace it with the rich text
+					// and surface the parsed <reason> via sttFailureReason.
+					in.Text = sttFailureText(att, sttFailureReason(o.raw))
+				case n > 0:
+					in.Text = appendVoiceMarker(in.Text, sttFailureText(att, sttFailureReason(o.raw)))
+				}
+				if o.transcript != "" {
+					echoTranscript = appendVoiceMarker(echoTranscript, o.transcript)
+				}
+				if o.notice != "" && failNotice == "" {
+					failNotice = o.notice
+				}
 			}
-			// Ask the bot server whether it will hand this file over, BEFORE
-			// the STT chain (voicegate.go, 2026-07-27 incident Ask #1). The ask
-			// is the same getFile the chain opens with, so a refusal here is a
-			// refusal there — and reporting it costs one bodyless call instead
-			// of two HTTP 400s under a message that names the wrong subsystem.
-			var transcript, failNotice string
-			agentMarker, notice, unfetchable := w.broker.voiceFetchRefusal(in)
-			if unfetchable {
-				failNotice = notice
-				log.Printf("stt SKIPPED chan=%s chat=%d topic=%s msg=%d: the bot server will not serve this file (%d bytes stated) — handler not run: %s",
-					w.key.Channel, w.key.ChatID, TopicKeyStr(w.key), in.MessageID, voiceAttachmentSize(in), agentMarker)
-			} else {
-				// Per-call deadline so a hung download can't block the worker
-				// goroutine (and the JobFetch/JobConsume jobs queued behind it).
-				// cancel() runs immediately (not deferred) because this is a
-				// per-inbound loop — a deferred cancel would leak every iteration's
-				// timer until flushInbounds returns. A "" result (incl. on timeout)
-				// flows to the sttFailureText placeholder path below.
-				sttCtx, cancel := context.WithTimeout(ctx, sttFlushTimeout)
-				transcript = w.broker.Plugins.FireOnVoiceReceived(sttCtx, payload)
-				cancel()
-			}
-			switch {
-			case unfetchable:
-				// APPENDED, never conditional on the text being empty: the
-				// refusal is the one thing the agent must not miss, and a
-				// caption or a rich-voice "[voice_note]" marker would otherwise
-				// swallow it entirely. The sender's own words are kept.
-				in.Text = appendVoiceMarker(in.Text, agentMarker)
-			case transcript != "" && !isSTTFailureMarker(transcript):
-				in.Text = w.sttPrefix(in.Channel) + transcript
-			case in.Text == "":
-				// Self-documenting failure: the text the AGENT sees becomes a
-				// recovery instruction (it names the file_id + how to fetch /
-				// retry), not a dead end. The audio is durably queued and
-				// recoverable; the user never re-forwards. This fires on BOTH the
-				// empty-transcript path (no STT plugin / timeout) AND a non-empty
-				// "[STT FAILED: <reason>]" marker from the builtin — the marker
-				// only names the log, so we replace it with the rich text and
-				// surface the parsed <reason> via sttFailureReason.
-				in.Text = sttFailureText(in, sttFailureReason(transcript))
-			}
+			transcript := echoTranscript
 			// Voice-transcript readback echo (moved out of the Python STT handler).
 			// ADDITIVE + NON-FATAL: it is a SEND, so it must NEVER affect the
 			// agent-surface in.Text set above, inbound delivery, persistence, or
@@ -736,12 +800,12 @@ func (w *RouteWorker) flushInbounds(ctx context.Context, batch []*c3types.Inboun
 // (download_attachment), that it can retry transcription (retranscribe), and
 // that the user does NOT need to resend. Includes file_id, mime, and duration
 // when known. See broker.log (LogPath) for the provider traceback.
-func sttFailureText(in *c3types.Inbound, reason string) string {
-	fileID, mime, dur := "", "", ""
-	if len(in.Attachments) > 0 {
-		fileID = in.Attachments[0].FileID
-		mime = in.Attachments[0].MIME
-	}
+//
+// It names the attachment it is ABOUT, not Attachments[0]: a rich message can
+// put a photo first and the voice second, and quoting the photo's file_id would
+// send the agent to download the wrong thing (Codex review 2, finding 2).
+func sttFailureText(att c3types.Attachment, reason string) string {
+	fileID, mime, dur := att.FileID, att.MIME, ""
 	if mime == "" {
 		mime = "audio"
 	}
@@ -820,9 +884,12 @@ func (w *RouteWorker) echoReadback(in *c3types.Inbound, transcript, failNotice s
 		// echo to. Skip silently — the agent surface (in.Text) is already set.
 		return
 	}
-	// Failure: an empty transcript or the STT failure marker → a human notice,
-	// not a transcript. The agent-surface marker path (in.Text) is unchanged.
-	if transcript == "" || isSTTFailureMarker(transcript) {
+	// Failure notice and transcript readback are INDEPENDENT, not either/or. One
+	// message can carry several voice attachments (a rich message decodes its
+	// blocks in order), so one can transcribe while another is refused — and the
+	// human must hear about both. With a single voice note exactly one of these
+	// fires, which is the behavior this has always had.
+	if transcript == "" || isSTTFailureMarker(transcript) || failNotice != "" {
 		notice := failNotice
 		if notice == "" {
 			notice = "⚠️ Couldn't transcribe that voice note — see logs / try again."
@@ -834,10 +901,12 @@ func (w *RouteWorker) echoReadback(in *c3types.Inbound, transcript, failNotice s
 			log.Printf("readback notice chan=%s chat=%d topic=%s msg=%d: send failed (non-fatal): %v",
 				w.key.Channel, w.key.ChatID, TopicKeyStr(w.key), in.MessageID, serr)
 		}
+	}
+	if transcript == "" || isSTTFailureMarker(transcript) {
 		return
 	}
-	// Success: echo the transcript via the channel's optional readback renderer.
-	// Other channels simply don't implement it and are skipped.
+	// Echo the transcript via the channel's optional readback renderer. Other
+	// channels simply don't implement it and are skipped.
 	rb, ok := ch.(interface {
 		SendReadback(c3types.ReadbackArgs) (int64, error)
 	})
@@ -2287,10 +2356,6 @@ var errWorkerStopped = workerErr("worker stopped before job ran")
 type workerErr string
 
 func (e workerErr) Error() string { return string(e) }
-
-func hasVoice(in *c3types.Inbound) bool {
-	return len(in.Attachments) > 0 && in.Attachments[0].Kind == "voice"
-}
 
 func (w *RouteWorker) sttPrefix(chanName string) string {
 	if w.broker == nil || w.broker.Mappings() == nil {

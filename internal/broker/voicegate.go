@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 
 	"github.com/Andrometiq/c3/internal/c3types"
 	"github.com/Andrometiq/c3/internal/channel"
@@ -55,21 +56,59 @@ type attachmentSizer interface {
 //     chain opens with this same fetch, so it would fail identically and report
 //     a generic "transcription failed" over the top of a real error. The real
 //     error is passed through instead.
-func (b *Broker) voiceFetchRefusal(in *c3types.Inbound) (agentText, notice string, refuse bool) {
-	ch, err := b.Channel(in.Channel)
+func (b *Broker) voiceFetchRefusal(chanName string, att c3types.Attachment) (agentText, notice string, refuse bool) {
+	ch, err := b.Channel(chanName)
 	if err != nil {
 		return "", "", false
 	}
 	sizer, ok := ch.(attachmentSizer)
-	fileID := voiceAttachmentFileID(in)
-	if !ok || fileID == "" {
+	if !ok || att.FileID == "" {
 		return "", "", false // nothing to ask, or nobody to ask
 	}
-	if _, perr := sizer.AttachmentSize(fileID); perr != nil {
-		agent, human := fetchFailureTexts(perr, voiceAttachmentSize(in))
+	if _, perr := sizer.AttachmentSize(att.FileID); perr != nil {
+		agent, human := fetchFailureTexts(perr, att.Size)
 		return agent, human, true
 	}
 	return "", "", false
+}
+
+// sttFetchFailedPrefix mirrors stt.FetchFailedPrefix. It is duplicated rather
+// than imported for the same reason isSTTFailureMarker is: the broker does not
+// depend on the STT builtin, so the marker vocabulary crosses that boundary as a
+// string. Keep the two in step.
+const sttFetchFailedPrefix = "[STT FETCH FAILED: "
+
+// sttFetchFailure reports the handler's own fetch error when a transcript
+// stand-in carries one. The STT handler performs its own getFile — the broker's
+// preflight cannot speak for it (a failover advance or plain TOCTOU between the
+// two calls), so when the handler's fetch is the thing that failed, its cause
+// must reach the same honest surfaces the preflight refusal uses instead of
+// collapsing into "transcription failed / try again" (Codex review 2, finding 1).
+func sttFetchFailure(transcript string) (string, bool) {
+	detail, ok := strings.CutPrefix(transcript, sttFetchFailedPrefix)
+	if !ok {
+		return "", false
+	}
+	return strings.TrimSuffix(detail, "]"), true
+}
+
+// voiceAttachments returns every voice attachment on in, in arrival order.
+//
+// Position is NOT identity: a rich message decodes its blocks in order
+// (telegram/richdecode.go), so a photo block followed by a voice_note block
+// yields attachments [photo, voice]. Looking only at Attachments[0] meant that
+// message never entered the voice path at all — no fetch, no transcription, no
+// refusal marker, no notice: the audio simply vanished (Codex review 2,
+// finding 2). Telegram allows many blocks per rich message, so "the voice one"
+// is a filter, never an index.
+func voiceAttachments(in *c3types.Inbound) []c3types.Attachment {
+	var out []c3types.Attachment
+	for _, a := range in.Attachments {
+		if a.Kind == "voice" {
+			out = append(out, a)
+		}
+	}
+	return out
 }
 
 // fetchFailureTexts renders the two surfaces for a fetch the server refused.
@@ -168,24 +207,4 @@ func appendVoiceMarker(existing, marker string) string {
 		return marker
 	}
 	return existing + "\n" + marker
-}
-
-// voiceAttachmentSize returns the size the channel reported for in's voice
-// attachment. 0 means NOT STATED — Telegram marks Voice.file_size Optional
-// (https://core.telegram.org/bots/api#voice) — and nothing is decided from it;
-// it only makes a message concrete when it happens to be there.
-func voiceAttachmentSize(in *c3types.Inbound) int64 {
-	if len(in.Attachments) == 0 {
-		return 0
-	}
-	return in.Attachments[0].Size
-}
-
-// voiceAttachmentFileID returns the file_id of in's voice attachment, or "" when
-// there is nothing to ask about.
-func voiceAttachmentFileID(in *c3types.Inbound) string {
-	if len(in.Attachments) == 0 {
-		return ""
-	}
-	return in.Attachments[0].FileID
 }

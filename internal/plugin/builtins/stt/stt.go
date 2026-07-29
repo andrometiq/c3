@@ -201,6 +201,41 @@ func sttFailureMarker(reason string) string {
 	return "[STT FAILED: " + reason + " — see " + sttLogHintPath() + "]"
 }
 
+// FetchFailedPrefix marks a transcript stand-in that is NOT a transcription
+// failure: the handler never got the audio, because the bot server refused or
+// could not serve the fetch. The broker recognizes this prefix and reports the
+// server's own words instead of the "audio is saved and recoverable" recovery
+// text, which is false on every clause when nothing was ever downloaded (the
+// 2026-07-27 incident, and Codex review 2 finding 1 — the same opacity returning
+// through the handler's own getFile).
+const FetchFailedPrefix = "[STT FETCH FAILED: "
+
+// handlerDownloadFailLine is what stt-handler.py prints to stderr when its
+// download gives up: "[stt-handler] download failed: <cause>", where <cause>
+// carries Telegram's own error_code + description for a getFile refusal.
+const handlerDownloadFailLine = "[stt-handler] download failed: "
+
+// sttFetchFailureMarker carries the handler's actual fetch error upward verbatim.
+func sttFetchFailureMarker(detail string) string {
+	return FetchFailedPrefix + detail + "]"
+}
+
+// fetchFailureDetail returns the handler's reported download cause from its
+// stderr, or "" when the failure was not a fetch failure. Scans the WHOLE
+// stderr, not the logged tail: the line can be followed by a Python traceback
+// and truncating first would drop exactly the words worth surfacing.
+func fetchFailureDetail(stderr string) string {
+	i := strings.LastIndex(stderr, handlerDownloadFailLine)
+	if i < 0 {
+		return ""
+	}
+	detail := stderr[i+len(handlerDownloadFailLine):]
+	if nl := strings.IndexByte(detail, '\n'); nl >= 0 {
+		detail = detail[:nl]
+	}
+	return strings.TrimSpace(detail)
+}
+
 // sttLogHintPath returns the broker log path to surface in the failure
 // marker. Mirrors broker.LogPath() but lives here to avoid the
 // plugin->broker import cycle. Falls back to the documented default if
@@ -305,6 +340,14 @@ func runHandler(ctx context.Context, host plugin.Host, cfg Config, token, apiBas
 		host.Logf("stt: msg=%d %s after %v (timeout=%v, file_size=%d): %v | stderr-tail=%q",
 			p.MessageID, reason, elapsed.Round(time.Millisecond), timeout,
 			p.Size, err, string(serr))
+		// A FETCH failure is not a transcription failure. Reducing it to
+		// "[STT FAILED: error]" is what let the server's specific answer reach
+		// the agent as a generic "transcription failed / try again", so the
+		// cause travels upward intact instead.
+		if detail := fetchFailureDetail(stderr.String()); detail != "" {
+			host.Logf("stt: msg=%d fetch failed before transcription: %s", p.MessageID, detail)
+			return sttFetchFailureMarker(detail), nil
+		}
 		return sttFailureMarker(reason), nil
 	}
 
@@ -332,11 +375,26 @@ func pythonExe(cfg Config) string {
 	return "python3"
 }
 
-// readTelegramConn pulls the bot token and the optional Bot-API base URL from
-// mappings.json via the host's ChannelConfig helper. The plugin doesn't store
-// its own copy. The base URL lets the STT handler download voice files through
-// the same reverse proxy the broker uses; env C3_TELEGRAM_API_URL wins over the
-// mappings.json value, mirroring the telegram channel's own precedence.
+// apiBaseURLer is the OPTIONAL channel capability that reports which Bot-API
+// host the channel is talking to RIGHT NOW.
+type apiBaseURLer interface{ APIBaseURL() string }
+
+// readTelegramConn pulls the bot token and the Bot-API base URL the handler must
+// use. The plugin doesn't store its own copy.
+//
+// The base comes from the LIVE channel when it can answer, not from
+// mappings.json. The handler performs its own getFile, and the broker has just
+// performed one of its own during preflight; reading the static primary
+// api_base_url made those two calls able to address different hosts — it ignores
+// C3_TELEGRAM_API_URL, ignores the api_base_urls failover list, and ignores any
+// failover advance the poll loop has already made. A preflight that succeeded on
+// the active endpoint would then be followed by a fetch against a stale one, and
+// the resulting failure looked like a transcription problem (Codex review 2,
+// finding 1). The channel has already folded env + failover into its answer, so
+// its answer is the only correct one; "" legitimately means api.telegram.org.
+//
+// The mappings/env path stays as the fallback for a channel that cannot answer
+// (a transport without the accessor, or a unit harness with no channel wired).
 func readTelegramConn(host plugin.Host) (token, apiBaseURL string, err error) {
 	var cc struct {
 		BotToken   string `json:"bot_token"`
@@ -347,6 +405,11 @@ func readTelegramConn(host plugin.Host) (token, apiBaseURL string, err error) {
 	}
 	if cc.BotToken == "" {
 		return "", "", fmt.Errorf("stt: bot_token is empty in mappings.json:channels.telegram")
+	}
+	if ch, cerr := host.Channel("telegram"); cerr == nil {
+		if live, ok := ch.(apiBaseURLer); ok {
+			return cc.BotToken, live.APIBaseURL(), nil
+		}
 	}
 	base := os.Getenv("C3_TELEGRAM_API_URL")
 	if base == "" {

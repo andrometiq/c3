@@ -113,8 +113,9 @@ class PermanentDownloadError(Exception):
     """A getFile/download failure that retrying cannot fix.
 
     Telegram returns {ok:false, description, error_code} for permanent
-    conditions — an expired/invalid file_id, or the Bot API's hard 20 MB
-    getFile ceiling ("file is too big"). Re-running getFile would fail
+    conditions — an expired/invalid file_id, or the bot server refusing the
+    file as too big. The server's own description is what gets reported; this
+    code states no size limit of its own. Re-running getFile would fail
     identically, so the download loop treats this as terminal and does NOT
     burn the remaining retries (I-9)."""
     pass

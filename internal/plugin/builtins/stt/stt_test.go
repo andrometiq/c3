@@ -3,6 +3,7 @@ package stt
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -23,6 +24,11 @@ type fakeHost struct {
 	channelCfg    map[string]any
 	voiceCallback func(ctx context.Context, p c3types.VoicePayload) (string, error)
 	logs          []string
+	// channel, when set, is what Channel() hands back. nil ⇒ "not registered",
+	// which is what a broker with no telegram channel really answers; returning
+	// a nil channel with a nil error would let a caller's type assertion decide
+	// the fallback by accident instead of by rule.
+	channel channel.Channel
 }
 
 func (h *fakeHost) OnInbound(fn func(context.Context, *c3types.Inbound) (*c3types.Inbound, bool)) {
@@ -62,9 +68,14 @@ func (h *fakeHost) ChannelConfig(name string, target any) error {
 	return json.Unmarshal(b, target)
 }
 
-func (h *fakeHost) State(name string) plugin.StateDir            { return nil }
-func (h *fakeHost) CacheDir(name string) string                  { return "" }
-func (h *fakeHost) Channel(name string) (channel.Channel, error) { return nil, nil }
+func (h *fakeHost) State(name string) plugin.StateDir { return nil }
+func (h *fakeHost) CacheDir(name string) string       { return "" }
+func (h *fakeHost) Channel(name string) (channel.Channel, error) {
+	if h.channel == nil {
+		return nil, errors.New("plugin host: channel not registered")
+	}
+	return h.channel, nil
+}
 func (h *fakeHost) Logf(format string, args ...any) {
 	h.logs = append(h.logs, format)
 }

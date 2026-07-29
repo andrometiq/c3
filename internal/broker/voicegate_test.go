@@ -48,10 +48,16 @@ type gateChannel struct {
 	size  int64
 	err   error
 	calls atomic.Int64
+	// answer, when set, decides per file_id — for messages carrying several
+	// voice attachments with different fates.
+	answer func(fileID string) (int64, error)
 }
 
-func (g *gateChannel) AttachmentSize(string) (int64, error) {
+func (g *gateChannel) AttachmentSize(fileID string) (int64, error) {
 	g.calls.Add(1)
+	if g.answer != nil {
+		return g.answer(fileID)
+	}
 	return g.size, g.err
 }
 
@@ -259,7 +265,7 @@ func TestFlushInbounds_NothingToAsk_StillTranscribes(t *testing.T) {
 func TestFlushInbounds_RefusalIsAppendedToExistingText(t *testing.T) {
 	for _, tc := range []struct{ name, existing string }{
 		{"ordinary voice with a caption", "user-typed caption"},
-		{"rich-message voice block", "[voice_note]"},
+		{"rich-message marker text", "[voice_note]"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			g := newGateChannel(0, tooBigErr())
@@ -368,5 +374,202 @@ func TestSizeSuffix_UnstatedSizeSaysNothing(t *testing.T) {
 	}
 	if got := sizeSuffix(incidentVoiceBytes); !strings.Contains(got, "20.2 MB") {
 		t.Fatalf("sizeSuffix must state a size that WAS given; got %q", got)
+	}
+}
+
+// ── Codex review 2, finding 2 — position is not identity ──────────────────────
+//
+// A rich message decodes its blocks in order, so a photo block followed by a
+// voice_note block yields attachments [photo, voice]. That real shape is
+// established through the actual decoder in
+// internal/channel/telegram/voicegate_richvoice_test.go
+// (TestConvertInbound_RichVoiceAfterPhoto_KeepsVoiceAttachment); these tests
+// feed the SAME shape to the broker, which used to look only at Attachments[0]
+// and therefore never entered the voice path at all.
+
+// photoThenVoice is the decoded shape of a rich message whose blocks are photo,
+// then voice_note.
+func photoThenVoice(msgID int64, voiceSize int64) *c3types.Inbound {
+	return &c3types.Inbound{
+		Channel: "telegram", ChatID: -100, MessageID: msgID,
+		Text: "[photo]\n\n[voice_note]",
+		Attachments: []c3types.Attachment{
+			{Kind: "photo", FileID: "P1", Size: 10},
+			{Kind: "voice", FileID: "V1", MIME: "audio/ogg", Size: voiceSize},
+		},
+	}
+}
+
+// A voice note that is not the first attachment must still be transcribed.
+func TestFlushInbounds_VoiceNotFirstAttachment_IsTranscribed(t *testing.T) {
+	g := newGateChannel(1000, nil)
+	b := gateBroker(t, g)
+	defer b.Shutdown()
+	calls := countingSTT(b, "the second attachment spoke")
+
+	in := photoThenVoice(7101, 1000)
+	flushVoice(t, b, in)
+
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("STT ran %d time(s) for a voice note sitting at attachment index 1; want 1 — checking only Attachments[0] drops the audio with no fetch, no marker and no notice", got)
+	}
+	if !strings.Contains(in.Text, "the second attachment spoke") {
+		t.Fatalf("the transcript never reached the agent surface; got %q", in.Text)
+	}
+	if !strings.Contains(in.Text, "[photo]") {
+		t.Fatalf("the rich message's own block markers were destroyed; got %q", in.Text)
+	}
+}
+
+// …and one the server refuses must still produce BOTH honest surfaces.
+func TestFlushInbounds_VoiceNotFirstAttachment_RefusalStillSurfaces(t *testing.T) {
+	g := newGateChannel(0, tooBigErr())
+	b := gateBroker(t, g)
+	defer b.Shutdown()
+	calls := countingSTT(b, "should never be produced")
+
+	in := photoThenVoice(7102, incidentVoiceBytes)
+	flushVoice(t, b, in)
+
+	if got := calls.Load(); got != 0 {
+		t.Fatalf("STT ran %d time(s) on a refused file; want 0", got)
+	}
+	if !strings.Contains(in.Text, "[voice too big:") {
+		t.Fatalf("a refused voice note at index 1 produced no agent marker — the audio vanishes silently; got %q", in.Text)
+	}
+	if !strings.Contains(in.Text, "20.2 MB") {
+		t.Fatalf("the marker must describe THIS attachment's size, not another attachment's; got %q", in.Text)
+	}
+	g.waitReplyContaining(t, "over the bot server's size limit")
+}
+
+// Multi-voice: the first keeps single-voice semantics, every additional one
+// APPENDS. Neither is dropped, and a refusal mixed with a transcript reports
+// both to the human.
+func TestFlushInbounds_TwoVoiceAttachments_BothSurface(t *testing.T) {
+	g := newGateChannel(100, nil)
+	b := gateBroker(t, g)
+	defer b.Shutdown()
+	var n atomic.Int64
+	b.Plugins.OnVoiceReceived(func(_ context.Context, p c3types.VoicePayload) (string, error) {
+		n.Add(1)
+		return "transcript of " + p.FileID, nil
+	})
+
+	in := &c3types.Inbound{
+		Channel: "telegram", ChatID: -100, MessageID: 7103,
+		Attachments: []c3types.Attachment{
+			{Kind: "voice", FileID: "V1", Size: 100},
+			{Kind: "voice", FileID: "V2", Size: 200},
+		},
+	}
+	flushVoice(t, b, in)
+
+	if got := n.Load(); got != 2 {
+		t.Fatalf("STT ran %d time(s) for two voice attachments; want 2 — the second one is a message the user sent and must not be discarded", got)
+	}
+	for _, want := range []string{"transcript of V1", "transcript of V2"} {
+		if !strings.Contains(in.Text, want) {
+			t.Fatalf("agent surface is missing %q; got %q", want, in.Text)
+		}
+	}
+}
+
+// The recovery text names the attachment it is ABOUT. With a photo first, the
+// old code quoted Attachments[0].FileID and sent the agent to download the photo.
+func TestSTTFailureText_NamesItsOwnAttachment(t *testing.T) {
+	g := newGateChannel(1000, nil)
+	b := gateBroker(t, g)
+	defer b.Shutdown()
+	b.Plugins.OnVoiceReceived(func(context.Context, c3types.VoicePayload) (string, error) {
+		return "", nil // STT ran and produced nothing
+	})
+
+	in := photoThenVoice(7104, 1000)
+	in.Text = "" // let the failure text own the surface
+	flushVoice(t, b, in)
+
+	if !strings.Contains(in.Text, `file_id="V1"`) {
+		t.Fatalf("the recovery instruction must name the VOICE attachment; got %q", in.Text)
+	}
+	if strings.Contains(in.Text, `file_id="P1"`) {
+		t.Fatalf("the recovery instruction names the photo — the agent would download the wrong attachment; got %q", in.Text)
+	}
+}
+
+// ── Codex review 2, finding 1 — the handler's own fetch failure ───────────────
+//
+// The STT handler performs its OWN getFile, so the broker's preflight cannot
+// speak for it (a failover advance between the two calls, or plain TOCTOU). When
+// that second fetch fails, its cause used to collapse to "[STT FAILED: error]"
+// and then to the generic transcription-failed text — the exact opacity the
+// ruling forbids.
+func TestFlushInbounds_HandlerFetchFailure_ReportsTheServersWordsNotAGenericFailure(t *testing.T) {
+	g := newGateChannel(1000, nil) // preflight SUCCEEDS; the handler's fetch is what fails
+	b := gateBroker(t, g)
+	defer b.Shutdown()
+	b.Plugins.OnVoiceReceived(func(context.Context, c3types.VoicePayload) (string, error) {
+		return "[STT FETCH FAILED: getFile failed (error_code=400): Bad Request: file is too big]", nil
+	})
+
+	in := voiceInbound(7105, incidentVoiceBytes)
+	flushVoice(t, b, in)
+
+	if !strings.Contains(in.Text, "Bad Request: file is too big") {
+		t.Fatalf("the handler's fetch failure lost the server's actual error on the way up; got %q", in.Text)
+	}
+	if strings.Contains(in.Text, "saved and recoverable") {
+		t.Fatalf("a fetch that never delivered any bytes still claims the audio is saved and recoverable; got %q", in.Text)
+	}
+	if strings.Contains(in.Text, "[STT FAILED:") {
+		t.Fatalf("a fetch failure is still labelled a transcription failure, which names the wrong subsystem; got %q", in.Text)
+	}
+	g.waitReplyContaining(t, "Bad Request: file is too big")
+	for _, rp := range g.sendRepliesSnapshot() {
+		if strings.Contains(rp.Text, "try again") {
+			t.Fatalf("the human is told to try again for a fetch the server refused; got %q", rp.Text)
+		}
+	}
+}
+
+// A single message can transcribe one voice and have another refused. The human
+// must hear BOTH — the readback for what worked and the notice for what did not.
+// They used to be either/or, so a mixed message told the human only half of it.
+func TestFlushInbounds_MixedTranscriptAndRefusal_HumanHearsBoth(t *testing.T) {
+	g := newGateChannel(0, nil)
+	// V1 is servable, V2 is refused.
+	g.answer = func(fileID string) (int64, error) {
+		if fileID == "V2" {
+			return 0, tooBigErr()
+		}
+		return 100, nil
+	}
+	b := gateBroker(t, g)
+	defer b.Shutdown()
+	b.Plugins.OnVoiceReceived(func(_ context.Context, p c3types.VoicePayload) (string, error) {
+		return "transcript of " + p.FileID, nil
+	})
+
+	in := &c3types.Inbound{
+		Channel: "telegram", ChatID: -100, MessageID: 7106,
+		Attachments: []c3types.Attachment{
+			{Kind: "voice", FileID: "V1", Size: 100},
+			{Kind: "voice", FileID: "V2", Size: incidentVoiceBytes},
+		},
+	}
+	flushVoice(t, b, in)
+
+	if !strings.Contains(in.Text, "transcript of V1") {
+		t.Fatalf("the servable voice never transcribed; got %q", in.Text)
+	}
+	if !strings.Contains(in.Text, "[voice too big:") {
+		t.Fatalf("the refused voice produced no marker; got %q", in.Text)
+	}
+	// The refusal notice must be sent even though another attachment transcribed.
+	g.waitReplyContaining(t, "over the bot server's size limit")
+	// …and the transcript must still be read back.
+	rbs := g.waitReadbacks(t, 1)
+	if !strings.Contains(rbs[0].Transcript, "transcript of V1") {
+		t.Fatalf("readback = %q, want the transcript that succeeded", rbs[0].Transcript)
 	}
 }
