@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/Andrometiq/c3/internal/ipc"
 )
@@ -460,6 +461,88 @@ func TestToolAttach_WaitsUntilThisSessionsIdentityIsSettled(t *testing.T) {
 	case <-attachDone:
 	case <-time.After(5 * time.Second):
 		t.Fatal("toolAttach never returned after its response arrived")
+	}
+}
+
+func unresolvedRecoverTestAdapter(t *testing.T) (*adapter, *brokerPeer, context.Context) {
+	t.Helper()
+	a, broker, ctx := recoverTestAdapter(t, "")
+	a.rcmu.Lock()
+	a.recoverConn = a.currentConn()
+	a.rcmu.Unlock()
+	return a, broker, ctx
+}
+
+func TestToolAttach_CanceledIdentityWaitWritesNoAttach(t *testing.T) {
+	a, broker, _ := unresolvedRecoverTestAdapter(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	result, err := a.toolAttach(ctx, newAttachReq(t, map[string]any{"name": "other-topic"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.IsError {
+		t.Fatalf("canceled identity wait returned success: %+v", result)
+	}
+	if raw, ok := broker.next(t, 100*time.Millisecond); ok {
+		t.Fatalf("a canceled identity wait still wrote a broker frame: %s", raw)
+	}
+}
+
+func TestToolAttach_BareIdentityTimeoutRefusesWithoutBrokerWrite(t *testing.T) {
+	old := recoverSettleTimeout
+	recoverSettleTimeout = 20 * time.Millisecond
+	defer func() { recoverSettleTimeout = old }()
+
+	a, broker, _ := unresolvedRecoverTestAdapter(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
+	defer cancel()
+	result, err := a.toolAttach(ctx, newAttachReq(t, map[string]any{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if raw, ok := broker.next(t, 100*time.Millisecond); ok {
+		t.Fatalf("a bare attach reached the broker before identity settled: %s", raw)
+	}
+	if !result.IsError || len(result.Content) == 0 {
+		t.Fatalf("bare unsettled attach did not return a retryable error: %+v", result)
+	}
+	text, ok := result.Content[0].(*mcp.TextContent)
+	if !ok || !strings.Contains(text.Text, "identity still resolving; retry attach") {
+		t.Fatalf("bare unsettled attach error did not name the remedy: %+v", result.Content)
+	}
+}
+
+func TestToolAttach_ExplicitTargetWaitsPastBareBudgetUntilIdentitySettles(t *testing.T) {
+	old := recoverSettleTimeout
+	recoverSettleTimeout = 20 * time.Millisecond
+	defer func() { recoverSettleTimeout = old }()
+
+	a, broker, ctx := unresolvedRecoverTestAdapter(t)
+	done := make(chan *mcp.CallToolResult, 1)
+	go func() {
+		result, _ := a.toolAttach(ctx, newAttachReq(t, map[string]any{"name": "other-topic"}))
+		done <- result
+	}()
+
+	if raw, ok := broker.next(t, 100*time.Millisecond); ok {
+		t.Fatalf("an explicit attach overtook unsettled identity after the bare budget: %s", raw)
+	}
+	a.markIdentitySettled()
+	raw, ok := broker.next(t, 2*time.Second)
+	if !ok || frameOp(t, raw) != ipc.OpAttach {
+		t.Fatalf("explicit attach was not released after identity settled: %s", raw)
+	}
+	attachedRaw, err := json.Marshal(ipc.AttachedMsg{Op: ipc.OpAttached, OK: false, Err: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.dispatchAttached(attachedRaw)
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("explicit attach did not return after the broker response")
 	}
 }
 

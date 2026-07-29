@@ -1392,7 +1392,6 @@ func (a *adapter) toolAttach(ctx context.Context, req *mcp.CallToolRequest) (*mc
 	// Bind stable session id before attach so broker records session attachment
 	// for silent resume, and inject targets the right Grok session.
 	a.bindSessionIDForAttach(cwd)
-	a.ensureStableSessionRegistered(ctx)
 	attachReq := ipc.AttachReq{Op: ipc.OpAttach, CWD: cwd}
 	if v, ok := args["target"].(string); ok {
 		attachReq.Target = v
@@ -1420,6 +1419,12 @@ func (a *adapter) toolAttach(ctx context.Context, req *mcp.CallToolRequest) (*mc
 		case int64:
 			attachReq.TopicID = &x
 		}
+	}
+	if err := a.ensureStableSessionRegistered(ctx, isBareAttachReq(attachReq)); err != nil {
+		if errors.Is(err, errIdentityStillResolving) {
+			return toolErrorResult(err.Error()), nil
+		}
+		return toolErrorResult("canceled"), nil
 	}
 
 	ch := make(chan ipc.ToolResultMsg, 1)

@@ -53,18 +53,17 @@ const (
 	// something is wrong — and an attach blocks on this resolution (rule (b)),
 	// so it must not be able to hang a tool call.
 	recoverIdentityTimeout = 3 * time.Second
-
-	// recoverSettleTimeout caps how long an attach waits for identity to settle
-	// before giving up on the ordering and attaching anyway. Proceeding is safe,
-	// not a hole: a recover that lands AFTER its own session attached takes the
-	// broker's record-only branch (internal/broker/handler.go, the
-	// `stub.CurrentRoute() != nil` arm of handleRecoverSession), which records
-	// the explicitly-attached route under this session's id instead of claiming
-	// anything. The explicit attach always wins.
-	recoverSettleTimeout = 10 * time.Second
 )
 
 var (
+	// recoverSettleTimeout is the bare-attach patience budget. An explicit
+	// attach may keep waiting for the already-bounded recovery attempt; a bare
+	// attach refuses at this point because its answer depends on identity.
+	// A var so mutation tests can shorten it.
+	recoverSettleTimeout = 10 * time.Second
+
+	errIdentityStillResolving = errors.New("identity still resolving; retry attach")
+
 	// errCodexNoAppServer: no app-server to ask. Happens when the adapter runs
 	// outside the C3 launcher (a hand-registered MCP server), which is a
 	// supported way to run — it just cannot have a session identity.
@@ -355,18 +354,31 @@ func (a *adapter) markIdentitySettled() {
 
 // awaitIdentitySettled blocks until this session's identity question has been
 // answered — rule (b): nothing that depends on the identity may be answered
-// before it is settled. Returns immediately when no recovery was ever started
-// (nothing to wait for) and gives up after recoverSettleTimeout rather than
-// hanging a tool call; see recoverSettleTimeout for why proceeding is safe.
-func (a *adapter) awaitIdentitySettled(ctx context.Context) {
+// before it is settled. A canceled caller aborts. At the settle budget a bare
+// attach is refused because own-route recovery versus picker is identity-
+// dependent. An explicit attach keeps waiting for the bounded recovery attempt;
+// it is sent only after the broker has answered identity, never raced against a
+// late recover frame.
+func (a *adapter) awaitIdentitySettled(ctx context.Context, bare bool) error {
 	if !a.recoverStarted() {
-		return
+		return nil
 	}
 	select {
 	case <-a.identitySettled:
+		return nil
 	case <-ctx.Done():
+		return ctx.Err()
 	case <-time.After(recoverSettleTimeout):
-		log.Printf("attach: this session's identity did not settle within %v — attaching anyway; the broker records an explicit attach against whatever identity resolves later", recoverSettleTimeout)
+		if bare {
+			return errIdentityStillResolving
+		}
+		log.Printf("attach: identity still resolving after %v — explicit target will wait for recovery to settle before it is sent", recoverSettleTimeout)
+	}
+	select {
+	case <-a.identitySettled:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 }
 

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -14,14 +15,18 @@ import (
 
 const recoverRespTimeout = 8 * time.Second
 
-// recoverSettleBudget bounds how long an identity-dependent call (attach) waits
-// for the recovery round-trip to FINISH. Deliberately longer than
+// recoverSettleBudget bounds how long a bare attach waits for the recovery
+// round-trip to FINISH before refusing with a retryable answer. Deliberately
+// longer than
 // recoverRespTimeout so it is a genuine backstop rather than the normal exit:
 // every ordinary failure inside fireRecover (write error, broker error, response
 // timeout) settles the gate by itself well inside this window, so reaching this
-// budget means the recovery goroutine is wedged somewhere it should not be. A
-// var (not a const) so tests can shorten it.
+// budget means the recovery goroutine is wedged somewhere it should not be. An
+// explicit attach keeps waiting for that already-bounded attempt rather than
+// racing it. A var (not a const) so tests can shorten it.
 var recoverSettleBudget = recoverRespTimeout + 2*time.Second
+
+var errIdentityStillResolving = errors.New("identity still resolving; retry attach")
 
 // recover fields live on adapter (declared here via methods).
 
@@ -261,13 +266,12 @@ func (a *adapter) refireRecoverOnReconnect(ctx context.Context) {
 // it is where the "identity before anything that depends on it" rule is enforced
 // for Grok: every path out of here has either ANSWERED the identity question or
 // waited for the answer.
-func (a *adapter) ensureStableSessionRegistered(ctx context.Context) {
+func (a *adapter) ensureStableSessionRegistered(ctx context.Context, bare bool) error {
 	sid := a.stableSessionID()
 	if sid == "" {
 		// No id to register — but a recovery started earlier may still be in
 		// flight, and the attach must not overtake it.
-		a.awaitIdentitySettled(ctx)
-		return
+		return a.awaitIdentitySettled(ctx, bare)
 	}
 	// fireRecover is once per BROKER CONNECTION (refireRecoverOnReconnect resets
 	// the guard after a reconnect) and its CompareAndSwap makes this a no-op when
@@ -280,7 +284,7 @@ func (a *adapter) ensureStableSessionRegistered(ctx context.Context) {
 	// the attach write — so an attach could be answered while the recover that
 	// would have told the broker who this session is was still in flight, and the
 	// broker answered attachBare from no identity. Wait for the answer.
-	a.awaitIdentitySettled(ctx)
+	return a.awaitIdentitySettled(ctx, bare)
 }
 
 // identityGate returns the channel that closes when this session's identity
@@ -305,28 +309,30 @@ func (a *adapter) markIdentitySettled() {
 }
 
 // awaitIdentitySettled blocks until this session's identity question has been
-// ANSWERED. Returns immediately when no recovery was ever started — nothing will
-// ever settle it, and blocking on that would hang every attach in a session with
-// no resolvable Grok session id.
-func (a *adapter) awaitIdentitySettled(ctx context.Context) {
+// ANSWERED. Returns immediately when no recovery was ever started. A canceled
+// caller aborts. At the settle budget a bare attach is refused because its
+// answer depends on identity; an explicit target keeps waiting for the bounded
+// recovery attempt and is never raced against a late recover frame.
+func (a *adapter) awaitIdentitySettled(ctx context.Context, bare bool) error {
 	if !a.recoverStarted.Load() {
-		return
+		return nil
 	}
 	select {
 	case <-a.identityGate():
+		return nil
 	case <-ctx.Done():
+		return ctx.Err()
 	case <-time.After(recoverSettleBudget):
-		// Say plainly what proceeding means: the session is dispatching this call
-		// as an UNIDENTIFIED session — one the broker has no stable id for. An
-		// `attach` answered here cannot silently re-claim this session's own last
-		// topic; it falls to the picker / explicit-name path. Degraded, not
-		// unsafe: a recover that lands later takes the broker's record-only branch
-		// (internal/broker/handler.go handleRecoverSession, the already-attached
-		// arm), so it cannot steal the route the explicit attach just took.
-		log.Printf("recover-session: identity still unsettled after %v — dispatching this call as an UNIDENTIFIED session: an `attach` answered now will not silently re-claim this session's own topic (expect the picker) while the recover completes behind it", recoverSettleBudget)
-		// Giving up IS the answer, so record it: one wedged recovery must cost
-		// one budget for the process, not one budget per caller.
-		a.markIdentitySettled()
+		if bare {
+			return errIdentityStillResolving
+		}
+		log.Printf("recover-session: identity still resolving after %v — explicit target will wait for recovery to settle before it is sent", recoverSettleBudget)
+	}
+	select {
+	case <-a.identityGate():
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net"
+	"strings"
 	"testing"
 	"time"
 
@@ -219,7 +220,7 @@ func TestFireRecover_SettlesIdentityEvenWhenItCannotSend(t *testing.T) {
 	settled := make(chan struct{})
 	go func() {
 		defer close(settled)
-		a.awaitIdentitySettled(ctx)
+		_ = a.awaitIdentitySettled(ctx, false)
 	}()
 	select {
 	case <-settled:
@@ -240,7 +241,7 @@ func TestAwaitIdentitySettled_DoesNotWaitWhenNoRecoveryWasEverStarted(t *testing
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		a.awaitIdentitySettled(ctx)
+		_ = a.awaitIdentitySettled(ctx, false)
 	}()
 	select {
 	case <-done:
@@ -250,30 +251,82 @@ func TestAwaitIdentitySettled_DoesNotWaitWhenNoRecoveryWasEverStarted(t *testing
 	}
 }
 
-// Giving up on a wedged recovery must ANSWER the identity question, not just
-// release one caller — otherwise every later identity-dependent call pays the
-// full budget again.
-func TestAwaitIdentitySettled_GivingUpIsAnAnswerAndIsPaidOnlyOnce(t *testing.T) {
+func unresolvedIdentityAdapter(t *testing.T) (*adapter, *recoveryBroker) {
+	t.Helper()
+	a, broker := newRecoveryAdapter(t)
+	a.recoverStarted.Store(true)
+	a.recoverFired.Store(true)
+	return a, broker
+}
+
+func TestToolAttach_CanceledIdentityWaitWritesNoAttach(t *testing.T) {
+	a, broker := unresolvedIdentityAdapter(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	result, err := a.toolAttach(ctx, newRecoveryAttachReq(t, map[string]any{"name": "other-topic"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.IsError {
+		t.Fatalf("canceled identity wait returned success: %+v", result)
+	}
+	if op, ok := broker.nextOp(t, 100*time.Millisecond); ok {
+		t.Fatalf("a canceled identity wait still wrote a %q broker frame", op)
+	}
+}
+
+func TestToolAttach_BareIdentityTimeoutRefusesWithoutBrokerWrite(t *testing.T) {
 	prev := recoverSettleBudget
-	recoverSettleBudget = 50 * time.Millisecond
+	recoverSettleBudget = 20 * time.Millisecond
 	t.Cleanup(func() { recoverSettleBudget = prev })
 
-	a, broker := newRecoveryAdapter(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	a, broker := unresolvedIdentityAdapter(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
 	defer cancel()
 
-	// A recovery that is never answered: the gate can only close by giving up.
-	go a.trySessionRecover(ctx)
-	if op, ok := broker.nextOp(t, 5*time.Second); !ok || op != ipc.OpRecoverSession {
-		t.Fatalf("recovery never reached the broker (op=%q ok=%v)", op, ok)
+	result, err := a.toolAttach(ctx, newRecoveryAttachReq(t, map[string]any{}))
+	if err != nil {
+		t.Fatal(err)
 	}
+	if op, ok := broker.nextOp(t, 100*time.Millisecond); ok {
+		t.Fatalf("a bare unsettled attach wrote a %q broker frame", op)
+	}
+	if !result.IsError || len(result.Content) == 0 {
+		t.Fatalf("bare unsettled attach did not return a retryable error: %+v", result)
+	}
+	text, ok := result.Content[0].(*mcp.TextContent)
+	if !ok || !strings.Contains(text.Text, "identity still resolving; retry attach") {
+		t.Fatalf("bare unsettled attach error did not name the remedy: %+v", result.Content)
+	}
+}
 
-	a.awaitIdentitySettled(ctx) // first caller pays the budget
+func TestToolAttach_ExplicitTargetWaitsPastBareBudgetUntilIdentitySettles(t *testing.T) {
+	prev := recoverSettleBudget
+	recoverSettleBudget = 20 * time.Millisecond
+	t.Cleanup(func() { recoverSettleBudget = prev })
 
-	start := time.Now()
-	a.awaitIdentitySettled(ctx) // second caller must not pay it again
-	if waited := time.Since(start); waited > 20*time.Millisecond {
-		t.Fatalf("the second identity-dependent call waited %v after the first had already given up: one wedged "+
-			"recovery costs one budget per CALLER instead of one per session", waited)
+	a, broker := unresolvedIdentityAdapter(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	attachReq := newRecoveryAttachReq(t, map[string]any{"name": "other-topic"})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _ = a.toolAttach(ctx, attachReq)
+	}()
+
+	if op, ok := broker.nextOp(t, 100*time.Millisecond); ok {
+		t.Fatalf("an explicit attach overtook unsettled identity after the bare budget with a %q frame", op)
+	}
+	a.markIdentitySettled()
+	if op, ok := broker.nextOp(t, time.Second); !ok || op != ipc.OpAttach {
+		t.Fatalf("explicit attach was not released after identity settled (op=%q ok=%v)", op, ok)
+	}
+	driveAttached(t, a)
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("explicit attach did not return after the broker response")
 	}
 }

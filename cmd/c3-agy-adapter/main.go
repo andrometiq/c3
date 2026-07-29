@@ -415,14 +415,18 @@ const (
 	recoverRespTimeout = 8 * time.Second
 )
 
-// recoverSettleBudget bounds how long an identity-dependent call (attach) waits
-// for the recovery round-trip to FINISH. Deliberately longer than
+// recoverSettleBudget bounds how long a bare attach waits for the recovery
+// round-trip to FINISH before refusing with a retryable answer. Deliberately
+// longer than
 // recoverRespTimeout so it is a genuine backstop rather than the normal exit:
 // every ordinary failure inside fireRecover (write error, broker error, response
 // timeout) settles the gate by itself well inside this window, so reaching this
-// budget means the recovery goroutine is wedged. A var (not a const) so tests
-// can shorten it.
+// budget means the recovery goroutine is wedged. An explicit attach keeps
+// waiting for that already-bounded attempt rather than racing it. A var (not a
+// const) so tests can shorten it.
 var recoverSettleBudget = recoverRespTimeout + 2*time.Second
+
+var errIdentityStillResolving = errors.New("identity still resolving; retry attach")
 
 func (a *adapter) trySessionRecover(ctx context.Context) {
 	sid := strings.TrimSpace(os.Getenv("ANTIGRAVITY_CONVERSATION_ID"))
@@ -478,28 +482,30 @@ func (a *adapter) markIdentitySettled() {
 }
 
 // awaitIdentitySettled blocks until this session's identity question has been
-// ANSWERED. Returns immediately when no recovery was ever started — nothing will
-// ever settle it, and blocking on that would hang every attach in a session with
-// no Antigravity conversation id.
-func (a *adapter) awaitIdentitySettled(ctx context.Context) {
+// ANSWERED. Returns immediately when no recovery was ever started. A canceled
+// caller aborts. At the settle budget a bare attach is refused because its
+// answer depends on identity; an explicit target keeps waiting for the bounded
+// recovery attempt and is never raced against a late recover frame.
+func (a *adapter) awaitIdentitySettled(ctx context.Context, bare bool) error {
 	if !a.recoverStarted.Load() {
-		return
+		return nil
 	}
 	select {
 	case <-a.identityGate():
+		return nil
 	case <-ctx.Done():
+		return ctx.Err()
 	case <-time.After(recoverSettleBudget):
-		// Say plainly what proceeding means: the session is dispatching this call
-		// as an UNIDENTIFIED session — one the broker has no stable id for. An
-		// `attach` answered here cannot silently re-claim this session's own last
-		// topic; it falls to the picker / explicit-name path. Degraded, not
-		// unsafe: a recover that lands later takes the broker's record-only branch
-		// (internal/broker/handler.go handleRecoverSession, the already-attached
-		// arm), so it cannot steal the route the explicit attach just took.
-		log.Printf("recover-session: identity still unsettled after %v — dispatching this call as an UNIDENTIFIED session: an `attach` answered now will not silently re-claim this session's own topic (expect the picker) while the recover completes behind it", recoverSettleBudget)
-		// Giving up IS the answer, so record it: one wedged recovery must cost
-		// one budget for the process, not one budget per caller.
-		a.markIdentitySettled()
+		if bare {
+			return errIdentityStillResolving
+		}
+		log.Printf("recover-session: identity still resolving after %v — explicit target will wait for recovery to settle before it is sent", recoverSettleBudget)
+	}
+	select {
+	case <-a.identityGate():
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 }
 
@@ -910,6 +916,24 @@ func (a *adapter) toolAttach(ctx context.Context, req *mcp.CallToolRequest) (*mc
 		}
 	}
 
+	// Register stable session id before attach. fireRecover is a no-op when a
+	// recover already fired on this connection (its CompareAndSwap), so this is
+	// safe to call unconditionally — but a no-op RETURN is not an answer: the
+	// recover that DID fire may still be in flight, and the attach below is
+	// ANSWERED from the identity it is carrying. Wait for the identity question
+	// to be settled before the attach goes on the wire.
+	sid := strings.TrimSpace(os.Getenv("ANTIGRAVITY_CONVERSATION_ID"))
+	if sid != "" {
+		a.recoverStarted.Store(true)
+		a.fireRecover(ctx, sid, cwd)
+	}
+	if err := a.awaitIdentitySettled(ctx, isBareAttachReq(attachReq)); err != nil {
+		if errors.Is(err, errIdentityStillResolving) {
+			return toolErrorResult(err.Error()), nil
+		}
+		return toolErrorResult("canceled"), nil
+	}
+
 	ch := make(chan ipc.ToolResultMsg, 1)
 	a.pmu.Lock()
 	a.pending["attached"] = ch
@@ -922,19 +946,6 @@ func (a *adapter) toolAttach(ctx context.Context, req *mcp.CallToolRequest) (*mc
 		a.pmu.Unlock()
 		return toolErrorResult("broker reconnecting — retry attach in a moment"), nil
 	}
-
-	// Register stable session id before attach. fireRecover is a no-op when a
-	// recover already fired on this connection (its CompareAndSwap), so this is
-	// safe to call unconditionally — but a no-op RETURN is not an answer: the
-	// recover that DID fire may still be in flight, and the attach below is
-	// ANSWERED from the identity it is carrying. Wait for the identity question
-	// to be settled before the attach goes on the wire.
-	sid := strings.TrimSpace(os.Getenv("ANTIGRAVITY_CONVERSATION_ID"))
-	if sid != "" {
-		a.recoverStarted.Store(true)
-		a.fireRecover(ctx, sid, cwd)
-	}
-	a.awaitIdentitySettled(ctx)
 
 	if err := conn.WriteJSON(attachReq); err != nil {
 		a.pmu.Lock()

@@ -1189,11 +1189,6 @@ func decodeArgs(raw json.RawMessage) (map[string]any, error) {
 }
 
 func (a *adapter) toolAttach(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	// Identity before anything that depends on it (recover.go rule (b)): an
-	// in-flight session recovery may be about to re-claim this session's own
-	// topic, and answering an attach first would race it. No-op once settled,
-	// and a no-op entirely when no recovery was started.
-	a.awaitIdentitySettled(ctx)
 	args, err := decodeArgs(req.Params.Arguments)
 	if err != nil {
 		return nil, fmt.Errorf("invalid params: %w", err)
@@ -1229,6 +1224,16 @@ func (a *adapter) toolAttach(ctx context.Context, req *mcp.CallToolRequest) (*mc
 		case int64:
 			attachReq.TopicID = &x
 		}
+	}
+	// Identity before anything that depends on it (recover.go rule (b)). Decode
+	// first so the gate can distinguish a bare own-route question from an
+	// explicit target. Cancellation and a bare settle timeout both return before
+	// any attach frame is registered or written.
+	if err := a.awaitIdentitySettled(ctx, isBareAttachReq(attachReq)); err != nil {
+		if errors.Is(err, errIdentityStillResolving) {
+			return toolErrorResult(err.Error()), nil
+		}
+		return toolErrorResult("canceled"), nil
 	}
 
 	ch := make(chan ipc.ToolResultMsg, 1)
