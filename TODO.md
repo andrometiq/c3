@@ -34,6 +34,17 @@ Post-first-tag — the binaries only exist once the release workflow runs on a t
 - [ ] Auto-update live end-to-end verify: status-line notice → `/c3:update` →
       checksum-verified atomic swap, against a real published release
 
+## Pre-tag polish (non-blocking SEV3s from the RC2 cross-review rounds, 2026-07-29)
+
+- [ ] Mutation-coverage gap: `voiceFetchFailedOpening` is in the production opening table
+      (`internal/broker/worker.go`) but the re-derived segment-replace unit table no longer
+      exercises it — removing it would leave a `[voice download failed: …]` segment stale
+      after a successful retranscribe with every test green. Add the one table row.
+      (CODEX-REVIEW-5 finding 2.)
+- [ ] The advertised nonce-less STT degradation is unreachable on Go ≥1.25 (`crypto/rand.Read`
+      never returns an error there — it aborts the process). Fail-closed either way; align the
+      code/comment with reality or drop the branch. (CODEX-REVIEW-5 finding 1.)
+
 ## Packaging
 
 - [ ] GitHub-source marketplace edit — paired with the first published release
