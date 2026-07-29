@@ -264,7 +264,7 @@ The `inbound` object's fields (PascalCase, exactly as written):
 - `Kind`? — **empty string means an ordinary message.** A non-empty value marks a *synthesized channel event*: `poll_result`, `reaction`, `callback`, or `system` (a broker-originated advisory such as a channel-health alert, carrying no user content).
 - `Event`? — the event payload when `Kind` is non-empty. Exactly one of `PollResult`, `Reaction`, `Callback`, `System` is set.
 - `DrainedFrom`? — provenance when the line was moved in by a drain; empty for organic messages.
-- `V`? — record-format version. **Absent or 0 means version 1.** **Readers MUST NOT reject a higher value** — a newer writer sharing a socket or queue directory with an older reader is a normal partially-updated install, and hard-failing turns cosmetic skew into lost messages. Best-effort decode.
+- `V`? — record-format version. **Absent or 0 means version 1.** Direct marshaling and legacy queue rewrites preserve an absent key; a **new** durable queue append stamps `V:1` on a copy of the record. That stamp is additive and old-reader-compatible, but it means a newly appended record is not promised to remain byte-identical to its unstamped input. **Readers MUST NOT reject a higher value** — a newer writer sharing a socket or queue directory with an older reader is a normal partially-updated install, and hard-failing turns cosmetic skew into lost messages. Best-effort decode.
 - `ConvKind`? — `"dm"` or `"group"` as stated by the channel. Empty means the channel didn't say.
 
 `ChatID` sign convention follows Telegram's: positive = user/DM, negative = group, `-100…` = supergroup.
