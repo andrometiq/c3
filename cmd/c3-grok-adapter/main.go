@@ -92,7 +92,9 @@ func run() error {
 	go a.brokerReader(ctx)
 	go a.idleStartupWatchdog(ctx, cancel)
 	// Resume auto-attach: register stable session id + re-claim last topic.
-	go a.trySessionRecover(ctx)
+	// Prepare synchronously so the MCP server cannot expose attach while
+	// recoverStarted still says there is no identity question.
+	a.trySessionRecover(ctx)
 
 	err := srv.Run(ctx, a.transport)
 	// Process exit is NOT a detach — deliberately NO OpRelease here (or in the
@@ -186,8 +188,9 @@ type adapter struct {
 	// emit but with our own shape (no level filtering).
 	transport *logNotifyTransport
 
-	bmu  sync.Mutex
-	conn *ipc.Conn
+	bmu                sync.Mutex
+	conn               *ipc.Conn
+	brokerHelloPending bool // production conn is unusable until its HelloAck
 
 	pmu     sync.Mutex
 	pending map[string]chan ipc.ToolResultMsg
@@ -264,11 +267,13 @@ type adapter struct {
 
 	// Session-resume recover (OpRecoverSession).
 	runCtx    context.Context
+	recoverMu sync.Mutex
 	rsmu      sync.Mutex
 	rsPending chan ipc.RecoverSessionResp
 	// recoverFired guards RecoverSessionReq to at most once per BROKER
-	// CONNECTION (not per process): fireRecover CompareAndSwaps it, and
-	// refireRecoverOnReconnect RESETS it after a successful reconnect so a
+	// CONNECTION (not per process): fireRecover claims it for one identity
+	// epoch, and refireRecoverOnReconnect resets it after a successful reconnect
+	// so a
 	// FRESH broker (self-update / rebuild restart, which has no stub and no
 	// reconnect-transfer) re-learns this session's stable id — otherwise every
 	// post-restart attach records nothing and a later Grok resume silently
@@ -284,6 +289,14 @@ type adapter struct {
 	// test adapters behave like constructor-built adapters.
 	idmu            sync.Mutex
 	identitySettled chan struct{}
+	// recoverFiredGate binds the once-per-connection guard to the identity
+	// epoch that claimed it. An old recovery may finish after reconnect opened a
+	// new epoch; it must not release the new epoch's guard.
+	recoverFiredGate chan struct{}
+	// identityReconnect stays true from atomic old-conn retirement through the
+	// replacement hello. The open gate is visible during that interval, but no
+	// recovery may claim it before hello is the first frame.
+	identityReconnect bool
 }
 
 // grokForwardReq is one inbound queued for the serial Grok-forward goroutine.
@@ -331,9 +344,7 @@ func (a *adapter) connectBroker() error {
 	for attempt := 0; attempt < 50; attempt++ {
 		c, err := net.Dial("unix", sockPath)
 		if err == nil {
-			a.bmu.Lock()
-			a.conn = ipc.NewConn(c)
-			a.bmu.Unlock()
+			a.publishBrokerConnection(ipc.NewConn(c))
 			return nil
 		}
 		if attempt == 0 {
@@ -355,20 +366,36 @@ func spawnBroker() error {
 }
 
 func (a *adapter) hello() error {
+	// Do not use currentConn here: production connect publishes the raw socket
+	// before hello, but keeps it unavailable to every other outbound path until
+	// this exact handshake has completed.
+	a.bmu.Lock()
+	conn := a.conn
+	a.bmu.Unlock()
+	if conn == nil {
+		return errors.New("no broker connection for hello")
+	}
 	cwd := os.Getenv("C3_GROK_CWD")
 	if cwd == "" {
 		cwd, _ = os.Getwd()
 	}
-	if err := a.conn.WriteJSON(ipc.HelloMsg{
+	if err := conn.WriteJSON(ipc.HelloMsg{
 		Op: ipc.OpHello, CLI: "grok", PID: os.Getpid(), CWD: cwd,
 		Capabilities:    []string{"leader-inject", "fetch_queue"},
 		ProtocolVersion: ipc.ProtocolVersion,
 	}); err != nil {
 		return err
 	}
-	raw, err := a.conn.ReadFrame()
+	raw, err := conn.ReadFrame()
 	if err != nil {
 		return err
+	}
+	op, err := ipc.PeekOp(raw)
+	if err != nil {
+		return fmt.Errorf("read hello response op: %w", err)
+	}
+	if op != ipc.OpHelloAck {
+		return fmt.Errorf("expected hello_ack, got %q", op)
 	}
 	var ack ipc.HelloAckMsg
 	if err := json.Unmarshal(raw, &ack); err != nil {
@@ -378,15 +405,38 @@ func (a *adapter) hello() error {
 	if w := ipc.AdapterProtocolWarning("grok", ack.ProtocolVersion); w != "" {
 		log.Print(w)
 	}
-	a.helloAck = ack
-	a.brokerVersion.Store(int64(ipc.PeerProtocolVersion(ack.ProtocolVersion)))
+	// A reconnect can supersede conn while this hello is in flight. Only the
+	// connection whose ack we just validated becomes visible to normal tools.
+	a.bmu.Lock()
+	sameConn := a.conn == conn
+	if sameConn {
+		a.helloAck = ack
+		a.brokerVersion.Store(int64(ipc.PeerProtocolVersion(ack.ProtocolVersion)))
+		a.brokerHelloPending = false
+	}
+	a.bmu.Unlock()
+	if !sameConn {
+		return errors.New("broker connection changed during hello")
+	}
 	return nil
 }
 
 func (a *adapter) currentConn() *ipc.Conn {
 	a.bmu.Lock()
 	defer a.bmu.Unlock()
+	if a.brokerHelloPending {
+		return nil
+	}
 	return a.conn
+}
+
+// publishBrokerConnection exposes a dialed production socket only to hello.
+// Direct test fixtures assign conn themselves and remain ready by default.
+func (a *adapter) publishBrokerConnection(conn *ipc.Conn) {
+	a.bmu.Lock()
+	a.conn = conn
+	a.brokerHelloPending = true
+	a.bmu.Unlock()
 }
 
 // brokerReader runs in a goroutine, draining frames from the broker. On any
@@ -451,13 +501,11 @@ func (a *adapter) brokerReader(ctx context.Context) {
 // reconnect window. Single attempt; recoverBroker is the retry-loop wrapper.
 func (a *adapter) reconnectBroker() error {
 	a.wakePendingWithErr("broker reconnect — request canceled")
-
-	a.bmu.Lock()
-	if a.conn != nil {
-		_ = a.conn.Close()
-		a.conn = nil
-	}
-	a.bmu.Unlock()
+	// Open the new identity epoch BEFORE a fresh connection can be published.
+	// A call already waiting on the old gate is woken only so it can chase this
+	// new epoch; it may never use the eventual new connection under the old
+	// identity answer.
+	a.beginReconnectIdentityEpoch()
 
 	if err := a.connectBroker(); err != nil {
 		return err
@@ -1413,7 +1461,8 @@ func (a *adapter) toolAttach(ctx context.Context, req *mcp.CallToolRequest) (*mc
 			attachReq.TopicID = &x
 		}
 	}
-	if err := a.ensureStableSessionRegistered(ctx, isBareAttachReq(attachReq)); err != nil {
+	conn, err := a.ensureStableSessionRegistered(ctx, isBareAttachReq(attachReq))
+	if err != nil {
 		if errors.Is(err, errIdentityStillResolving) {
 			return toolErrorResult(err.Error()), nil
 		}
@@ -1425,7 +1474,6 @@ func (a *adapter) toolAttach(ctx context.Context, req *mcp.CallToolRequest) (*mc
 	a.pending["attached"] = ch
 	a.pmu.Unlock()
 
-	conn := a.currentConn()
 	if conn == nil {
 		a.pmu.Lock()
 		delete(a.pending, "attached")

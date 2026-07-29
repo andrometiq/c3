@@ -340,11 +340,19 @@ func TestSessionRecover_WithoutAnAppServerStaysQuietAndStillSettles(t *testing.T
 
 	go a.brokerReader(ctx)
 
+	deadline := time.Now().Add(2 * time.Second)
+	for !a.recoverStarted() && time.Now().Before(deadline) {
+		time.Sleep(2 * time.Millisecond)
+	}
+	if !a.recoverStarted() {
+		t.Fatal("brokerReader never started session recovery")
+	}
+	gate := a.identityGate()
 	if raw, ok := broker.next(t, 1*time.Second); ok {
 		t.Fatalf("an adapter with no app-server still asserted an identity (%s)", raw)
 	}
 	select {
-	case <-a.identitySettled:
+	case <-gate:
 	case <-time.After(2 * time.Second):
 		t.Fatal("identity never settled with no app-server configured — every attach would stall for the full " +
 			"settle timeout before doing anything")
@@ -467,9 +475,7 @@ func TestToolAttach_WaitsUntilThisSessionsIdentityIsSettled(t *testing.T) {
 func unresolvedRecoverTestAdapter(t *testing.T) (*adapter, *brokerPeer, context.Context) {
 	t.Helper()
 	a, broker, ctx := recoverTestAdapter(t, "")
-	a.rcmu.Lock()
-	a.recoverConn = a.currentConn()
-	a.rcmu.Unlock()
+	a.prepareSessionRecoverForConn(ctx, a.currentConn())
 	return a, broker, ctx
 }
 
@@ -668,5 +674,187 @@ func TestReconnectRecoveryRearmsIdentitySettlement(t *testing.T) {
 	case <-current:
 	case <-time.After(time.Second):
 		t.Fatal("current reconnect identity epoch did not settle")
+	}
+}
+
+func TestSupersededRecoveryCannotSettleReplacementEpoch(t *testing.T) {
+	a := newAdapter()
+	a.tidmu.Lock()
+	a.threadID = "thread-epoch"
+	a.tidmu.Unlock()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	oldAdapter, oldBroker := net.Pipe()
+	newAdapterConn, newBrokerConn := net.Pipe()
+	t.Cleanup(func() {
+		_ = oldAdapter.Close()
+		_ = oldBroker.Close()
+		_ = newAdapterConn.Close()
+		_ = newBrokerConn.Close()
+	})
+	oldConn := ipc.NewConn(oldAdapter)
+	newConn := ipc.NewConn(newAdapterConn)
+	oldEpoch := a.prepareSessionRecoverForConn(ctx, oldConn)
+	newEpoch := a.prepareSessionRecoverForConn(ctx, newConn)
+
+	// This is the exact stale-goroutine interleaving: conn1 was superseded before
+	// its recovery goroutine got CPU. It must settle only conn1's captured epoch,
+	// never look up and close conn2's current gate.
+	a.startSessionRecover(oldEpoch)
+	select {
+	case <-newEpoch.gate:
+		t.Fatal("superseded conn1 recovery settled conn2's identity epoch")
+	default:
+	}
+
+	peer := newBrokerPeer(newBrokerConn)
+	a.ensureSessionRecoverForConn(ctx, newConn)
+	if raw, ok := peer.next(t, time.Second); !ok || frameOp(t, raw) != ipc.OpRecoverSession {
+		t.Fatalf("replacement recovery did not register on conn2: %s", raw)
+	}
+	resp, err := json.Marshal(ipc.RecoverSessionResp{Op: ipc.OpRecoverSessionResult})
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.dispatchRecoverSessionResult(newConn, resp)
+	select {
+	case <-newEpoch.gate:
+	case <-time.After(time.Second):
+		t.Fatal("conn2 epoch did not settle after its own recovery response")
+	}
+}
+
+func TestRecoverResponseWaitersAreConnectionBound(t *testing.T) {
+	a := newAdapter()
+	a.tidmu.Lock()
+	a.threadID = "thread-response-routing"
+	a.tidmu.Unlock()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	newAdapterConn, newBrokerConn := net.Pipe()
+	staleAdapterConn, staleBrokerConn := net.Pipe()
+	t.Cleanup(func() {
+		_ = newAdapterConn.Close()
+		_ = newBrokerConn.Close()
+		_ = staleAdapterConn.Close()
+		_ = staleBrokerConn.Close()
+	})
+	newConn := ipc.NewConn(newAdapterConn)
+	staleConn := ipc.NewConn(staleAdapterConn)
+	newEpoch := a.prepareSessionRecoverForConn(ctx, newConn)
+	peer := newBrokerPeer(newBrokerConn)
+	a.ensureSessionRecoverForConn(ctx, newConn)
+	if raw, ok := peer.next(t, time.Second); !ok || frameOp(t, raw) != ipc.OpRecoverSession {
+		t.Fatalf("current recovery did not reach conn2: %s", raw)
+	}
+
+	// Install a stale connection's waiter AFTER conn2's waiter. Recover responses
+	// have no request id, so an unkeyed singleton would now send conn2's response
+	// to this stale waiter and leave conn2 parked until its eight-second timeout.
+	staleCtx, cancelStale := context.WithCancel(context.Background())
+	staleDone := make(chan struct{})
+	go func() {
+		defer close(staleDone)
+		a.fireRecover(staleCtx, staleConn, "thread-stale", "/w/proj")
+	}()
+	deadline := time.Now().Add(time.Second)
+	for {
+		a.rsmu.Lock()
+		staleInstalled := a.rsPending[staleConn] != nil
+		currentInstalled := a.rsPending[newConn] != nil
+		a.rsmu.Unlock()
+		if staleInstalled && currentInstalled {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("both connection-bound recover waiters were not installed")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	resp, err := json.Marshal(ipc.RecoverSessionResp{Op: ipc.OpRecoverSessionResult})
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.dispatchRecoverSessionResult(newConn, resp)
+	select {
+	case <-newEpoch.gate:
+	case <-time.After(time.Second):
+		t.Fatal("conn2 response was stolen by a stale connection's waiter")
+	}
+
+	cancelStale()
+	if _, err := ipc.NewConn(staleBrokerConn).ReadFrame(); err != nil {
+		t.Fatalf("release stale recover write: %v", err)
+	}
+	select {
+	case <-staleDone:
+	case <-time.After(time.Second):
+		t.Fatal("stale recovery did not unwind after cancellation")
+	}
+}
+
+func TestAwaitIdentityEpochFollowsReplacementAndReturnsItsConn(t *testing.T) {
+	a := newAdapter()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	oldAdapter, oldBroker := net.Pipe()
+	newAdapterConn, newBrokerConn := net.Pipe()
+	t.Cleanup(func() {
+		_ = oldAdapter.Close()
+		_ = oldBroker.Close()
+		_ = newAdapterConn.Close()
+		_ = newBrokerConn.Close()
+	})
+	oldConn := ipc.NewConn(oldAdapter)
+	newConn := ipc.NewConn(newAdapterConn)
+	oldEpoch := a.prepareSessionRecoverForConn(ctx, oldConn)
+	newEpoch := a.prepareSessionRecoverForConn(ctx, newConn)
+
+	got := make(chan *ipc.Conn, 1)
+	go func() {
+		conn, _ := a.awaitIdentityEpoch(ctx, false, oldEpoch)
+		got <- conn
+	}()
+	newEpoch.settle()
+	select {
+	case conn := <-got:
+		if conn != newConn {
+			t.Fatalf("waiter released by conn1 returned %p, want replacement conn2 %p", conn, newConn)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("waiter did not follow the settled old epoch to conn2")
+	}
+}
+
+func TestPreparedConnectionBlocksAttachBeforeRecoveryStarts(t *testing.T) {
+	a, broker, ctx := recoverTestAdapter(t, "")
+	conn := a.currentConn()
+	epoch := a.prepareSessionRecoverForConn(ctx, conn)
+	done := make(chan *mcp.CallToolResult, 1)
+	go func() {
+		result, _ := a.toolAttach(ctx, newAttachReq(t, map[string]any{"name": "other-topic"}))
+		done <- result
+	}()
+
+	if raw, ok := broker.next(t, 100*time.Millisecond); ok {
+		t.Fatalf("attach overtook a prepared-but-not-started connection epoch: %s", raw)
+	}
+	epoch.settle()
+	raw, ok := broker.next(t, time.Second)
+	if !ok || frameOp(t, raw) != ipc.OpAttach {
+		t.Fatalf("attach was not released after the prepared epoch settled: %s", raw)
+	}
+	attachedRaw, err := json.Marshal(ipc.AttachedMsg{Op: ipc.OpAttached, OK: false, Err: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.dispatchAttached(attachedRaw)
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("attach did not return after its broker response")
 	}
 }

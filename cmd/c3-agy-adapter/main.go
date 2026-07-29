@@ -83,7 +83,9 @@ func run() error {
 	go a.brokerReader(ctx)
 	go a.idleStartupWatchdog(ctx, cancel)
 	// Resume auto-attach: register stable session id + re-claim last topic.
-	go a.trySessionRecover(ctx)
+	// Prepare synchronously so the MCP server cannot expose attach while
+	// recoverStarted still says there is no identity question.
+	a.trySessionRecover(ctx)
 
 	err := srv.Run(ctx, a.transport)
 	switch {
@@ -133,8 +135,14 @@ func setupAdapterLog() (string, error) {
 type adapter struct {
 	transport *logNotifyTransport
 
-	bmu  sync.Mutex
-	conn *ipc.Conn
+	bmu sync.Mutex
+	// connHelloPending is the production-published connection whose HelloAck
+	// has not yet been validated. currentConn hides it from ordinary tools while
+	// hello uses rawCurrentConn for the handshake. Direct test-installed conns do
+	// not set this field and remain usable by default.
+	connHelloPending *ipc.Conn
+	conn             *ipc.Conn
+	epoch            *identityEpoch
 
 	pmu     sync.Mutex
 	pending map[string]chan ipc.ToolResultMsg
@@ -145,19 +153,14 @@ type adapter struct {
 	rtmu      sync.Mutex
 	rtPending map[string]chan ipc.RetranscribeResp
 
+	recoverMu sync.Mutex
 	rsmu      sync.Mutex
 	rsPending chan ipc.RecoverSessionResp
 
-	recoverFired atomic.Bool
 	// recoverStarted records that recovery has begun. The current per-connection
 	// identitySettled epoch says whether that registration has finished.
 	recoverStarted atomic.Bool
-	// identitySettled is replaced synchronously for every reconnect registration
-	// and closed only by that epoch's recovery attempt. Created lazily so bare
-	// test adapters behave like constructor-built adapters.
-	idmu            sync.Mutex
-	identitySettled chan struct{}
-	runCtx          context.Context
+	runCtx         context.Context
 
 	helloAck      ipc.HelloAckMsg
 	brokerVersion atomic.Int64
@@ -168,6 +171,19 @@ type adapter struct {
 
 	brokerDownAdvised atomic.Bool
 	dispatched        atomic.Bool
+}
+
+// identityEpoch pairs one broker connection with the answer to the identity
+// question asked on that connection. Neither field changes after construction:
+// an old recovery can therefore settle only its own gate, never a gate opened
+// by a reconnect.
+type identityEpoch struct {
+	conn *ipc.Conn
+	gate chan struct{}
+
+	recoverFired atomic.Bool
+	ready        atomic.Bool
+	settleOnce   sync.Once
 }
 
 func newAdapter() *adapter {
@@ -186,9 +202,7 @@ func (a *adapter) connectBroker() error {
 	for attempt := 0; attempt < 50; attempt++ {
 		c, err := net.Dial("unix", sockPath)
 		if err == nil {
-			a.bmu.Lock()
-			a.conn = ipc.NewConn(c)
-			a.bmu.Unlock()
+			a.publishBrokerConnection(ipc.NewConn(c))
 			return nil
 		}
 		if attempt == 0 {
@@ -204,11 +218,15 @@ func spawnBroker() error {
 }
 
 func (a *adapter) hello() error {
+	conn := a.rawCurrentConn()
+	if conn == nil {
+		return errors.New("broker connection unavailable during hello")
+	}
 	cwd := os.Getenv("C3_AGY_CWD")
 	if cwd == "" {
 		cwd, _ = os.Getwd()
 	}
-	if err := a.conn.WriteJSON(ipc.HelloMsg{
+	if err := conn.WriteJSON(ipc.HelloMsg{
 		Op: ipc.OpHello, CLI: "agy", PID: os.Getpid(), CWD: cwd,
 		Capabilities:         []string{"fetch_queue"},
 		CannotRenderChannels: true,
@@ -216,7 +234,7 @@ func (a *adapter) hello() error {
 	}); err != nil {
 		return err
 	}
-	raw, err := a.conn.ReadFrame()
+	raw, err := conn.ReadFrame()
 	if err != nil {
 		return err
 	}
@@ -224,19 +242,125 @@ func (a *adapter) hello() error {
 	if err := json.Unmarshal(raw, &ack); err != nil {
 		return err
 	}
+	if ack.Op != ipc.OpHelloAck {
+		return fmt.Errorf("unexpected broker hello response op %q", ack.Op)
+	}
 	// Version disagreement is logged, never fatal — see ipc.ProtocolVersion.
 	if w := ipc.AdapterProtocolWarning("agy", ack.ProtocolVersion); w != "" {
 		log.Print(w)
 	}
-	a.helloAck = ack
-	a.brokerVersion.Store(int64(ipc.PeerProtocolVersion(ack.ProtocolVersion)))
+	if !a.commitBrokerHello(conn, ack) {
+		return errors.New("broker connection changed during hello")
+	}
 	return nil
 }
 
 func (a *adapter) currentConn() *ipc.Conn {
 	a.bmu.Lock()
 	defer a.bmu.Unlock()
+	if a.conn != nil && a.connHelloPending == a.conn {
+		return nil
+	}
 	return a.conn
+}
+
+// rawCurrentConn is reserved for the Hello handshake. Ordinary broker traffic
+// must use currentConn so it cannot overtake HelloAck validation.
+func (a *adapter) rawCurrentConn() *ipc.Conn {
+	a.bmu.Lock()
+	defer a.bmu.Unlock()
+	return a.conn
+}
+
+// currentIdentityEpoch returns the epoch for the currently published broker
+// connection. Bare test adapters sometimes install conn directly; treating that
+// as a fresh epoch keeps those fixtures faithful to a real connection publish.
+func (a *adapter) currentIdentityEpoch() *identityEpoch {
+	a.bmu.Lock()
+	defer a.bmu.Unlock()
+	if a.epoch == nil || a.epoch.conn != a.conn {
+		a.epoch = &identityEpoch{conn: a.conn, gate: make(chan struct{})}
+		a.epoch.ready.Store(true) // direct/test-installed conn is already usable
+	}
+	return a.epoch
+}
+
+func (a *adapter) isCurrentIdentityEpoch(epoch *identityEpoch) bool {
+	a.bmu.Lock()
+	defer a.bmu.Unlock()
+	if a.epoch == nil || a.epoch.conn != a.conn {
+		a.epoch = &identityEpoch{conn: a.conn, gate: make(chan struct{})}
+		a.epoch.ready.Store(true)
+	}
+	return a.epoch == epoch
+}
+
+// publishBrokerConnection opens its recovery epoch before making the connection
+// visible. An attach that wakes from an older epoch can then only write to its
+// captured old connection; it cannot silently adopt this one.
+func (a *adapter) publishBrokerConnection(conn *ipc.Conn) {
+	a.bmu.Lock()
+	a.epoch = &identityEpoch{conn: conn, gate: make(chan struct{})}
+	a.conn = conn
+	a.connHelloPending = conn
+	a.bmu.Unlock()
+}
+
+func (a *adapter) markCurrentIdentityEpochReady() {
+	a.markBrokerHelloReady(a.rawCurrentConn())
+}
+
+func (a *adapter) markBrokerHelloReady(conn *ipc.Conn) bool {
+	a.bmu.Lock()
+	defer a.bmu.Unlock()
+	if conn == nil || a.conn != conn {
+		return false
+	}
+	a.markBrokerHelloReadyLocked(conn)
+	return true
+}
+
+func (a *adapter) commitBrokerHello(conn *ipc.Conn, ack ipc.HelloAckMsg) bool {
+	a.bmu.Lock()
+	defer a.bmu.Unlock()
+	if conn == nil || a.conn != conn {
+		return false
+	}
+	a.helloAck = ack
+	a.brokerVersion.Store(int64(ipc.PeerProtocolVersion(ack.ProtocolVersion)))
+	a.markBrokerHelloReadyLocked(conn)
+	return true
+}
+
+func (a *adapter) markBrokerHelloReadyLocked(conn *ipc.Conn) {
+	if a.connHelloPending == conn {
+		a.connHelloPending = nil
+	}
+	if a.epoch != nil && a.epoch.conn == conn {
+		a.epoch.ready.Store(true)
+	}
+}
+
+// retireBrokerConnection replaces a lost connection with an already-answered
+// unavailable epoch. Wake old waiters promptly; their captured recovery owns
+// only the old gate and cannot affect a later reconnect's epoch.
+func (a *adapter) retireBrokerConnection() {
+	a.bmu.Lock()
+	oldConn := a.conn
+	oldEpoch := a.epoch
+	down := &identityEpoch{gate: make(chan struct{})}
+	down.ready.Store(true)
+	down.settleOnce.Do(func() { close(down.gate) })
+	a.epoch = down
+	a.conn = nil
+	a.connHelloPending = nil
+	a.bmu.Unlock()
+	if oldConn != nil {
+		_ = oldConn.Close()
+	}
+	if oldEpoch != nil {
+		a.settleIdentity(oldEpoch)
+	}
 }
 
 func (a *adapter) brokerReader(ctx context.Context) {
@@ -321,13 +445,7 @@ func (a *adapter) handleSystemInbound(in *c3types.Inbound) {
 
 func (a *adapter) reconnectBroker() error {
 	a.wakePendingWithErr("broker reconnect — request canceled")
-
-	a.bmu.Lock()
-	if a.conn != nil {
-		_ = a.conn.Close()
-		a.conn = nil
-	}
-	a.bmu.Unlock()
+	a.retireBrokerConnection()
 
 	if err := a.connectBroker(); err != nil {
 		return err
@@ -433,21 +551,22 @@ func (a *adapter) trySessionRecover(ctx context.Context) {
 	// Mark the identity question OPEN before firing, so an attach arriving in the
 	// same instant waits for the answer instead of racing it.
 	a.recoverStarted.Store(true)
-	a.fireRecover(ctx, sid, cwd)
+	go a.fireRecover(ctx, sid, cwd)
 }
 
 func (a *adapter) refireRecoverOnReconnect(ctx context.Context) {
 	sid := strings.TrimSpace(os.Getenv("ANTIGRAVITY_CONVERSATION_ID"))
 	if sid == "" {
+		// This freshly connected broker has no identity to learn. Answer its
+		// epoch rather than making an attach wait for a recovery nobody will fire.
+		a.markIdentitySettled()
 		return
 	}
 	cwd := os.Getenv("C3_AGY_CWD")
 	if cwd == "" {
 		cwd, _ = os.Getwd()
 	}
-	a.recoverFired.Store(false)
 	a.recoverStarted.Store(true)
-	a.rearmIdentity()
 	go func() {
 		a.fireRecover(ctx, sid, cwd)
 	}()
@@ -458,31 +577,16 @@ func (a *adapter) refireRecoverOnReconnect(ctx context.Context) {
 // as a bare struct literal (as several tests do) behaves like one from
 // newAdapter instead of waiting on a nil channel forever.
 func (a *adapter) identityGate() chan struct{} {
-	a.idmu.Lock()
-	defer a.idmu.Unlock()
-	if a.identitySettled == nil {
-		a.identitySettled = make(chan struct{})
-	}
-	return a.identitySettled
-}
-
-func (a *adapter) rearmIdentity() {
-	a.idmu.Lock()
-	a.identitySettled = make(chan struct{})
-	a.idmu.Unlock()
+	return a.currentIdentityEpoch().gate
 }
 
 func (a *adapter) markIdentitySettled() {
-	a.settleIdentity(a.identityGate())
+	a.settleIdentity(a.currentIdentityEpoch())
 }
 
-func (a *adapter) settleIdentity(gate chan struct{}) {
-	a.idmu.Lock()
-	defer a.idmu.Unlock()
-	select {
-	case <-gate:
-	default:
-		close(gate)
+func (a *adapter) settleIdentity(epoch *identityEpoch) {
+	if epoch != nil {
+		epoch.settleOnce.Do(func() { close(epoch.gate) })
 	}
 }
 
@@ -492,10 +596,38 @@ func (a *adapter) settleIdentity(gate chan struct{}) {
 // answer depends on identity; an explicit target keeps waiting for the bounded
 // recovery attempt and is never raced against a late recover frame.
 func (a *adapter) awaitIdentitySettled(ctx context.Context, bare bool) error {
+	_, err := a.awaitCurrentIdentityEpoch(ctx, bare)
+	return err
+}
+
+// awaitCurrentIdentityEpoch waits for the current connection's recovery answer
+// and returns that immutable conn+gate pair. If a reconnect replaces it while
+// waiting, the old answer is deliberately not enough: chase the new epoch.
+func (a *adapter) awaitCurrentIdentityEpoch(ctx context.Context, bare bool) (*identityEpoch, error) {
+	epoch := a.currentIdentityEpoch()
 	if !a.recoverStarted.Load() {
-		return nil
+		if !epoch.ready.Load() {
+			return nil, errIdentityStillResolving
+		}
+		return epoch, nil
 	}
-	gate := a.identityGate()
+	return a.awaitIdentityEpoch(ctx, bare, epoch)
+}
+
+// awaitIdentityEpoch is split out so the epoch handoff is directly testable.
+func (a *adapter) awaitIdentityEpoch(ctx context.Context, bare bool, epoch *identityEpoch) (*identityEpoch, error) {
+	for {
+		if err := waitForIdentityEpoch(ctx, bare, epoch.gate); err != nil {
+			return nil, err
+		}
+		if a.isCurrentIdentityEpoch(epoch) {
+			return epoch, nil
+		}
+		epoch = a.currentIdentityEpoch()
+	}
+}
+
+func waitForIdentityEpoch(ctx context.Context, bare bool, gate <-chan struct{}) error {
 	select {
 	case <-gate:
 		return nil
@@ -516,13 +648,18 @@ func (a *adapter) awaitIdentitySettled(ctx context.Context, bare bool) error {
 }
 
 func (a *adapter) fireRecover(ctx context.Context, stableID, cwd string) {
+	a.recoverMu.Lock()
+	defer a.recoverMu.Unlock()
 	if stableID == "" {
 		return
 	}
-	if !a.recoverFired.CompareAndSwap(false, true) {
+	epoch := a.currentIdentityEpoch()
+	if !epoch.ready.Load() {
 		return
 	}
-	gate := a.identityGate()
+	if !epoch.recoverFired.CompareAndSwap(false, true) {
+		return
+	}
 	// The CAS winner OWNS the identity question, so it answers it on EVERY exit
 	// path below — recovered, registered, refused, write-failed, timed out. A
 	// session that could not be identified is a settled answer ("nobody"), not a
@@ -530,7 +667,7 @@ func (a *adapter) fireRecover(ctx context.Context, stableID, cwd string) {
 	// worse failure than an unidentified one. (The CAS loser deliberately does
 	// NOT settle — the winner is still working, and letting the loser answer for
 	// it is the exact entry-read-as-completion mistake this guards against.)
-	defer a.settleIdentity(gate)
+	defer a.settleIdentity(epoch)
 
 	respCh := make(chan ipc.RecoverSessionResp, 1)
 	a.rsmu.Lock()
@@ -544,7 +681,7 @@ func (a *adapter) fireRecover(ctx context.Context, stableID, cwd string) {
 		a.rsmu.Unlock()
 	}()
 
-	conn := a.currentConn()
+	conn := epoch.conn
 	if conn == nil {
 		// NOTHING WAS SENT — so nothing was registered, and holding the
 		// once-per-connection guard here wedges the session permanently: the
@@ -556,7 +693,7 @@ func (a *adapter) fireRecover(ctx context.Context, stableID, cwd string) {
 		// identitySettled): with no broker connection, toolAttach itself answers
 		// "broker reconnecting — retry attach in a moment", so no attach can be
 		// answered in this window anyway, and the reconnect path re-fires.
-		a.recoverFired.Store(false)
+		epoch.recoverFired.Store(false)
 		log.Printf("recover-session: no broker connection — nothing sent; releasing the once-per-connection guard so a later attempt can register this session")
 		return
 	}
@@ -564,7 +701,7 @@ func (a *adapter) fireRecover(ctx context.Context, stableID, cwd string) {
 	if err := conn.WriteJSON(req); err != nil {
 		// Same as conn == nil: the request never reached the broker, so the guard
 		// must not stay set on a recovery that did not happen.
-		a.recoverFired.Store(false)
+		epoch.recoverFired.Store(false)
 		log.Printf("recover session write failed: %v (nothing sent — guard released for a later attempt)", err)
 		return
 	}
@@ -934,7 +1071,8 @@ func (a *adapter) toolAttach(ctx context.Context, req *mcp.CallToolRequest) (*mc
 		a.recoverStarted.Store(true)
 		a.fireRecover(ctx, sid, cwd)
 	}
-	if err := a.awaitIdentitySettled(ctx, isBareAttachReq(attachReq)); err != nil {
+	epoch, err := a.awaitCurrentIdentityEpoch(ctx, isBareAttachReq(attachReq))
+	if err != nil {
 		if errors.Is(err, errIdentityStillResolving) {
 			return toolErrorResult(err.Error()), nil
 		}
@@ -946,7 +1084,10 @@ func (a *adapter) toolAttach(ctx context.Context, req *mcp.CallToolRequest) (*mc
 	a.pending["attached"] = ch
 	a.pmu.Unlock()
 
-	conn := a.currentConn()
+	// Use the connection that answered the epoch we just waited on. Reading the
+	// latest connection here would let an old waiter adopt a freshly reconnected
+	// broker before that broker learned this session's stable identity.
+	conn := epoch.conn
 	if conn == nil {
 		a.pmu.Lock()
 		delete(a.pending, "attached")

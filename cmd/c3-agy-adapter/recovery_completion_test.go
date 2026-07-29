@@ -128,7 +128,7 @@ func TestToolAttach_IsNotAnsweredBeforeThisSessionsIdentityIsSettled(t *testing.
 	// Drive the REAL startup path: trySessionRecover reads the conversation id
 	// and fires. The recovery reaches the broker but is NOT answered, so this
 	// session still does not know who it is.
-	go a.trySessionRecover(ctx)
+	a.trySessionRecover(ctx)
 	if op, ok := broker.nextOp(t, 5*time.Second); !ok || op != ipc.OpRecoverSession {
 		t.Fatalf("recovery never reached the broker (op=%q ok=%v), so this test cannot prove anything", op, ok)
 	}
@@ -182,7 +182,7 @@ func TestFireRecover_ASendThatNeverHappenedMustNotWedgeTheSession(t *testing.T) 
 	a.recoverStarted.Store(true)
 	a.fireRecover(ctx, recoveryTestSID, t.TempDir()) // returns at once: nothing sent
 
-	if a.recoverFired.Load() {
+	if a.currentIdentityEpoch().recoverFired.Load() {
 		t.Fatal("the recovery sent NOTHING (no broker connection) yet left the once-per-connection flag set: " +
 			"every later attempt short-circuits on a recovery that never happened, the broker never learns this " +
 			"session's stable id, and every subsequent attach is answered with no identity")
@@ -255,7 +255,7 @@ func unresolvedIdentityAdapter(t *testing.T) (*adapter, *recoveryBroker) {
 	t.Helper()
 	a, broker := newRecoveryAdapter(t)
 	a.recoverStarted.Store(true)
-	a.recoverFired.Store(true)
+	a.currentIdentityEpoch().recoverFired.Store(true)
 	return a, broker
 }
 
@@ -369,5 +369,297 @@ func TestReconnectRecoveryRearmsIdentitySettlement(t *testing.T) {
 	case <-current:
 	case <-time.After(time.Second):
 		t.Fatal("current reconnect identity epoch did not settle")
+	}
+}
+
+func TestAwaitIdentityEpoch_ChasesReconnectInsteadOfReturningOldConnection(t *testing.T) {
+	a := newAdapter()
+	a.recoverStarted.Store(true)
+
+	oldClient, oldPeer := net.Pipe()
+	defer oldClient.Close()
+	defer oldPeer.Close()
+	a.publishBrokerConnection(ipc.NewConn(oldClient))
+	a.markCurrentIdentityEpochReady()
+	old := a.currentIdentityEpoch()
+
+	newClient, newPeer := net.Pipe()
+	defer newClient.Close()
+	defer newPeer.Close()
+	a.publishBrokerConnection(ipc.NewConn(newClient))
+	current := a.currentIdentityEpoch()
+
+	// A waiter already holding old sees its answer after the reconnect. It must
+	// chase current rather than return old and let toolAttach adopt newClient.
+	a.settleIdentity(old)
+	a.settleIdentity(current)
+	got, err := a.awaitIdentityEpoch(context.Background(), false, old)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != current || got.conn != current.conn {
+		t.Fatalf("old waiter returned epoch %+v / conn %p; want current epoch %+v / conn %p", got, got.conn, current, current.conn)
+	}
+}
+
+func TestOldRecoverySettlementCannotCloseReconnectGate(t *testing.T) {
+	a := newAdapter()
+
+	oldClient, oldPeer := net.Pipe()
+	defer oldClient.Close()
+	defer oldPeer.Close()
+	a.publishBrokerConnection(ipc.NewConn(oldClient))
+	a.markCurrentIdentityEpochReady()
+	old := a.currentIdentityEpoch()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	requestSeen := make(chan error, 1)
+	go func() {
+		_, err := ipc.NewConn(oldPeer).ReadFrame()
+		requestSeen <- err
+	}()
+	go a.fireRecover(ctx, recoveryTestSID, t.TempDir())
+	select {
+	case err := <-requestSeen:
+		if err != nil {
+			t.Fatalf("old recovery did not reach its broker connection: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("old recovery never reached its broker connection")
+	}
+
+	newClient, newPeer := net.Pipe()
+	defer newClient.Close()
+	defer newPeer.Close()
+	a.publishBrokerConnection(ipc.NewConn(newClient))
+	current := a.currentIdentityEpoch()
+
+	// Model the old RecoverSession goroutine returning after the reconnect. Its
+	// deferred settlement must answer only old, leaving current unresolved.
+	cancel()
+	select {
+	case <-old.gate:
+	case <-time.After(time.Second):
+		t.Fatal("old recovery did not settle its own identity gate after cancellation")
+	}
+	select {
+	case <-current.gate:
+		t.Fatal("old recovery settled the new connection's identity gate")
+	default:
+	}
+}
+
+func TestReconnectRecoveryCannotClaimBeforeHelloAck(t *testing.T) {
+	t.Setenv("ANTIGRAVITY_CONVERSATION_ID", recoveryTestSID)
+	a := newAdapter()
+
+	adapterSide, brokerSide := net.Pipe()
+	defer adapterSide.Close()
+	defer brokerSide.Close()
+	a.publishBrokerConnection(ipc.NewConn(adapterSide))
+	epoch := a.currentIdentityEpoch()
+
+	broker := &recoveryBroker{frames: make(chan []byte, 1)}
+	peer := ipc.NewConn(brokerSide)
+	go func() {
+		raw, err := peer.ReadFrame()
+		if err == nil {
+			broker.frames <- raw
+		}
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	a.recoverStarted.Store(true)
+	a.fireRecover(ctx, recoveryTestSID, t.TempDir())
+
+	if op, ok := broker.nextOp(t, 100*time.Millisecond); ok {
+		t.Fatalf("reconnect recovery wrote %q before HelloAck", op)
+	}
+	if epoch.recoverFired.Load() {
+		t.Fatal("pre-Hello recovery claimed the reconnect epoch")
+	}
+	select {
+	case <-epoch.gate:
+		t.Fatal("pre-Hello recovery settled the reconnect identity gate")
+	default:
+	}
+
+	a.markCurrentIdentityEpochReady() // models a validated HelloAck
+	go a.fireRecover(ctx, recoveryTestSID, t.TempDir())
+	if op, ok := broker.nextOp(t, time.Second); !ok || op != ipc.OpRecoverSession {
+		t.Fatalf("post-Hello recovery did not register (op=%q ok=%v)", op, ok)
+	}
+	answerRecover(t, a)
+	select {
+	case <-epoch.gate:
+	case <-time.After(time.Second):
+		t.Fatal("post-Hello recovery response did not settle the reconnect identity gate")
+	}
+}
+
+func TestToolForwardCannotWriteBeforeHelloAck(t *testing.T) {
+	a := newAdapter()
+	adapterSide, brokerSide := net.Pipe()
+	defer adapterSide.Close()
+	defer brokerSide.Close()
+	conn := ipc.NewConn(adapterSide)
+	peer := ipc.NewConn(brokerSide)
+	a.publishBrokerConnection(conn)
+
+	helloDone := make(chan error, 1)
+	go func() { helloDone <- a.hello() }()
+	raw, err := peer.ReadFrame()
+	if err != nil {
+		t.Fatalf("read hello: %v", err)
+	}
+	if op, err := ipc.PeekOp(raw); err != nil || op != ipc.OpHello {
+		t.Fatalf("first frame = %q (err=%v), want Hello", op, err)
+	}
+
+	broker := &recoveryBroker{frames: make(chan []byte, 2)}
+	go func() {
+		for {
+			raw, err := peer.ReadFrame()
+			if err != nil {
+				return
+			}
+			broker.frames <- raw
+		}
+	}()
+	req := newRecoveryAttachReq(t, map[string]any{"text": "hello"})
+	preCtx, preCancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
+	defer preCancel()
+	result, err := a.toolForward("reply")(preCtx, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.IsError {
+		t.Fatalf("pre-Hello tool call returned success: %+v", result)
+	}
+	if op, ok := broker.nextOp(t, 100*time.Millisecond); ok {
+		t.Fatalf("ordinary tool wrote %q before HelloAck", op)
+	}
+
+	if err := peer.WriteJSON(ipc.HelloAckMsg{
+		Op: ipc.OpHelloAck, ProtocolVersion: ipc.ProtocolVersion,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-helloDone:
+		if err != nil {
+			t.Fatalf("hello failed: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("hello did not return after HelloAck")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	callDone := make(chan struct{})
+	go func() {
+		defer close(callDone)
+		_, _ = a.toolForward("reply")(ctx, req)
+	}()
+	if op, ok := broker.nextOp(t, time.Second); !ok || op != ipc.OpToolCall {
+		t.Fatalf("ordinary tool did not write after HelloAck (op=%q ok=%v)", op, ok)
+	}
+	cancel()
+	select {
+	case <-callDone:
+	case <-time.After(time.Second):
+		t.Fatal("ordinary tool did not return after cancellation")
+	}
+}
+
+func TestHello_OldAckCannotPublishReplacementConnection(t *testing.T) {
+	a := newAdapter()
+	oldAdapter, oldBroker := net.Pipe()
+	newAdapter, newBroker := net.Pipe()
+	t.Cleanup(func() {
+		_ = oldAdapter.Close()
+		_ = oldBroker.Close()
+		_ = newAdapter.Close()
+		_ = newBroker.Close()
+	})
+	oldConn := ipc.NewConn(oldAdapter)
+	newConn := ipc.NewConn(newAdapter)
+	peer := ipc.NewConn(oldBroker)
+	a.helloAck = ipc.HelloAckMsg{ConnID: 99, ProtocolVersion: ipc.ProtocolVersion}
+	a.brokerVersion.Store(int64(ipc.ProtocolVersion))
+	a.publishBrokerConnection(oldConn)
+
+	helloSeen := make(chan struct{})
+	allowAck := make(chan struct{})
+	go func() {
+		_, _ = peer.ReadFrame()
+		close(helloSeen)
+		<-allowAck
+		_ = peer.WriteJSON(ipc.HelloAckMsg{
+			Op: ipc.OpHelloAck, ConnID: 1, ProtocolVersion: ipc.ProtocolVersion + 1,
+		})
+	}()
+	helloDone := make(chan error, 1)
+	go func() { helloDone <- a.hello() }()
+	select {
+	case <-helloSeen:
+	case <-time.After(time.Second):
+		t.Fatal("hello frame was not sent")
+	}
+
+	a.publishBrokerConnection(newConn)
+	close(allowAck)
+	if err := <-helloDone; err == nil {
+		t.Fatal("old connection's HelloAck published its replacement as usable")
+	}
+	if got := a.currentConn(); got != nil {
+		t.Fatalf("replacement connection %p became usable from old connection's HelloAck", got)
+	}
+	if a.helloAck.ConnID != 99 || a.brokerVersion.Load() != int64(ipc.ProtocolVersion) {
+		t.Fatalf("old connection's HelloAck replaced current metadata: ack=%+v version=%d", a.helloAck, a.brokerVersion.Load())
+	}
+}
+
+func TestToolAttachWithoutSessionIDCannotWriteBeforeHelloAck(t *testing.T) {
+	t.Setenv("ANTIGRAVITY_CONVERSATION_ID", "")
+	a := newAdapter()
+	adapterSide, brokerSide := net.Pipe()
+	t.Cleanup(func() {
+		_ = adapterSide.Close()
+		_ = brokerSide.Close()
+	})
+	a.publishBrokerConnection(ipc.NewConn(adapterSide))
+	broker := &recoveryBroker{frames: make(chan []byte, 1)}
+	peer := ipc.NewConn(brokerSide)
+	go func() {
+		if raw, err := peer.ReadFrame(); err == nil {
+			broker.frames <- raw
+		}
+	}()
+
+	type attachResult struct {
+		result *mcp.CallToolResult
+		err    error
+	}
+	req := newRecoveryAttachReq(t, map[string]any{"name": "topic"})
+	done := make(chan attachResult, 1)
+	go func() {
+		result, err := a.toolAttach(context.Background(), req)
+		done <- attachResult{result: result, err: err}
+	}()
+	select {
+	case got := <-done:
+		if got.err != nil {
+			t.Fatal(got.err)
+		}
+		if !got.result.IsError {
+			t.Fatalf("pre-Hello attach returned success: %+v", got.result)
+		}
+	case raw := <-broker.frames:
+		op, _ := ipc.PeekOp(raw)
+		driveAttached(t, a)
+		t.Fatalf("attach without a session id wrote %q before HelloAck", op)
+	case <-time.After(time.Second):
+		t.Fatal("pre-Hello attach did not refuse promptly")
 	}
 }

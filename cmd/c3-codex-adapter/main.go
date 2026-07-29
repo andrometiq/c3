@@ -99,7 +99,7 @@ func run() error {
 	installSignalHandlers(cancel)
 
 	a := newAdapter()
-	if err := a.connectBroker(); err != nil {
+	if err := a.connectBroker(ctx); err != nil {
 		log.Printf("adapter: exit pid=%d reason=connect-broker err=%v", os.Getpid(), err)
 		return fmt.Errorf("connect broker: %w", err)
 	}
@@ -107,6 +107,9 @@ func run() error {
 		log.Printf("adapter: exit pid=%d reason=hello err=%v", os.Getpid(), err)
 		return fmt.Errorf("hello: %w", err)
 	}
+	// Prepare happens before connectBroker publishes the conn; start recovery
+	// synchronously before the MCP server can dispatch its first attach.
+	a.ensureSessionRecoverForConn(ctx, a.currentConn())
 
 	// No startup auto-attach: a FRESH Codex session starts UNATTACHED and
 	// attaches explicitly (a bare attach shows a picker). The old cwd-inferred
@@ -118,8 +121,9 @@ func run() error {
 	//
 	// A RESUMED conversation is a different case and does re-attach silently —
 	// but only to the topic that conversation itself last held, keyed on its own
-	// Codex thread id. brokerReader starts that (recover.go); it is identity, not
-	// inference, and it recovers nothing when the identity is not certain.
+	// Codex thread id. The startup path above starts that (recover.go) before MCP
+	// traffic is exposed; it is identity, not inference, and it recovers nothing
+	// when the identity is not certain.
 
 	srv := a.buildMCPServer()
 	a.transport = newLogNotifyTransport(&mcp.StdioTransport{})
@@ -180,8 +184,13 @@ type adapter struct {
 	// emit but with our own shape (no level filtering).
 	transport *logNotifyTransport
 
-	bmu  sync.Mutex
-	conn *ipc.Conn
+	bmu sync.Mutex
+	// connHelloPending keeps a production-dialed connection private from
+	// ordinary tool traffic until hello validates that connection's HelloAck.
+	// Its zero value is deliberately false so tests and manual callers that
+	// install conn directly retain the historical ready-by-default behavior.
+	connHelloPending bool
+	conn             *ipc.Conn
 
 	pmu     sync.Mutex
 	pending map[string]chan ipc.ToolResultMsg
@@ -222,17 +231,19 @@ type adapter struct {
 	brokerDownAdvised atomic.Bool
 
 	// ── session recovery (recover.go) ───────────────────────────────────────
-	// rsPending is the waiter for an in-flight RecoverSessionResp, fed by
-	// dispatchRecoverSessionResult off the broker read loop. Guarded by rsmu.
+	// rsPending holds one response waiter per broker connection. A superseded
+	// recovery may still be unwinding while its replacement is already in flight;
+	// keying by conn prevents either one from stealing or clearing the other's
+	// uncorrelated RecoverSessionResp. Guarded by rsmu.
 	rsmu      sync.Mutex
-	rsPending chan ipc.RecoverSessionResp
+	rsPending map[*ipc.Conn]chan ipc.RecoverSessionResp
 
-	// recoverConn is the broker connection the last recovery was started on.
-	// brokerReader compares it every turn so recovery runs once per CONNECTION —
-	// once at startup, and again on a fresh conn after a broker restart (which
-	// otherwise loses this session's stable id). Guarded by rcmu.
-	rcmu        sync.Mutex
-	recoverConn *ipc.Conn
+	// recoverEpoch binds one broker connection to its identity-settlement gate and
+	// cancellation scope. It is prepared before that connection is published, so
+	// attach can never observe a fresh conn with the previous conn's closed gate.
+	// Guarded by rcmu.
+	rcmu         sync.Mutex
+	recoverEpoch *sessionRecoverEpoch
 
 	// threadID caches this session's resolved Codex thread id — the stable
 	// identity. Resolved at most once per process (a session cannot become a
@@ -240,12 +251,6 @@ type adapter struct {
 	// app-server round trip. Guarded by tidmu.
 	tidmu    sync.Mutex
 	threadID string
-
-	// identitySettled is a per-broker-connection recovery epoch. It closes when
-	// that connection's registration finishes and is replaced synchronously
-	// before reconnect registration starts, so attach cannot overtake it.
-	idmu            sync.Mutex
-	identitySettled chan struct{}
 
 	// forwardCh feeds the SINGLE serial Codex-forward goroutine (codexForwardLoop,
 	// started in newAdapter). Enqueueing here instead of spawning a goroutine per
@@ -280,11 +285,11 @@ type codexForwardReq struct {
 
 func newAdapter() *adapter {
 	a := &adapter{
-		pending:         map[string]chan ipc.ToolResultMsg{},
-		fqPending:       map[string]chan ipc.FetchQueueResp{},
-		rtPending:       map[string]chan ipc.RetranscribeResp{},
-		forwardCh:       make(chan codexForwardReq, 256),
-		identitySettled: make(chan struct{}),
+		pending:   map[string]chan ipc.ToolResultMsg{},
+		fqPending: map[string]chan ipc.FetchQueueResp{},
+		rtPending: map[string]chan ipc.RetranscribeResp{},
+		rsPending: map[*ipc.Conn]chan ipc.RecoverSessionResp{},
+		forwardCh: make(chan codexForwardReq, 256),
 	}
 	// Single serial Codex-forward consumer. Started here (not per-inbound) so all
 	// forwards + delivery acks go through one in-order path — the invariant the
@@ -295,7 +300,7 @@ func newAdapter() *adapter {
 	return a
 }
 
-func (a *adapter) connectBroker() error {
+func (a *adapter) connectBroker(ctx context.Context) error {
 	sockPath, err := broker.SocketPath()
 	if err != nil {
 		return fmt.Errorf("resolve broker socket: %w", err)
@@ -303,8 +308,14 @@ func (a *adapter) connectBroker() error {
 	for attempt := 0; attempt < 50; attempt++ {
 		c, err := net.Dial("unix", sockPath)
 		if err == nil {
+			conn := ipc.NewConn(c)
+			// Establish the connection's open identity gate BEFORE publishing the
+			// conn. A concurrent attach may now wait on this epoch, but can never
+			// pair the fresh conn with the superseded epoch's closed gate.
+			a.prepareSessionRecoverForConn(ctx, conn)
 			a.bmu.Lock()
-			a.conn = ipc.NewConn(c)
+			a.conn = conn
+			a.connHelloPending = true
 			a.bmu.Unlock()
 			return nil
 		}
@@ -327,18 +338,22 @@ func spawnBroker() error {
 }
 
 func (a *adapter) hello() error {
+	conn := a.rawConn()
+	if conn == nil {
+		return errors.New("broker not connected")
+	}
 	cwd := os.Getenv("C3_CODEX_CWD")
 	if cwd == "" {
 		cwd, _ = os.Getwd()
 	}
-	if err := a.conn.WriteJSON(ipc.HelloMsg{
+	if err := conn.WriteJSON(ipc.HelloMsg{
 		Op: ipc.OpHello, CLI: "codex", PID: os.Getpid(), CWD: cwd,
 		Capabilities:    []string{"log-notification", "fetch_queue", "ws-forwarder"},
 		ProtocolVersion: ipc.ProtocolVersion,
 	}); err != nil {
 		return err
 	}
-	raw, err := a.conn.ReadFrame()
+	raw, err := conn.ReadFrame()
 	if err != nil {
 		return err
 	}
@@ -346,16 +361,40 @@ func (a *adapter) hello() error {
 	if err := json.Unmarshal(raw, &ack); err != nil {
 		return err
 	}
+	if ack.Op != ipc.OpHelloAck {
+		return fmt.Errorf("unexpected hello response op %q", ack.Op)
+	}
 	// Version disagreement is logged, never fatal — see ipc.ProtocolVersion.
 	if w := ipc.AdapterProtocolWarning("codex", ack.ProtocolVersion); w != "" {
 		log.Print(w)
 	}
+	// Publish readiness only for the exact connection that produced this ack.
+	// A stale handshake must never unlock a replacement connection.
+	a.bmu.Lock()
+	if a.conn != conn {
+		a.bmu.Unlock()
+		return errors.New("broker connection changed during hello")
+	}
 	a.helloAck = ack
 	a.brokerVersion.Store(int64(ipc.PeerProtocolVersion(ack.ProtocolVersion)))
+	a.connHelloPending = false
+	a.bmu.Unlock()
 	return nil
 }
 
 func (a *adapter) currentConn() *ipc.Conn {
+	a.bmu.Lock()
+	defer a.bmu.Unlock()
+	if a.connHelloPending {
+		return nil
+	}
+	return a.conn
+}
+
+// rawConn returns the currently installed broker connection even while its
+// mandatory hello is in flight. Only handshake and reconnect teardown code may
+// use it; all ordinary traffic must go through currentConn.
+func (a *adapter) rawConn() *ipc.Conn {
 	a.bmu.Lock()
 	defer a.bmu.Unlock()
 	return a.conn
@@ -375,10 +414,9 @@ func (a *adapter) brokerReader(ctx context.Context) {
 		if conn == nil {
 			return
 		}
-		// Settle this session's identity (recover.go). Once per CONNECTION: the
-		// first turn does it at startup so a RESUMED Codex conversation silently
-		// re-claims its own topic, and a post-restart connection re-registers the
-		// stable id so later attaches are still recorded against this session.
+		// Ensure this session's identity recovery is running (recover.go). The
+		// startup/reconnect paths start it before publishing usable MCP state; this
+		// per-turn call is an idempotent backstop for manually-installed/test conns.
 		a.ensureSessionRecoverForConn(ctx, conn)
 		raw, err := conn.ReadFrame()
 		if err != nil {
@@ -407,7 +445,7 @@ func (a *adapter) brokerReader(ctx context.Context) {
 		case ipc.OpRetranscribeResult:
 			a.dispatchRetranscribeResult(raw)
 		case ipc.OpRecoverSessionResult:
-			a.dispatchRecoverSessionResult(raw)
+			a.dispatchRecoverSessionResult(conn, raw)
 		case ipc.OpError:
 			var errMsg ipc.ErrorMsg
 			_ = json.Unmarshal(raw, &errMsg)
@@ -426,20 +464,38 @@ func (a *adapter) brokerReader(ctx context.Context) {
 // reconnectBroker tears down the dead conn, dials a fresh one, sends hello.
 // Pending tool calls are woken with an error so callers don't hang during the
 // reconnect window. Single attempt; recoverBroker is the retry-loop wrapper.
-func (a *adapter) reconnectBroker() error {
+func (a *adapter) reconnectBroker(ctx context.Context) error {
 	a.wakePendingWithErr("broker reconnect — request canceled")
 
 	a.bmu.Lock()
+	oldConn := a.conn
 	if a.conn != nil {
 		_ = a.conn.Close()
 		a.conn = nil
+		a.connHelloPending = false
 	}
 	a.bmu.Unlock()
+	a.retireSessionRecoverForConn(oldConn)
 
-	if err := a.connectBroker(); err != nil {
+	if err := a.connectBroker(ctx); err != nil {
 		return err
 	}
-	return a.hello()
+	conn := a.rawConn()
+	if err := a.hello(); err != nil {
+		a.bmu.Lock()
+		if a.conn == conn {
+			_ = a.conn.Close()
+			a.conn = nil
+			a.connHelloPending = false
+		}
+		a.bmu.Unlock()
+		a.retireSessionRecoverForConn(conn)
+		return err
+	}
+	// hello must be the first frame, but recovery must be started before reconnect
+	// is reported usable and before replay/tool traffic can overtake registration.
+	a.ensureSessionRecoverForConn(ctx, conn)
+	return nil
 }
 
 // recoverBrokerAdviseAfter bounds how long the recovery loop retries silently
@@ -467,7 +523,7 @@ func (a *adapter) recoverBroker(ctx context.Context) bool {
 			log.Printf("broker recovery canceled (ctx done): %v", err)
 			return false
 		}
-		err := a.reconnectBroker()
+		err := a.reconnectBroker(ctx)
 		if err == nil {
 			log.Printf("broker reconnected (attempt %d)", attempt)
 			a.clearBrokerDownAdvisory()
@@ -1232,7 +1288,8 @@ func (a *adapter) toolAttach(ctx context.Context, req *mcp.CallToolRequest) (*mc
 	// first so the gate can distinguish a bare own-route question from an
 	// explicit target. Cancellation and a bare settle timeout both return before
 	// any attach frame is registered or written.
-	if err := a.awaitIdentitySettled(ctx, isBareAttachReq(attachReq)); err != nil {
+	conn, err := a.awaitIdentitySettled(ctx, isBareAttachReq(attachReq))
+	if err != nil {
 		if errors.Is(err, errIdentityStillResolving) {
 			return toolErrorResult(err.Error()), nil
 		}
@@ -1244,7 +1301,6 @@ func (a *adapter) toolAttach(ctx context.Context, req *mcp.CallToolRequest) (*mc
 	a.pending["attached"] = ch
 	a.pmu.Unlock()
 
-	conn := a.currentConn()
 	if conn == nil {
 		a.pmu.Lock()
 		delete(a.pending, "attached")

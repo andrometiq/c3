@@ -28,7 +28,13 @@ var recoverSettleBudget = recoverRespTimeout + 2*time.Second
 
 var errIdentityStillResolving = errors.New("identity still resolving; retry attach")
 
-// recover fields live on adapter (declared here via methods).
+// identityEpochSnapshot binds one recovery answer to the broker connection it
+// describes. A caller that waited on an older gate may not re-read currentConn
+// and accidentally write on a newer connection whose identity is still open.
+type identityEpochSnapshot struct {
+	conn *ipc.Conn
+	gate chan struct{}
+}
 
 // trySessionRecover fires OpRecoverSession once after hello so a resumed Grok
 // session silently re-claims its last topic (Claude parity, Grok-flavored:
@@ -42,7 +48,7 @@ func (a *adapter) trySessionRecover(ctx context.Context) {
 	// Mark the identity question OPEN before firing, so an attach arriving in the
 	// same instant waits for the answer instead of racing it.
 	a.recoverStarted.Store(true)
-	a.fireRecover(ctx, sid, a.cwd())
+	go a.fireRecover(ctx, sid, a.cwd())
 }
 
 // stableSessionID returns the Grok session UUID this adapter is bound to — the
@@ -86,21 +92,29 @@ func (a *adapter) cwd() string {
 }
 
 func (a *adapter) fireRecover(ctx context.Context, stableID, cwd string) {
+	a.fireRecoverEpoch(ctx, stableID, cwd, a.currentIdentityEpoch())
+}
+
+func (a *adapter) fireRecoverEpoch(ctx context.Context, stableID, cwd string, epoch identityEpochSnapshot) {
 	if stableID == "" {
 		return
 	}
-	if !a.recoverFired.CompareAndSwap(false, true) {
+	// RecoverSessionResp has no request id. Serialize complete attempts so an
+	// old connection's waiter can never overwrite or steal the fresh
+	// connection's singleton response slot.
+	a.recoverMu.Lock()
+	defer a.recoverMu.Unlock()
+	if !a.claimRecoveryEpoch(epoch) {
 		return
 	}
-	gate := a.identityGate()
-	// The CAS winner OWNS the identity question, so it answers it on EVERY exit
+	// The epoch-claim winner OWNS the identity question, so it answers it on EVERY exit
 	// path below — recovered, registered, refused, write-failed, timed out. A
 	// session that could not be identified is a settled answer ("nobody"), not a
 	// session that blocks attaches until a budget expires: a hung attach is a
-	// worse failure than an unidentified one. (The CAS loser deliberately does
+	// worse failure than an unidentified one. (The claim loser deliberately does
 	// NOT settle — the winner is still working, and letting the loser answer for
 	// it is the exact entry-read-as-completion mistake this guards against.)
-	defer a.settleIdentity(gate)
+	defer a.settleIdentity(epoch.gate)
 
 	// Ensure inject targets this session.
 	if a.leader != nil {
@@ -124,7 +138,7 @@ func (a *adapter) fireRecover(ctx context.Context, stableID, cwd string) {
 		a.rsmu.Unlock()
 	}()
 
-	conn := a.currentConn()
+	conn := epoch.conn
 	if conn == nil {
 		// NOTHING WAS SENT — so nothing was registered, and holding the
 		// once-per-connection guard here wedges the session permanently: every
@@ -136,7 +150,7 @@ func (a *adapter) fireRecover(ctx context.Context, stableID, cwd string) {
 		// identitySettled): with no broker connection, toolAttach itself answers
 		// "broker reconnecting — retry attach in a moment", so no attach can be
 		// answered in this window anyway, and the reconnect path re-fires.
-		a.recoverFired.Store(false)
+		a.releaseRecoveryEpoch(epoch)
 		log.Printf("recover-session: no broker connection — nothing sent; releasing the once-per-connection guard so a later attempt can register this session")
 		return
 	}
@@ -145,7 +159,7 @@ func (a *adapter) fireRecover(ctx context.Context, stableID, cwd string) {
 	}); err != nil {
 		// Same as conn == nil: the request never reached the broker, so the guard
 		// must not stay set on a recovery that did not happen.
-		a.recoverFired.Store(false)
+		a.releaseRecoveryEpoch(epoch)
 		log.Printf("recover-session: write failed: %v (nothing sent — guard released for a later attempt)", err)
 		return
 	}
@@ -249,16 +263,16 @@ func (a *adapter) emitRecoverNotice(text string) {
 // record-only branch when the replay restored the route (and the gated
 // own-route recover when the replay's proposal was discarded).
 func (a *adapter) refireRecoverOnReconnect(ctx context.Context) {
+	epoch := a.prepareReconnectRecoveryEpoch()
 	sid := a.stableSessionID()
 	if sid == "" {
+		a.settleIdentity(epoch.gate)
 		return
 	}
 	cwd := a.cwd()
-	a.recoverFired.Store(false)
 	a.recoverStarted.Store(true)
-	a.rearmIdentity()
 	go func() {
-		a.fireRecover(ctx, sid, cwd)
+		a.fireRecoverEpoch(ctx, sid, cwd, epoch)
 	}()
 }
 
@@ -268,17 +282,16 @@ func (a *adapter) refireRecoverOnReconnect(ctx context.Context) {
 // it is where the "identity before anything that depends on it" rule is enforced
 // for Grok: every path out of here has either ANSWERED the identity question or
 // waited for the answer.
-func (a *adapter) ensureStableSessionRegistered(ctx context.Context, bare bool) error {
+func (a *adapter) ensureStableSessionRegistered(ctx context.Context, bare bool) (*ipc.Conn, error) {
 	sid := a.stableSessionID()
 	if sid == "" {
 		// No id to register — but a recovery started earlier may still be in
 		// flight, and the attach must not overtake it.
-		return a.awaitIdentitySettled(ctx, bare)
+		return a.connAfterIdentitySettled(ctx, bare)
 	}
 	// fireRecover is once per BROKER CONNECTION (refireRecoverOnReconnect resets
-	// the guard after a reconnect) and its CompareAndSwap makes this a no-op when
-	// a recover already fired on this connection — so calling it unconditionally
-	// is safe and duplicate-free.
+	// the epoch guard after a reconnect), so calling it unconditionally is safe
+	// and duplicate-free.
 	a.recoverStarted.Store(true)
 	a.fireRecover(ctx, sid, a.cwd())
 	// A no-op RETURN is not an answer, though. The old code read recoverFired
@@ -286,7 +299,7 @@ func (a *adapter) ensureStableSessionRegistered(ctx context.Context, bare bool) 
 	// the attach write — so an attach could be answered while the recover that
 	// would have told the broker who this session is was still in flight, and the
 	// broker answered attachBare from no identity. Wait for the answer.
-	return a.awaitIdentitySettled(ctx, bare)
+	return a.connAfterIdentitySettled(ctx, bare)
 }
 
 // identityGate returns the channel that closes when this session's identity
@@ -304,8 +317,121 @@ func (a *adapter) identityGate() chan struct{} {
 
 func (a *adapter) rearmIdentity() {
 	a.idmu.Lock()
+	old := a.identitySettled
 	a.identitySettled = make(chan struct{})
+	a.recoverFiredGate = nil
+	a.recoverFired.Store(false)
+	a.identityReconnect = false
 	a.idmu.Unlock()
+	if old != nil {
+		a.settleIdentity(old)
+	}
+}
+
+// beginReconnectIdentityEpoch makes the new unanswered identity visible before
+// conn can point at the replacement broker. Closing the superseded gate merely
+// wakes old waiters; connAfterIdentitySettled revalidates and chases the new
+// epoch before returning any connection.
+func (a *adapter) beginReconnectIdentityEpoch() {
+	a.recoverStarted.Store(true)
+	// Publish {no connection, new open gate} atomically under the same lock
+	// order currentIdentityEpoch uses. Otherwise a caller can observe {old conn,
+	// new gate}, let an old-stub recovery settle that gate, and later reuse its
+	// answer against the replacement connection.
+	a.idmu.Lock()
+	a.bmu.Lock()
+	old := a.conn
+	oldGate := a.identitySettled
+	a.identitySettled = make(chan struct{})
+	a.recoverFiredGate = nil
+	a.recoverFired.Store(false)
+	a.identityReconnect = true
+	a.brokerHelloPending = true
+	a.conn = nil
+	a.bmu.Unlock()
+	a.idmu.Unlock()
+	if old != nil {
+		_ = old.Close()
+	}
+	if oldGate != nil {
+		a.settleIdentity(oldGate)
+	}
+}
+
+// prepareReconnectRecoveryEpoch preserves the epoch opened by reconnectBroker.
+// Direct tests and defensive callers that invoke refire without that transition
+// still get a fresh epoch when the current gate is already settled. An open,
+// claimed epoch is the recovery already running for this connection and must be
+// reused; rearming it would create two uncorrelated recoveries on one conn.
+func (a *adapter) prepareReconnectRecoveryEpoch() identityEpochSnapshot {
+	a.idmu.Lock()
+	gate := a.identitySettled
+	a.identityReconnect = false // hello completed; this epoch may now register
+	settled := gate == nil
+	if gate != nil {
+		select {
+		case <-gate:
+			settled = true
+		default:
+		}
+	}
+	a.idmu.Unlock()
+	if settled {
+		a.rearmIdentity()
+	}
+	return a.currentIdentityEpoch()
+}
+
+func (a *adapter) currentIdentityEpoch() identityEpochSnapshot {
+	// One lock order everywhere that needs the pair: identity, then connection.
+	a.idmu.Lock()
+	a.bmu.Lock()
+	epoch := identityEpochSnapshot{conn: a.conn, gate: a.identitySettled}
+	if epoch.gate == nil {
+		epoch.gate = make(chan struct{})
+		a.identitySettled = epoch.gate
+	}
+	a.bmu.Unlock()
+	a.idmu.Unlock()
+	return epoch
+}
+
+func (a *adapter) identityEpochCurrent(epoch identityEpochSnapshot) bool {
+	a.idmu.Lock()
+	a.bmu.Lock()
+	current := a.identitySettled == epoch.gate && a.conn == epoch.conn
+	a.bmu.Unlock()
+	a.idmu.Unlock()
+	return current
+}
+
+func (a *adapter) claimRecoveryEpoch(epoch identityEpochSnapshot) bool {
+	a.idmu.Lock()
+	defer a.idmu.Unlock()
+	a.bmu.Lock()
+	currentPair := a.identitySettled == epoch.gate && a.conn == epoch.conn && !a.identityReconnect
+	a.bmu.Unlock()
+	if !currentPair {
+		return false
+	}
+	// Tests and legacy setup sometimes seed only the atomic guard. Treat that as
+	// a claim on the current epoch; normal production claims also record gate.
+	if a.recoverFiredGate == epoch.gate || (a.recoverFired.Load() && a.recoverFiredGate == nil) {
+		return false
+	}
+	a.recoverFiredGate = epoch.gate
+	a.recoverFired.Store(true)
+	return true
+}
+
+func (a *adapter) releaseRecoveryEpoch(epoch identityEpochSnapshot) {
+	a.idmu.Lock()
+	defer a.idmu.Unlock()
+	if a.recoverFiredGate != epoch.gate {
+		return
+	}
+	a.recoverFiredGate = nil
+	a.recoverFired.Store(false)
 }
 
 func (a *adapter) markIdentitySettled() {
@@ -327,11 +453,7 @@ func (a *adapter) settleIdentity(gate chan struct{}) {
 // caller aborts. At the settle budget a bare attach is refused because its
 // answer depends on identity; an explicit target keeps waiting for the bounded
 // recovery attempt and is never raced against a late recover frame.
-func (a *adapter) awaitIdentitySettled(ctx context.Context, bare bool) error {
-	if !a.recoverStarted.Load() {
-		return nil
-	}
-	gate := a.identityGate()
+func waitIdentityGate(ctx context.Context, gate chan struct{}, bare bool) error {
 	select {
 	case <-gate:
 		return nil
@@ -349,6 +471,38 @@ func (a *adapter) awaitIdentitySettled(ctx context.Context, bare bool) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+}
+
+// connAfterIdentitySettled returns the connection governed by the identity
+// epoch that actually settled. A reconnect can replace the epoch while this
+// call waits; in that case it loops. The caller must write only this returned
+// connection, never re-read currentConn afterward.
+func (a *adapter) connAfterIdentitySettled(ctx context.Context, bare bool) (*ipc.Conn, error) {
+	return a.connAfterIdentityEpoch(ctx, bare, a.currentIdentityEpoch())
+}
+
+// connAfterIdentityEpoch is split out so tests can synchronously capture an old
+// epoch and reproduce the reconnect interleaving without scheduler guesses.
+func (a *adapter) connAfterIdentityEpoch(ctx context.Context, bare bool, epoch identityEpochSnapshot) (*ipc.Conn, error) {
+	for {
+		if a.recoverStarted.Load() {
+			if err := waitIdentityGate(ctx, epoch.gate, bare); err != nil {
+				return nil, err
+			}
+		}
+		if a.identityEpochCurrent(epoch) {
+			return epoch.conn, nil
+		}
+		epoch = a.currentIdentityEpoch()
+	}
+}
+
+// awaitIdentitySettled remains the recovery-completion-only seam used by
+// focused tests. Production attach uses connAfterIdentitySettled so the wait and
+// subsequent write cannot be split across broker connections.
+func (a *adapter) awaitIdentitySettled(ctx context.Context, bare bool) error {
+	_, err := a.connAfterIdentitySettled(ctx, bare)
+	return err
 }
 
 // bindSessionIDForAttach freezes inject + recover identity from cwd/env at

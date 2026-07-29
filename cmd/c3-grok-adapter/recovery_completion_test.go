@@ -30,6 +30,22 @@ type recoveryBroker struct {
 	frames chan []byte
 }
 
+// observedDoneContext exposes each waitIdentityGate select without relying on
+// scheduler timing. Done is called as the select arms, so tests can place a
+// reconnect exactly while a waiter is blocked on a particular identity epoch.
+type observedDoneContext struct {
+	context.Context
+	doneCalls chan struct{}
+}
+
+func (c *observedDoneContext) Done() <-chan struct{} {
+	select {
+	case c.doneCalls <- struct{}{}:
+	default:
+	}
+	return c.Context.Done()
+}
+
 // newRecoveryBroker starts reading the broker side of an adapter's IPC pipe.
 func newRecoveryBroker(peer *ipc.Conn) *recoveryBroker {
 	b := &recoveryBroker{frames: make(chan []byte, 8)}
@@ -125,7 +141,7 @@ func TestToolAttach_IsNotAnsweredBeforeThisSessionsIdentityIsSettled(t *testing.
 	// Drive the REAL startup path: trySessionRecover resolves this session's id
 	// and fires. The recovery reaches the broker but is NOT answered, so this
 	// session still does not know who it is.
-	go a.trySessionRecover(ctx)
+	a.trySessionRecover(ctx)
 	if op, ok := broker.nextOp(t, 5*time.Second); !ok || op != ipc.OpRecoverSession {
 		t.Fatalf("recovery never reached the broker (op=%q ok=%v), so this test cannot prove anything", op, ok)
 	}
@@ -169,7 +185,7 @@ func TestEnsureStableSessionRegistered_WaitsEvenWhenItHasNoIdToRegister(t *testi
 	defer cancel()
 
 	// Drive the REAL startup path: trySessionRecover resolves the id and fires.
-	go a.trySessionRecover(ctx)
+	a.trySessionRecover(ctx)
 	if op, ok := broker.nextOp(t, 5*time.Second); !ok || op != ipc.OpRecoverSession {
 		t.Fatalf("recovery never reached the broker (op=%q ok=%v), so this test cannot prove anything", op, ok)
 	}
@@ -188,7 +204,7 @@ func TestEnsureStableSessionRegistered_WaitsEvenWhenItHasNoIdToRegister(t *testi
 	released := make(chan struct{})
 	go func() {
 		defer close(released)
-		_ = a.ensureStableSessionRegistered(ctx, false)
+		_, _ = a.ensureStableSessionRegistered(ctx, false)
 	}()
 	select {
 	case <-released:
@@ -411,5 +427,385 @@ func TestReconnectRecoveryRearmsIdentitySettlement(t *testing.T) {
 	case <-current:
 	case <-time.After(time.Second):
 		t.Fatal("current reconnect identity epoch did not settle")
+	}
+}
+
+func TestIdentityEpoch_OldWaiterChasesReconnectAndReturnsNewConn(t *testing.T) {
+	a, _ := newRecoveryAdapter(t)
+	a.recoverStarted.Store(true)
+	oldEpoch := a.currentIdentityEpoch()
+
+	baseCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ctx := &observedDoneContext{
+		Context:   baseCtx,
+		doneCalls: make(chan struct{}, 4),
+	}
+	type waitResult struct {
+		conn *ipc.Conn
+		err  error
+	}
+	result := make(chan waitResult, 1)
+	go func() {
+		conn, err := a.connAfterIdentityEpoch(ctx, false, oldEpoch)
+		result <- waitResult{conn: conn, err: err}
+	}()
+
+	select {
+	case <-ctx.doneCalls:
+	case <-time.After(time.Second):
+		t.Fatal("old identity waiter never armed")
+	}
+
+	a.beginReconnectIdentityEpoch()
+	newGate := a.identityGate()
+	if newGate == oldEpoch.gate {
+		t.Fatal("reconnect did not open a new identity epoch")
+	}
+
+	adapterSide, brokerSide := net.Pipe()
+	defer adapterSide.Close()
+	defer brokerSide.Close()
+	newConn := ipc.NewConn(adapterSide)
+	a.bmu.Lock()
+	a.conn = newConn
+	a.bmu.Unlock()
+
+	select {
+	case <-ctx.doneCalls:
+		// The old gate woke the waiter, which revalidated the epoch and armed a
+		// second wait on the new gate.
+	case got := <-result:
+		t.Fatalf("old waiter returned before the new identity epoch settled: conn=%p err=%v", got.conn, got.err)
+	case <-time.After(time.Second):
+		t.Fatal("old waiter did not chase the new identity epoch")
+	}
+
+	select {
+	case <-newGate:
+		t.Fatal("new identity gate was settled before the new recovery answered")
+	default:
+	}
+	a.settleIdentity(newGate)
+
+	select {
+	case got := <-result:
+		if got.err != nil {
+			t.Fatalf("identity waiter returned error: %v", got.err)
+		}
+		if got.conn != newConn {
+			t.Fatalf("identity waiter returned conn %p, want current epoch conn %p", got.conn, newConn)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("identity waiter did not return after the new epoch settled")
+	}
+}
+
+func TestIdentityEpoch_OldRecoveryCannotSettleNewGate(t *testing.T) {
+	a, broker := newRecoveryAdapter(t)
+	a.recoverStarted.Store(true)
+	oldEpoch := a.currentIdentityEpoch()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cwd := t.TempDir()
+	recoveryDone := make(chan struct{})
+	go func() {
+		defer close(recoveryDone)
+		a.fireRecoverEpoch(ctx, "sess-recovery", cwd, oldEpoch)
+	}()
+	if op, ok := broker.nextOp(t, time.Second); !ok || op != ipc.OpRecoverSession {
+		t.Fatalf("old recovery did not enter its response wait (op=%q ok=%v)", op, ok)
+	}
+
+	a.beginReconnectIdentityEpoch()
+	newGate := a.identityGate()
+	if newGate == oldEpoch.gate {
+		t.Fatal("reconnect did not open a new identity epoch")
+	}
+
+	cancel()
+	select {
+	case <-recoveryDone:
+	case <-time.After(time.Second):
+		t.Fatal("old recovery did not stop after cancellation")
+	}
+	select {
+	case <-newGate:
+		t.Fatal("old recovery completion settled the new identity epoch")
+	default:
+	}
+	a.settleIdentity(newGate)
+}
+
+func TestReconnectRefire_ReusesClaimedEpochOnSameConnection(t *testing.T) {
+	a, broker := newRecoveryAdapter(t)
+	a.recoverStarted.Store(true)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	epoch := a.currentIdentityEpoch()
+	go a.fireRecoverEpoch(ctx, "sess-recovery", t.TempDir(), epoch)
+	if op, ok := broker.nextOp(t, time.Second); !ok || op != ipc.OpRecoverSession {
+		t.Fatalf("first recovery did not reach the broker (op=%q ok=%v)", op, ok)
+	}
+
+	a.refireRecoverOnReconnect(ctx)
+	if got := a.identityGate(); got != epoch.gate {
+		t.Fatal("refire replaced an open, claimed epoch and enabled a second recovery on the same connection")
+	}
+	if op, ok := broker.nextOp(t, 100*time.Millisecond); ok {
+		t.Fatalf("refire sent a second %q recovery on the same connection; its uncorrelated response can be delivered to the wrong waiter", op)
+	}
+
+	answerRecover(t, a)
+	select {
+	case <-epoch.gate:
+	case <-time.After(time.Second):
+		t.Fatal("the connection's one recovery did not settle its reused epoch")
+	}
+}
+
+func TestReconnectEpoch_CannotRegisterBeforeHelloCompletes(t *testing.T) {
+	a, _ := newRecoveryAdapter(t)
+	a.beginReconnectIdentityEpoch()
+
+	adapterSide, brokerSide := net.Pipe()
+	defer adapterSide.Close()
+	defer brokerSide.Close()
+	conn := ipc.NewConn(adapterSide)
+	broker := newRecoveryBroker(ipc.NewConn(brokerSide))
+	a.bmu.Lock()
+	a.conn = conn // connectBroker has published it; hello is still in flight
+	a.bmu.Unlock()
+	epoch := a.currentIdentityEpoch()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	a.fireRecoverEpoch(ctx, "sess-recovery", t.TempDir(), epoch)
+	if op, ok := broker.nextOp(t, 100*time.Millisecond); ok {
+		t.Fatalf("recovery wrote %q before hello completed; hello must be the replacement connection's first frame", op)
+	}
+	select {
+	case <-epoch.gate:
+		t.Fatal("pre-hello recovery attempt settled the replacement gate")
+	default:
+	}
+
+	epoch = a.prepareReconnectRecoveryEpoch() // models successful hello
+	go a.fireRecoverEpoch(ctx, "sess-recovery", t.TempDir(), epoch)
+	if op, ok := broker.nextOp(t, time.Second); !ok || op != ipc.OpRecoverSession {
+		t.Fatalf("post-hello recovery did not register (op=%q ok=%v)", op, ok)
+	}
+	answerRecover(t, a)
+	select {
+	case <-epoch.gate:
+	case <-time.After(time.Second):
+		t.Fatal("post-hello recovery did not settle the replacement gate")
+	}
+}
+
+func TestReconnectHello_GatesGenericToolUntilValidatedAck(t *testing.T) {
+	a := newAdapter()
+	a.beginReconnectIdentityEpoch()
+
+	adapterSide, brokerSide := net.Pipe()
+	t.Cleanup(func() {
+		_ = adapterSide.Close()
+		_ = brokerSide.Close()
+	})
+	a.publishBrokerConnection(ipc.NewConn(adapterSide))
+	broker := newRecoveryBroker(ipc.NewConn(brokerSide))
+	forward := a.toolForward("reply")
+	req := &mcp.CallToolRequest{Params: &mcp.CallToolParamsRaw{
+		Name: "reply", Arguments: json.RawMessage(`{"text":"hello"}`),
+	}}
+
+	// The freshly dialed connection is published only for hello. An ordinary
+	// tool must receive the normal reconnect retry, never become C1's first
+	// frame.
+	preHelloDone := make(chan error, 1)
+	go func() {
+		_, err := forward(context.Background(), req)
+		preHelloDone <- err
+	}()
+	select {
+	case raw := <-broker.frames:
+		op, err := ipc.PeekOp(raw)
+		if err != nil {
+			t.Fatalf("pre-hello frame is malformed: %v", err)
+		}
+		t.Fatalf("generic tool wrote %q before hello started", op)
+	case err := <-preHelloDone:
+		if err != nil {
+			t.Fatalf("pre-hello tool call returned transport error: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("pre-hello tool did not return with a reconnect retry")
+	}
+
+	helloDone := make(chan error, 1)
+	go func() { helloDone <- a.hello() }()
+	if op, ok := broker.nextOp(t, time.Second); !ok || op != ipc.OpHello {
+		t.Fatalf("first replacement frame = %q, want hello", op)
+	}
+	if _, err := forward(context.Background(), req); err != nil {
+		t.Fatalf("during-hello tool call returned transport error: %v", err)
+	}
+	if op, ok := broker.nextOp(t, 100*time.Millisecond); ok {
+		t.Fatalf("generic tool wrote %q while hello awaited its ack", op)
+	}
+	if err := ipc.NewConn(brokerSide).WriteJSON(ipc.HelloAckMsg{Op: ipc.OpHelloAck}); err != nil {
+		t.Fatalf("write hello ack: %v", err)
+	}
+	if err := <-helloDone; err != nil {
+		t.Fatalf("hello failed: %v", err)
+	}
+
+	toolDone := make(chan struct{})
+	go func() {
+		_, _ = forward(context.Background(), req)
+		close(toolDone)
+	}()
+	var raw []byte
+	select {
+	case raw = <-broker.frames:
+	case <-time.After(time.Second):
+		t.Fatal("generic tool remained blocked after validated hello ack")
+	}
+	var call ipc.ToolCallReq
+	if err := json.Unmarshal(raw, &call); err != nil || call.Op != ipc.OpToolCall {
+		t.Fatalf("post-hello frame = %s err=%v, want tool_call", raw, err)
+	}
+	result, err := json.Marshal(ipc.ToolResultMsg{Op: ipc.OpToolResult, ID: call.ID, Result: map[string]any{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.dispatchToolResult(result)
+	select {
+	case <-toolDone:
+	case <-time.After(time.Second):
+		t.Fatal("post-hello generic tool did not return after its broker result")
+	}
+}
+
+func TestHello_NonAckKeepsProductionConnectionUnavailable(t *testing.T) {
+	a := newAdapter()
+	adapterSide, brokerSide := net.Pipe()
+	t.Cleanup(func() {
+		_ = adapterSide.Close()
+		_ = brokerSide.Close()
+	})
+	a.publishBrokerConnection(ipc.NewConn(adapterSide))
+	broker := newRecoveryBroker(ipc.NewConn(brokerSide))
+
+	done := make(chan error, 1)
+	go func() { done <- a.hello() }()
+	if op, ok := broker.nextOp(t, time.Second); !ok || op != ipc.OpHello {
+		t.Fatalf("first frame = %q, want hello", op)
+	}
+	if err := ipc.NewConn(brokerSide).WriteJSON(ipc.ErrorMsg{Op: ipc.OpError, Err: "expected hello first"}); err != nil {
+		t.Fatalf("write non-ack response: %v", err)
+	}
+	if err := <-done; err == nil {
+		t.Fatal("hello accepted a non-hello_ack response")
+	}
+	if got := a.currentConn(); got != nil {
+		t.Fatalf("non-hello_ack made production conn %p available", got)
+	}
+}
+
+func TestHello_OldAckCannotPublishReplacementConnection(t *testing.T) {
+	a := newAdapter()
+	oldAdapter, oldBroker := net.Pipe()
+	newAdapter, newBroker := net.Pipe()
+	t.Cleanup(func() {
+		_ = oldAdapter.Close()
+		_ = oldBroker.Close()
+		_ = newAdapter.Close()
+		_ = newBroker.Close()
+	})
+	oldConn := ipc.NewConn(oldAdapter)
+	newConn := ipc.NewConn(newAdapter)
+	peer := ipc.NewConn(oldBroker)
+	a.helloAck = ipc.HelloAckMsg{ConnID: 99, ProtocolVersion: ipc.ProtocolVersion}
+	a.brokerVersion.Store(int64(ipc.ProtocolVersion))
+	a.publishBrokerConnection(oldConn)
+
+	helloSeen := make(chan struct{})
+	allowAck := make(chan struct{})
+	go func() {
+		_, _ = peer.ReadFrame()
+		close(helloSeen)
+		<-allowAck
+		_ = peer.WriteJSON(ipc.HelloAckMsg{
+			Op: ipc.OpHelloAck, ConnID: 1, ProtocolVersion: ipc.ProtocolVersion + 1,
+		})
+	}()
+	helloDone := make(chan error, 1)
+	go func() { helloDone <- a.hello() }()
+	select {
+	case <-helloSeen:
+	case <-time.After(time.Second):
+		t.Fatal("hello frame was not sent")
+	}
+
+	a.publishBrokerConnection(newConn)
+	close(allowAck)
+	if err := <-helloDone; err == nil {
+		t.Fatal("old connection's HelloAck published its replacement as usable")
+	}
+	if got := a.currentConn(); got != nil {
+		t.Fatalf("replacement connection %p became usable from old connection's HelloAck", got)
+	}
+	if a.helloAck.ConnID != 99 || a.brokerVersion.Load() != int64(ipc.ProtocolVersion) {
+		t.Fatalf("old connection's HelloAck replaced current metadata: ack=%+v version=%d", a.helloAck, a.brokerVersion.Load())
+	}
+}
+
+func TestReconnectRecovery_SerializesUncorrelatedResponseSlot(t *testing.T) {
+	a, oldBroker := newRecoveryAdapter(t)
+	oldCtx, cancelOld := context.WithCancel(context.Background())
+	defer cancelOld()
+	oldEpoch := a.currentIdentityEpoch()
+	oldDone := make(chan struct{})
+	go func() {
+		defer close(oldDone)
+		a.fireRecoverEpoch(oldCtx, "sess-recovery", t.TempDir(), oldEpoch)
+	}()
+	if op, ok := oldBroker.nextOp(t, time.Second); !ok || op != ipc.OpRecoverSession {
+		t.Fatalf("old recovery did not install its response waiter (op=%q ok=%v)", op, ok)
+	}
+
+	a.beginReconnectIdentityEpoch()
+	adapterSide, brokerSide := net.Pipe()
+	defer adapterSide.Close()
+	defer brokerSide.Close()
+	a.bmu.Lock()
+	a.conn = ipc.NewConn(adapterSide)
+	a.bmu.Unlock()
+	newBroker := newRecoveryBroker(ipc.NewConn(brokerSide))
+	newCtx, cancelNew := context.WithCancel(context.Background())
+	defer cancelNew()
+	a.refireRecoverOnReconnect(newCtx)
+
+	if op, ok := newBroker.nextOp(t, 100*time.Millisecond); ok {
+		t.Fatalf("new %q recovery overlapped the old singleton response waiter", op)
+	}
+	cancelOld()
+	select {
+	case <-oldDone:
+	case <-time.After(time.Second):
+		t.Fatal("old recovery did not release the response slot after cancellation")
+	}
+	if op, ok := newBroker.nextOp(t, time.Second); !ok || op != ipc.OpRecoverSession {
+		t.Fatalf("new recovery did not start after the old waiter left (op=%q ok=%v)", op, ok)
+	}
+	answerRecover(t, a)
+	newGate := a.identityGate()
+	select {
+	case <-newGate:
+	case <-time.After(time.Second):
+		t.Fatal("new recovery response did not settle the replacement epoch")
 	}
 }

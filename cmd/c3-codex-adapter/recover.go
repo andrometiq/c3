@@ -35,6 +35,7 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -191,8 +192,70 @@ func loadedThreadIDs(data any) ([]string, error) {
 	return ids, nil
 }
 
+// sessionRecoverEpoch binds every recovery side effect to the broker connection
+// it belongs to. A superseded epoch is canceled and settled, but its completion
+// can never close a replacement epoch's gate.
+type sessionRecoverEpoch struct {
+	conn    *ipc.Conn
+	gate    chan struct{}
+	ctx     context.Context
+	cancel  context.CancelFunc
+	started bool // guarded by adapter.rcmu
+	settled sync.Once
+}
+
+func (e *sessionRecoverEpoch) settle() {
+	e.settled.Do(func() { close(e.gate) })
+}
+
+// prepareSessionRecoverForConn creates the open recovery epoch for conn. The
+// production connect path calls this BEFORE publishing conn; ensure below also
+// calls it so tests and manually-installed connections get the same invariant.
+func (a *adapter) prepareSessionRecoverForConn(ctx context.Context, conn *ipc.Conn) *sessionRecoverEpoch {
+	if conn == nil {
+		return nil
+	}
+	a.rcmu.Lock()
+	if current := a.recoverEpoch; current != nil && current.conn == conn {
+		a.rcmu.Unlock()
+		return current
+	}
+	epochCtx, cancel := context.WithCancel(ctx)
+	epoch := &sessionRecoverEpoch{
+		conn: conn, gate: make(chan struct{}), ctx: epochCtx, cancel: cancel,
+	}
+	old := a.recoverEpoch
+	a.recoverEpoch = epoch
+	a.rcmu.Unlock()
+
+	if old != nil {
+		old.cancel()
+		old.settle()
+	}
+	return epoch
+}
+
+// retireSessionRecoverForConn removes and cancels conn's epoch during teardown.
+// Waiters wake, observe that their epoch is no longer current, and retry against
+// the replacement (or return "broker reconnecting" while no conn is published).
+func (a *adapter) retireSessionRecoverForConn(conn *ipc.Conn) {
+	if conn == nil {
+		return
+	}
+	a.rcmu.Lock()
+	epoch := a.recoverEpoch
+	if epoch == nil || epoch.conn != conn {
+		a.rcmu.Unlock()
+		return
+	}
+	a.recoverEpoch = nil
+	a.rcmu.Unlock()
+	epoch.cancel()
+	epoch.settle()
+}
+
 // ensureSessionRecoverForConn starts session recovery once per BROKER
-// CONNECTION. brokerReader calls it on every loop turn; the stored conn pointer
+// CONNECTION. brokerReader calls it on every loop turn; the epoch's started bit
 // makes all but the first call on a given connection a no-op.
 //
 // Per-CONNECTION rather than per-process on purpose. A broker RESTART (a `c3
@@ -201,26 +264,27 @@ func loadedThreadIDs(data any) ([]string, error) {
 // restart is recorded against nothing, and the NEXT resume silently recovers the
 // pre-restart topic instead of the one the user actually chose.
 func (a *adapter) ensureSessionRecoverForConn(ctx context.Context, conn *ipc.Conn) {
-	if conn == nil {
+	epoch := a.prepareSessionRecoverForConn(ctx, conn)
+	if epoch == nil {
 		return
 	}
 	a.rcmu.Lock()
-	if a.recoverConn == conn {
+	if a.recoverEpoch != epoch || epoch.started {
 		a.rcmu.Unlock()
 		return
 	}
-	a.rearmIdentity()
-	a.recoverConn = conn
+	epoch.started = true
 	a.rcmu.Unlock()
-	go a.startSessionRecover(ctx, conn)
+	go a.startSessionRecover(epoch)
 }
 
-// recoverStarted reports whether any recovery attempt has been kicked off. When
-// nothing is resolving an identity there is nothing for an attach to wait on.
+// recoverStarted reports whether the current prepared epoch has been kicked off.
+// Production attach gating starts at preparation; this narrower predicate is
+// retained for tests that need to synchronize with the recovery goroutine.
 func (a *adapter) recoverStarted() bool {
 	a.rcmu.Lock()
 	defer a.rcmu.Unlock()
-	return a.recoverConn != nil
+	return a.recoverEpoch != nil && a.recoverEpoch.started
 }
 
 // startSessionRecover resolves this session's identity and, if it can, asks the
@@ -228,20 +292,27 @@ func (a *adapter) recoverStarted() bool {
 // settles the identity gate on the way out, including on failure — a session
 // that cannot be identified is a settled answer ("unattached"), not a session
 // that blocks attaches for ten seconds.
-func (a *adapter) startSessionRecover(ctx context.Context, conn *ipc.Conn) {
-	gate := a.identityGate()
-	defer a.settleIdentity(gate)
+func (a *adapter) startSessionRecover(epoch *sessionRecoverEpoch) {
+	defer epoch.settle()
 
 	cfg := codexForwardConfigFromEnv()
 	cfg.Timeout = recoverIdentityTimeout
-	sid, err := a.stableSessionID(ctx, cfg)
+	sid, err := a.stableSessionID(epoch.ctx, cfg)
 	if err != nil {
 		// Loud, and specific about the consequence: this is the branch where C3
 		// chooses to do nothing rather than bind a topic it is not sure of.
 		log.Printf("recover-session: NOT recovering — %v. This Codex session starts UNATTACHED; call `attach` to choose a topic (or set C3_CODEX_THREAD_ID to name this session's thread). C3 never guesses: an identity it cannot determine must not match another session's.", err)
 		return
 	}
-	a.fireRecover(ctx, conn, sid, cfg.CWD)
+	// Resolution can outlive a broker connection. Do not let a superseded
+	// goroutine install a response waiter or write on behalf of the new epoch.
+	a.rcmu.Lock()
+	current := a.recoverEpoch == epoch
+	a.rcmu.Unlock()
+	if !current {
+		return
+	}
+	a.fireRecover(epoch.ctx, epoch.conn, sid, cfg.CWD)
 }
 
 // stableSessionID returns this session's Codex thread id, resolving it from the
@@ -282,12 +353,15 @@ func (a *adapter) fireRecover(ctx context.Context, conn *ipc.Conn, stableID, cwd
 	}
 	respCh := make(chan ipc.RecoverSessionResp, 1)
 	a.rsmu.Lock()
-	a.rsPending = respCh
+	if a.rsPending == nil {
+		a.rsPending = make(map[*ipc.Conn]chan ipc.RecoverSessionResp)
+	}
+	a.rsPending[conn] = respCh
 	a.rsmu.Unlock()
 	defer func() {
 		a.rsmu.Lock()
-		if a.rsPending == respCh {
-			a.rsPending = nil
+		if a.rsPending[conn] == respCh {
+			delete(a.rsPending, conn)
 		}
 		a.rsmu.Unlock()
 	}()
@@ -328,15 +402,15 @@ func (a *adapter) fireRecover(ctx context.Context, conn *ipc.Conn, stableID, cwd
 }
 
 // dispatchRecoverSessionResult routes the broker's response to the in-flight
-// fireRecover. Called from brokerReader; non-blocking, and a response with no
-// waiter is dropped rather than parked.
-func (a *adapter) dispatchRecoverSessionResult(raw []byte) {
+// fireRecover for the SAME connection. Called from brokerReader; non-blocking,
+// and a response with no waiter is dropped rather than parked.
+func (a *adapter) dispatchRecoverSessionResult(conn *ipc.Conn, raw []byte) {
 	var resp ipc.RecoverSessionResp
 	if err := json.Unmarshal(raw, &resp); err != nil {
 		return
 	}
 	a.rsmu.Lock()
-	ch := a.rsPending
+	ch := a.rsPending[conn]
 	a.rsmu.Unlock()
 	if ch == nil {
 		return
@@ -348,34 +422,45 @@ func (a *adapter) dispatchRecoverSessionResult(raw []byte) {
 }
 
 func (a *adapter) identityGate() chan struct{} {
-	a.idmu.Lock()
-	defer a.idmu.Unlock()
-	if a.identitySettled == nil {
-		a.identitySettled = make(chan struct{})
+	a.rcmu.Lock()
+	defer a.rcmu.Unlock()
+	if a.recoverEpoch == nil {
+		epochCtx, cancel := context.WithCancel(context.Background())
+		a.recoverEpoch = &sessionRecoverEpoch{
+			gate: make(chan struct{}), ctx: epochCtx, cancel: cancel,
+		}
 	}
-	return a.identitySettled
+	return a.recoverEpoch.gate
 }
 
-func (a *adapter) rearmIdentity() {
-	a.idmu.Lock()
-	a.identitySettled = make(chan struct{})
-	a.idmu.Unlock()
+func (a *adapter) currentSessionRecoverEpoch() *sessionRecoverEpoch {
+	a.rcmu.Lock()
+	defer a.rcmu.Unlock()
+	return a.recoverEpoch
+}
+
+func (a *adapter) currentSessionRecoverSnapshot() (*sessionRecoverEpoch, *ipc.Conn) {
+	a.rcmu.Lock()
+	defer a.rcmu.Unlock()
+	a.bmu.Lock()
+	defer a.bmu.Unlock()
+	return a.recoverEpoch, a.conn
 }
 
 // markIdentitySettled releases anything waiting on the current broker
 // connection's recovery registration.
 func (a *adapter) markIdentitySettled() {
-	a.settleIdentity(a.identityGate())
-}
-
-func (a *adapter) settleIdentity(gate chan struct{}) {
-	a.idmu.Lock()
-	defer a.idmu.Unlock()
-	select {
-	case <-gate:
-	default:
-		close(gate)
+	a.rcmu.Lock()
+	epoch := a.recoverEpoch
+	if epoch == nil {
+		epochCtx, cancel := context.WithCancel(context.Background())
+		epoch = &sessionRecoverEpoch{
+			gate: make(chan struct{}), ctx: epochCtx, cancel: cancel,
+		}
+		a.recoverEpoch = epoch
 	}
+	a.rcmu.Unlock()
+	epoch.settle()
 }
 
 // awaitIdentitySettled blocks until this session's identity question has been
@@ -384,28 +469,56 @@ func (a *adapter) settleIdentity(gate chan struct{}) {
 // attach is refused because own-route recovery versus picker is identity-
 // dependent. An explicit attach keeps waiting for the bounded recovery attempt;
 // it is sent only after the broker has answered identity, never raced against a
-// late recover frame.
-func (a *adapter) awaitIdentitySettled(ctx context.Context, bare bool) error {
-	if !a.recoverStarted() {
-		return nil
-	}
-	gate := a.identityGate()
-	select {
-	case <-gate:
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-time.After(recoverSettleTimeout):
-		if bare {
-			return errIdentityStillResolving
+// late recover frame. The returned conn belongs to the settled epoch; callers
+// must use it rather than re-reading currentConn, which could pair a new conn
+// with the old epoch's completion.
+func (a *adapter) awaitIdentitySettled(ctx context.Context, bare bool) (*ipc.Conn, error) {
+	return a.awaitIdentityEpoch(ctx, bare, a.currentSessionRecoverEpoch())
+}
+
+// awaitIdentityEpoch takes the first epoch as an argument so the snapshot and
+// the wait are one explicit operation. On replacement it follows the current
+// epoch; callers never treat an old gate's close as settlement for a new conn.
+func (a *adapter) awaitIdentityEpoch(ctx context.Context, bare bool, epoch *sessionRecoverEpoch) (*ipc.Conn, error) {
+	timer := time.NewTimer(recoverSettleTimeout)
+	defer timer.Stop()
+	var budget <-chan time.Time = timer.C
+
+	for {
+		if epoch == nil {
+			// Read epoch+conn as one snapshot. Production publishes an epoch
+			// before its conn, so {nil,newConn} is impossible here; a split read
+			// could otherwise jump from the reconnect gap onto an unsettled conn.
+			current, conn := a.currentSessionRecoverSnapshot()
+			if current == nil {
+				return conn, nil
+			}
+			epoch = current
+			continue
 		}
-		log.Printf("attach: identity still resolving after %v — explicit target will wait for recovery to settle before it is sent", recoverSettleTimeout)
-	}
-	select {
-	case <-gate:
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
+		select {
+		case <-epoch.gate:
+			// A replacement settles the old gate to wake waiters. Only return
+			// when the epoch we waited on is still the current one.
+			current, conn := a.currentSessionRecoverSnapshot()
+			if current == epoch {
+				return epoch.conn, nil
+			}
+			if current == nil {
+				return conn, nil
+			}
+			epoch = current
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-budget:
+			if bare {
+				return nil, errIdentityStillResolving
+			}
+			log.Printf("attach: identity still resolving after %v — explicit target will wait for recovery to settle before it is sent", recoverSettleTimeout)
+			// An explicit target has paid the one bounded patience budget. Keep
+			// following replacement epochs until identity settles or ctx ends.
+			budget = nil
+		}
 	}
 }
 
