@@ -17,15 +17,16 @@ import (
 	"github.com/Andrometiq/c3/internal/mappings"
 )
 
-// recoverRouteIdentity records the stable identity under which an automatic
-// route carriage happened. Manual attach-before-recover remains unconstrained:
-// its first RecoverSessionReq is the operation that names the conversation.
-// Reconnect transfers and adapter replay are different — they carry old state
-// forward automatically, so an absent or different identity must never be
-// recorded under the identity now registering.
+// recoverRouteIdentity records the stable identity under which a route was
+// established. Provenance is enforced only when such an identity existed:
+// attach-before-recover remains unconstrained, and its first RecoverSessionReq
+// names the conversation. automatic distinguishes replay/reconnect carriage
+// from a human attach so anonymous automatic state can still be rejected when
+// the registering identity already has a different server-side route record.
 type recoverRouteIdentity struct {
 	stableID     string
 	requireMatch bool
+	automatic    bool
 }
 
 // HandleConn drives one adapter connection through its lifecycle. Owns the
@@ -111,7 +112,8 @@ func (b *Broker) HandleConn(nc net.Conn) {
 			stub.SetRoute(&k)
 			routeIdentity = recoverRouteIdentity{
 				stableID:     existing.StableSessionIDValue(),
-				requireMatch: true,
+				requireMatch: existing.StableSessionIDValue() != "",
+				automatic:    true,
 			}
 			if existing.RouteConfirmed() {
 				stub.MarkRouteConfirmed()
@@ -208,9 +210,15 @@ func (b *Broker) HandleConn(nc net.Conn) {
 			if after := stub.CurrentRoute(); after != nil {
 				routeChanged := !hadBefore || beforeKey != *after
 				if attachReq.Replay {
-					// A replay is automatic old-state carriage, including when it
-					// lands on an identity-empty fresh stub.
-					routeIdentity = recoverRouteIdentity{stableID: stableAtAttach, requireMatch: true}
+					// A replay is automatic old-state carriage, but an
+					// identity-empty fresh stub has no provenance to enforce.
+					// Its first recover may name the conversation, subject to
+					// the server-side recorded-route conflict check below.
+					routeIdentity = recoverRouteIdentity{
+						stableID:     stableAtAttach,
+						requireMatch: stableAtAttach != "",
+						automatic:    true,
+					}
 				} else if routeChanged {
 					// Preserve D4's attach-first ruling: a human-driven attach
 					// made before the first stable id is known may be recorded by
@@ -330,10 +338,12 @@ func (b *Broker) handleRelease(stub *Stub) {
 // takes ONE of two dual-path-recording branches:
 //
 //   - Stub ALREADY attached: RECORD the current route under the stable id only
-//     when it was a manual attach-before-recover or was carried under this same
-//     stable id. An automatically transferred/replayed route stamped for a
-//     different or absent id is an identity switch: release it without a
-//     tombstone, then recover the new identity's own route.
+//     when it was a manual attach-before-recover, was carried under this same
+//     stable id, or arrived anonymously and does not conflict with that id's
+//     server-side record. A route stamped for a different id, or anonymous
+//     automatic carriage that conflicts with an existing record, is an identity
+//     switch: release it without a tombstone, then recover the new identity's
+//     own route.
 //   - Stub NOT attached: attempt recoverSession — re-claim the route the stable
 //     id was last attached to, when recoverable and not held by another live
 //     session. On success, report it + the held backlog count so the adapter
@@ -353,9 +363,18 @@ func (b *Broker) handleRecoverSession(conn *ipc.Conn, stub *Stub, raw []byte, ro
 		return
 	}
 	prev := stub.StableSessionIDValue()
-	routeIdentityMismatch := routeIdentity != nil &&
+	stampedRouteIdentityMismatch := routeIdentity != nil &&
 		routeIdentity.requireMatch &&
 		routeIdentity.stableID != req.StableSessionID
+	recordedRouteIdentityMismatch := false
+	if routeIdentity != nil && routeIdentity.automatic && !routeIdentity.requireMatch {
+		if cur := stub.CurrentRoute(); cur != nil {
+			if recorded, ok := b.Mappings().LookupSessionAttachment(req.StableSessionID); ok {
+				recordedRouteIdentityMismatch = routeKeyFromSessionAttachment(recorded) != *cur
+			}
+		}
+	}
+	routeIdentityMismatch := stampedRouteIdentityMismatch || recordedRouteIdentityMismatch
 	switched := (prev != "" && prev != req.StableSessionID) || routeIdentityMismatch
 	stub.SetStableSessionID(req.StableSessionID)
 	defer func() {
@@ -366,7 +385,11 @@ func (b *Broker) handleRecoverSession(conn *ipc.Conn, stub *Stub, raw []byte, ro
 			*routeIdentity = recoverRouteIdentity{}
 			return
 		}
-		*routeIdentity = recoverRouteIdentity{stableID: req.StableSessionID, requireMatch: true}
+		*routeIdentity = recoverRouteIdentity{
+			stableID:     req.StableSessionID,
+			requireMatch: true,
+			automatic:    true,
+		}
 	}()
 	if switched {
 		if cur := stub.CurrentRoute(); cur != nil {

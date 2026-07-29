@@ -339,8 +339,8 @@ type adapter struct {
 	amu sync.Mutex
 	// lastAttachStableID attributes lastAttach to the conversation under which
 	// it was made. Empty means no stable identity could be established at attach
-	// time; once a terminal handoff exists, such an attach is never replayed
-	// blindly.
+	// time. It remains replayable when the subsequently-settled identity matches
+	// the terminal handoff: that is the supported attach-before-identity window.
 	lastAttach         *ipc.AttachReq
 	lastAttachStableID string
 	// attachedTopic is the human-readable name of the currently-attached topic
@@ -777,7 +777,7 @@ func (a *adapter) replayLastAttachResolved(entry sessionhandoff.Entry, found boo
 	if req == nil {
 		return reconnectReplayDecision{}
 	}
-	if found && (a.lastAttachStableID == "" || a.lastAttachStableID != entry.StableSessionID) {
+	if found && a.lastAttachStableID != "" && a.lastAttachStableID != entry.StableSessionID {
 		log.Printf("recover-session: skipped attach replay stamped for %q; terminal identity is %q",
 			a.lastAttachStableID, entry.StableSessionID)
 		return reconnectReplayDecision{
@@ -811,19 +811,30 @@ func reconnectTerminalHandoff() (sessionhandoff.Entry, bool) {
 
 // restoreSessionAfterReconnect restores adapter state onto a fresh broker
 // connection. Same identity: preserve replay-before-recover so the fresh stub
-// reclaims the live route, then records it under the known id. Switched or
-// unattributable identity: never replay the remembered attach; schedule the
-// switch off this caller because recoverBroker runs on brokerReader, which must
-// stay free to dispatch the response that recovery awaits.
+// reclaims the live route, then records it under the known id. A mismatched
+// non-empty stamp is stale and schedules an identity switch off this caller
+// because recoverBroker runs on brokerReader, which must stay free to dispatch
+// the response that recovery awaits. If that switch was already superseded,
+// fall back to re-registering the latest identity.
 func (a *adapter) restoreSessionAfterReconnect(ctx context.Context) {
 	entry, found, decision := a.replayLastAttach()
 	if decision.switchIdentity {
 		log.Printf("recover-session: reconnect resolved identity switch %s → %s — skipping stale attach replay", decision.expected, entry.StableSessionID)
-		go a.beginIdentitySwitchMode(ctx, decision.expected, entry, decision.allowUnsettled)
+		go func() {
+			if a.beginIdentitySwitchMode(ctx, decision.expected, entry, decision.allowUnsettled) {
+				return
+			}
+			log.Printf("recover-session: reconnect switch was superseded — re-registering the latest terminal identity")
+			a.refireResolvedHandoffOnReconnect(ctx, entry)
+		}()
 		return
 	}
 	if found {
 		a.refireResolvedHandoffOnReconnect(ctx, entry)
+		return
+	}
+	if current, settled := a.currentStableIdentity(); settled {
+		a.refireResolvedHandoffOnReconnect(ctx, current)
 	}
 }
 
@@ -2269,7 +2280,7 @@ func renderIdentitySwitchUnattachedNotice(oldTopic string, released bool) string
 // ready handshake is load-bearing: a tools/call must never observe the old,
 // already-closed gate after switch detection returns.
 func (a *adapter) beginIdentitySwitch(ctx context.Context, expectedCurrent string, terminal sessionhandoff.Entry) {
-	a.beginIdentitySwitchMode(ctx, expectedCurrent, terminal, false)
+	_ = a.beginIdentitySwitchMode(ctx, expectedCurrent, terminal, false)
 }
 
 // beginIdentitySwitchMode also handles reconnect after an earlier recovery
@@ -2277,13 +2288,13 @@ func (a *adapter) beginIdentitySwitch(ctx context.Context, expectedCurrent strin
 // remembered attach's identity stamp is the only trustworthy description of
 // the previous conversation, so allowUnsettled permits replacing it with the
 // terminal handoff identity.
-func (a *adapter) beginIdentitySwitchMode(ctx context.Context, expectedCurrent string, terminal sessionhandoff.Entry, allowUnsettled bool) {
+func (a *adapter) beginIdentitySwitchMode(ctx context.Context, expectedCurrent string, terminal sessionhandoff.Entry, allowUnsettled bool) bool {
 	a.awaitIdentitySettled(ctx)
 	fireCtx := a.runCtx
 	if fireCtx == nil {
 		fireCtx = ctx
 	}
-	ready := make(chan struct{})
+	ready := make(chan bool, 1)
 	go func() {
 		a.recoverMu.Lock()
 		defer a.recoverMu.Unlock()
@@ -2291,11 +2302,15 @@ func (a *adapter) beginIdentitySwitchMode(ctx context.Context, expectedCurrent s
 		current, settled := a.currentStableIdentity()
 		if settled {
 			if current.StableSessionID != expectedCurrent || current.StableSessionID == terminal.StableSessionID {
-				close(ready)
+				log.Printf("identity-switch: skipped superseded transition expected=%q current=%q terminal=%q",
+					expectedCurrent, current.StableSessionID, terminal.StableSessionID)
+				ready <- false
 				return
 			}
 		} else if !allowUnsettled {
-			close(ready)
+			log.Printf("identity-switch: skipped transition %q → %q because no settled current identity exists",
+				expectedCurrent, terminal.StableSessionID)
+			ready <- false
 			return
 		}
 
@@ -2304,7 +2319,7 @@ func (a *adapter) beginIdentitySwitchMode(ctx context.Context, expectedCurrent s
 		a.dropPendingRecoverNoticeOnEpochChange()
 		a.recoverFired.Store(false)
 		a.recoverStarted.Store(true)
-		close(ready)
+		ready <- true
 
 		outcome := a.fireRecoverLocked(fireCtx, terminal)
 		if !outcome.recovered {
@@ -2314,7 +2329,7 @@ func (a *adapter) beginIdentitySwitchMode(ctx context.Context, expectedCurrent s
 			a.markIdentitySettled()
 		}
 	}()
-	<-ready
+	return <-ready
 }
 
 // recoverSessionOnResume runs in a goroutine after hello. It WATCHES (in the

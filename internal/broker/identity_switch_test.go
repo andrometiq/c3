@@ -323,3 +323,76 @@ func TestRecoverSession_ReconnectTransferWithoutIdentity_DoesNotRecordOldRouteUn
 		t.Fatalf("claim-transfer switch did not leave B holding its own route: held=%v holder=%+v", held, holder)
 	}
 }
+
+// N10: the same anonymous reconnect transfer is legitimate when the first
+// identity has no conflicting server-side record. Absence is not mismatched
+// provenance: recover must name and record the carried attach-first route.
+func TestRecoverSession_ReconnectTransferWithoutIdentity_FirstIdentityRecordsRoute(t *testing.T) {
+	mf := identitySwitchMappings(false)
+	b := brokerWithChannel(t, mf, &fakeChannel{})
+	defer b.Shutdown()
+	pid := os.Getpid()
+	cwd := "/projects/anonymous-first-identity"
+
+	first, closeFirst := peerPair(t, b)
+	if err := first.WriteJSON(ipc.HelloMsg{Op: ipc.OpHello, CLI: "claude", PID: pid, CWD: cwd}); err != nil {
+		t.Fatalf("first hello: %v", err)
+	}
+	if _, err := first.ReadFrame(); err != nil {
+		t.Fatalf("first hello ack: %v", err)
+	}
+	topicA := int64(281)
+	if err := first.WriteJSON(ipc.AttachReq{
+		Op: ipc.OpAttach, TopicID: &topicA, ChatID: -100, Group: "main", CWD: cwd,
+	}); err != nil {
+		t.Fatalf("attach before first identity: %v", err)
+	}
+	raw, err := first.ReadFrame()
+	if err != nil {
+		t.Fatalf("read attach response: %v", err)
+	}
+	var attached ipc.AttachedMsg
+	if err := json.Unmarshal(raw, &attached); err != nil || !attached.OK {
+		t.Fatalf("precondition: anonymous attach failed: attached=%+v err=%v", attached, err)
+	}
+	closeFirst()
+
+	keyA := switchRoute(281, -100)
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		holder, held := b.Routes.Holder(keyA)
+		if held && !holder.IsConnected() {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("precondition: anonymous claim did not become reconnectable: held=%v holder=%+v", held, holder)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	second, closeSecond := peerPair(t, b)
+	defer closeSecond()
+	if err := second.WriteJSON(ipc.HelloMsg{Op: ipc.OpHello, CLI: "claude", PID: pid, CWD: cwd}); err != nil {
+		t.Fatalf("reconnect hello: %v", err)
+	}
+	if _, err := second.ReadFrame(); err != nil {
+		t.Fatalf("reconnect hello ack: %v", err)
+	}
+	if holder, held := b.Routes.Holder(keyA); !held || holder.StableSessionIDValue() != "" {
+		t.Fatalf("precondition: reconnect did not transfer the anonymous route: held=%v holder=%+v", held, holder)
+	}
+
+	const firstStableID = "conversation-first"
+	resp := recoverIdentityOnPeer(t, second, firstStableID)
+	if resp.Recovered {
+		t.Fatalf("N10 anonymous first identity took auto-recovery instead of record-only: %+v", resp)
+	}
+	holder, held := b.Routes.Holder(keyA)
+	if !held || holder.StableSessionIDValue() != firstStableID {
+		t.Fatalf("N10 anonymous claim-transfer was treated as mismatched provenance and released instead of surviving first identity: held=%v holder=%+v", held, holder)
+	}
+	sa, ok := b.Mappings().LookupSessionAttachment(firstStableID)
+	if !ok || sa.TopicID == nil || *sa.TopicID != 281 || sa.Detached {
+		t.Fatalf("N10 first recover did not record the anonymous attach-first route: got %+v ok=%v", sa, ok)
+	}
+}

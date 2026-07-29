@@ -138,6 +138,7 @@ func waitForIdentityGate(t *testing.T, gate chan struct{}, defect string) {
 type reconnectSwitchChannel struct {
 	mu        sync.Mutex
 	validated []int64
+	replies   []c3types.ReplyArgs
 }
 
 func (*reconnectSwitchChannel) Name() string { return "telegram" }
@@ -148,8 +149,13 @@ func (*reconnectSwitchChannel) Stop() error { return nil }
 func (*reconnectSwitchChannel) Capabilities() c3types.Capabilities {
 	return c3types.Capabilities{Channel: "telegram"}
 }
-func (*reconnectSwitchChannel) SendReply(c3types.ReplyArgs) (int64, error) { return 1, nil }
-func (*reconnectSwitchChannel) SendTyping(int64, *int64) error             { return nil }
+func (c *reconnectSwitchChannel) SendReply(args c3types.ReplyArgs) (int64, error) {
+	c.mu.Lock()
+	c.replies = append(c.replies, args)
+	c.mu.Unlock()
+	return 1, nil
+}
+func (*reconnectSwitchChannel) SendTyping(int64, *int64) error { return nil }
 func (*reconnectSwitchChannel) EditMessage(args c3types.EditArgs) (*c3types.EditResult, error) {
 	return &c3types.EditResult{MessageID: args.MessageID}, nil
 }
@@ -175,6 +181,12 @@ func (c *reconnectSwitchChannel) validatedTopic(topicID int64) bool {
 		}
 	}
 	return false
+}
+
+func (c *reconnectSwitchChannel) replyCount() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return len(c.replies)
 }
 
 func reconnectSwitchMappings() *mappings.MappingsFile {
@@ -257,6 +269,173 @@ func requireReconnectSwitchIntegrity(t *testing.T, b *c3broker.Broker) {
 	if holder, held := b.Routes.Holder(keyB); !held || holder.StableSessionIDValue() != "conversation-b" {
 		t.Fatalf("fresh broker did not recover conversation B's own topic: held=%v holder=%+v", held, holder)
 	}
+}
+
+func waitForReconnectClaim(t *testing.T, b *c3broker.Broker, key c3broker.RouteKey, stableID, defect string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if holder, held := b.Routes.Holder(key); held && holder.StableSessionIDValue() == stableID {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	holder, held := b.Routes.Holder(key)
+	t.Fatalf("%s: held=%v holder=%+v", defect, held, holder)
+}
+
+func requireNoReconnectResumeNotice(t *testing.T, a *adapter, ch *reconnectSwitchChannel, defect string) {
+	t.Helper()
+	// Both broker and adapter notices are dispatched asynchronously after the
+	// recover response. Give a wrongly-taken recovery arm time to surface them.
+	time.Sleep(100 * time.Millisecond)
+	if text, ok := a.takePendingRecoverNotice(); ok {
+		t.Fatalf("%s: adapter queued %q", defect, text)
+	}
+	if got := ch.replyCount(); got != 0 {
+		t.Fatalf("%s: broker posted %d channel reply/replies", defect, got)
+	}
+}
+
+// T15 runs ordinary broker restarts through recoverBroker and the real broker
+// handler. Replay is the restoration operation; it must not be reclassified as
+// an identity switch merely because hello created an identity-empty fresh stub.
+func TestRecoverBroker_OrdinaryRestartReplayKeepsClaimWithoutResumeNotice(t *testing.T) {
+	tests := []struct {
+		name       string
+		handoff    bool
+		autoAttach bool
+	}{
+		{name: "no_handoff", autoAttach: true},
+		{name: "same_identity_handoff_auto_attach_enabled", handoff: true, autoAttach: true},
+		{name: "same_identity_handoff_auto_attach_disabled", handoff: true, autoAttach: false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+			t.Setenv("C3_QUEUE_DIR", t.TempDir())
+			t.Setenv("CLAUDE_CODE_SESSION_ID", "")
+			if tc.handoff {
+				t.Setenv("CLAUDE_CODE_SESSION_ID", "spawn")
+				writeIdentityHandoff(t, "spawn", "conversation-a", 10)
+			}
+
+			mf := reconnectSwitchMappings()
+			mf.AutoAttachOnResume = &tc.autoAttach
+			freshBroker := c3broker.New(mf)
+			t.Cleanup(freshBroker.Shutdown)
+			testChannel := &reconnectSwitchChannel{}
+			if err := freshBroker.RegisterChannel(testChannel); err != nil {
+				t.Fatalf("register T15 channel: %v", err)
+			}
+
+			ctx, cancel := context.WithCancel(context.Background())
+			a := newAdapter()
+			a.runCtx = ctx
+			wireReconnectTestBroker(t, a, freshBroker)
+			t.Cleanup(func() {
+				cancel()
+				if conn := a.currentConn(); conn != nil {
+					_ = conn.Close()
+				}
+			})
+
+			stamp := ""
+			wantBrokerID := ""
+			if tc.handoff {
+				entry := sessionhandoff.Entry{
+					StableSessionID: "conversation-a", CWD: "/projects/a", UnixNano: 10,
+				}
+				establishSettledIdentity(a, entry)
+				stamp = entry.StableSessionID
+				wantBrokerID = entry.StableSessionID
+			}
+			topicA := int64(281)
+			a.rememberAttachForIdentity(rememberedIdentityReq("/projects/a", -100, &topicA, "main"), stamp)
+			a.setAttachedTopic("topic-a")
+
+			if !a.recoverBroker(ctx) {
+				t.Fatal("T15 recoverBroker aborted before reconnecting to the fresh broker")
+			}
+			go a.brokerReader(ctx)
+
+			keyA := c3broker.MakeRouteKey("telegram", -100, &topicA)
+			waitForReconnectClaim(t, freshBroker, keyA, wantBrokerID,
+				"T15 ordinary restart lost the replayed route claim or failed to register the same identity")
+			if tc.handoff {
+				// Seeing the broker-side stable id proves the async refire wrote
+				// its request while holding recoverMu. Wait for that same lock
+				// to be released so this subtest cannot leak a timeout read into
+				// the next test's recoverRespTimeout override under -race.
+				a.recoverMu.Lock()
+				a.recoverMu.Unlock()
+			}
+			attachmentA, ok := freshBroker.Mappings().LookupSessionAttachment("conversation-a")
+			if !ok || attachmentA.TopicID == nil || *attachmentA.TopicID != 281 || attachmentA.Detached {
+				t.Fatalf("T15 ordinary restart damaged the session attachment record: got %+v ok=%v", attachmentA, ok)
+			}
+			requireNoReconnectResumeNotice(t, a, testChannel,
+				"T15 ordinary restart took the identity-switch/recovery arm and emitted a spurious resumed notice")
+		})
+	}
+}
+
+// T16 reproduces D4 end to end: attach succeeded before identity, so its stamp
+// is empty; the handoff then settles that same conversation before a broker
+// restart. Reconnect must replay the route and re-register the stable identity.
+func TestRecoverBroker_AttachBeforeIdentityReplayAndReregisters(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("C3_QUEUE_DIR", t.TempDir())
+	t.Setenv("CLAUDE_CODE_SESSION_ID", "spawn")
+
+	disabled := false
+	mf := reconnectSwitchMappings()
+	mf.AutoAttachOnResume = &disabled
+	delete(mf.SessionAttachments, "conversation-a")
+	freshBroker := c3broker.New(mf)
+	t.Cleanup(freshBroker.Shutdown)
+	testChannel := &reconnectSwitchChannel{}
+	if err := freshBroker.RegisterChannel(testChannel); err != nil {
+		t.Fatalf("register T16 channel: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	a := newAdapter()
+	a.runCtx = ctx
+	wireReconnectTestBroker(t, a, freshBroker)
+	t.Cleanup(func() {
+		cancel()
+		if conn := a.currentConn(); conn != nil {
+			_ = conn.Close()
+		}
+	})
+
+	topicA := int64(281)
+	a.rememberAttachForIdentity(rememberedIdentityReq("/projects/a", -100, &topicA, "main"), "")
+	a.setAttachedTopic("topic-a")
+	writeIdentityHandoff(t, "spawn", "conversation-a", 10)
+	establishSettledIdentity(a, sessionhandoff.Entry{
+		StableSessionID: "conversation-a", CWD: "/projects/a", UnixNano: 10,
+	})
+
+	if !a.recoverBroker(ctx) {
+		t.Fatal("T16 recoverBroker aborted before reconnecting to the fresh broker")
+	}
+	go a.brokerReader(ctx)
+
+	keyA := c3broker.MakeRouteKey("telegram", -100, &topicA)
+	waitForReconnectClaim(t, freshBroker, keyA, "conversation-a",
+		"T16 attach-before-identity reconnect performed no usable replay/re-registration; the route or broker stable id is missing")
+	a.recoverMu.Lock()
+	a.recoverMu.Unlock()
+	attachmentA, ok := freshBroker.Mappings().LookupSessionAttachment("conversation-a")
+	if !ok || attachmentA.TopicID == nil || *attachmentA.TopicID != 281 || attachmentA.Detached {
+		t.Fatalf("T16 fresh broker did not record the attach-before-identity route under the settled stable id: got %+v ok=%v", attachmentA, ok)
+	}
+	requireNoReconnectResumeNotice(t, a, testChannel,
+		"T16 matching attach-before-identity replay was misclassified as a switch/recovery")
 }
 
 // T12 reproduces the broker-restart race from F1 end to end through the real
@@ -510,6 +689,47 @@ func TestReconnectRefire_ReresolvesBeforeAsyncDispatch(t *testing.T) {
 		}
 	case <-time.After(500 * time.Millisecond):
 		t.Fatal("async reconnect refire did not re-register the latest terminal identity")
+	}
+	answerRecover(t, a)
+}
+
+func TestReconnectSupersededSwitchFallsBackToReregistration(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("CLAUDE_CODE_SESSION_ID", "spawn")
+	writeIdentityHandoff(t, "spawn", "conversation-b", 20)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	a := newAdapter()
+	a.runCtx = ctx
+	broker := newRecoveryBroker(t, a)
+	establishSettledIdentity(a, sessionhandoff.Entry{
+		StableSessionID: "conversation-a", CWD: "/projects/a", UnixNano: 10,
+	})
+	a.rememberAttachForIdentity(ipc.AttachReq{Op: ipc.OpAttach, Name: "topic-a"}, "conversation-a")
+
+	// Hold switch execution after restore has decided A→B, then model a
+	// concurrent hook/recovery settling B before that scheduled switch runs.
+	// The switch correctly bails, but reconnect must still register B with the
+	// fresh broker instead of returning after doing neither operation.
+	a.recoverMu.Lock()
+	a.restoreSessionAfterReconnect(ctx)
+	a.setCurrentStableIdentity(sessionhandoff.Entry{
+		StableSessionID: "conversation-b", CWD: "/projects/b", UnixNano: 20,
+	})
+	a.recoverMu.Unlock()
+
+	select {
+	case raw := <-broker.frames:
+		var req ipc.RecoverSessionReq
+		if err := json.Unmarshal(raw, &req); err != nil {
+			t.Fatalf("decode superseded-switch fallback registration: %v", err)
+		}
+		if req.Op != ipc.OpRecoverSession || req.StableSessionID != "conversation-b" {
+			t.Fatalf("superseded reconnect switch re-registered the wrong identity: %+v", req)
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("superseded reconnect switch performed neither replay nor re-registration; the fresh broker never learned conversation-b")
 	}
 	answerRecover(t, a)
 }
