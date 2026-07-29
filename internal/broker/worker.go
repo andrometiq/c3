@@ -82,11 +82,14 @@ type FetchJob struct {
 	// the adapter picks it — so it is caller-controlled length that lands in the
 	// same frame as the messages. The worker needs it because the frame budget
 	// has to size the ACTUAL response, id included; a budget computed without it
-	// under-counts by exactly the number of bytes the caller chose. Empty is
-	// legal (an observe carries no fetch id) and simply costs nothing.
-	RespID   string
-	Lease    *fetchLease
-	ResultCh chan<- FetchResult
+	// under-counts by exactly the number of bytes the caller chose.
+	RespID string
+	// FrameReserve is extra response-envelope weight outside FetchQueueResp.
+	// Observe uses the encoded base ObserveResp as a conservative reserve for
+	// its resolved identity and holder fields; ordinary fetch_queue leaves it 0.
+	FrameReserve int
+	Lease        *fetchLease
+	ResultCh     chan<- FetchResult
 }
 
 // FetchResult carries the pulled messages + remaining count back to the handler.
@@ -1539,6 +1542,16 @@ func (w *RouteWorker) evictIfOverCap(qrk queue.RouteKey) {
 //     frame. That is a fact about that record, and the caller must deal with the
 //     record (see handleFetch's ruling) — not with the queue behind it.
 func fetchFrameFit(respID string, remainingHint int, msgs []c3types.Inbound) (int, error) {
+	return fetchFrameFitReserved(respID, remainingHint, msgs, 0)
+}
+
+// fetchFrameFitReserved applies fetchFrameFit's exact sizing with additional
+// response-envelope weight. Observe uses this because it returns the same
+// messages inside a larger response shape.
+func fetchFrameFitReserved(respID string, remainingHint int, msgs []c3types.Inbound, frameReserve int) (int, error) {
+	if frameReserve < 0 {
+		return 0, fmt.Errorf("fetch_queue: invalid negative frame reserve %d", frameReserve)
+	}
 	envelope := func(m []c3types.Inbound) ([]byte, error) {
 		return json.Marshal(ipc.FetchQueueResp{
 			Op: ipc.OpFetchQueueResult, ID: respID, Messages: m, Remaining: remainingHint,
@@ -1549,9 +1562,9 @@ func fetchFrameFit(respID string, remainingHint int, msgs []c3types.Inbound) (in
 		return 0, fmt.Errorf("fetch_queue: cannot size the response envelope: %w", err)
 	}
 	if len(msgs) == 0 {
-		if len(bare)+1 > ipc.MaxFrameSize {
-			return 0, fmt.Errorf("fetch_queue: the response envelope alone is %d bytes (cap %d) — the echoed id is %d bytes",
-				len(bare)+1, ipc.MaxFrameSize, len(respID))
+		if len(bare)+frameReserve+1 > ipc.MaxFrameSize {
+			return 0, fmt.Errorf("fetch_queue: the response envelope plus %d reserved bytes is %d bytes (cap %d) — the echoed id is %d bytes",
+				frameReserve, len(bare)+frameReserve+1, ipc.MaxFrameSize, len(respID))
 		}
 		return 0, nil
 	}
@@ -1569,10 +1582,10 @@ func fetchFrameFit(respID string, remainingHint int, msgs []c3types.Inbound) (in
 		return 0, nil
 	}
 	arrayCost := len(withOne) - len(bare) - len(first)
-	budget := ipc.MaxFrameSize - 1 - len(bare) - arrayCost // -1: the newline WriteJSON appends
+	budget := ipc.MaxFrameSize - 1 - len(bare) - arrayCost - frameReserve // -1: the newline WriteJSON appends
 	if budget <= 0 {
-		return 0, fmt.Errorf("fetch_queue: the response envelope alone is %d bytes (cap %d) — the echoed id is %d bytes, leaving no room for any message",
-			len(bare)+arrayCost+1, ipc.MaxFrameSize, len(respID))
+		return 0, fmt.Errorf("fetch_queue: the response envelope plus %d reserved bytes is %d bytes (cap %d) — the echoed id is %d bytes, leaving no room for any message",
+			frameReserve, len(bare)+arrayCost+frameReserve+1, ipc.MaxFrameSize, len(respID))
 	}
 	fit, used := 0, 0
 	for i := range msgs {
@@ -1759,7 +1772,7 @@ func (w *RouteWorker) handleFetch(_ context.Context, job *FetchJob) {
 				// again; each pass provably removes one record, so this ends.
 				for len(cand) > 0 {
 					var headFit int
-					headFit, err = fetchFrameFit(job.RespID, total, cand[:1])
+					headFit, err = fetchFrameFitReserved(job.RespID, total, cand[:1], job.FrameReserve)
 					if err != nil || headFit > 0 {
 						break // envelope is unsendable (reported below), or the head is deliverable
 					}
@@ -1779,7 +1792,7 @@ func (w *RouteWorker) handleFetch(_ context.Context, job *FetchJob) {
 				// Budget the notices alongside the records: they ride in the same
 				// frame, so room taken by a notice is room a record cannot have.
 				var fit int
-				if fit, err = fetchFrameFit(job.RespID, total, append(append(make([]c3types.Inbound, 0, len(notices)+len(cand)), notices...), cand...)); err != nil {
+				if fit, err = fetchFrameFitReserved(job.RespID, total, append(append(make([]c3types.Inbound, 0, len(notices)+len(cand)), notices...), cand...), job.FrameReserve); err != nil {
 					return
 				}
 				take := fit - len(notices)
@@ -1804,7 +1817,7 @@ func (w *RouteWorker) handleFetch(_ context.Context, job *FetchJob) {
 		// is still reported, so the caller can tell "nothing queued" apart from
 		// "something is stuck"; the ack path is what actually moves it aside.
 		var fit int
-		if fit, err = fetchFrameFit(job.RespID, total, cand); err != nil {
+		if fit, err = fetchFrameFitReserved(job.RespID, total, cand, job.FrameReserve); err != nil {
 			job.ResultCh <- FetchResult{Err: err}
 			return
 		}

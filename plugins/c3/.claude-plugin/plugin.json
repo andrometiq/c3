@@ -1,6 +1,6 @@
 {
   "name": "c3",
   "description": "C3 — Telegram (multi-channel ready) multiplexer for Claude Code. Per-cwd topic mappings, multi-group, voice transcription, attach proposal flow.",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "keywords": ["telegram", "messaging", "channel", "mcp", "c3"]
 }

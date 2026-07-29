@@ -71,7 +71,7 @@ From there:
 
 ## Durable inbound queue & backlog
 
-Once C3 has *received* a Telegram message it is written to disk before anything else consumes it, and it stays there until a session takes it — even if no CLI is attached, or the broker was down when it later caught up. You don't have to re-forward a voice note or babysit delivery.
+While the durable queue is healthy, once C3 has *received* a Telegram message it is written to disk before anything else consumes it, and it stays there until a session takes it — even if no CLI is attached, or the broker was down when it later caught up. If the queue cannot start, C3 continues in the loud degraded mode described below instead of pretending this promise still holds.
 
 How it works:
 
@@ -87,6 +87,7 @@ Everything above is a promise C3 can only keep while it has a queue. Without one
 
 - **At startup** — a warning to your Telegram DM, plus a system advisory to any live CLI session.
 - **On `/status`** — a `⚠️ ... durable queue is DISABLED` line on both the per-topic and the global summary, so the reassuring `0 queued · broker up` can never stand alone.
+- **In `c3-broker status`** — the same persistent `durable queue: DEGRADED` warning appears in the one-shot shell summary for as long as this broker is running without its queue.
 - **On every hold** — the auto-reply becomes *"⚠️ NOT held — that message was dropped."* instead of *"📨 Held — nothing lost."* It is deliberately on the slower 5-minute-per-topic cooldown rather than the 10-second held-notice window: the warning is the same sentence every time, and repeating it through a burst is how an alert gets ignored.
 - **In `broker.log`** — the `durable inbound hold DISABLED for this run` line at startup, then a `DROPPED — durable queue disabled` line for every dropped message, carrying the sender and the text (truncated to 200 characters). Not a substitute for the queue, but enough to know what you missed.
 
@@ -96,10 +97,10 @@ The fix is to make the queue directory (`$XDG_STATE_HOME/c3/queue/`, fallback `~
 
 Your CLI agent retrieves held messages with the `fetch_queue` MCP tool (both Claude Code and Codex have it):
 
-- `limit` — how many oldest messages to pull. Default **3**, max **50**, or the string `"all"` to drain everything. Small batches let the agent process carefully one group at a time; `"all"` is for bulk catch-up.
+- `limit` — how many oldest messages to pull. Default **3**, max **50**, or the string `"all"` to drain everything. Small batches let the agent process carefully one group at a time. Every response, including a finite limit, is frame-budgeted and may return only a prefix (for example, three records) with `remaining > 0`; call again until `remaining` is zero.
 - `ack` — default **true**, which *consumes* the messages (walks the cursor forward; the queue files are deleted once fully drained). Pass `ack=false` to *peek* without consuming.
 
-Each returned message carries full content — sender, kind, timestamp, the text or voice transcript, any quote-reply context, and attachments (each with `file_id`) — plus `remaining`, the count still queued.
+Each returned record normally carries sender, kind, timestamp, text or voice transcript, quote-reply context, and attachments (each with `file_id`), plus `remaining`, the count still queued. Two bounded exceptions are deliberate: a record above the 1 MiB queue-record cap has truncated text with an in-band marker; a legacy record that cannot fit in any 4 MiB IPC response is moved aside and replaced in position by a broker-authored notice carrying the original identity but **no original content**. The full original is retained only when `.trash/` retention is available; otherwise the marker or notice says no copy was kept. Treat the notice as an operational warning, not as what the sender said. Adapter authors: the response correlation id is also capped at 1 KiB because it shares this frame.
 
 ### Fixing a failed transcription — the `retranscribe` tool
 
@@ -130,6 +131,7 @@ between topics. Full grammar and the authorization matrix:
 ### Limits
 
 - Per-route cap: **1000 messages OR 14 days**, whichever comes first. On overflow the oldest held messages are dropped, logged to `broker.log`, **and** announced in the topic (*"⚠️ queue full — dropped N oldest held message(s); attach a session soon."*) — never a silent truncation.
+- Per-record cap: **1 MiB encoded JSON**. The queue retains the full original in `.trash/` first, then stores a truncated record with an in-band marker so the route can continue rather than redelivering the same unwriteable record forever. If retention is disabled, the marker says that the removed text was not kept.
 - **24-hour Telegram bound (outside C3's control).** Telegram itself keeps undelivered updates for at most 24 hours. C3 can only queue what it has actually received, so a gap longer than 24 hours with **no broker polling anywhere** loses messages at Telegram's level before C3 ever sees them. Keeping a broker polling (the opt-in `systemd --user` unit helps) is the only guard against that window.
 
 ### Safe draining — named nudges and the confirmed-route guard
@@ -151,11 +153,12 @@ Nothing ever leaves the queue by hard delete. When a route drains — the right 
 >
 > If that line is present, the recovery steps below do not apply until you clear the `.trash/` obstruction and **restart the broker** (retention state is decided once, at `NewStore`).
 
-The trash lives beside the queue, at `$XDG_STATE_HOME/c3/queue/.trash/` (fallback `~/.local/state/c3/queue/.trash/`). Three kinds of file appear there:
+The trash lives beside the queue, at `$XDG_STATE_HOME/c3/queue/.trash/` (fallback `~/.local/state/c3/queue/.trash/`). Four kinds of file appear there:
 
 - **A retired drain pair** — `<base>.<stamp>.jsonl` is the full line history at the moment of the drain, and `<base>.<stamp>.cur` is the pre-drain cursor. The pair shares one `<stamp>` (a UnixNano timestamp). `<base>` is the route-key filename — `<channel>__<chat_id>__<topic|none>`, e.g. `telegram__-100__none` for a DM/no-topic route, or `telegram__-1001234__948` for topic 948.
 - **An evict snapshot** — `<base>.<stamp>.evicted.jsonl` holds lines dropped by the per-route cap/age eviction (never a whole drain).
 - **A quarantined corrupt line** — `<base>.<stamp>.corrupt.jsonl` holds the **raw bytes** of one or more lines the queue could not parse, copied out before they were removed from the live queue. The usual cause is a write cut short by a full disk or a power cut, and the fragment may be part of a real message. The removal is also logged to `broker.log` (`removed N unparseable line(s) …`), so this never happens silently.
+- **An oversize original** — `<base>.<stamp>.oversize.jsonl` holds a full record that exceeded the 1 MiB append bound before the queued copy was truncated. A legacy record too large for any IPC frame is also moved aside under this retention policy; the session receives an identity-preserving notice rather than its content, and the topic receives `⚠️ N message(s) were too large…` so the set-aside is visible.
 
   > **These are NOT valid queue records — never feed one back into a live queue.** Read the file by hand to see what the fragment was. Concatenating it into `<base>.jsonl` (as the step-3 recipe below does for a *retired* `.jsonl`) would inject an unparseable line into a healthy queue, which the store would then have to quarantine all over again.
 
@@ -192,7 +195,7 @@ Configure multiple Telegram supergroups in `mappings.json`:
 }
 ```
 
-`attach` and `attach <name>` default to `main`. `attach --group=work <name>` targets the work group. The broker records the chosen group against the session, so resuming that session re-attaches to the right group.
+`attach` and `attach <name>` default to `main`. An agent can target the work group with structured MCP arguments such as `attach(name="<name>", group="work")`; there is no shell-style `--group` parser. The broker records the chosen group against the session, so resuming that session re-attaches to the right group.
 
 Each group needs the bot as an admin with `Manage Topics`.
 
@@ -208,6 +211,8 @@ $ codex
 The `codex` command goes through the C3 launcher, which spawns a Codex app-server, registers the C3 MCP adapter, and launches the visible TUI bound to that app-server. A bare `attach` from Codex shows the picker with `widget` ranked first — but marked **held by** the Claude session, so you're warned instead of silently stealing it. To take over, `/exit` the Claude session to drop the claim (`c3-broker release <cwd>` is on the roadmap but stubbed in v1), then `attach` from Codex.
 
 If you want Claude and Codex on different topics in the same group, attach Codex to a different topic explicitly: `attach(name="widget-codex", create=true)`. The broker creates that as a sibling topic in the group, and Codex remembers it for that session's future resumes.
+
+Recovery ids are scoped by CLI family. If two hosts happen to issue the same opaque session id, Claude's remembered topic and Codex's remembered topic remain separate; an old unqualified record can be adopted by at most one family.
 
 ## Editing mappings.json by hand
 
@@ -226,7 +231,7 @@ C3 doesn't auto-delete. From your phone (Telegram), long-press the topic in the 
 
 ## When things go wrong
 
-- **No CLI is attached, but messages keep arriving** — they're held, not dropped. They go into the durable queue and you get a held-notice reply (cooldown 5 min) with the running count; send `/status` to check depth. Open a session in the project directory and `attach`, and the agent retrieves the backlog with `fetch_queue`. See "Durable inbound queue & backlog" above.
+- **No CLI is attached, but messages keep arriving** — check `/status`. With a healthy queue they are held and the healthy notice is rate-limited to once per topic per 10 seconds; open a session, `attach`, and drain them with `fetch_queue`. If status says the durable queue is disabled, they are dropped and the explicit loss warning uses the slower 5-minute cooldown. See "Durable inbound queue & backlog" above.
 - **`attach` says the topic is held** — `topics` lists who. If it's a stale claim (the holder crashed), the broker now sweeps dead-pid holders on dispatch (2026-05-14 fix); just retry `attach`. If that doesn't free it, quit Claude Code and relaunch — the new session's broker auto-spawn starts clean. Don't bounce the broker from inside CC (killing the broker also kills this session's MCP server, requiring a manual `/mcp` reconnect). From an external terminal, `pkill c3-broker` works. For mappings.json edits, `/c3:reload-config` is non-disruptive.
 - **Voice transcription is wrong or failed** — never re-record. The original audio is saved; the CLI can `download_attachment` to re-listen, or `retranscribe` to re-run STT (e.g. once a flaky provider recovers). On an outright STT failure the agent sees a self-documenting message telling it exactly how to recover. The STT plugin's confidence isn't surfaced in v1; treat the transcript as a hint when accuracy matters.
 - **Typing indicator** — the broker now auto-pulses a typing indicator on a route while the agent is working, once that session has replied at least once in the topic (the signal you're in an active Telegram conversation). It stops when the agent sends its reply, or after a safety timeout. A brand-new topic shows no typing until the agent's first reply, and default-CLI-mode sessions (that never reply to Telegram) never pulse it.
@@ -316,10 +321,10 @@ This release changes how a session binds to a topic. Three user-visible changes:
   chooses explicitly, rather than silently claiming whatever the cwd mapping
   pointed at. cwd only *seeds* the suggestions. After you pick once, future
   resumes are silent (per the first change above).
-- **Codex no longer auto-attaches at startup.** Codex sessions start unattached
-  and attach explicitly (a bare `attach` lands on the picker). The old
-  launch-time silent bind — which could claim a topic inferred from the
-  directory name — is gone.
+- **Codex no longer guesses an attachment at startup.** A fresh Codex session
+  starts unattached and a bare `attach` opens the picker. A resumed Codex
+  session still recovers its own remembered topic from its CLI-scoped stable
+  identity. The old launch-time cwd guess is gone.
 - **Restart your running CLI sessions after updating.** An old in-process adapter
   that replays a bare `attach` onto the freshly-restarted broker can land on the
   new picker (a discarded proposal, not a claim) and stay detached until you run a
@@ -331,4 +336,4 @@ This release changes how a session binds to a topic. Three user-visible changes:
 - The bot token is in `mappings.json` at mode 600. Treat it like a password.
 - Anyone in your Telegram supergroup can send messages that hit your CLI. The `master_user_id` field in `mappings.json` is plumbed for future per-user access control; today, the bot trusts everyone in the group. Use private supergroups.
 - C3 doesn't store message history beyond what's needed for routing. If you want a message log, set up Telegram's own export, or write a plugin that subscribes to `OnInbound` and writes to a file.
-- The Codex bridge spawns app-servers. They're long-lived processes that hold MCP servers loaded; they listen on `127.0.0.1` only (not exposed to the network). If you `pkill codex-app-server` everything cleans up.
+- The Codex bridge spawns app-servers. They're long-lived processes that hold MCP servers loaded; they listen on `127.0.0.1` only (not exposed to the network). Concurrent launchers serialize port selection and child readiness with a per-user runtime-directory lock, and each child starts on an OS-assigned ephemeral port. If you `pkill codex-app-server` everything cleans up.

@@ -1,8 +1,8 @@
 # TODO — C3 v0.1 release
 
-The v0.1 finish line — only what is still open and still blocking the tag or the
-public push. Shipped history is in git; future and unbuilt work lives in
-[`ROADMAP.md`](ROADMAP.md).
+The v0.1 finish line — open release work across code, documentation, tests,
+packaging, and human verification that blocks the tag or release safety. Shipped
+history is in git; future and unbuilt work lives in [`ROADMAP.md`](ROADMAP.md).
 
 ## Release gates
 
@@ -19,22 +19,22 @@ Need a live human tap — run these in a real Telegram session before the tag:
       (post-restart broker at 32f5c7d; tapped choice returned as the tool result)
 - [ ] Permission-relay live-verify: a real Claude Code permission prompt → approve/deny over
       Telegram. **Cannot fire from an auto-approve session** (no prompt exists to relay — two
-      forced probes auto-ran, broker log shows no registration). Run in the maintainer's RC2
+      forced probes auto-ran, broker log shows no registration). Run in the maintainer's final
       test session under normal permission mode: first non-allowlisted tool call relays; one
-      Allow tap closes this. Mechanism last fully verified live 2026-07-12 on pre-RC2 code.
+      Allow tap closes this. Mechanism last fully verified live 2026-07-12 on earlier code.
 - [x] Smoke-test visual tails (expandable show-more; inline-button callback) — **PASSED
       2026-07-29** (expandable `||` blockquote collapsed + expanded; inline-button callback
       proven by the `ask` taps). Note: first attempt was a mis-authored test — a plain `>`
       quote renders full-length BY DESIGN; expandable must be requested with the `||`
       terminator (format.go) or comes automatic in voice readbacks.
 
-Post-first-tag — the binaries only exist once the release workflow runs on a tag:
+Post-v0.1.0 publication — the stable release must exist before these can run:
 
-- [ ] Fresh-machine install validation (public-push blocker)
+- [ ] Fresh-machine install validation against the published stable artifacts
 - [ ] Auto-update live end-to-end verify: status-line notice → `/c3:update` →
       checksum-verified atomic swap, against a real published release
 
-## Pre-tag polish (non-blocking SEV3s from the RC2 cross-review rounds, 2026-07-29)
+## Pre-tag polish (non-blocking SEV3s from the cross-review rounds, 2026-07-29)
 
 - [ ] Mutation-coverage gap: `voiceFetchFailedOpening` is in the production opening table
       (`internal/broker/worker.go`) but the re-derived segment-replace unit table no longer

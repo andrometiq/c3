@@ -19,7 +19,7 @@ If what you want is a new transcription engine, you almost certainly want the ST
 
 ## Hook points — what fires, and what doesn't
 
-`plugin.Host` (`internal/plugin/host.go:18`) declares five subscription methods. **Three are live. Two are declared but never invoked by the broker in v0.1.0.** They remain on the interface, so you will see them if you read `host.go`; this table is the authority on which ones actually run.
+`plugin.Host` (`internal/plugin/host.go:18`) declares four callback subscription methods plus the `RegisterTools` registration seam. **Two callbacks are live. Two are declared but never invoked by the broker in v0.1.0.** They remain on the interface, so you will see them if you read `host.go`; this table is the authority on which ones actually run.
 
 | Hook | Status in v0.1.0 | Semantics |
 |---|---|---|
@@ -134,7 +134,7 @@ Anything else under `plugins.<name>` is yours.
 
 ## Persistent state
 
-`host.State(name)` returns a JSON-backed `StateDir` (`Load`/`Save`) rooted at `$XDG_STATE_HOME/c3/state/<name>/`, falling back to `~/.local/state/c3/<name>/` when `XDG_STATE_HOME` is unset. Writes are atomic (temp file, fsync, rename, dir fsync). Keep entries small — under a megabyte, easily regenerable.
+`host.State(name)` returns a JSON-backed `StateDir` (`Load`/`Save`) rooted at `$XDG_STATE_HOME/c3/state/<name>/`, falling back to `~/.local/state/c3/state/<name>/` when `XDG_STATE_HOME` is unset. Writes are atomic (temp file, fsync, rename, dir fsync). Keep entries small — under a megabyte, easily regenerable.
 
 `host.CacheDir(name)` returns a path under `$XDG_CACHE_HOME/c3/<name>/` (fallback `~/.cache/c3/<name>/`) for anything large or disposable — model weights, indices. The directory is not created for you.
 
@@ -157,7 +157,7 @@ Arg and result types live in `internal/c3types`.
 
 ## Tools: registered but not dispatched in v0.1.0
 
-`host.RegisterTools` hands your callback a registry with `Add`/`Remove`/`List`. `Add` stores the tool in the host's map. **Nothing else in the broker reads that map**, no adapter queries it, and there is no wire op to fetch plugin tools. Tool dispatch is a fixed switch over seven built-in names (`reply`, `react`, `edit_message`, `send_typing`, `poll`, `stop_poll`, `download_attachment`) with `unknown tool %q` as the default (`internal/broker/dispatch.go:19-38`).
+`host.RegisterTools` hands your callback a registry with `Add`/`Remove`/`List`. `Add` is **first-writer-wins**: a held name is refused, the incumbent remains, and the only signal is a broker-log line. Prefix tool names with your plugin name (for example, `<plugin>_<verb>`) to avoid collisions. **Nothing else in the broker reads that map**, no adapter queries it, and there is no wire op to fetch plugin tools. Tool dispatch is a fixed switch over seven built-in names (`reply`, `react`, `edit_message`, `send_typing`, `poll`, `stop_poll`, `download_attachment`) with `unknown tool %q` as the default (`internal/broker/dispatch.go:19-38`).
 
 So a plugin-registered tool is never listed to any CLI and is never routable. The shipped counter-example is instructive: STT's `retranscribe` is not a plugin tool at all — it is a dedicated IPC op (`ops.go:35`, `handler.go:157`), because that's what works today.
 

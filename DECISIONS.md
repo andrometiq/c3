@@ -1,63 +1,199 @@
 # Decisions
 
-## D001: Architecture — Daemon + MCP Stubs
-**Date:** 2026-04-15
-**Decision:** Use a single daemon process that owns the bot token and polls Telegram, with thin MCP stubs (one per CLI) connecting via unix socket.
-**Why:** Telegram enforces one getUpdates poller per bot token. Can't have multiple plugins polling the same bot. The daemon centralizes polling, and stubs distribute messages.
+Entries are newest first. This is the public architecture record: it records
+rulings and rationale, never private operational details.
 
-## D002: Telegram Topics as Primary Routing
-**Date:** 2026-04-15
-**Decision:** Use Telegram group topics as the primary routing mechanism. One topic = one CLI instance.
-**Why:** Topics provide visual separation in Telegram UI. Users can see which "terminal" they're talking to. Group creation is free and topics are lightweight.
+## D017: Final release discipline — independent review, then a direct v0.1.0 release
 
-## D003: STT Built Into Daemon
-**Date:** 2026-04-15
-**Decision:** Voice transcription (speech-to-text, STT) runs in the daemon, not patched into each MCP stub.
-**Why:** Centralizes STT — one place to maintain, no patching needed. The daemon transcribes before routing, so stubs always receive text.
+**Date:** 2026-07-29
 
-## D004: Use the Predecessor Bot's Message Tool as Spec Reference
-**Date:** 2026-04-15
-**Decision:** Use a predecessor TypeScript Telegram bot's messaging system features as a reference spec, not its code. Adapt concepts (dedup, debouncing, session routing, access control) for our Telegram-centric model.
-**Why:** The predecessor bot has solved many of the same problems. No need to reinvent — but we only need Telegram, not all-platform support.
+**Decision:** Code authors and reviewers must be from different model families;
+a finding remains open until a review explicitly passes it. After the remaining
+release blockers and final audits, v0.1.0 is released directly rather than via a
+second release candidate.
 
-## D005: Project Name — C3 (C-cubed)
-**Date:** 2026-04-15
-**Decision:** Project named C3, pronounced "C-cubed". The name now reads as **C³ — Command, Control, Communications** (the multiplexer maps 1:1 to that triad; see README). It started life as an initialism for "Claude Code Claw" when the project was a single-instance remote-control; that backstory is retired as C3 grew into a multi-CLI, multi-channel broker.
+**Why:** Independent review found real release blockers that the implementing
+lane had missed. A further candidate is not a substitute for closing those
+findings and running the final release checks on the exact tree.
 
-## D006: Go for Daemon and MCP Stubs
-**Date:** 2026-04-15
-**Decision:** Write the entire C3 system in Go — daemon and MCP stubs. Official Go MCP SDK exists (Tier 1, v1.0.0).
-**Why:** Python and JS consume too much memory and CPU for a long-running daemon. Go is efficient, compiles to a single binary, and is well-suited to long-running daemon work. Low resource footprint matters since this runs alongside multiple CLI instances.
+## D016: Ask the bot server; do not hardcode a voice-download limit
 
-## D007: Pluggable Transport Layer
-**Date:** 2026-04-15
-**Decision:** Design the daemon with a pluggable transport interface from the start. Telegram is first, but web chat (magic-link URLs) and voice mode are planned.
-**Why:** Future use cases include browser-based sessions, voice-only mode (driving), and live CLI view. Architecting the transport boundary now avoids rewriting the core later.
+**Date:** 2026-07-29
 
-## D008: Use Official Go MCP SDK
-**Date:** 2026-04-15
-**Decision:** Use `github.com/modelcontextprotocol/go-sdk` for MCP stub implementation.
-**Why:** Official Tier 1 SDK, maintained by Anthropic/MCP org + Google. Supports stdio transport, tool registration, and custom notifications (needed for `notifications/claude/channel`). Maximum compatibility with Claude Code.
+**Decision:** C3 asks the configured Bot API server whether it will serve an
+attachment and reports that answer. It does not impose a baked-in size ceiling;
+server refusals are shown transparently and notices do not suggest re-recording.
 
-## D009: Go implementation landed
-**Date:** 2026-05-09
-**Decision:** The full v3 Go rearchitecture is the active C3 codebase. It honors D006 (Go for daemon and stubs) and D008 (official Go MCP SDK), reactivates D007 (pluggable transport — multi-channel from day one in the data model), and adds a plugin extension system the original direction implied but didn't formalize.
+**Why:** A deployment's server is authoritative and may have different limits.
+A local threshold can reject a file the configured server would serve, while a
+generic transcription failure hides the actual, actionable cause.
 
-**Structural choices baked in:**
-- Single Go module. Four binaries: `c3-broker`, `c3-claude-adapter`, `c3-codex-adapter`, `migrate-legacy`.
-- Telegram channel: cleanroom Go via `gotgbot/v2` rc.34.
-- IPC: typed Go structs + Op constants + writer-mutex'd `*ipc.Conn`.
-- Routing: value-typed `RouteKey` so the channel/chat/topic triple is map-safe.
-- Per-route serial executor: one goroutine per `(channel, chat_id, *topic_id)` owns the inbound pipeline + outbound calls + placeholder/typing state.
-- Mappings file: single XDG path `~/.config/c3/mappings.json` (mode 0600, atomic-rewrite with one-generation `.bak`).
-- Multi-group, attach proposal flow with cross-group disambiguation, cooldown-fallback, debounce + cap, manual JSON-RPC framing for `notifications/claude/channel`.
-- Plugin host with five hook points; STT is the only built-in plugin in v1, shelling out to a bundled Python pipeline (Gemini 3 Flash → Sarvam Saaras v3) shipped at `plugins/c3/stt/`. Users can override via `mappings.json:plugins.stt.handler_path`.
+## D015: Degraded durability uses posture B — continue loudly
+
+**Date:** 2026-07-27
+
+**Decision:** If the durable queue cannot start, keep the broker running but
+make the loss mode explicit through startup, status, hold-notice, and log
+surfaces. A fail-fast alternative was considered; the loud-degrade ruling
+stands.
+
+**Why:** Refusing to advance an unpersisted source update can wedge all inbound.
+Continuing has a real loss cost, so it is acceptable only when every affected
+surface makes that cost impossible to mistake for normal durable delivery.
+
+## D014: Frozen describes wire shape, not an implementation requirement
+
+**Date:** 2026-07-27
+
+**Decision:** A frozen operation promises stable fields and meanings; it does
+not automatically require every adapter to implement that operation. Incomplete
+session identity is accepted for a live connection but must never match another
+connection or receive persistence privileges.
+
+**Why:** Optional frozen conveniences remain useful without becoming a false
+compatibility burden. Likewise, rejecting an incomplete hello would not make an
+identity safe; accepting it while refusing cross-connection matching preserves
+ordinary use without guessing ownership.
+
+## D013: Preserve oversize records before making the live queue usable
+
+**Date:** 2026-07-27
+
+**Decision:** When trash retention is available, a record that cannot fit in a
+response frame is retained outside the live queue and represented to the
+session by an identity-preserving notice. At append time, an over-bound record
+is retained first when possible, then truncated with an in-band marker rather
+than rejected. Without retention, the marker or notice says no copy was kept.
+
+**Why:** Leaving an impossible head record blocks every later message; silently
+truncating misrepresents user content; rejecting it causes the source to replay
+the same unwriteable record forever. Retain-first plus an explicit marker keeps
+the route moving without concealing the loss boundary.
+
+## D012: A Codex launcher never adopts another app-server
+
+**Date:** 2026-07-26
+
+**Decision:** A launcher starts its own app-server rather than adopting a
+reachable existing one. A busy or lost port costs a retry, not a session merge.
+
+**Why:** Launch context is a description, not a unique session identity. Sharing
+an app-server based on matching launch attributes can cross-deliver two
+independent conversations.
 
 ## D011: Codex bridge implemented in Go
+
 **Date:** 2026-05-09
 
-**Decision:** The Codex bridge is implemented in Go. The active Codex path is `cmd/codex/main.go` launcher + `cmd/c3-codex-adapter/main.go` MCP adapter + `c3-broker install-codex-shim`.
+**Decision:** The Codex bridge is implemented in Go. The active path is the
+`codex` launcher, `c3-codex-adapter` MCP adapter, and the broker's installation
+support for that launcher.
 
-**What changed:** `codex` launches interactive sessions through a local Codex app-server with `c3-codex-adapter` injected into both the app-server and visible TUI config. The adapter speaks the Go broker IPC, exposes Codex tools, and forwards inbound Telegram messages to Codex as app-server turns over WebSocket. `install-codex-shim` installs symlinks into `~/.local/bin` and Node-manager bin directories.
+**Why:** It keeps the single-broker architecture while supporting Codex as an
+adapter front-end.
 
-**Why:** Keeps the single-broker architecture (one Telegram poller per bot token) while supporting both Claude Code and Codex as adapter front-ends.
+## D010: Superseded by D011
+
+**Date:** 2026-05-09
+
+**Decision:** Retired.
+
+**Why:** D011 is the active Codex-bridge decision.
+
+## D009: Go implementation landed
+
+**Date:** 2026-05-09
+
+**Decision:** The full v3 Go rearchitecture is the active C3 codebase. It
+honors D006 and D008, reactivates D007, and formalizes the plugin extension
+system.
+
+**Structural choices baked in:**
+
+- One Go module and nine release binaries: `c3-broker`, five CLI adapters,
+  `codex`, `claude-shim`, and `migrate-legacy`.
+- Telegram channel implementation in Go; typed IPC structs and operations; and
+  a value-typed route key.
+- One serial executor per route for inbound, outbound, and presentation work.
+- One atomic, user-scoped mappings file with a recovery copy.
+- Multi-group attach proposals, cooldown-aware routing, and manual JSON-RPC
+  framing for CLI notifications.
+- Four declared plugin hook callbacks, two invoked in v0.1.0; STT is the
+  shipped built-in plugin.
+
+## D008: Use Official Go MCP SDK
+
+**Date:** 2026-04-15
+
+**Decision:** Use `github.com/modelcontextprotocol/go-sdk` for MCP stub
+implementation.
+
+**Why:** It supports stdio transport, tool registration, and the custom
+notifications C3 needs while retaining broad compatibility.
+
+## D007: Pluggable transport layer
+
+**Date:** 2026-04-15
+
+**Decision:** Design the daemon with a pluggable transport interface from the
+start. Telegram is first; other transports remain future work.
+
+**Why:** A transport boundary avoids rewriting the broker when other chat
+surfaces are added.
+
+## D006: Go for daemon and MCP stubs
+
+**Date:** 2026-04-15
+
+**Decision:** Write the C3 system in Go.
+
+**Why:** It keeps the long-running broker efficient, deployable as a single
+binary, and suitable for the concurrency model.
+
+## D005: Project name — C3
+
+**Date:** 2026-04-15
+
+**Decision:** The project is C3, pronounced “C-cubed”: Command, Control,
+Communications.
+
+**Why:** The name describes the multiplexer’s three responsibilities.
+
+## D004: Use the predecessor bot's message tool as a reference
+
+**Date:** 2026-04-15
+
+**Decision:** Use a predecessor bot's messaging features as a reference spec,
+not as source code.
+
+**Why:** Reuse proven concepts while keeping C3's Telegram-centric model and
+implementation independent.
+
+## D003: STT built into the daemon
+
+**Date:** 2026-04-15
+
+**Decision:** Speech-to-text runs in the daemon rather than being patched into
+each MCP stub.
+
+**Why:** It centralizes transcription and gives every adapter text-first inbound
+messages.
+
+## D002: Telegram topics as primary routing
+
+**Date:** 2026-04-15
+
+**Decision:** Use Telegram group topics as the primary routing mechanism: one
+topic per CLI instance.
+
+**Why:** Topics give people a visible, lightweight separation between sessions.
+
+## D001: Architecture — daemon plus MCP stubs
+
+**Date:** 2026-04-15
+
+**Decision:** Use one daemon that owns the bot connection and thin per-CLI MCP
+stubs that connect to it over a local socket.
+
+**Why:** The daemon centralizes channel polling while the stubs distribute
+messages to concurrent CLI sessions.

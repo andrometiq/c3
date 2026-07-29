@@ -49,7 +49,12 @@ A strict parser is the natural implementation here and it is **wrong**. A tagged
 
 `hello` and `hello_ack` both carry an optional `protocol_version` integer. The current version is **1**. An absent or zero value means version 1 — the first C3 releases shipped no version field at all.
 
-**C3 never refuses a connection over a version mismatch.** Both sides log a warning naming the disagreement and carry on. Your adapter should do the same: compare, log if different, proceed.
+**C3 keeps a mismatched connection open, but it does not let an unknown dialect mutate ownership or durable state.** Both sides log a warning naming the disagreement. The broker has an explicit state-change compatibility window, currently **v1 through v1**. Outside it, safe/read-only and additive operations remain usable, including `fetch_queue` with `ack:false`, while these operations fail closed:
+
+- ownership: `attach`, `release`, `recover_session`
+- destructive delivery: `fetch_queue` with `ack:true`, `inbound_delivered`
+
+The broker answers each refusal in that operation's response shape where one exists (`attached`, `fetch_queue_result`, `recover_session_result`), or with `error` for normally one-way operations. Those refusal errors are the version-mismatch exception to the usual no-response rule for `release` and `inbound_delivered`. Do not close the connection: surface the error and restart the CLI so its adapter and broker come from the same C3 build.
 
 The bump rule, so you know what a bump means: the version increments only on a change a peer speaking the other version could **misinterpret** — renaming or removing a field, changing a field's type/units/meaning, changing what an existing op does, or making previously-optional behaviour mandatory. It is **not** bumped for a new optional field or a brand-new op.
 
@@ -100,7 +105,7 @@ The correct shape is **one dedicated reader task** that dispatches every frame b
 - Ops that carry a correlation `id` — `tool_call`/`tool_result`, `fetch_queue`/`fetch_queue_result`, `retranscribe`/`retranscribe_result`, `observe`/`observe_result` — are matched on that id. Generate it yourself; the broker echoes it verbatim.
 - `ask_register`/`ask_registered`/`ask_result` are matched on `ask_id`; `permission_request`/`permission_verdict` on `request_id`.
 - **`attach`/`attached`, `list_topics`/`topics_list`, and every op in the CLI-client section carry no correlation id** and are matched **by op alone**. Keep at most one of each in flight per connection. (An optional `id` may be added additively in a future version; until then, serialise them.)
-- `release`, `inbound_delivered`, `permission_request`, and `bye` get **no reply on any path**. Do not await one — you will deadlock.
+- On a compatible dialect, `release`, `inbound_delivered`, `permission_request`, and `bye` get **no reply on their normal path**. Do not await one — you will deadlock. An incompatible `release` or `inbound_delivered` is refused with `error`; your demux reader handles that unsolicited frame.
 
 On a broker drop, wake every pending request with an error so the host CLI's tool calls don't hang.
 
@@ -248,7 +253,8 @@ A `tool_call` before any attach returns `error.message = "tool_call before attac
 #### `inbound` — unsolicited push
 
 ```json
-{"op":"inbound","inbound":{ /* PascalCase message object */ },"pending":2,"covered":3}
+{"op":"inbound","inbound":{ /* PascalCase message object */ },"pending":2,"covered":3,
+ "delivery_token":"<opaque broker token>"}
 ```
 
 | field | type | notes |
@@ -256,6 +262,7 @@ A `tool_call` before any attach returns `error.message = "tool_call before attac
 | `inbound` | object | the normalised message. **PascalCase keys** — see the payload shape below. |
 | `pending`? | int | messages **still queued after** the lines this push covered, i.e. backlog this push did *not* deliver. Surface it (e.g. "(N pending — call fetch_queue)") so a stuck item is visible on this push, not only at the next re-attach. |
 | `covered`? | int | how many durable queue lines this (possibly **merged**) push covers. A debounced batch of N stored lines arrives as **one** notification with `covered: N`. Defaults to 1 when absent. **You must echo this back.** |
+| `delivery_token`? | string | opaque broker-minted identity for this exact pushed route and durable record set. Echo it unchanged in `inbound_delivered`. Empty means a legacy broker; never invent one. |
 
 The `inbound` object's fields (PascalCase, exactly as written):
 
@@ -266,16 +273,18 @@ The `inbound` object's fields (PascalCase, exactly as written):
 - `DrainedFrom`? — provenance when the line was moved in by a drain; empty for organic messages.
 - `V`? — record-format version. **Absent or 0 means version 1.** Direct marshaling and legacy queue rewrites preserve an absent key; a **new** durable queue append stamps `V:1` on a copy of the record. That stamp is additive and old-reader-compatible, but it means a newly appended record is not promised to remain byte-identical to its unstamped input. **Readers MUST NOT reject a higher value** — a newer writer sharing a socket or queue directory with an older reader is a normal partially-updated install, and hard-failing turns cosmetic skew into lost messages. Best-effort decode.
 - `ConvKind`? — `"dm"` or `"group"` as stated by the channel. Empty means the channel didn't say.
+- `Edited`? — set **only by the channel** when this is a new version of an already-delivered message. An edit reuses `MessageID`, has `Edited: true`, and carries new `Text`; it is not a duplicate. Never deduplicate inbound records on `MessageID`: the broker preserves occurrences for one id in FIFO order so the original and its correction can both be delivered.
 
 `ChatID` sign convention follows Telegram's: positive = user/DM, negative = group, `-100…` = supergroup.
 
 #### `inbound_delivered` — the acknowledgement you must not skip
 
 ```json
-{"op":"inbound_delivered","update_id":<Inbound.MessageID>,"ok":true,"count":<covered>}
+{"op":"inbound_delivered","update_id":<Inbound.MessageID>,"ok":true,
+ "count":<covered>,"delivery_token":"<same token from inbound>"}
 ```
 
-**No response.** See [The inbound delivery contract](#the-inbound-delivery-contract) below — this is the single highest-consequence thing in the document and it gets its own section.
+**No response on the normal compatible path.** An incompatible dialect gets the uncorrelated `error` described under Protocol version. See [The inbound delivery contract](#the-inbound-delivery-contract) below — this is the single highest-consequence thing in the document and it gets its own section.
 
 #### `fetch_queue` → `fetch_queue_result`
 
@@ -288,10 +297,11 @@ The durable-queue drain. Every adapter exposes this as a tool; for a CLI with no
 
 | field | type | notes |
 |---|---|---|
-| `limit`? | int | oldest-first batch cap. The built-ins default to 3 and cap at 50. |
-| `all`? | bool | overrides `limit`; drains everything. |
+| `id` | string | caller-generated correlation id, echoed in the response. It is limited to **1 KiB UTF-8 bytes** because it shares the response frame with the messages; an over-limit id is refused without consuming anything. |
+| `limit`? | int | oldest-first batch cap. The built-ins default to 3 and cap at 50. Every finite limit is still subject to the one-frame response budget; keep calling until `remaining` is zero. |
+| `all`? | bool | overrides `limit`, still subject to the same one-frame response budget. |
 | `ack` | bool | `true` **consumes** (advances the cursor, deletes files when drained); `false` **peeks**. Not optional — send it explicitly. |
-| `messages`? | array | full content, oldest first. |
+| `messages`? | array | oldest first. Normal records carry their stored content. A record that can never fit in an IPC frame is moved aside and replaced **in position** by a broker-authored notice with the original identity and no original content; do not treat that notice as a user message. |
 | `remaining` | int | still queued after this batch. |
 | `err`? | string | set (and `messages` nil) on failure, e.g. no route claimed. |
 
@@ -327,7 +337,8 @@ Semantics that are not obvious:
 
 - It is sent **after** `hello`, on the existing connection — not during the handshake. The stable session id is delivered by a host `SessionStart` hook that fires roughly two seconds after the adapter spawns.
 - The id you send is the **stable, resumable transcript id**, which on Claude Code is **not** the value of the `CLAUDE_CODE_SESSION_ID` environment variable. That variable is an *ephemeral per-MCP-spawn* id; the built-in adapter uses it only to locate its own hook handoff file, which carries the real stable id. If your host has no equivalent, skip recovery — fail closed rather than guess.
-- Send it **exactly once per session**, guarded against races between your hook watcher and any first-activity recheck.
+- Stable ids are scoped by the `cli` family from `hello`. The same opaque id may validly name separate Claude, Codex, Grok, or other host sessions, and the broker stores those records separately. Old unqualified records are migrated under the first requesting CLI family and persisted before they become identity evidence; one legacy id can never identify a second family.
+- Send it once per **broker connection**, guarded against races between your hook watcher and any first-activity recheck. Re-send it after every reconnect; otherwise a broker restart loses the session's recovery identity.
 
 ```json
 {"op":"recover_session","stable_session_id":"<stable id>","cwd":"/absolute/path"}
@@ -335,9 +346,13 @@ Semantics that are not obvious:
  "topic_id":42,"name":"…","group":"…","queued_count":3,"queued_summary":[…]}
 ```
 
-The broker takes one of two branches, silently:
-- **Stub already attached** → it *records* the current route under the stable id so a future resume can recover it. No re-claim. `recovered` stays `false`.
-- **Stub not attached** → it attempts to re-claim the route that stable id was last attached to. `recovered: false` is also returned for an expired/tombstoned attachment or a route now held by another live session. A `false` is not an error and should be silent.
+The broker takes one of these branches, silently:
+
+- **Stub already attached** → it records the current route under the stable id for a future resume. No re-claim; `recovered` stays `false`.
+- **Explicit detach/tombstone, auto-attach disabled, expired or missing record, invalid route, or route held by another live session** → no claim and `recovered:false`.
+- **Eligible remembered route is free (or already belongs to this logical session)** → claim it and return `recovered:true`.
+
+An empty `err` with `recovered:false` is therefore an ordinary non-recovery outcome, not a transport failure.
 
 `err` is set only on a malformed request or an empty id. `queued_summary` rows have the same `{message_id, sender?, kind?, unix?, preview?}` shape as `attached`.
 
@@ -450,6 +465,8 @@ On startup:
 7. **Run the MCP stdio loop.** Read JSON-RPC requests from stdin; respond on stdout.
 8. **If your host exposes a stable session id** (via a hook or equivalent), send `recover_session` once it arrives.
 
+Do not answer an `attach` while that identity is still settling. A canceled caller must return with **no attach frame written**. At the bounded settle budget, refuse a bare attach with `identity still resolving; retry attach` rather than choosing between own-session recovery and the picker. An explicit target may keep waiting for the bounded recovery attempt, but its attach frame must never overtake that recovery. Every terminal recovery path — success, no record, broker refusal, disconnect, or timeout — must settle the gate so the adapter cannot wedge.
+
 While running:
 
 - **`initialize`** → respond with your own `serverInfo`, your `capabilities`, your assembled `instructions`, and the right `protocolVersion`.
@@ -473,7 +490,7 @@ On the broker dropping the connection:
 
 This is the part a doc-conformant adapter previously got wrong in a way that works perfectly in a demo and then quietly corrupts the user's queue.
 
-**A delivered message stays in the durable queue until you acknowledge it.** The broker writes the push to your socket and then waits. It does not consider the message done.
+**While the durable queue is healthy, a delivered message stays there until you acknowledge it.** The broker writes the push to your socket and then waits. It does not consider the message done. If the broker reports that durability is degraded, live delivery still works but there is no queued copy to protect.
 
 The full loop:
 
@@ -481,16 +498,20 @@ The full loop:
 2. Render it into your host's dialect.
 3. **On success**, send:
    ```json
-   {"op":"inbound_delivered","update_id":<inbound.MessageID>,"ok":true,"count":<covered>}
+   {"op":"inbound_delivered","update_id":<inbound.MessageID>,"ok":true,
+    "count":<covered>,"delivery_token":"<inbound.delivery_token>"}
    ```
 4. **On render failure, do not ack.** Return without writing anything (or send `ok: false`, which the broker logs as a NACK). The message stays queued as backlog and surfaces in the next push's `pending` count and in `fetch_queue`. Also log the full content locally — the message is otherwise invisible.
 
-Four rules, each with a concrete failure behind it:
+Six rules, each with a concrete failure behind it:
 
+- **Echo `delivery_token` unchanged whenever it is present.** It is the primary identity for the exact pushed route and durable records. An unknown or already-used non-empty token consumes nothing; only an absent token enters the legacy fallback below.
 - **`update_id` carries `inbound.MessageID`.** The field name is a leftover from an earlier design; the `inbound` object has no `update_id` of its own. Sending anything else is unmatched.
+- **A `MessageID` is not a delivery identity.** It can occur more than once, including an edit with `Edited: true`. Do not suppress either occurrence. Empty-token acks exist only for old adapters: the broker accepts that legacy fallback when exactly one outstanding pushed occurrence has the id. Ambiguity consumes nothing and deliberately leaves a duplicate for recovery.
 - **`count` must echo `covered`.** A merged debounced batch covers N stored lines and must consume N. Acking `count: 1` for a 5-line batch orphans four lines as phantom backlog that nothing will ever consume. `count < 1` is dropped by the broker as a no-op.
 - **Never ack a synthesized event.** If `inbound.Kind` is non-empty (`poll_result`, `reaction`, `callback`, `system`), the message was never queued — it covers zero lines. Acking one consumes a real queued backlog message the event never delivered, silently dropping it. The broker also stamps `covered: 0` for events, but check `Kind` yourself.
-- **You must be genuinely attached.** The broker drops a consume from a connection whose route was never confirmed by an explicit claim. This is a deliberate fail-closed tripwire, not a bug — a legitimate holder always has a confirmed route.
+- **An ack consumes only the route recorded when that push was sent**, not the route the adapter happens to hold later. The record is one-shot and bounded to 64 outstanding pushes per session (the oldest is evicted). An ack with no matching push record is dropped and its queue line remains available through `fetch_queue`.
+- **You must be genuinely attached.** The broker drops a consume from a connection whose route was never confirmed by an explicit claim. The same rule refuses `fetch_queue(ack=true)` on an unconfirmed route. This is a deliberate fail-closed tripwire, not a bug — a legitimate holder always has a confirmed route.
 
 **If you never ack at all**, everything appears to work: messages render, the user reads them. Meanwhile every delivered message stays queued forever, `pending` climbs monotonically on every push, and `fetch_queue` re-delivers messages the user has already seen — permanently, because nothing ever consumes the head.
 
@@ -568,7 +589,7 @@ A built-in adapter binary lives at `cmd/<cli>-adapter/main.go` and is installed 
 
 If your target CLI has a plugin marketplace, ship the adapter as a thin manifest referencing the binary. If it doesn't, document the manual MCP server registration steps in your adapter's `SETUP.md`.
 
-**Budget for real work.** The five built-in adapters are, whole-package and excluding tests: Claude Code ~3.0k LOC, Codex ~1.9k, Grok Build ~3.1k, Claude Desktop ~2.4k, Antigravity ~1.4k — each reimplementing the handshake, attach, tool forwarding, reconnect, delivery acknowledgement, and host-specific inbound translation. This is the hardest of C3's three extension seams.
+**Budget for real work.** The five built-in adapters are, whole-package and excluding tests: Claude Code ~3.0k LOC, Codex ~2.4k, Grok Build ~3.1k, Claude Desktop ~2.4k, Antigravity ~1.4k — each reimplementing the handshake, attach, tool forwarding, reconnect, delivery acknowledgement, and host-specific inbound translation. This is the hardest of C3's three extension seams.
 
 ## Adding a new adapter — checklist
 
@@ -576,15 +597,16 @@ If your target CLI has a plugin marketplace, ship the adapter as a thin manifest
 - [ ] Newline-JSON framing with the 4 MiB cap, `\r\n` tolerance, trailing-frame-on-EOF, and serialised writes
 - [ ] A dedicated demux reader task; correlation by `id` where it exists, by op elsewhere (one in flight)
 - [ ] **A `default` arm that logs unknown ops and continues** — never fatal, never silent
+- [ ] Protocol mismatch keeps the connection live but handles state-change refusals: `attach`, `release`, `fetch_queue(ack=true)`, `inbound_delivered`, and `recover_session`; safe peeks remain usable
 - [ ] Per-type JSON casing: `snake_case` envelope, **PascalCase** nested payloads
 - [ ] `hello` first on every connection, with `cannot_render_channels` set correctly for your host
 - [ ] `serverInfo.name` equals the MCP server key your CLI registers, **not** the binary name
 - [ ] Adapter-owned `serverInfo` / `instructions` / tool list; `instructions` folds in `hello_ack.capabilities`
 - [ ] `attach` and `topics` implemented adapter-locally with the right user-facing wording; `detach`/`ask`/`fetch_queue`/`retranscribe` on their dedicated ops, not `tool_call`
 - [ ] Inbound translation matches what the host renders
-- [ ] **`inbound_delivered` sent on every successful render** — `update_id` = `MessageID`, `count` = `covered`, never for a non-empty `Kind`, never on render failure
+- [ ] **`inbound_delivered` sent on every successful render** — echo `delivery_token` unchanged when present, `update_id` = `MessageID`, `count` = `covered`, never for a non-empty `Kind`, never on render failure; preserve same-`MessageID` occurrences in delivery order
 - [ ] Reconnect with backoff → `hello` → replay last attach with `replay: true` → re-fire `recover_session`; wake pending calls with an error
-- [ ] `recover_session` sent once per session, post-hello, with the **stable** session id — or resume deliberately skipped
+- [ ] `recover_session` sent once per **connection**, post-hello, with the **stable** session id — then re-sent after every reconnect, or resume deliberately skipped
 - [ ] `ask_result` and `permission_verdict` handled if you expose `ask` / permission relay
 - [ ] Marketplace manifest authored if the CLI has one; `SETUP.md` if it doesn't
 - [ ] Tests (see below)

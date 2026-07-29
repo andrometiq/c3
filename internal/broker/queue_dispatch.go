@@ -38,7 +38,10 @@ var workerJobTimeout = 30 * time.Second
 // maxFetchIDBytes bounds the correlation id a fetch_queue request may carry. See
 // handleFetchQueue for why an unbounded id is a problem at all. A real id is a
 // uuid, a nanoid or a counter — tens of bytes — so a kilobyte is roughly 30x the
-// largest plausible one and cannot be reached by accident.
+// largest plausible one and cannot be reached by accident. One KiB is also
+// deliberately not the bare 4096 literal: archguard reserves that number for
+// Telegram's message-length boundary outside the channel package, and a
+// correlation-id limit has no reason to create a sanctioned collision.
 const maxFetchIDBytes = 1024
 
 // handleFetchQueue routes a fetch_queue pull through the claimed route's worker
@@ -57,7 +60,8 @@ func (b *Broker) handleFetchQueue(conn *ipc.Conn, stub *Stub, raw []byte) {
 	// which is enough to keep the response sendable; this bound handles the
 	// degenerate end of the same lever, where the id alone would leave no room for
 	// any message and every fetch would come back empty for a reason the caller
-	// could never see. A real id is a uuid or a counter — 4 KiB is ~100x that.
+	// could never see. A real id is a uuid or a counter — 1 KiB is already
+	// roughly 30x that.
 	//
 	// The refusal cannot echo an id it just called too long, so it answers with
 	// none: an adapter matching on id will time out this one request (and find the

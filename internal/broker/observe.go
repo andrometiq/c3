@@ -174,7 +174,20 @@ func (b *Broker) handleObserve(conn *ipc.Conn, stub *Stub, raw []byte) {
 	// display peek wants the full inbox, not the empty batch a literal Limit=0
 	// would produce (the adapter, unlike fetch_queue, does not pre-default it).
 	all := req.All || req.Limit <= 0
-	job := Job{Kind: JobFetch, Fetch: &FetchJob{Limit: req.Limit, All: all, Ack: false, ResultCh: resultCh}}
+	observeEnvelope, err := json.Marshal(resp)
+	if err != nil {
+		resp.Err = "observe: cannot size response envelope: " + err.Error()
+		_ = conn.WriteJSON(resp)
+		return
+	}
+	job := Job{Kind: JobFetch, Fetch: &FetchJob{
+		Limit: req.Limit, All: all, Ack: false, ResultCh: resultCh,
+		// fetchFrameFit measures a FetchQueueResp. Reserve this response's whole
+		// encoded base so its extra resolved-identity/holder fields cannot turn a
+		// proven-fit peek into an oversized ObserveResp. Deliberate over-reserve:
+		// the fetch envelope remains counted too, keeping future additive fields safe.
+		FrameReserve: len(observeEnvelope),
+	}}
 	if !b.Workers.Submit(res.key, job) {
 		resp.Err = "worker queue full or stopped"
 		_ = conn.WriteJSON(resp)

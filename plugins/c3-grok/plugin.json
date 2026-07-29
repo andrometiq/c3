@@ -1,6 +1,6 @@
 {
   "name": "c3",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "C3 — Telegram multiplexer for Grok Build. Live inject requires leader mode ([cli] use_leader = true).",
   "keywords": ["telegram", "c3", "messaging", "mcp"]
 }

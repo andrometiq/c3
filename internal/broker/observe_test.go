@@ -3,6 +3,7 @@ package broker
 import (
 	"encoding/json"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -203,5 +204,76 @@ func TestHandleObserve_NeverConsumes(t *testing.T) {
 	}
 	if n, _ := b.Queue.Pending(qrk); n != 2 {
 		t.Fatalf("observe consumed; pending=%d, want 2", n)
+	}
+}
+
+// TestHandleObserve_ReservesItsLargerEnvelope pins the #103 regression: the
+// worker sizes messages through FetchQueueResp, but ObserveResp also carries
+// resolved route and holder identity. Without reserving that larger envelope,
+// a near-cap batch passes the worker preflight and WriteJSON refuses the actual
+// observe response, leaving the panel with silence.
+func TestHandleObserve_ReservesItsLargerEnvelope(t *testing.T) {
+	t.Setenv("C3_QUEUE_DIR", t.TempDir())
+	b := brokerWithChannel(t, mfWithTelegram(), &fakeChannel{})
+	defer b.Shutdown()
+
+	key, qrk := c3QueueKey()
+	for i := int64(1); i <= 4; i++ {
+		if err := b.Queue.Append(qrk, &c3types.Inbound{
+			Channel: "telegram", ChatID: -100, TopicID: qrk.TopicID,
+			MessageID: i, Text: strings.Repeat("m", 900*1024), Timestamp: time.Now(),
+		}); err != nil {
+			t.Fatalf("seed near-cap observe record %d: %v", i, err)
+		}
+	}
+	holder := &Stub{
+		CLI: "claude", PID: os.Getpid(), CWD: strings.Repeat("h", 700*1024),
+		ConnID: 7, Conn: "live",
+	}
+	if _, ok := b.Routes.Claim(key, holder); !ok {
+		t.Fatal("claim route for large-envelope observe")
+	}
+
+	observer := &Stub{CLI: "desktop", PID: os.Getpid(), CWD: "/other", ConnID: 9, Conn: "live"}
+	agentSide, brokerSide := newConnPair(t)
+	raw, _ := json.Marshal(ipc.ObserveReq{Op: ipc.OpObserve, ID: "near-cap", Name: "c3", All: true})
+	go b.handleObserve(brokerSide, observer, raw)
+	readCh := make(chan ipc.ObserveResp, 1)
+	errCh := make(chan error, 1)
+	go func() {
+		frame, err := agentSide.ReadFrame()
+		if err != nil {
+			errCh <- err
+			return
+		}
+		var got ipc.ObserveResp
+		if err := json.Unmarshal(frame, &got); err != nil {
+			errCh <- err
+			return
+		}
+		readCh <- got
+	}()
+	var resp ipc.ObserveResp
+	select {
+	case resp = <-readCh:
+	case err := <-errCh:
+		t.Fatalf("read frame-budgeted observe response: %v", err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("observe sized only the fetch envelope, so its larger response was refused and the panel received no frame")
+	}
+
+	if resp.Err != "" || len(resp.Messages) == 0 || resp.Remaining == 0 {
+		t.Fatalf("observe did not return a frame-budgeted partial batch: messages=%d remaining=%d err=%q",
+			len(resp.Messages), resp.Remaining, resp.Err)
+	}
+	encoded, err := json.Marshal(resp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(encoded)+1 > ipc.MaxFrameSize {
+		t.Fatalf("observe returned an oversized frame: %d bytes (cap %d)", len(encoded)+1, ipc.MaxFrameSize)
+	}
+	if n, _ := b.Queue.Pending(qrk); n != 4 {
+		t.Fatalf("observe consumed the queue while budgeting its envelope; pending=%d, want 4", n)
 	}
 }

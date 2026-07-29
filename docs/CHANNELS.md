@@ -122,12 +122,13 @@ type Inbound struct {
 	DrainedFrom string        `json:"DrainedFrom,omitempty"` // drain provenance; set by the broker, not by you
 	V           int           `json:"V,omitempty"`           // record format version; absent or 0 means 1
 	ConvKind    string        `json:"ConvKind,omitempty"`    // "dm" | "group", stated by the channel
+	Edited      bool          `json:"Edited,omitempty"`      // true only for a new version of an existing MessageID
 }
 ```
 
 There is **no `Raw` field** and no channel-specific passthrough. The JSON tags are frozen on purpose — this struct is marshalled straight into the durable queue `.jsonl` and onto the IPC wire, so the tag names are the on-disk and wire format. Do not "tidy" one.
 
-Set `ConvKind` if you add a channel. It exists precisely so the trust gate stops inferring DM-vs-group from a Telegram sign convention — see blocker 4. It currently has no readers; wiring one is part of the second-channel PR.
+Set `ConvKind` if you add a channel. It exists precisely so the trust gate stops inferring DM-vs-group from a Telegram sign convention — see blocker 4. It currently has no readers; wiring one is part of the second-channel PR. Set `Edited: true` when your transport sends a corrected version of an existing message id: the broker must retain the correction instead of replay-deduplicating it.
 
 Poll results, reactions, and callbacks are surfaced as *events*: an `Inbound` with a non-empty `Kind` and an `Event` payload. The route worker flushes those alone and keeps them out of the text-debounce and STT paths.
 
@@ -315,6 +316,7 @@ Until then: channels are in-tree, the PR is welcome, and this document is the li
 - [ ] Hand-wired via `br.RegisterChannel(<name>.New())` in `cmd/c3-broker/main.go` (no `registry.go`)
 - [ ] `GateInbound` called before every `Emit`, and its decision honored
 - [ ] `ConvKind` set on every emitted `Inbound`
+- [ ] `Edited: true` set on every emitted correction that reuses an earlier `MessageID`
 - [ ] `Emit`-false handling does **not** advance past the message (blocker 1) — and if your transport cannot redeliver, say so in the PR rather than working around it
 - [ ] Config keys survive a mappings save (blocker 3) — needs a broker-side fix, not a channel-side workaround
 - [ ] Persisted-callback conflict resolved (blocker 2) — Telegram's offset tracker must still work with your channel registered
@@ -335,6 +337,6 @@ Until then: channels are in-tree, the PR is welcome, and this document is the li
 - **Reply threading**: an inbound with `reply_to_message` populates `ReplyContext` with `MessageID`, `User`, `Text`; the Claude adapter renders it as `reply_to_message_id` / `reply_to_text` attributes on the `<channel>` block.
 - **Voice handling**: voice messages emit an inbound with `Attachments[0].Kind="voice"`, a `FileID`, and empty `Text`. The STT plugin's `OnVoiceReceived` fills in `Text`. The attachment is preserved so a CLI can re-download the audio if a transcript is ambiguous.
 - **Broker bot commands (`/status`, `/queue`, `/drain`)**: registered at startup via `setMyCommands` so they autocomplete. An inbound whose first token is one of these (optionally `@<botname>`-suffixed on that token only, case-insensitive) is intercepted in the poll path **after the allowlist gate** — a stranger's command dies at the gate in silence, never a reply. The broker answers directly and the update is never queued or routed to an agent; its `update_id` is marked done so the offset advances. A handled command with an empty reply sends nothing. Messages carrying attachments are never intercepted, so a command in a media caption cannot swallow the attachment. See `docs/COMMANDS.md` for the grammar and authorization matrix.
-- **Persisted-offset advance**: the read offset advances only to the highest contiguous `update_id` whose message has been durably persisted (`fsync`'d) to the inbound queue, or which was a no-op (gated, `/status`, or a non-message update). An update still mid-STT or not yet persisted does not advance the offset, so a crash there means Telegram redelivers it within its retention window — loss-free by construction. STT runs at flush time so the stored line already carries the transcript; storage is per-message, and the debounce/merge is a delivery-presentation concern that does not merge stored lines. See `docs/USAGE.md` "Durable inbound queue & backlog".
+- **Persisted-offset advance**: the read offset advances only to the highest contiguous `update_id` whose message has been durably persisted (`fsync`'d) to the inbound queue, or which was a no-op (gated, `/status`, or a non-message update). An update still mid-STT or not yet persisted is redelivered after a crash within Telegram's retention window. This protection depends on a healthy durable queue and the provider's retention; degraded mode is intentionally loud rather than loss-free. STT runs at flush time so the stored line already carries the transcript; storage is per-message, and the debounce/merge is a delivery-presentation concern that does not merge stored lines. See `docs/USAGE.md` "Durable inbound queue & backlog".
 
 Treat these as patterns, not templates. Your transport has its own quirks, and where they conflict with a Telegram idiom, the quirk usually wins — that conflict is exactly the information this repo is missing.
