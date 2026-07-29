@@ -268,6 +268,15 @@ type RouteWorker struct {
 	// the total outstanding records.
 	coveredOrder []coveredPushOrder
 
+	// highestTelegramMessageID is the greatest ordinary Telegram message ID this
+	// worker has begun processing. Telegram message IDs increase within a chat,
+	// so a lower first-seen voice ID after this watermark is definitively older
+	// content arriving late (for example, a held-offset redelivery after a newer
+	// end-of-batch marker). The worker still transcribes, persists, and delivers
+	// it; this watermark exists only to label that visible reordering honestly.
+	// Worker-run-goroutine-only, so it needs no lock.
+	highestTelegramMessageID int64
+
 	// prevEchoDone chains the per-topic voice-readback echoes so they post in
 	// strict arrival order (spec Phase 3 — the maintainer: "processed one by one"). The
 	// echo is dispatched off the critical path (a retrying send can back off for
@@ -490,6 +499,31 @@ type voiceOutcome struct {
 	raw        string // the plugin's raw return, for sttFailureReason
 }
 
+// observeTelegramOrder advances the per-route Telegram message watermark and
+// reports the newer message a late voice has overtaken. It does not suppress or
+// defer anything: recoverable late delivery is safer than loss, and the caller
+// uses the result only to make the reordered delivery explicit to both readers.
+//
+// Edits reuse an old message ID intentionally, so they advance the watermark
+// when newer but are never themselves called "late". Non-Telegram channels have
+// no message-ID monotonicity contract here and are left unchanged.
+func (w *RouteWorker) observeTelegramOrder(in *c3types.Inbound) (after int64, late bool) {
+	if in == nil || in.Channel != "telegram" || in.MessageID <= 0 {
+		return 0, false
+	}
+	after = w.highestTelegramMessageID
+	if in.MessageID > after {
+		w.highestTelegramMessageID = in.MessageID
+		return 0, false
+	}
+	return after, !in.Edited && in.MessageID < after
+}
+
+func lateVoiceOrderNotice(messageID, afterMessageID int64) string {
+	return fmt.Sprintf("⚠️ [late voice message: message_id=%d was spoken before message_id=%d but is being delivered after it]",
+		messageID, afterMessageID)
+}
+
 // voiceOutcome fetches and transcribes ONE voice attachment.
 //
 // Two things can refuse the audio, and both must reach the same honest
@@ -588,6 +622,10 @@ func (w *RouteWorker) flushInbounds(ctx context.Context, batch []*c3types.Inboun
 	// Per-inbound STT substitution.
 	if w.broker.Plugins != nil {
 		for _, in := range batch {
+			// Observe EVERY ordinary message, including text-only batch markers,
+			// before deciding whether a later voice is old content surfacing out
+			// of order.
+			afterMessageID, late := w.observeTelegramOrder(in)
 			// CB-1 defense-in-depth: never run voice/STT over a synthesized
 			// event. The run loop already diverts events to flushEvent, so a
 			// batch here is all ordinary messages — this guard makes that
@@ -596,13 +634,21 @@ func (w *RouteWorker) flushInbounds(ctx context.Context, batch []*c3types.Inboun
 			if in.IsEvent() || len(voices) == 0 {
 				continue
 			}
+			var notices []string
+			if late {
+				// The label precedes C3's transcript/failure segment on the agent
+				// surface. It also becomes a human notice immediately before the
+				// verbatim readback, so neither reader can mistake spoken order.
+				orderNotice := lateVoiceOrderNotice(in.MessageID, afterMessageID)
+				in.Text = appendVoiceMarker(in.Text, orderNotice)
+				notices = append(notices, orderNotice)
+			}
 			// EVERY voice attachment is handled, at whatever position it sits.
 			// The FIRST one keeps the long-standing single-voice semantics (a
 			// transcript becomes the agent surface); each additional one APPENDS
 			// its own transcript or marker, so a rich message carrying two voice
 			// blocks surfaces both instead of silently dropping the rest.
 			var echoTranscript string
-			var notices []string
 			for _, att := range voices {
 				o := w.voiceOutcome(ctx, in, att)
 				switch {
