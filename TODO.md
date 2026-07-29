@@ -15,9 +15,18 @@ public push. Shipped history is in git; future and unbuilt work lives in
 
 Need a live human tap — run these in a real Telegram session before the tag:
 
-- [ ] `ask` live-verify: button tap → choice returns to Claude
-- [ ] Permission-relay live-verify: a real Claude Code permission prompt → approve/deny over Telegram
-- [ ] Smoke-test visual tails (expandable show-more; inline-button callback)
+- [x] `ask` live-verify: button tap → choice returns to Claude — **PASSED 2026-07-29**
+      (post-restart broker at 32f5c7d; tapped choice returned as the tool result)
+- [ ] Permission-relay live-verify: a real Claude Code permission prompt → approve/deny over
+      Telegram. **Cannot fire from an auto-approve session** (no prompt exists to relay — two
+      forced probes auto-ran, broker log shows no registration). Run in the maintainer's RC2
+      test session under normal permission mode: first non-allowlisted tool call relays; one
+      Allow tap closes this. Mechanism last fully verified live 2026-07-12 on pre-RC2 code.
+- [x] Smoke-test visual tails (expandable show-more; inline-button callback) — **PASSED
+      2026-07-29** (expandable `||` blockquote collapsed + expanded; inline-button callback
+      proven by the `ask` taps). Note: first attempt was a mis-authored test — a plain `>`
+      quote renders full-length BY DESIGN; expandable must be requested with the `||`
+      terminator (format.go) or comes automatic in voice readbacks.
 
 Post-first-tag — the binaries only exist once the release workflow runs on a tag:
 
