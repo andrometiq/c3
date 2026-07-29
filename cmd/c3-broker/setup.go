@@ -1317,9 +1317,13 @@ var (
 // releasing the lock, or an adapter may have respawned one in the gap (stop
 // it again and retry). While held, the pid file carries setup's own pid.
 func acquireBrokerPairingLock() (*broker.SingletonLock, error) {
+	pidFile, err := broker.PidFilePath()
+	if err != nil {
+		return nil, err
+	}
 	var lastErr error
 	for attempt := 0; attempt < 10; attempt++ {
-		lock, err := broker.AcquireSingleton(broker.PidFilePath())
+		lock, err := broker.AcquireSingleton(pidFile)
 		if err == nil {
 			return lock, nil
 		}
@@ -1343,7 +1347,11 @@ func releasePairingLock(lock **broker.SingletonLock) {
 
 // brokerReachable reports whether a broker answers on the unix socket.
 func brokerReachable() bool {
-	c, err := net.DialTimeout("unix", broker.SocketPath(), 500*time.Millisecond)
+	sockPath, err := broker.SocketPath()
+	if err != nil {
+		return false
+	}
+	c, err := net.DialTimeout("unix", sockPath, 500*time.Millisecond)
 	if err != nil {
 		return false
 	}
@@ -1363,7 +1371,11 @@ func stopBrokerIfRunning() (bool, string) {
 	if !brokerReachable() {
 		return false, ""
 	}
-	data, err := os.ReadFile(broker.PidFilePath())
+	pidFile, err := broker.PidFilePath()
+	if err != nil {
+		return false, "note: the broker runtime path is unsafe or unavailable — fix its ownership/mode before retrying setup"
+	}
+	data, err := os.ReadFile(pidFile)
 	if err != nil {
 		return false, "note: a broker looks alive but its pid file is unreadable — if pairing never sees your code, run `pkill -x c3-broker` and retry"
 	}

@@ -245,7 +245,10 @@ Usage:
 `
 
 func runDaemon() (err error) {
-	pidFile := broker.PidFilePath()
+	pidFile, err := broker.PidFilePath()
+	if err != nil {
+		return fmt.Errorf("resolve broker pid file: %w", err)
+	}
 	lock, err := broker.AcquireSingleton(pidFile)
 	if err != nil {
 		// Sibling broker already running; expected when an adapter races and
@@ -403,13 +406,20 @@ func runDaemon() (err error) {
 	// adapter via CC's recycle behavior. Rewritten on every startup;
 	// removed at clean shutdown so a stale file from a crashed broker
 	// doesn't falsely advertise capabilities for a future older broker.
-	capsPath := broker.CapsFilePath()
+	capsPath, err := broker.CapsFilePath()
+	if err != nil {
+		return fmt.Errorf("resolve broker capabilities file: %w", err)
+	}
 	if err := os.WriteFile(capsPath, []byte("sighup-reload\npair-mode-start\n"), 0600); err != nil {
 		log.Printf("warn: write caps file %s: %v", capsPath, err)
 	}
 	defer os.Remove(capsPath)
 
-	srv, err := broker.Listen(broker.SocketPath(), br)
+	sockPath, err := broker.SocketPath()
+	if err != nil {
+		return fmt.Errorf("resolve broker socket: %w", err)
+	}
+	srv, err := broker.Listen(sockPath, br)
 	if err != nil {
 		// Sibling broker already serving the socket — same silent exit as
 		// flock collision. 2026-05-09: prevents the
@@ -420,7 +430,7 @@ func runDaemon() (err error) {
 		}
 		return fmt.Errorf("listen on socket: %w", err)
 	}
-	fmt.Fprintf(os.Stderr, "c3-broker: listening on %s (pid %d)\n", broker.SocketPath(), os.Getpid())
+	fmt.Fprintf(os.Stderr, "c3-broker: listening on %s (pid %d)\n", sockPath, os.Getpid())
 
 	for sig := range sigC {
 		if osutil.IsReloadSignal(sig) {

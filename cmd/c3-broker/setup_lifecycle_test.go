@@ -109,7 +109,11 @@ func TestRunSetupPair_HoldsSingletonLockDuringWindow(t *testing.T) {
 	// The window is open — a broker must NOT be able to take the singleton
 	// lock now (flock is per open-file-description, so this in-process probe
 	// conflicts with setup's held lock exactly like a spawned broker would).
-	if lock, err := broker.AcquireSingleton(broker.PidFilePath()); err == nil {
+	pidFile, err := broker.PidFilePath()
+	if err != nil {
+		t.Fatalf("resolve broker pid file: %v", err)
+	}
+	if lock, err := broker.AcquireSingleton(pidFile); err == nil {
 		lock.Release()
 		t.Error("broker singleton lock was acquirable DURING the pairing window — a respawned broker would steal getUpdates")
 	}
@@ -125,7 +129,7 @@ func TestRunSetupPair_HoldsSingletonLockDuringWindow(t *testing.T) {
 	}
 
 	// After setup returns, the lock must be free for the restarted broker.
-	lock, err := broker.AcquireSingleton(broker.PidFilePath())
+	lock, err := broker.AcquireSingleton(pidFile)
 	if err != nil {
 		t.Fatalf("singleton lock still held after setup returned: %v", err)
 	}
@@ -202,7 +206,11 @@ func TestRunSetupInteractive_ErrorPathRestoresBroker(t *testing.T) {
 	if *ensureCalls != 1 {
 		t.Errorf("ensureBrokerUp called %d times after the error return, want 1 (broker must be restored)", *ensureCalls)
 	}
-	lock, lockErr := broker.AcquireSingleton(broker.PidFilePath())
+	pidFile, err := broker.PidFilePath()
+	if err != nil {
+		t.Fatalf("resolve broker pid file: %v", err)
+	}
+	lock, lockErr := broker.AcquireSingleton(pidFile)
 	if lockErr != nil {
 		t.Fatalf("singleton lock still held after the error return: %v", lockErr)
 	}

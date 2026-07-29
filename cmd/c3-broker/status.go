@@ -31,7 +31,10 @@ func runStatus() error {
 	fmt.Fprintf(&b, "  version:   %s\n", version.Current())
 
 	// Daemon liveness via pid file + flock probe.
-	pidFile := broker.PidFilePath()
+	pidFile, err := broker.PidFilePath()
+	if err != nil {
+		return fmt.Errorf("resolve broker pid file: %w", err)
+	}
 	fmt.Fprintf(&b, "  pid file:  %s\n", pidFile)
 	if data, err := os.ReadFile(pidFile); err == nil && len(data) > 0 {
 		fmt.Fprintf(&b, "  pid:       %s", string(data))
@@ -41,7 +44,10 @@ func runStatus() error {
 	fmt.Fprintf(&b, "  log file:  %s\n", broker.LogPath())
 
 	// Socket.
-	sockPath := broker.SocketPath()
+	sockPath, err := broker.SocketPath()
+	if err != nil {
+		return fmt.Errorf("resolve broker socket: %w", err)
+	}
 	fmt.Fprintf(&b, "  socket:    %s", sockPath)
 	if _, err := os.Stat(sockPath); err == nil {
 		c, dialErr := net.Dial("unix", sockPath)

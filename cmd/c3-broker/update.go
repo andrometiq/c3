@@ -132,7 +132,11 @@ marketplace — run `+"`/plugin`"+` and update the c3 marketplace if prompted.
 // runningBrokerPID returns the pid of a live broker from the pid file, or 0 if
 // none is running. Best-effort: a parse error or dead pid ⇒ 0.
 func runningBrokerPID() int {
-	data, err := os.ReadFile(broker.PidFilePath())
+	pidFile, err := broker.PidFilePath()
+	if err != nil {
+		return 0
+	}
+	data, err := os.ReadFile(pidFile)
 	if err != nil {
 		return 0
 	}

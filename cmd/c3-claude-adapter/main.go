@@ -401,7 +401,10 @@ func newAdapter() *adapter {
 
 // connectBroker dials the broker socket, spawning the broker if unreachable.
 func (a *adapter) connectBroker() error {
-	sockPath := broker.SocketPath()
+	sockPath, err := broker.SocketPath()
+	if err != nil {
+		return fmt.Errorf("resolve broker socket: %w", err)
+	}
 	for attempt := 0; attempt < 50; attempt++ { // ~10s with 200ms sleep
 		c, err := net.Dial("unix", sockPath)
 		if err == nil {

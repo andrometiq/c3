@@ -246,7 +246,10 @@ func newAdapter() *adapter {
 }
 
 func (a *adapter) connectBroker() error {
-	sockPath := broker.SocketPath()
+	sockPath, err := broker.SocketPath()
+	if err != nil {
+		return fmt.Errorf("resolve broker socket: %w", err)
+	}
 	for attempt := 0; attempt < 50; attempt++ {
 		c, err := net.Dial("unix", sockPath)
 		if err == nil {

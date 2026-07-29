@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"syscall"
 )
 
 // runtimeDir returns the per-user runtime directory for the broker's socket
@@ -22,7 +23,7 @@ import (
 // Resolution: probe `/run/user/$UID` directly first (the systemd-logind
 // convention on every modern Linux distro), independent of env. Only fall
 // back to `/tmp/c3-$UID/` if that path doesn't exist.
-func runtimeDir() string {
+func runtimeDir() (string, error) {
 	if runtime.GOOS == "windows" {
 		base := os.Getenv("LOCALAPPDATA")
 		if base == "" {
@@ -33,37 +34,74 @@ func runtimeDir() string {
 			}
 		}
 		dir := filepath.Join(base, "c3")
-		_ = os.MkdirAll(dir, 0700)
-		return dir
+		if err := os.MkdirAll(dir, 0700); err != nil {
+			return "", fmt.Errorf("create runtime directory %s: %w", dir, err)
+		}
+		return dir, nil
 	}
 	uid := os.Getuid()
 	if x := os.Getenv("XDG_RUNTIME_DIR"); x != "" {
 		// Use env if set, but check that it exists.
 		if st, err := os.Stat(x); err == nil && st.IsDir() {
-			return x
+			return x, nil
 		}
 	}
 	// Independent probe of the canonical Linux per-user runtime dir.
 	canonical := fmt.Sprintf("/run/user/%d", uid)
 	if st, err := os.Stat(canonical); err == nil && st.IsDir() {
-		return canonical
+		return canonical, nil
 	}
-	// Last resort: a per-uid tmp dir we create ourselves.
+	// Last resort: a per-uid tmp dir. /tmp is attacker-writable, so never
+	// follow a pre-planted symlink or accept a path owned/configured by someone
+	// else. A failure here is fatal to path resolution; silently returning the
+	// target would hand the broker socket, pid file, and caps file to an
+	// untrusted filesystem object.
 	tmp := fmt.Sprintf("/tmp/c3-%d", uid)
-	_ = os.MkdirAll(tmp, 0700)
-	return tmp
+	return validateOrCreatePrivateRuntimeDir(tmp, uint32(uid))
+}
+
+func validateOrCreatePrivateRuntimeDir(path string, uid uint32) (string, error) {
+	if err := os.Mkdir(path, 0700); err != nil && !os.IsExist(err) {
+		return "", fmt.Errorf("create private runtime directory %s: %w", path, err)
+	}
+	st, err := os.Lstat(path)
+	if err != nil {
+		return "", fmt.Errorf("inspect private runtime directory %s: %w", path, err)
+	}
+	if !st.IsDir() {
+		return "", fmt.Errorf("private runtime path %s is not a directory (symlinks are not allowed)", path)
+	}
+	stat, ok := st.Sys().(*syscall.Stat_t)
+	if !ok {
+		return "", fmt.Errorf("private runtime path %s has unsupported ownership metadata", path)
+	}
+	if stat.Uid != uid {
+		return "", fmt.Errorf("private runtime path %s is owned by uid %d, want %d", path, stat.Uid, uid)
+	}
+	if mode := st.Mode().Perm(); mode != 0700 {
+		return "", fmt.Errorf("private runtime path %s has mode %04o, want 0700", path, mode)
+	}
+	return path, nil
 }
 
 // SocketPath returns the broker's listening socket path. Deterministic
 // across invocations (see runtimeDir for why this matters).
-func SocketPath() string {
-	return filepath.Join(runtimeDir(), "c3.sock")
+func SocketPath() (string, error) {
+	dir, err := runtimeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "c3.sock"), nil
 }
 
 // PidFilePath returns the broker's flock pid-file path. Same dir as the
 // socket — single source of truth, no env-fork-induced split.
-func PidFilePath() string {
-	return filepath.Join(runtimeDir(), "c3-broker.pid")
+func PidFilePath() (string, error) {
+	dir, err := runtimeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "c3-broker.pid"), nil
 }
 
 // CapsFilePath returns the broker's capabilities-marker file path.
@@ -74,8 +112,12 @@ func PidFilePath() string {
 // the process (Go's default handler) and indirectly kills the MCP
 // adapter via CC's recycle behavior, so the slash command refuses to
 // fire when the capability isn't advertised.
-func CapsFilePath() string {
-	return filepath.Join(runtimeDir(), "c3-broker.caps")
+func CapsFilePath() (string, error) {
+	dir, err := runtimeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "c3-broker.caps"), nil
 }
 
 func ensureParentDir(path string) error {

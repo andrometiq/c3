@@ -28,7 +28,10 @@ import (
 // reads/writes. On error, the broker is unreachable (not running, socket
 // missing, etc.).
 func dialBroker() (*ipc.Conn, error) {
-	sockPath := broker.SocketPath()
+	sockPath, err := broker.SocketPath()
+	if err != nil {
+		return nil, fmt.Errorf("resolve broker socket: %w", err)
+	}
 	c, err := net.DialTimeout("unix", sockPath, 2*time.Second)
 	if err != nil {
 		return nil, fmt.Errorf("dial %s: %w (is the broker running?)", sockPath, err)
