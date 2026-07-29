@@ -282,10 +282,10 @@ type HelloMsg struct {
 	// ProtocolVersion is the IPC wire-protocol version this adapter speaks (see
 	// ipc.ProtocolVersion for the bump rule). Additive + omitempty: an adapter
 	// that predates versioning omits it, and absence means version 1 — the
-	// broker normalizes with PeerProtocolVersion and NEVER errors on absence.
-	// A mismatch is logged by the broker and the connection proceeds; C3 does
-	// not refuse a connection over version, because `c3 update` routinely
-	// leaves old adapters talking to a new broker on the same host.
+	// broker normalizes with PeerProtocolVersion. A mismatch keeps safe operations
+	// live but sensitive state changes are refused outside the explicit
+	// compatibility window; `c3 update` can therefore be diagnosed without
+	// allowing an unknown dialect to mutate claims or queues.
 	ProtocolVersion int `json:"protocol_version,omitempty"`
 }
 
@@ -351,7 +351,8 @@ type HelloAckMsg struct {
 	// ProtocolVersion is the IPC wire-protocol version the BROKER speaks (see
 	// ipc.ProtocolVersion for the bump rule). Additive + omitempty: a broker
 	// that predates versioning omits it, and absence means version 1. The
-	// adapter logs a mismatch and carries on — the handshake still succeeds.
+	// adapter logs a mismatch; the handshake and safe operations continue, while
+	// sensitive state changes may be refused until versions match.
 	ProtocolVersion int `json:"protocol_version,omitempty"`
 }
 

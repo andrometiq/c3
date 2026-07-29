@@ -22,6 +22,19 @@ func TestPeerProtocolVersion_AbsenceIsV1(t *testing.T) {
 	}
 }
 
+func TestProtocolStateChangesCompatibilityWindowIsExplicit(t *testing.T) {
+	if !ProtocolStateChangesCompatible(ProtocolVersion) {
+		t.Fatalf("this build's protocol v%d is outside its own compatibility window v%d..v%d",
+			ProtocolVersion, CompatibleProtocolMin, CompatibleProtocolMax)
+	}
+	for _, peer := range []int{CompatibleProtocolMin - 1, CompatibleProtocolMax + 1} {
+		if peer > 0 && ProtocolStateChangesCompatible(peer) {
+			t.Fatalf("protocol v%d was implicitly allowed outside the explicit state-change window v%d..v%d",
+				peer, CompatibleProtocolMin, CompatibleProtocolMax)
+		}
+	}
+}
+
 // hello must carry the version on the wire under the agreed key, and an old
 // adapter's hello (no key) must decode to the zero value — which normalizes to
 // v1 rather than failing.
@@ -118,7 +131,7 @@ func TestProtocolWarnings(t *testing.T) {
 		"PROTOCOL VERSION MISMATCH",
 		"cli=claude", "pid=42",
 		"v" + strconv.Itoa(other), "v" + strconv.Itoa(ProtocolVersion),
-		"ACCEPTED",
+		"ACCEPTED", "REFUSED",
 	} {
 		if !strings.Contains(bw, want) {
 			t.Errorf("broker warning missing %q: %s", want, bw)
@@ -130,7 +143,7 @@ func TestProtocolWarnings(t *testing.T) {
 		"PROTOCOL VERSION MISMATCH",
 		"codex",
 		"v" + strconv.Itoa(other), "v" + strconv.Itoa(ProtocolVersion),
-		"ACCEPTED",
+		"ACCEPTED", "REFUSED",
 	} {
 		if !strings.Contains(aw, want) {
 			t.Errorf("adapter warning missing %q: %s", want, aw)

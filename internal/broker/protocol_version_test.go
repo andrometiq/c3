@@ -4,11 +4,14 @@ import (
 	"bytes"
 	"encoding/json"
 	"log"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
+	"github.com/Andrometiq/c3/internal/c3types"
 	"github.com/Andrometiq/c3/internal/ipc"
 	"github.com/Andrometiq/c3/internal/mappings"
 )
@@ -60,11 +63,9 @@ func mappingsWithTopic() *mappings.MappingsFile {
 	return mf
 }
 
-// A newer/older adapter must be WARNED, never refused. Refusing would turn every
-// `c3 update` — which swaps binaries under adapters that then reconnect with old
-// code — into a hard outage. This asserts BOTH halves: the warning names both
-// versions, AND the connection is fully live afterwards (a real op round-trips).
-func TestHello_ProtocolMismatch_WarnsAndKeepsConnectionLive(t *testing.T) {
+// A newer/older adapter is warned and the connection remains live for safe
+// operations. State changes are covered separately below.
+func TestHello_ProtocolMismatch_WarnsAndKeepsSafeOpsLive(t *testing.T) {
 	lb := captureProtoLog(t)
 	peer, done := runHandlerWithPeer(t, mappingsWithTopic())
 	defer done()
@@ -132,6 +133,156 @@ func TestHello_ProtocolMismatch_WarnsAndKeepsConnectionLive(t *testing.T) {
 	}
 	if resp.Op != ipc.OpTopicsList || len(resp.Topics) != 1 || resp.Topics[0].Name != "c3" {
 		t.Errorf("post-mismatch op not served correctly: %+v", resp)
+	}
+}
+
+func TestProtocolMismatch_RefusesDestructiveAndOwnershipChangingOps(t *testing.T) {
+	t.Setenv("C3_QUEUE_DIR", t.TempDir())
+	b := brokerWithChannel(t, mfWithTelegram(), &fakeChannel{})
+	defer b.Shutdown()
+
+	tidA, tidB := int64(281), int64(412)
+	keyA := MakeRouteKey("telegram", -100, &tidA)
+	pid, cwd := os.Getpid(), "/work"
+
+	// Seed a live claim on a disconnected prior stub. The mismatched hello below
+	// takes the real reconnect path and inherits this claim, proving the gate
+	// protects already-owned state rather than merely refusing a fresh attach.
+	old := b.Stubs.Register("claude", pid, cwd, nil)
+	if _, ok := b.Routes.Claim(keyA, old); !ok {
+		t.Fatal("seed claim")
+	}
+	old.SetRoute(&keyA)
+	old.MarkRouteConfirmed()
+
+	qrk := queueRouteKey(keyA)
+	if err := b.Queue.Append(qrk, &c3types.Inbound{
+		Channel: "telegram", ChatID: -100, TopicID: &tidA,
+		MessageID: 7, Text: "must remain durable", Timestamp: time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	peer, done := peerPair(t, b)
+	defer done()
+	peerVersion := ipc.CompatibleProtocolMax + 1
+	if err := peer.WriteJSON(ipc.HelloMsg{
+		Op: ipc.OpHello, CLI: "claude", PID: pid, CWD: cwd,
+		ProtocolVersion: peerVersion,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := peer.ReadFrame(); err != nil {
+		t.Fatal(err)
+	}
+	holder, claimed := b.Routes.Holder(keyA)
+	if !claimed || holder == old {
+		t.Fatal("setup: mismatched reconnect did not inherit the existing claim")
+	}
+	if got := holder.PeerProtocolVersion(); got != peerVersion {
+		t.Fatalf("stub forgot the observed dialect: got v%d, want v%d", got, peerVersion)
+	}
+
+	// Safe peek remains live.
+	if err := peer.WriteJSON(ipc.FetchQueueReq{Op: ipc.OpFetchQueue, ID: "peek", Limit: 1, Ack: false}); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := peer.ReadFrame()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var peek ipc.FetchQueueResp
+	if err := json.Unmarshal(raw, &peek); err != nil {
+		t.Fatal(err)
+	}
+	if peek.Err != "" || len(peek.Messages) != 1 {
+		t.Fatalf("safe fetch_queue(ack=false) was not served on mismatched connection: %+v", peek)
+	}
+
+	// Destructive fetch is refused before the worker can consume.
+	if err := peer.WriteJSON(ipc.FetchQueueReq{Op: ipc.OpFetchQueue, ID: "drain", Limit: 1, Ack: true}); err != nil {
+		t.Fatal(err)
+	}
+	raw, err = peer.ReadFrame()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var drain ipc.FetchQueueResp
+	if err := json.Unmarshal(raw, &drain); err != nil {
+		t.Fatal(err)
+	}
+	if drain.Err == "" {
+		t.Fatalf("fetch_queue(ack=true) executed under incompatible protocol v%d", peerVersion)
+	}
+	if n, _ := b.Queue.Pending(qrk); n != 1 {
+		t.Fatalf("incompatible destructive fetch consumed the queue; pending=%d, want 1", n)
+	}
+
+	// Plant a genuine live-push correlation; an incompatible delivered ack still
+	// must not consume it.
+	b.Workers.mu.Lock()
+	w := b.Workers.spawnLocked(keyA)
+	b.Workers.mu.Unlock()
+	w.recordCoveredByPush(7, "token-7", []int64{7})
+	holder.RecordPushRoute(7, "token-7", keyA)
+	if err := peer.WriteJSON(ipc.InboundDeliveredMsg{
+		Op: ipc.OpInboundDelivered, UpdateID: 7, OK: true, Count: 1, DeliveryToken: "token-7",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	raw, err = peer.ReadFrame()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var refused ipc.ErrorMsg
+	if json.Unmarshal(raw, &refused) != nil || refused.Op != ipc.OpError {
+		t.Fatalf("incompatible inbound_delivered was not refused: %s", raw)
+	}
+	if n, _ := b.Queue.Pending(qrk); n != 1 {
+		t.Fatalf("incompatible inbound_delivered consumed the queue; pending=%d, want 1", n)
+	}
+
+	// Attach/recover/release are all ownership changes and must leave A held.
+	if err := peer.WriteJSON(ipc.AttachReq{
+		Op: ipc.OpAttach, ChatID: -200, TopicID: &tidB, Group: "work", CWD: cwd,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	raw, err = peer.ReadFrame()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var attached ipc.AttachedMsg
+	if json.Unmarshal(raw, &attached) != nil || attached.OK {
+		t.Fatalf("incompatible attach changed ownership: %s", raw)
+	}
+
+	if err := peer.WriteJSON(ipc.RecoverSessionReq{
+		Op: ipc.OpRecoverSession, StableSessionID: "session-1", CWD: cwd,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	raw, err = peer.ReadFrame()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var recovered ipc.RecoverSessionResp
+	if json.Unmarshal(raw, &recovered) != nil || recovered.Err == "" {
+		t.Fatalf("incompatible recover_session was not refused: %s", raw)
+	}
+
+	if err := peer.WriteJSON(ipc.ReleaseReq{Op: ipc.OpRelease}); err != nil {
+		t.Fatal(err)
+	}
+	raw, err = peer.ReadFrame()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if json.Unmarshal(raw, &refused) != nil || refused.Op != ipc.OpError {
+		t.Fatalf("incompatible release was not refused: %s", raw)
+	}
+	if got := holder.CurrentRoute(); got == nil || *got != keyA {
+		t.Fatalf("incompatible ownership op changed the inherited route: got %v, want %v", got, keyA)
 	}
 }
 

@@ -54,13 +54,10 @@ func (b *Broker) HandleConn(nc net.Conn) {
 		return
 	}
 
-	// Protocol version: WARN on mismatch, never refuse. `c3 update` swaps the
-	// binaries and exits the broker while adapter processes belonging to
-	// already-running CLI sessions reconnect to the NEW broker with their OLD
-	// code — mixed-version pairs are a normal event on a single host, not an
-	// anomaly. Refusing here would turn every routine update into a hard outage;
-	// a logged warning turns it into a diagnosable line. Absence (older adapter)
-	// normalizes to v1 and logs nothing.
+	// Protocol version: retain the connection for safe operations, but refuse
+	// destructive/ownership-changing ops outside the explicitly implemented
+	// compatibility window. `c3 update` can therefore remain diagnosable without
+	// letting an unknown dialect mutate claims or durable queues.
 	if w := ipc.BrokerProtocolWarning(hello.CLI, hello.PID, hello.ProtocolVersion); w != "" {
 		log.Print(w)
 	}
@@ -138,6 +135,7 @@ func (b *Broker) HandleConn(nc net.Conn) {
 		log.Printf("hello: NEW cli=%s pid=%d cwd=%q conn=%d",
 			hello.CLI, hello.PID, hello.CWD, stub.ConnID)
 	}
+	stub.SetPeerProtocolVersion(ipc.PeerProtocolVersion(hello.ProtocolVersion))
 
 	// Record whether this host can render channel pushes (from the adapter's
 	// /proc detection). Set for BOTH new and reconnect stubs so a reconnecting
@@ -193,6 +191,9 @@ func (b *Broker) HandleConn(nc net.Conn) {
 		op, err := ipc.PeekOp(raw)
 		if err != nil {
 			_ = conn.WriteJSON(ipc.ErrorMsg{Op: ipc.OpError, Err: err.Error()})
+			continue
+		}
+		if refuseIncompatibleStateChange(conn, stub, op, raw) {
 			continue
 		}
 		switch op {

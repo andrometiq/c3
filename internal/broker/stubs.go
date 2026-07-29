@@ -72,6 +72,10 @@ type Stub struct {
 	// once at hello via SetCannotRender; read on the delivery path via
 	// CanRenderPush. Guarded by stubMu.
 	cannotRender bool
+	// peerProtocolVersion is the normalized IPC dialect observed on hello.
+	// Sensitive dispatch reads this stored connection identity rather than
+	// re-decoding or assuming the current build's dialect.
+	peerProtocolVersion int
 	// stableSessionID is the host CLI's STABLE per-session id (Claude: the
 	// transcript / --resume id), learned from the SessionStart-hook handoff and
 	// delivered to the broker via RecoverSessionReq AFTER hello. The broker keys
@@ -287,6 +291,18 @@ func (s *Stub) CanRenderPush() bool {
 	s.stubMu.Lock()
 	defer s.stubMu.Unlock()
 	return !s.cannotRender
+}
+
+func (s *Stub) SetPeerProtocolVersion(version int) {
+	s.stubMu.Lock()
+	defer s.stubMu.Unlock()
+	s.peerProtocolVersion = version
+}
+
+func (s *Stub) PeerProtocolVersion() int {
+	s.stubMu.Lock()
+	defer s.stubMu.Unlock()
+	return s.peerProtocolVersion
 }
 
 // MarkReplied records that this connection has dispatched ≥1 `reply` to its
