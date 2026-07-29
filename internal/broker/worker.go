@@ -513,18 +513,17 @@ func (w *RouteWorker) flushInbounds(ctx context.Context, batch []*c3types.Inboun
 				MIME:      in.Attachments[0].MIME,
 				Size:      in.Attachments[0].Size,
 			}
-			// Size gate BEFORE the STT chain (voicegate.go, 2026-07-27 incident
-			// Ask #1): a voice note over the channel's bot download ceiling can
-			// never be fetched, so running the handler only earns two HTTP 400s
-			// and a recovery message that lies. The size came in on the update
-			// itself, so this costs nothing.
+			// Ask the bot server whether it will hand this file over, BEFORE
+			// the STT chain (voicegate.go, 2026-07-27 incident Ask #1). The ask
+			// is the same getFile the chain opens with, so a refusal here is a
+			// refusal there — and reporting it costs one bodyless call instead
+			// of two HTTP 400s under a message that names the wrong subsystem.
 			var transcript, failNotice string
-			limit, tooBig := w.broker.voiceOverDownloadLimit(in.Channel, voiceAttachmentSize(in))
-			if tooBig {
-				size := voiceAttachmentSize(in)
-				failNotice = voiceTooBigNotice(size, limit)
-				log.Printf("stt SKIPPED chan=%s chat=%d topic=%s msg=%d: voice is %d bytes, over the channel's %d-byte bot download limit — unfetchable, handler not run",
-					w.key.Channel, w.key.ChatID, TopicKeyStr(w.key), in.MessageID, size, limit)
+			agentMarker, notice, unfetchable := w.broker.voiceFetchRefusal(in)
+			if unfetchable {
+				failNotice = notice
+				log.Printf("stt SKIPPED chan=%s chat=%d topic=%s msg=%d: the bot server will not serve this file (%d bytes stated) — handler not run: %s",
+					w.key.Channel, w.key.ChatID, TopicKeyStr(w.key), in.MessageID, voiceAttachmentSize(in), agentMarker)
 			} else {
 				// Per-call deadline so a hung download can't block the worker
 				// goroutine (and the JobFetch/JobConsume jobs queued behind it).
@@ -537,12 +536,12 @@ func (w *RouteWorker) flushInbounds(ctx context.Context, batch []*c3types.Inboun
 				cancel()
 			}
 			switch {
-			case tooBig:
-				// Same "don't clobber a deliberate caption" rule as the failure
-				// path below; the human notice carries the news either way.
-				if in.Text == "" {
-					in.Text = voiceTooBigAgentText(voiceAttachmentSize(in), limit)
-				}
+			case unfetchable:
+				// APPENDED, never conditional on the text being empty: the
+				// refusal is the one thing the agent must not miss, and a
+				// caption or a rich-voice "[voice_note]" marker would otherwise
+				// swallow it entirely. The sender's own words are kept.
+				in.Text = appendVoiceMarker(in.Text, agentMarker)
 			case transcript != "" && !isSTTFailureMarker(transcript):
 				in.Text = w.sttPrefix(in.Channel) + transcript
 			case in.Text == "":

@@ -176,13 +176,13 @@ func (b *Broker) handleRetranscribe(conn *ipc.Conn, stub *Stub, raw []byte) {
 		_ = conn.WriteJSON(ipc.RetranscribeResp{Op: ipc.OpRetranscribeResult, ID: req.ID, Err: "no STT plugin registered"})
 		return
 	}
-	// Size gate, same rule as the live path (voicegate.go, 2026-07-27 incident
-	// Ask #1) — asked by file_id, since a retranscribe request carries no size.
-	// Without it an over-limit file re-runs the whole chain and comes back as
-	// "STT provider still failing (no transcript)", which sends the agent hunting
-	// for a provider outage that isn't there: the file is simply unfetchable.
-	if refusal := b.attachmentTooBigRefusal(chanName, req.FileID); refusal != "" {
-		log.Printf("retranscribe chan=%s file_id=%s msg=%d ok=false: refused, over the bot download limit", chanName, req.FileID, req.MessageID)
+	// Ask the bot server first, same rule as the live path (voicegate.go,
+	// 2026-07-27 incident Ask #1). Without it an unfetchable file re-runs the
+	// whole chain and comes back as "STT provider still failing (no
+	// transcript)", which sends the agent hunting for a provider outage that
+	// isn't there: the server simply will not serve the file.
+	if refusal := b.attachmentFetchRefusal(chanName, req.FileID); refusal != "" {
+		log.Printf("retranscribe chan=%s file_id=%s msg=%d ok=false: the bot server will not serve this file — %s", chanName, req.FileID, req.MessageID, refusal)
 		_ = conn.WriteJSON(ipc.RetranscribeResp{Op: ipc.OpRetranscribeResult, ID: req.ID, Err: "retranscribe: " + refusal})
 		return
 	}

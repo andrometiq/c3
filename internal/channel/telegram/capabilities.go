@@ -34,8 +34,6 @@ const (
 	maxCaptionRunes = 1024
 	// maxSendBytes is the Bot API upload ceiling for media we send (50 MiB).
 	maxSendBytes = 50 * 1024 * 1024
-	// maxDownloadBytes is the Bot API download ceiling for getFile (20 MiB).
-	maxDownloadBytes = 20 * 1024 * 1024
 	// minEditInterval is the floor between successive edits before Telegram
 	// starts rate-limiting; unused while streaming is deferred but reported
 	// in the manifest for honesty.
@@ -120,7 +118,16 @@ func (c *Channel) Capabilities() c3types.Capabilities {
 		RichMessages: true,
 		RichTables:   richTablesEnabled,
 		Inbound: c3types.InboundCaps{
-			MaxDownloadBytes: maxDownloadBytes,
+			// C3 declares NO download ceiling, and does not enforce one. The
+			// 20 MiB number is a fact about api.telegram.org today, not about
+			// the Bot API: a self-hosted server "download[s] files without a
+			// size limit"
+			// (https://core.telegram.org/bots/api#using-a-local-bot-api-server)
+			// and Telegram can move its own number whenever it likes. A baked-in
+			// ceiling is therefore a false refusal waiting to happen — in BOTH
+			// directions — so the bot server is the only authority: C3 asks it
+			// (getFile) and reports whatever it answers. 0 means UNDECLARED.
+			MaxDownloadBytes: 0,
 			// The attachment kinds Telegram delivers inbound. Mapped onto the
 			// neutral MediaKind set; sticker/video_note have no neutral kind
 			// in v1 and are omitted.

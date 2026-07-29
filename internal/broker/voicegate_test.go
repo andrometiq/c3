@@ -15,32 +15,67 @@ import (
 	"github.com/Andrometiq/c3/internal/mappings"
 )
 
-// Voice size gate — 2026-07-27 incident, Ask #1
+// Voice fetchability gate — 2026-07-27 incident, Ask #1
 // (local-notes/INCIDENT-2026-07-27-voice-limit-ordering.md). A 21,226,288-byte
 // voice note ran the STT chain twice (two HTTP 400s) and surfaced "The audio is
 // saved and recoverable — the user does not need to resend", which was false on
-// every clause. Telegram's getFile ceiling is a hard 20MB
-// (https://core.telegram.org/bots/api#getfile), and C3 already had the size on
-// the incoming update.
+// every clause.
+//
+// The rule these tests pin (maintainer, 2026-07-29): C3 owns NO size limit and
+// compares nothing against one. The bot server decides; C3 asks it with a
+// bodyless getFile before running STT, and reports what it hears.
 
-const (
-	incidentVoiceBytes = int64(21226288) // msg 6994, 2026-07-27
-	botDownloadLimit   = int64(20 * 1024 * 1024)
-)
+const incidentVoiceBytes = int64(21226288) // msg 6994, 2026-07-27
 
-// capsWithDownloadLimit builds a telegram-shaped manifest declaring limit as the
-// inbound download ceiling — the ONLY place the gate reads the number from.
-func capsWithDownloadLimit(limit int64) *c3types.Capabilities {
-	return &c3types.Capabilities{
-		Channel: "telegram",
-		Inbound: c3types.InboundCaps{MaxDownloadBytes: limit},
+// probeChannel answers the fetchability ask. size/err are what the transport
+// says; calls counts how often it was asked.
+type probeChannel struct {
+	*fakeChannel
+	size  int64
+	err   error
+	calls atomic.Int64
+}
+
+func (p *probeChannel) AttachmentSize(string) (int64, error) {
+	p.calls.Add(1)
+	return p.size, p.err
+}
+
+// gateChannel is a readback recorder that ALSO answers the fetchability ask, so
+// one double drives both the skip decision and the human notice it produces.
+type gateChannel struct {
+	*readbackRecorderChannel
+	size  int64
+	err   error
+	calls atomic.Int64
+}
+
+func (g *gateChannel) AttachmentSize(string) (int64, error) {
+	g.calls.Add(1)
+	return g.size, g.err
+}
+
+func newGateChannel(size int64, err error) *gateChannel {
+	return &gateChannel{
+		readbackRecorderChannel: &readbackRecorderChannel{fakeChannel: &fakeChannel{}},
+		size:                    size,
+		err:                     err,
 	}
 }
 
-// gateChannel is a readback recorder that also declares a download ceiling, so
-// one double drives both the skip decision and the human notice it produces.
-func gateChannel(limit int64) *readbackRecorderChannel {
-	return &readbackRecorderChannel{fakeChannel: &fakeChannel{caps: capsWithDownloadLimit(limit)}}
+func registerGateChannel(b *Broker, g *gateChannel) {
+	b.chMu.Lock()
+	b.channels[g.Name()] = &channelRegistration{Channel: g}
+	b.chMu.Unlock()
+}
+
+// tooBigErr is what a transport hands back when its server refuses on size: its
+// OWN words, tagged with the sentinel that means "permanent, do not retry".
+func tooBigErr() error {
+	return errors.Join(
+		errors.New("telegram: the bot server refused to download this file — unable to getFile: Bad Request: file is too big"),
+		channel.ErrAttachmentTooLarge,
+	)
 }
 
 func voiceInbound(msgID, size int64) *c3types.Inbound {
@@ -50,9 +85,9 @@ func voiceInbound(msgID, size int64) *c3types.Inbound {
 	}
 }
 
-// countingSTT registers a voice callback that records how many times it ran and
-// returns transcript. The count is the point: over the ceiling the handler must
-// not run AT ALL (today it runs, fails, and logs an HTTP 400).
+// countingSTT registers a voice callback that records how often it ran. The
+// count is the point: on a file the server refuses, the handler must not run AT
+// ALL (today it runs, fails, and logs an HTTP 400).
 func countingSTT(b *Broker, transcript string) *atomic.Int64 {
 	var calls atomic.Int64
 	b.Plugins.OnVoiceReceived(func(context.Context, c3types.VoicePayload) (string, error) {
@@ -62,153 +97,191 @@ func countingSTT(b *Broker, transcript string) *atomic.Int64 {
 	return &calls
 }
 
-// The headline behavior: over the ceiling, STT never runs, the agent is told the
-// truth in its own distinct marker, and the human is told the size, the limit,
-// and the only action that works.
-func TestFlushInbounds_VoiceOverDownloadLimit_SkipsSTTAndTellsTheTruth(t *testing.T) {
+func gateBroker(t *testing.T, g *gateChannel) *Broker {
+	t.Helper()
 	t.Setenv("C3_QUEUE_DIR", t.TempDir())
 	b := New(&mappings.MappingsFile{SchemaVersion: 1})
-	defer b.Shutdown()
+	registerGateChannel(b, g)
+	return b
+}
 
-	rc := gateChannel(botDownloadLimit)
-	registerReadbackChannel(b, rc)
-	calls := countingSTT(b, "should never be produced")
-
+func flushVoice(t *testing.T, b *Broker, in *c3types.Inbound) {
+	t.Helper()
 	w := newRouteWorker(context.Background(), RouteKey{Channel: "telegram", ChatID: -100}, time.Hour, b)
 	defer w.Stop()
+	w.flushInbounds(context.Background(), []*c3types.Inbound{in})
+}
+
+// The headline behavior: the server refuses on size, STT never runs, the agent
+// is told the truth in its own distinct marker, and the human is offered the two
+// routes that keep the original audio.
+func TestFlushInbounds_ServerRefusesOnSize_SkipsSTTAndTellsTheTruth(t *testing.T) {
+	g := newGateChannel(0, tooBigErr())
+	b := gateBroker(t, g)
+	defer b.Shutdown()
+	calls := countingSTT(b, "should never be produced")
 
 	in := voiceInbound(6994, incidentVoiceBytes)
-	w.flushInbounds(context.Background(), []*c3types.Inbound{in})
+	flushVoice(t, b, in)
 
 	if got := calls.Load(); got != 0 {
-		t.Fatalf("STT ran %d time(s) on a voice note the bot API can never download; want 0 — the size was on the update before any getFile attempt", got)
+		t.Fatalf("STT ran %d time(s) on a file the bot server refuses to serve; want 0 — transcription opens with that same fetch", got)
 	}
 	if !strings.Contains(in.Text, "[voice too big:") {
 		t.Fatalf("agent surface must carry the distinct too-big marker; got %q", in.Text)
 	}
 	if strings.Contains(in.Text, "saved and recoverable") {
-		t.Fatalf("agent surface still claims the audio is saved and recoverable — false for an over-limit note: nothing was fetched and resending is the only fix; got %q", in.Text)
+		t.Fatalf("agent surface still claims the audio is saved and recoverable — false for a file that was never fetched; got %q", in.Text)
 	}
-	if !strings.Contains(in.Text, "20.2 MB") || !strings.Contains(in.Text, "20.0 MB") {
-		t.Fatalf("agent surface must name the actual size AND the ceiling; got %q", in.Text)
+	if !strings.Contains(in.Text, "file is too big") {
+		t.Fatalf("agent surface must quote the SERVER's own refusal, not a cause C3 decided for it; got %q", in.Text)
+	}
+	if !strings.Contains(in.Text, "20.2 MB") {
+		t.Fatalf("agent surface must name the size the update stated when it stated one; got %q", in.Text)
+	}
+	if !strings.Contains(in.Text, "SPLIT that same file") {
+		t.Fatalf("agent surface must name the recovery that works — share or split the SAME file; got %q", in.Text)
 	}
 
-	rc.waitReplyContaining(t, "over the 20.0 MB bot download limit")
-	for _, rp := range rc.sendRepliesSnapshot() {
+	g.waitReplyContaining(t, "over the bot server's size limit")
+	for _, rp := range g.sendRepliesSnapshot() {
 		if strings.Contains(rp.Text, "try again") {
-			t.Fatalf("human notice tells the sender to try again, which cannot work for an over-limit note; got %q", rp.Text)
+			t.Fatalf("human notice tells the sender to try again, which cannot work for a file the server refuses; got %q", rp.Text)
+		}
+	}
+
+	// Neither surface may mention re-recording, in ANY direction. Whether to
+	// re-record is the sender's own call; recommending it throws away audio that
+	// is perfectly fine, and forbidding it puts the idea in their head for no
+	// reason (maintainer, 2026-07-29). We suggest the two routes that keep the
+	// original file and stay silent on the rest.
+	surfaces := []string{in.Text}
+	for _, rp := range g.sendRepliesSnapshot() {
+		surfaces = append(surfaces, rp.Text)
+	}
+	for _, text := range surfaces {
+		if strings.Contains(strings.ToLower(text), "record") {
+			t.Fatalf("a refusal surface talks about re-recording; it must simply suggest sharing or splitting the same file and say nothing about recording. got %q", text)
 		}
 	}
 }
 
-// The boundary is EXCLUSIVE: a note exactly at the ceiling is downloadable, so it
-// must transcribe. A gate that refuses at the limit silently kills the largest
-// notes that actually work.
-func TestFlushInbounds_VoiceAtDownloadLimit_StillTranscribes(t *testing.T) {
-	t.Setenv("C3_QUEUE_DIR", t.TempDir())
-	b := New(&mappings.MappingsFile{SchemaVersion: 1})
+// No local ceiling exists any more, so SIZE ALONE never refuses. A 21 MB note
+// the server is willing to serve must transcribe — that is the false refusal
+// this rule exists to prevent, and it is exactly what a self-hosted Bot API
+// server does ("Download files without a size limit").
+func TestFlushInbounds_ServerServesLargeFile_StillTranscribes(t *testing.T) {
+	g := newGateChannel(incidentVoiceBytes, nil)
+	b := gateBroker(t, g)
 	defer b.Shutdown()
+	calls := countingSTT(b, "transcribed a large file")
 
-	registerReadbackChannel(b, gateChannel(botDownloadLimit))
-	calls := countingSTT(b, "transcribed at the boundary")
-
-	w := newRouteWorker(context.Background(), RouteKey{Channel: "telegram", ChatID: -100}, time.Hour, b)
-	defer w.Stop()
-
-	in := voiceInbound(6995, botDownloadLimit)
-	w.flushInbounds(context.Background(), []*c3types.Inbound{in})
+	in := voiceInbound(6995, incidentVoiceBytes)
+	flushVoice(t, b, in)
 
 	if got := calls.Load(); got != 1 {
-		t.Fatalf("STT ran %d time(s) for a note exactly AT the ceiling; want 1 — that file is downloadable", got)
+		t.Fatalf("STT ran %d time(s) on a 21 MB file the server agreed to serve; want 1 — C3 must hold no size limit of its own", got)
 	}
-	if !strings.Contains(in.Text, "transcribed at the boundary") {
-		t.Fatalf("a note at the ceiling must surface its transcript; got %q", in.Text)
+	if !strings.Contains(in.Text, "transcribed a large file") {
+		t.Fatalf("a file the server serves must surface its transcript; got %q", in.Text)
 	}
 }
 
-// A channel that declares no ceiling (0) must never be gated. Silence in the
-// manifest means "unknown", and treating unknown as zero would refuse to
-// transcribe every voice note on that channel.
-func TestFlushInbounds_ChannelDeclaresNoDownloadLimit_StillTranscribes(t *testing.T) {
-	t.Setenv("C3_QUEUE_DIR", t.TempDir())
-	b := New(&mappings.MappingsFile{SchemaVersion: 1})
+// Telegram marks Voice.file_size Optional, so an update that omits it must be
+// answered by ASKING, not by assuming the file is small.
+func TestFlushInbounds_UnstatedSize_StillAsksTheServer(t *testing.T) {
+	g := newGateChannel(0, tooBigErr())
+	b := gateBroker(t, g)
 	defer b.Shutdown()
+	calls := countingSTT(b, "should never be produced")
 
-	registerReadbackChannel(b, gateChannel(0))
-	calls := countingSTT(b, "no ceiling declared")
+	in := voiceInbound(6996, 0) // Telegram omitted file_size
+	flushVoice(t, b, in)
 
-	w := newRouteWorker(context.Background(), RouteKey{Channel: "telegram", ChatID: -100}, time.Hour, b)
-	defer w.Stop()
-
-	in := voiceInbound(6996, incidentVoiceBytes)
-	w.flushInbounds(context.Background(), []*c3types.Inbound{in})
-
-	if got := calls.Load(); got != 1 {
-		t.Fatalf("STT ran %d time(s) on a channel that declares no download ceiling; want 1 — an undeclared limit must not gate", got)
+	if got := g.calls.Load(); got != 1 {
+		t.Fatalf("the server was asked %d time(s) about a voice note with no stated size; want 1 — an unstated size is unknown, not small", got)
+	}
+	if got := calls.Load(); got != 0 {
+		t.Fatalf("STT ran %d time(s) on a refused file whose size the update omitted; want 0", got)
+	}
+	if strings.Contains(in.Text, "0 bytes") || strings.Contains(in.Text, "0.0 MB") {
+		t.Fatalf("a size that was never stated must not be reported as a number; got %q", in.Text)
 	}
 }
 
-// A route whose channel cannot be resolved (unit harnesses, a channel that
-// failed to register) has no manifest to read, so the gate must stand down
-// rather than block transcription on a missing answer.
-func TestFlushInbounds_UnresolvableChannel_StillTranscribes(t *testing.T) {
-	t.Setenv("C3_QUEUE_DIR", t.TempDir())
-	b := New(&mappings.MappingsFile{SchemaVersion: 1})
+// A refusal C3 cannot classify is passed through VERBATIM rather than dressed as
+// a transcription failure. Transparent beats classified: this is what happens
+// the day Telegram rewords "file is too big", and it still tells both sides the
+// truth instead of blaming the STT provider.
+func TestFlushInbounds_UnrecognizedRefusal_PassesTheRealErrorThrough(t *testing.T) {
+	g := newGateChannel(0, errors.New("telegram: GetFile: unable to getFile: Bad Request: file is too large"))
+	b := gateBroker(t, g)
 	defer b.Shutdown()
-
-	calls := countingSTT(b, "no channel registered")
-
-	w := newRouteWorker(context.Background(), RouteKey{Channel: "telegram", ChatID: -100}, time.Hour, b)
-	defer w.Stop()
+	calls := countingSTT(b, "should never be produced")
 
 	in := voiceInbound(6997, incidentVoiceBytes)
-	w.flushInbounds(context.Background(), []*c3types.Inbound{in})
+	flushVoice(t, b, in)
 
-	if got := calls.Load(); got != 1 {
-		t.Fatalf("STT ran %d time(s) with no resolvable channel; want 1 — an unreadable manifest must not become a refusal", got)
+	if got := calls.Load(); got != 0 {
+		t.Fatalf("STT ran %d time(s) after the fetch had already failed; want 0 — the chain begins with that same fetch and would report a generic failure over a real error", got)
 	}
+	if !strings.Contains(in.Text, "file is too large") {
+		t.Fatalf("the agent must see the server's ACTUAL words when C3 cannot classify them; got %q", in.Text)
+	}
+	if strings.Contains(in.Text, "saved and recoverable") {
+		t.Fatalf("a download-classified failure must never carry the transcription-failed reassurance; got %q", in.Text)
+	}
+	g.waitReplyContaining(t, "file is too large")
 }
 
-// A deliberate caption is the sender's own words and outranks any C3 placeholder
-// — same rule the STT-failure path already follows. The human notice still fires,
-// so the news is not lost.
-func TestFlushInbounds_VoiceOverLimitKeepsSenderCaption(t *testing.T) {
+// A channel that cannot be asked, or a route with no resolvable channel, must
+// not become a refusal — the gate stands down and STT runs as before.
+func TestFlushInbounds_NothingToAsk_StillTranscribes(t *testing.T) {
 	t.Setenv("C3_QUEUE_DIR", t.TempDir())
 	b := New(&mappings.MappingsFile{SchemaVersion: 1})
 	defer b.Shutdown()
-
-	rc := gateChannel(botDownloadLimit)
-	registerReadbackChannel(b, rc)
-	countingSTT(b, "unused")
-
-	w := newRouteWorker(context.Background(), RouteKey{Channel: "telegram", ChatID: -100}, time.Hour, b)
-	defer w.Stop()
+	// readbackRecorderChannel has no AttachmentSize method.
+	registerReadbackChannel(b, &readbackRecorderChannel{fakeChannel: &fakeChannel{}})
+	calls := countingSTT(b, "no probe available")
 
 	in := voiceInbound(6998, incidentVoiceBytes)
-	in.Text = "user-typed caption"
-	w.flushInbounds(context.Background(), []*c3types.Inbound{in})
+	flushVoice(t, b, in)
 
-	if in.Text != "user-typed caption" {
-		t.Fatalf("an over-limit voice note clobbered the sender's caption; in.Text=%q", in.Text)
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("STT ran %d time(s) on a channel that cannot be asked; want 1 — an unanswerable question is not a refusal", got)
 	}
-	rc.waitReplyContaining(t, "over the 20.0 MB bot download limit")
 }
 
-// sizeProbeChannel adds the OPTIONAL AttachmentSize probe, which is how the
-// file_id-only paths (retranscribe) learn a size they were never given.
-type sizeProbeChannel struct {
-	*fakeChannel
-	size  int64
-	err   error
-	calls atomic.Int64
+// A caption is the sender's own words AND the refusal is the one thing the agent
+// must not miss, so both survive. The old "only when the text is empty" rule
+// dropped the refusal entirely whenever a caption — or a rich-voice
+// "[voice_note]" marker — was present.
+func TestFlushInbounds_RefusalIsAppendedToExistingText(t *testing.T) {
+	for _, tc := range []struct{ name, existing string }{
+		{"ordinary voice with a caption", "user-typed caption"},
+		{"rich-message voice block", "[voice_note]"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			g := newGateChannel(0, tooBigErr())
+			b := gateBroker(t, g)
+			defer b.Shutdown()
+			countingSTT(b, "unused")
+
+			in := voiceInbound(6999, incidentVoiceBytes)
+			in.Text = tc.existing
+			flushVoice(t, b, in)
+
+			if !strings.Contains(in.Text, tc.existing) {
+				t.Fatalf("the sender's own text was clobbered; in.Text=%q, want it to still contain %q", in.Text, tc.existing)
+			}
+			if !strings.Contains(in.Text, "[voice too big:") {
+				t.Fatalf("existing text swallowed the refusal — the agent is never told the audio was not fetched; in.Text=%q", in.Text)
+			}
+		})
+	}
 }
 
-func (s *sizeProbeChannel) AttachmentSize(string) (int64, error) {
-	s.calls.Add(1)
-	return s.size, s.err
-}
-
-func brokerWithProbe(t *testing.T, pc *sizeProbeChannel) *Broker {
+func brokerWithProbe(t *testing.T, pc *probeChannel) *Broker {
 	t.Helper()
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	b := New(mfWithTelegram())
@@ -228,12 +301,12 @@ func retranscribeOn(t *testing.T, b *Broker, fileID string) ipc.RetranscribeResp
 	return readRetranscribeResp(t, agentSide)
 }
 
-// retranscribe on an over-limit file used to re-run the whole chain and answer
-// "STT provider still failing (no transcript)" — sending the agent after a
-// provider outage that does not exist. It must refuse up front, naming size.
-func TestHandleRetranscribe_OverLimitFile_RefusedWithSizeCause(t *testing.T) {
+// retranscribe on a refused file used to re-run the whole chain and answer "STT
+// provider still failing (no transcript)" — sending the agent after a provider
+// outage that does not exist. It must ask first and pass the real cause on.
+func TestHandleRetranscribe_ServerRefuses_ReportsTheRealCause(t *testing.T) {
 	t.Setenv("C3_QUEUE_DIR", t.TempDir())
-	pc := &sizeProbeChannel{fakeChannel: &fakeChannel{caps: capsWithDownloadLimit(botDownloadLimit)}, size: incidentVoiceBytes}
+	pc := &probeChannel{fakeChannel: &fakeChannel{}, err: tooBigErr()}
 	b := brokerWithProbe(t, pc)
 	defer b.Shutdown()
 	calls := countingSTT(b, "should never be produced")
@@ -241,43 +314,20 @@ func TestHandleRetranscribe_OverLimitFile_RefusedWithSizeCause(t *testing.T) {
 	resp := retranscribeOn(t, b, "F-BIG")
 
 	if got := calls.Load(); got != 0 {
-		t.Fatalf("retranscribe ran STT %d time(s) on an unfetchable file; want 0", got)
+		t.Fatalf("retranscribe ran STT %d time(s) on a file the server will not serve; want 0", got)
 	}
-	if !strings.Contains(resp.Err, "voice too big") || !strings.Contains(resp.Err, "20.2 MB") {
-		t.Fatalf("retranscribe error must name SIZE as the cause, not a generic provider failure; got %q", resp.Err)
+	if !strings.Contains(resp.Err, "file is too big") {
+		t.Fatalf("retranscribe must report the SERVER's cause, not a generic provider failure; got %q", resp.Err)
 	}
-}
-
-// The probe is a diagnostic, never a gate of its own: a probe that FAILS must
-// leave retranscribe working exactly as before. The size it returns alongside
-// that error is not an answer — a value handed back with an error has not been
-// established, and acting on it would refuse a file nobody ever measured.
-func TestHandleRetranscribe_ProbeFailure_DoesNotBlockTranscription(t *testing.T) {
-	t.Setenv("C3_QUEUE_DIR", t.TempDir())
-	pc := &sizeProbeChannel{
-		fakeChannel: &fakeChannel{caps: capsWithDownloadLimit(botDownloadLimit)},
-		size:        incidentVoiceBytes, // over the ceiling, but NOT established: err is set
-		err:         errors.New("telegram: GetFile: network unreachable"),
-	}
-	b := brokerWithProbe(t, pc)
-	defer b.Shutdown()
-	countingSTT(b, "fresh transcript")
-
-	resp := retranscribeOn(t, b, "F-FLAKY")
-
-	if resp.Err != "" {
-		t.Fatalf("a failed size probe turned into a refusal; err=%q", resp.Err)
-	}
-	if resp.Text != "fresh transcript" {
-		t.Fatalf("retranscribe text = %q, want the transcript — a flaky probe must not stop transcription", resp.Text)
+	if strings.Contains(resp.Err, "still failing") {
+		t.Fatalf("retranscribe still blames the STT provider for a fetch the server refused; got %q", resp.Err)
 	}
 }
 
-// A file the probe reports as fetchable must transcribe. The refusal is for
-// files over the ceiling, not for every file the probe happens to measure.
-func TestHandleRetranscribe_ProbeUnderLimit_StillTranscribes(t *testing.T) {
+// A file the server agrees to serve transcribes, whatever its size.
+func TestHandleRetranscribe_ServerServesFile_StillTranscribes(t *testing.T) {
 	t.Setenv("C3_QUEUE_DIR", t.TempDir())
-	pc := &sizeProbeChannel{fakeChannel: &fakeChannel{caps: capsWithDownloadLimit(botDownloadLimit)}, size: botDownloadLimit}
+	pc := &probeChannel{fakeChannel: &fakeChannel{}, size: incidentVoiceBytes}
 	b := brokerWithProbe(t, pc)
 	defer b.Shutdown()
 	calls := countingSTT(b, "fresh transcript")
@@ -285,55 +335,38 @@ func TestHandleRetranscribe_ProbeUnderLimit_StillTranscribes(t *testing.T) {
 	resp := retranscribeOn(t, b, "F-OK")
 
 	if resp.Err != "" {
-		t.Fatalf("a fetchable file was refused; err=%q", resp.Err)
+		t.Fatalf("a file the server serves was refused; err=%q", resp.Err)
 	}
 	if got := calls.Load(); got != 1 {
-		t.Fatalf("STT ran %d time(s) for a fetchable file; want 1", got)
+		t.Fatalf("STT ran %d time(s) for a servable file; want 1", got)
 	}
 }
 
-// When the transport refuses at getFile it reports no number, only the tagged
-// cause. That tag must still reach the agent as a size answer.
-func TestAttachmentTooBigRefusal_SizeSentinelSurfacesAsSizeCause(t *testing.T) {
+// A channel with no probe cannot be asked, so retranscribe proceeds as before.
+func TestAttachmentFetchRefusal_ChannelWithoutProbe_NeverRefuses(t *testing.T) {
 	t.Setenv("C3_QUEUE_DIR", t.TempDir())
-	pc := &sizeProbeChannel{
-		fakeChannel: &fakeChannel{caps: capsWithDownloadLimit(botDownloadLimit)},
-		err:         errors.New("telegram: getFile refused: over the 20.0 MB bot download limit: " + channel.ErrAttachmentTooLarge.Error()),
-	}
-	pc.err = errors.Join(pc.err, channel.ErrAttachmentTooLarge)
-	b := brokerWithProbe(t, pc)
+	b := brokerWithChannel(t, mfWithTelegram(), &fakeChannel{})
 	defer b.Shutdown()
 
-	refusal := b.attachmentTooBigRefusal("telegram", "F-BIG")
-	if refusal == "" {
-		t.Fatal("a probe tagged ErrAttachmentTooLarge produced no refusal — the permanent size cause would be reported as a generic STT failure")
-	}
-	if !strings.Contains(refusal, "resend it in shorter parts") {
-		t.Fatalf("refusal must state the action that actually works; got %q", refusal)
+	if got := b.attachmentFetchRefusal("telegram", "F-BIG"); got != "" {
+		t.Fatalf("a channel that cannot be asked must not produce a refusal; got %q", got)
 	}
 }
 
-// A channel with no probe cannot answer the size question, so the file_id-only
-// paths must proceed rather than refuse on an unknown.
-func TestAttachmentTooBigRefusal_ChannelWithoutProbe_NeverRefuses(t *testing.T) {
-	t.Setenv("C3_QUEUE_DIR", t.TempDir())
-	b := brokerWithChannel(t, mfWithTelegram(), &fakeChannel{caps: capsWithDownloadLimit(botDownloadLimit)})
-	defer b.Shutdown()
-
-	if got := b.attachmentTooBigRefusal("telegram", "F-BIG"); got != "" {
-		t.Fatalf("a channel that cannot report sizes must not produce a refusal; got %q", got)
+// Integer MB collapses the two numbers a size message exists to compare: the
+// incident file and a 20 MiB ceiling both floor to "20 MB".
+func TestMBString_KeepsTheDecimal(t *testing.T) {
+	if got := mbString(incidentVoiceBytes); got != "20.2 MB" {
+		t.Fatalf("mbString(%d) = %q, want 20.2 MB — integer MB prints 20 MB and reads as UNDER a 20 MB limit", incidentVoiceBytes, got)
 	}
 }
 
-// Integer MB collapses the two numbers this gate exists to compare: the incident
-// file and the ceiling both floor to "20 MB", so the message would read
-// "20 MB > 20 MB limit" and prove nothing.
-func TestMBString_DistinguishesSizeFromLimit(t *testing.T) {
-	size, limit := mbString(incidentVoiceBytes), mbString(botDownloadLimit)
-	if size == limit {
-		t.Fatalf("size and limit render identically (%q) — the reader cannot see the file is over", size)
+// A size the update never carried must not be invented as "0.0 MB".
+func TestSizeSuffix_UnstatedSizeSaysNothing(t *testing.T) {
+	if got := sizeSuffix(0); got != "" {
+		t.Fatalf("sizeSuffix(0) = %q, want empty — reporting a size Telegram never sent is a made-up fact", got)
 	}
-	if size != "20.2 MB" || limit != "20.0 MB" {
-		t.Fatalf("mbString(%d)=%q, mbString(%d)=%q; want 20.2 MB and 20.0 MB", incidentVoiceBytes, size, botDownloadLimit, limit)
+	if got := sizeSuffix(incidentVoiceBytes); !strings.Contains(got, "20.2 MB") {
+		t.Fatalf("sizeSuffix must state a size that WAS given; got %q", got)
 	}
 }

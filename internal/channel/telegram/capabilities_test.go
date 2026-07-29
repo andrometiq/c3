@@ -80,8 +80,13 @@ func TestCapabilities_GoldenManifest(t *testing.T) {
 	if !caps.RichTables {
 		t.Error("RichTables = false; want true (live-verified ON 2026-06-17)")
 	}
-	if want := int64(20 * 1024 * 1024); caps.Inbound.MaxDownloadBytes != want {
-		t.Errorf("Inbound.MaxDownloadBytes = %d; want %d (20 MiB)", caps.Inbound.MaxDownloadBytes, want)
+	// C3 declares NO download ceiling (maintainer's ruling 2026-07-29): 20 MiB is
+	// api.telegram.org's current number, not the Bot API's — a self-hosted server
+	// has none and Telegram can move its own — so any baked-in value is a false
+	// refusal waiting to happen, here or in an adapter that reads the manifest.
+	// The bot server is asked instead (getFile) and its answer is reported.
+	if caps.Inbound.MaxDownloadBytes != 0 {
+		t.Errorf("Inbound.MaxDownloadBytes = %d; want 0 (undeclared — C3 holds no size limit and the server is the authority)", caps.Inbound.MaxDownloadBytes)
 	}
 	if !caps.Inbound.DeliversRichMessages {
 		t.Error("Inbound.DeliversRichMessages = false; want true (Bot API 10.1 rich-message inbound decode)")
