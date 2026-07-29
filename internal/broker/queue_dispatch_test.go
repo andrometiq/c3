@@ -158,7 +158,15 @@ func TestHandleRetranscribe_RefreshesQueuedMessageInPlace(t *testing.T) {
 	key := MakeRouteKey("telegram", -100, &tid)
 	qrk := queue.RouteKey{Channel: "telegram", ChatID: -100, TopicID: &tid}
 	// A queued voice message whose stored Text is an STT-failure placeholder.
-	_ = b.Queue.Append(qrk, &c3types.Inbound{Channel: "telegram", ChatID: -100, TopicID: &tid, MessageID: 5, Text: "[STT FAILED]", Timestamp: time.Now()})
+	// The shape is the REAL one: a voice attachment, and text C3 wrote by itself
+	// (sttFailureOpening). The in-place refresh replaces the whole stored text,
+	// so it is allowed only for exactly this shape — see wholeTextIsC3sVoiceWrite.
+	_ = b.Queue.Append(qrk, &c3types.Inbound{
+		Channel: "telegram", ChatID: -100, TopicID: &tid, MessageID: 5,
+		Text:        sttFailureOpening + " no_transcript] the audio is saved and recoverable …",
+		Attachments: []c3types.Attachment{{Kind: "voice", FileID: "vf"}},
+		Timestamp:   time.Now(),
+	})
 	// A second queued message that must be left untouched.
 	_ = b.Queue.Append(qrk, &c3types.Inbound{Channel: "telegram", ChatID: -100, TopicID: &tid, MessageID: 6, Text: "other", Timestamp: time.Now()})
 

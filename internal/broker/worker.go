@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -522,8 +523,17 @@ func (w *RouteWorker) voiceOutcome(ctx context.Context, in *c3types.Inbound, att
 	if raw != "" && !isSTTFailureMarker(raw) {
 		return voiceOutcome{transcript: raw, raw: raw}
 	}
-	return voiceOutcome{raw: raw}
+	// An ordinary STT failure carries a notice too. It used to rely on
+	// echoReadback's fallback, which only fired when NOTHING transcribed — so a
+	// message where one voice failed and another succeeded sent the human a
+	// readback and no word about the failure (Codex review 3, finding 2).
+	return voiceOutcome{raw: raw, notice: sttFailureNotice}
 }
+
+// sttFailureNotice is the human-facing line for a voice note that was fetched
+// but not transcribed. Unlike a fetch refusal there is nothing specific to
+// report — the provider's traceback is a log concern, not a chat one.
+const sttFailureNotice = "⚠️ Couldn't transcribe that voice note — see logs / try again."
 
 // sttFlushTimeout bounds each per-inbound voice STT call made by flushInbounds.
 // Without it the call inherits only the run-loop ctx (cancelled solely on broker
@@ -574,8 +584,9 @@ func (w *RouteWorker) flushInbounds(ctx context.Context, batch []*c3types.Inboun
 			// transcript becomes the agent surface); each additional one APPENDS
 			// its own transcript or marker, so a rich message carrying two voice
 			// blocks surfaces both instead of silently dropping the rest.
-			var echoTranscript, failNotice string
-			for n, att := range voices {
+			var echoTranscript string
+			var notices []string
+			for _, att := range voices {
 				o := w.voiceOutcome(ctx, in, att)
 				switch {
 				case o.marker != "":
@@ -589,35 +600,34 @@ func (w *RouteWorker) flushInbounds(ctx context.Context, batch []*c3types.Inboun
 					// arrived with the message is the sender's, or the rich
 					// decoder's own block markers. Replacing it destroyed the
 					// "[photo]" half of a photo-then-voice rich message, and a
-					// plain voice note's caption before that. appendVoiceMarker
-					// returns the transcript alone when there was nothing there,
-					// which is every ordinary voice note.
+					// plain voice note's caption before that.
 					in.Text = appendVoiceMarker(in.Text, w.sttPrefix(in.Channel)+o.transcript)
-				case n == 0 && in.Text == "":
-					// Deliberately still guarded on empty text for the FIRST
-					// voice: a captioned note whose STT merely failed keeps the
-					// caption alone (worker_test.go pins that call), and the
-					// human notice carries the news. Additional attachments get
-					// no such luxury — dropping them entirely is the defect.
-					// Self-documenting failure: the text the AGENT sees becomes a
-					// recovery instruction (it names THIS attachment's file_id + how
-					// to fetch / retry), not a dead end. The audio is durably queued
-					// and recoverable; the user never re-forwards. This fires on BOTH
-					// the empty-transcript path (no STT plugin / timeout) AND a
-					// non-empty "[STT FAILED: <reason>]" marker from the builtin — the
-					// marker only names the log, so we replace it with the rich text
-					// and surface the parsed <reason> via sttFailureReason.
-					in.Text = sttFailureText(att, sttFailureReason(o.raw))
-				case n > 0:
+				default:
+					// An ordinary STT failure, appended like everything else. It
+					// used to be written only when in.Text was empty, on the
+					// reasoning that a captioned note keeps its caption and the
+					// human notice carries the news. That does not compose: a rich
+					// message ALWAYS has block-marker text, so the condition never
+					// fired there, and a second voice that transcribed made the
+					// notice non-empty and masked the first one's failure
+					// entirely — the agent was told nothing at all (Codex review
+					// 3, finding 2). appendVoiceMarker keeps the caption AND says
+					// what happened, which is what "don't clobber" always meant.
 					in.Text = appendVoiceMarker(in.Text, sttFailureText(att, sttFailureReason(o.raw)))
 				}
 				if o.transcript != "" {
 					echoTranscript = appendVoiceMarker(echoTranscript, o.transcript)
 				}
-				if o.notice != "" && failNotice == "" {
-					failNotice = o.notice
+				// EVERY failure contributes a notice, and DISTINCT causes are all
+				// kept: with several voice attachments, first-only silently drops
+				// the later server causes, and a success elsewhere in the message
+				// would otherwise leave the human with a readback and no hint that
+				// anything failed.
+				if o.notice != "" && !slices.Contains(notices, o.notice) {
+					notices = append(notices, o.notice)
 				}
 			}
+			failNotice := strings.Join(notices, "\n")
 			transcript := echoTranscript
 			// Voice-transcript readback echo (moved out of the Python STT handler).
 			// ADDITIVE + NON-FATAL: it is a SEND, so it must NEVER affect the
@@ -810,7 +820,7 @@ func sttFailureText(att c3types.Attachment, reason string) string {
 		mime = "audio"
 	}
 	dur = "duration unknown"
-	return fmt.Sprintf("⚠️ [voice transcription failed: %s] The audio is saved and recoverable — the user does not need to resend. Call download_attachment with file_id=%q (%s, %s) to retrieve it, or retranscribe with the same file_id to re-run transcription. Try retranscribe ONCE; if it still fails, ask the sender to resend or type it out — do not retry repeatedly. Provider traceback: %s",
+	return fmt.Sprintf(sttFailureOpening+" %s] The audio is saved and recoverable — the user does not need to resend. Call download_attachment with file_id=%q (%s, %s) to retrieve it, or retranscribe with the same file_id to re-run transcription. Try retranscribe ONCE; if it still fails, ask the sender to resend or type it out — do not retry repeatedly. Provider traceback: %s",
 		reason, fileID, mime, dur, LogPath())
 }
 
@@ -886,17 +896,15 @@ func (w *RouteWorker) echoReadback(in *c3types.Inbound, transcript, failNotice s
 	}
 	// Failure notice and transcript readback are INDEPENDENT, not either/or. One
 	// message can carry several voice attachments (a rich message decodes its
-	// blocks in order), so one can transcribe while another is refused — and the
-	// human must hear about both. With a single voice note exactly one of these
-	// fires, which is the behavior this has always had.
-	if transcript == "" || isSTTFailureMarker(transcript) || failNotice != "" {
-		notice := failNotice
-		if notice == "" {
-			notice = "⚠️ Couldn't transcribe that voice note — see logs / try again."
-		}
+	// blocks in order), so one can transcribe while another fails — and the human
+	// must hear about both. Every failed attachment contributes its notice at the
+	// call site, so this no longer infers one from an empty transcript: what to
+	// say is decided where the failures are known, not here. With a single voice
+	// note exactly one of these fires, which is the behavior this has always had.
+	if failNotice != "" {
 		if _, serr := ch.SendReply(c3types.ReplyArgs{
 			Channel: in.Channel, ChatID: in.ChatID, TopicID: in.TopicID, ReplyTo: &in.MessageID,
-			Text: notice,
+			Text: failNotice,
 		}); serr != nil {
 			log.Printf("readback notice chan=%s chat=%d topic=%s msg=%d: send failed (non-fatal): %v",
 				w.key.Channel, w.key.ChatID, TopicKeyStr(w.key), in.MessageID, serr)
@@ -1935,6 +1943,19 @@ func (w *RouteWorker) handleRefreshText(_ context.Context, job *RefreshTextJob) 
 		return
 	}
 	qrk := queueRouteKey(w.key)
+	// Store.RefreshText replaces the ENTIRE stored text, so it is only safe when
+	// C3's own single-voice write IS that entire text. A rich message's block
+	// markers, a caption, or a second attachment's transcript all live in the
+	// same field, and replacing wholesale destroyed them (Codex review 3,
+	// finding 4). Checked here rather than in the store: the store has no idea
+	// what C3 authored, and this runs on the route's single owner so the read is
+	// race-free against its own rewrite.
+	if rec, ok := w.queuedRecord(qrk, job.MessageID); ok && !wholeTextIsC3sVoiceWrite(rec, w.sttPrefix(w.key.Channel)) {
+		log.Printf("retranscribe refresh chan=%s chat=%d topic=%s msg=%d: SKIPPED — the stored message carries text C3 did not author alone (%d attachment(s)); a whole-text replace would destroy the caption / rich markers / other attachments' outcomes. The transcript is still returned to the agent.",
+			w.key.Channel, w.key.ChatID, TopicKeyStr(w.key), job.MessageID, len(rec.Attachments))
+		job.ResultCh <- RefreshResult{Refreshed: false}
+		return
+	}
 	refreshed, err := w.broker.Queue.RefreshText(qrk, job.MessageID, job.NewText)
 	if err != nil {
 		log.Printf("retranscribe refresh FAIL chan=%s chat=%d topic=%s msg=%d: %v",
@@ -1945,6 +1966,47 @@ func (w *RouteWorker) handleRefreshText(_ context.Context, job *RefreshTextJob) 
 	log.Printf("retranscribe refresh chan=%s chat=%d topic=%s msg=%d refreshed=%v",
 		w.key.Channel, w.key.ChatID, TopicKeyStr(w.key), job.MessageID, refreshed)
 	job.ResultCh <- RefreshResult{Refreshed: refreshed}
+}
+
+// queuedRecord returns the still-pending queued line for messageID. ok=false
+// means there is nothing queued under that id, in which case the refresh is
+// already a clean no-op and needs no judgement.
+func (w *RouteWorker) queuedRecord(qrk queue.RouteKey, messageID int64) (c3types.Inbound, bool) {
+	pending, _ := w.broker.Queue.Pending(qrk)
+	if pending <= 0 {
+		return c3types.Inbound{}, false
+	}
+	lines, err := w.broker.Queue.Peek(qrk, pending)
+	if err != nil {
+		return c3types.Inbound{}, false
+	}
+	for _, rec := range lines {
+		if rec.MessageID == messageID {
+			return rec, true
+		}
+	}
+	return c3types.Inbound{}, false
+}
+
+// wholeTextIsC3sVoiceWrite reports whether rec.Text is entirely something C3
+// itself wrote about a single voice attachment — the only shape a whole-text
+// replace cannot damage.
+//
+// The openings below are the complete set C3 authors as a voice message's whole
+// text: a transcript, an STT failure, and the two fetch-refusal markers. Anything
+// else in front of them — the sender's caption, a rich message's "[photo]" block
+// marker, another attachment's transcript — means the field is shared, and
+// sharing it is exactly what makes a wholesale replace destructive.
+func wholeTextIsC3sVoiceWrite(rec c3types.Inbound, sttPrefix string) bool {
+	if len(rec.Attachments) != 1 {
+		return false
+	}
+	for _, opening := range []string{sttPrefix, sttFailureOpening, voiceTooBigOpening, voiceFetchFailedOpening} {
+		if opening != "" && strings.HasPrefix(rec.Text, opening) {
+			return true
+		}
+	}
+	return false
 }
 
 // deliveredDedup is a bounded FIFO set of recently-delivered MessageIDs for this

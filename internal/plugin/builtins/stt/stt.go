@@ -177,12 +177,12 @@ func Register(host plugin.Host) error {
 			host.Logf("stt: msg=%d handler missing at %s (%v)", p.MessageID, cfg.HandlerPath, err)
 			return sttFailureMarker("handler_missing"), nil
 		}
-		token, apiBaseURL, err := readTelegramConn(host)
+		token, apiBaseURL, answered, err := readTelegramConn(host)
 		if err != nil {
 			host.Logf("stt: token read failed for msg=%d: %v", p.MessageID, err)
 			return sttFailureMarker("token_unavailable"), nil
 		}
-		return runHandler(ctx, host, cfg, token, apiBaseURL, p)
+		return runHandler(ctx, host, cfg, token, apiBaseURL, answered, p)
 	})
 	return nil
 }
@@ -210,30 +210,47 @@ func sttFailureMarker(reason string) string {
 // through the handler's own getFile).
 const FetchFailedPrefix = "[STT FETCH FAILED: "
 
-// handlerDownloadFailLine is what stt-handler.py prints to stderr when its
-// download gives up: "[stt-handler] download failed: <cause>", where <cause>
-// carries Telegram's own error_code + description for a getFile refusal.
-const handlerDownloadFailLine = "[stt-handler] download failed: "
+// fetchErrorMarker is the handler's structured fetch-error line prefix. It must
+// appear at the START of a line, and the rest of that line is the cause as a
+// JSON string (see stt-handler.py emit_fetch_error).
+//
+// The protocol is structured, not prose, because the payload is a SERVER
+// description — text C3 does not author and cannot constrain. An unanchored
+// search for a human-readable delimiter could be made to match inside the
+// description itself (parsing then lands on whitespace and the specific refusal
+// silently becomes a generic "[STT FAILED: error]"), an embedded newline
+// truncated the "verbatim" cause, and any non-fetch diagnostic containing the
+// delimiter could masquerade as a fetch failure. JSON encoding removes all three
+// at once: newlines become escapes, so a description can neither fabricate a
+// line nor end one early. (Codex review 3, finding 1.)
+const fetchErrorMarker = "C3-STT-FETCH-ERROR-v1 "
 
 // sttFetchFailureMarker carries the handler's actual fetch error upward verbatim.
 func sttFetchFailureMarker(detail string) string {
 	return FetchFailedPrefix + detail + "]"
 }
 
-// fetchFailureDetail returns the handler's reported download cause from its
-// stderr, or "" when the failure was not a fetch failure. Scans the WHOLE
-// stderr, not the logged tail: the line can be followed by a Python traceback
-// and truncating first would drop exactly the words worth surfacing.
+// fetchFailureDetail returns the handler's reported fetch cause from its stderr,
+// or "" when the failure was not a fetch failure. It scans the WHOLE stderr, not
+// the logged tail, and matches ONLY whole lines that BEGIN with the marker. The
+// last such line wins — the handler emits at most one per run, and a later
+// report is the more recent truth.
 func fetchFailureDetail(stderr string) string {
-	i := strings.LastIndex(stderr, handlerDownloadFailLine)
-	if i < 0 {
-		return ""
+	out := ""
+	for _, line := range strings.Split(stderr, "\n") {
+		rest, ok := strings.CutPrefix(line, fetchErrorMarker)
+		if !ok {
+			continue // not a marker line: anchored at line start, never mid-line
+		}
+		var cause string
+		if err := json.Unmarshal([]byte(strings.TrimRight(rest, "\r")), &cause); err != nil {
+			continue // not our encoding; refuse to guess at its meaning
+		}
+		if cause = strings.TrimSpace(cause); cause != "" {
+			out = cause
+		}
 	}
-	detail := stderr[i+len(handlerDownloadFailLine):]
-	if nl := strings.IndexByte(detail, '\n'); nl >= 0 {
-		detail = detail[:nl]
-	}
-	return strings.TrimSpace(detail)
+	return out
 }
 
 // sttLogHintPath returns the broker log path to surface in the failure
@@ -256,7 +273,7 @@ func sttLogHintPath() string {
 	return filepath.Join(state, "c3", "broker.log")
 }
 
-func runHandler(ctx context.Context, host plugin.Host, cfg Config, token, apiBaseURL string, p c3types.VoicePayload) (string, error) {
+func runHandler(ctx context.Context, host plugin.Host, cfg Config, token, apiBaseURL string, apiBaseAnswered bool, p c3types.VoicePayload) (string, error) {
 	// argv: <chat_id> <msg_id> <file_id> [<thread_id>]
 	// token is fed via stdin (see package doc).
 	args := []string{
@@ -283,14 +300,10 @@ func runHandler(ctx context.Context, host plugin.Host, cfg Config, token, apiBas
 	// Direct api.telegram.org is IP-blocked in some networks (e.g. India),
 	// which times out the download even with the proxy live. Empty =>
 	// handler defaults to api.telegram.org.
-	cmd.Env = os.Environ()
-	if apiBaseURL != "" {
-		cmd.Env = append(cmd.Env, "C3_TELEGRAM_API_URL="+apiBaseURL)
-	}
 	// Rolling-window audio retention: the handler keeps the newest N .oga in its
 	// inbox and prunes older ones after each transcription (recent audio stays
 	// available for retranscribe/testing). N is passed from config.
-	cmd.Env = append(cmd.Env, "STT_AUDIO_RETENTION="+strconv.Itoa(cfg.AudioRetention))
+	cmd.Env = handlerEnv(apiBaseURL, apiBaseAnswered, cfg.AudioRetention)
 
 	// I-7: kill the whole process group on the ctx deadline, not just the direct
 	// child. Setpgid makes stt-handler.py the leader of its OWN process group, so
@@ -395,28 +408,66 @@ type apiBaseURLer interface{ APIBaseURL() string }
 //
 // The mappings/env path stays as the fallback for a channel that cannot answer
 // (a transport without the accessor, or a unit harness with no channel wired).
-func readTelegramConn(host plugin.Host) (token, apiBaseURL string, err error) {
+// answered reports whether the LIVE channel gave an authoritative endpoint. It
+// is separate from the value because "" is a real answer — api.telegram.org —
+// and must not be mistaken for "nothing to say". Everything downstream has to
+// honor that distinction or the answer dies at the first boundary that treats
+// empty as unset (Codex review 3, finding 3).
+func readTelegramConn(host plugin.Host) (token, apiBaseURL string, answered bool, err error) {
 	var cc struct {
 		BotToken   string `json:"bot_token"`
 		APIBaseURL string `json:"api_base_url"`
 	}
 	if err := host.ChannelConfig("telegram", &cc); err != nil {
-		return "", "", fmt.Errorf("stt: read telegram channel config: %w", err)
+		return "", "", false, fmt.Errorf("stt: read telegram channel config: %w", err)
 	}
 	if cc.BotToken == "" {
-		return "", "", fmt.Errorf("stt: bot_token is empty in mappings.json:channels.telegram")
+		return "", "", false, fmt.Errorf("stt: bot_token is empty in mappings.json:channels.telegram")
 	}
 	if ch, cerr := host.Channel("telegram"); cerr == nil {
 		if live, ok := ch.(apiBaseURLer); ok {
-			return cc.BotToken, live.APIBaseURL(), nil
+			return cc.BotToken, live.APIBaseURL(), true, nil
 		}
 	}
 	base := os.Getenv("C3_TELEGRAM_API_URL")
 	if base == "" {
 		base = cc.APIBaseURL
 	}
-	return cc.BotToken, base, nil
+	return cc.BotToken, base, false, nil
 }
+
+// handlerEnv builds the subprocess environment.
+//
+// When the channel ANSWERED, its answer is FORCED onto the child: the inherited
+// C3_TELEGRAM_API_URL is stripped first, and re-set only for a non-empty base.
+// An answer of "" therefore means "use api.telegram.org" and the variable is
+// absent, which is the only way Python reads a default — setting it to the empty
+// string would build "/bot<token>/getFile" against no host at all. Without the
+// strip, a broker started with C3_TELEGRAM_API_URL pointing at a proxy kept
+// sending the handler there even after the channel had failed over to the
+// official endpoint and the preflight had succeeded on it.
+//
+// When the channel could NOT answer, the environment is inherited untouched —
+// that is the pre-existing behavior for a transport with no live accessor.
+func handlerEnv(base string, answered bool, retention int) []string {
+	env := os.Environ()
+	if answered {
+		kept := env[:0]
+		for _, kv := range env {
+			if !strings.HasPrefix(kv, apiURLEnvVar+"=") {
+				kept = append(kept, kv)
+			}
+		}
+		env = kept
+		if base != "" {
+			env = append(env, apiURLEnvVar+"="+base)
+		}
+	}
+	return append(env, "STT_AUDIO_RETENTION="+strconv.Itoa(retention))
+}
+
+// apiURLEnvVar is the variable stt-handler.py reads its Bot-API base from.
+const apiURLEnvVar = "C3_TELEGRAM_API_URL"
 
 // ensureSTTDefaultDirs creates the default handler-side log and inbox
 // directories at broker startup. The Python handler also mkdir's these

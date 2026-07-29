@@ -111,8 +111,19 @@ func TestFlushInbounds_VoiceWithCaptionKeepsCaptionWhenSTTAbsent(t *testing.T) {
 	}
 	w.flushInbounds(context.Background(), []*c3types.Inbound{in})
 
-	if in.Text != "user-typed caption" {
-		t.Errorf("voice with caption but no STT plugin: in.Text=%q, want caption preserved (don't clobber user-deliberate text with marker)", in.Text)
+	// The original rule here was "don't clobber user-deliberate text with the
+	// marker", and it was enforced by writing NO marker at all whenever text was
+	// present. That does not compose past a single voice note: a rich message
+	// always carries block-marker text, so the failure was never stated, and a
+	// second voice that transcribed then masked the human notice too — the
+	// failure became invisible on both surfaces (Codex review 3, finding 2).
+	// Appending honors the rule as it was meant: the caption is untouched AND
+	// the agent is told what happened.
+	if !strings.HasPrefix(in.Text, "user-typed caption") {
+		t.Errorf("voice with caption but no STT plugin: in.Text=%q, want the caption preserved and first (don't clobber user-deliberate text)", in.Text)
+	}
+	if !strings.Contains(in.Text, "transcription failed") {
+		t.Errorf("voice with caption but no STT plugin: in.Text=%q, want the failure appended — a caption must not be able to hide that the voice never transcribed", in.Text)
 	}
 }
 

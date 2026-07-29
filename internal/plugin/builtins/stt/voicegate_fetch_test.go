@@ -2,6 +2,7 @@ package stt
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -46,7 +47,7 @@ func hostWithChannel(ch channel.Channel, mappingsBase string) *fakeHost {
 func TestReadTelegramConn_PrefersTheChannelsLiveEndpoint(t *testing.T) {
 	h := hostWithChannel(&endpointChannel{base: "https://failed-over.example"}, "https://stale-primary.example")
 
-	_, base, err := readTelegramConn(h)
+	_, base, _, err := readTelegramConn(h)
 	if err != nil {
 		t.Fatalf("readTelegramConn: %v", err)
 	}
@@ -60,7 +61,7 @@ func TestReadTelegramConn_PrefersTheChannelsLiveEndpoint(t *testing.T) {
 func TestReadTelegramConn_LiveOfficialEndpointIsNotTreatedAsUnset(t *testing.T) {
 	h := hostWithChannel(&endpointChannel{base: ""}, "https://stale-primary.example")
 
-	_, base, err := readTelegramConn(h)
+	_, base, _, err := readTelegramConn(h)
 	if err != nil {
 		t.Fatalf("readTelegramConn: %v", err)
 	}
@@ -73,7 +74,7 @@ func TestReadTelegramConn_LiveOfficialEndpointIsNotTreatedAsUnset(t *testing.T) 
 func TestReadTelegramConn_FallsBackWhenTheChannelCannotAnswer(t *testing.T) {
 	h := hostWithChannel(&plainChannel{}, "https://configured.example")
 
-	_, base, err := readTelegramConn(h)
+	_, base, _, err := readTelegramConn(h)
 	if err != nil {
 		t.Fatalf("readTelegramConn: %v", err)
 	}
@@ -82,10 +83,11 @@ func TestReadTelegramConn_FallsBackWhenTheChannelCannotAnswer(t *testing.T) {
 	}
 }
 
-// The handler prints its download cause to stderr; that line is the only place
-// the server's own words survive.
+// The handler emits ONE structured line; that line is the only place the
+// server's own words survive.
 func TestFetchFailureDetail_ExtractsTheHandlersCause(t *testing.T) {
-	stderr := "some warmup noise\n[stt-handler] download failed: getFile failed (error_code=400): Bad Request: file is too big\nTraceback (most recent call last):\n  File \"x\"\n"
+	stderr := "some warmup noise\n" + fetchErrorMarker + `"getFile failed (error_code=400): Bad Request: file is too big"` +
+		"\nTraceback (most recent call last):\n  File \"x\"\n"
 
 	got := fetchFailureDetail(stderr)
 	if got != "getFile failed (error_code=400): Bad Request: file is too big" {
@@ -100,14 +102,108 @@ func TestFetchFailureDetail_NonFetchFailureReportsNothing(t *testing.T) {
 	}
 }
 
+// The payload is a SERVER description: text C3 does not author. It must not be
+// able to make the parse land inside itself, which is what an unanchored search
+// for a human-readable delimiter allowed — the extracted suffix was whitespace,
+// so a specific refusal silently became the generic "[STT FAILED: error]".
+func TestFetchFailureDetail_ServerDescriptionCannotDerailTheParse(t *testing.T) {
+	hostile := `Bad Request: rejected ` + fetchErrorMarker + `"" and more`
+	stderr := "\n" + fetchErrorMarker + mustJSON(hostile) + "\n"
+
+	if got := fetchFailureDetail(stderr); got != hostile {
+		t.Fatalf("fetchFailureDetail = %q, want the description verbatim (%q) — a server that quotes the marker must not be able to blank out its own cause", got, hostile)
+	}
+}
+
+// …nor truncate itself with an embedded newline, which is what "verbatim" means.
+func TestFetchFailureDetail_EmbeddedNewlineSurvivesWhole(t *testing.T) {
+	multi := "Bad Request: file is too big\nretry-after: never"
+	stderr := "\n" + fetchErrorMarker + mustJSON(multi) + "\n"
+
+	if got := fetchFailureDetail(stderr); got != multi {
+		t.Fatalf("fetchFailureDetail = %q, want all %q — a newline in the description truncated the cause the agent needs", got, multi)
+	}
+}
+
+// A marker appearing MID-LINE is not a report. Only a line that begins with it
+// is, or any diagnostic quoting the marker could masquerade as a fetch failure.
+func TestFetchFailureDetail_MidLineMarkerIsNotAReport(t *testing.T) {
+	stderr := "provider chain exhausted; note: " + fetchErrorMarker + `"not a real report"` + "\n"
+
+	if got := fetchFailureDetail(stderr); got != "" {
+		t.Fatalf("fetchFailureDetail = %q, want empty — a mid-line marker made a transcription failure impersonate a fetch failure", got)
+	}
+}
+
+func mustJSON(s string) string {
+	b, err := json.Marshal(s)
+	if err != nil {
+		panic(err)
+	}
+	return string(b)
+}
+
+// The channel's answer is FORCED onto the subprocess. An inherited
+// C3_TELEGRAM_API_URL pointing at a proxy must not survive an authoritative
+// answer of "" (api.telegram.org, after failover) — Python reads its default
+// only when the variable is ABSENT, so "" means remove it, never set it empty.
+func TestHandlerEnv_AuthoritativeEmptyAnswerRemovesTheInheritedOverride(t *testing.T) {
+	t.Setenv(apiURLEnvVar, "https://proxy-a.example")
+
+	env := handlerEnv("", true, 500)
+
+	for _, kv := range env {
+		if strings.HasPrefix(kv, apiURLEnvVar+"=") {
+			t.Fatalf("child env still carries %q — the channel authoritatively said api.telegram.org, and the handler would fetch from the stale proxy instead", kv)
+		}
+	}
+}
+
+// A non-empty answer replaces the inherited value rather than joining it.
+func TestHandlerEnv_AuthoritativeAnswerReplacesTheInheritedOverride(t *testing.T) {
+	t.Setenv(apiURLEnvVar, "https://proxy-a.example")
+
+	env := handlerEnv("https://proxy-b.example", true, 500)
+
+	var seen []string
+	for _, kv := range env {
+		if strings.HasPrefix(kv, apiURLEnvVar+"=") {
+			seen = append(seen, kv)
+		}
+	}
+	if len(seen) != 1 || seen[0] != apiURLEnvVar+"=https://proxy-b.example" {
+		t.Fatalf("child env %v, want exactly the live answer — a stale entry left beside it is decided by libc, not by us", seen)
+	}
+}
+
+// No answer ⇒ inherit untouched, which is the behavior for a transport that
+// cannot report its endpoint.
+func TestHandlerEnv_NoAnswerInheritsTheEnvironment(t *testing.T) {
+	t.Setenv(apiURLEnvVar, "https://proxy-a.example")
+
+	env := handlerEnv("", false, 500)
+
+	found := false
+	for _, kv := range env {
+		if kv == apiURLEnvVar+"=https://proxy-a.example" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("an unanswerable channel must leave the inherited environment alone — stripping it would break every transport without the live accessor")
+	}
+}
+
 // End to end through the real subprocess path: a handler whose fetch fails must
 // hand the server's words upward, not a generic marker.
 func TestRunHandler_FetchFailure_CarriesTheServersWordsUpward(t *testing.T) {
 	tmp := t.TempDir()
 	handler := filepath.Join(tmp, "stt-handler.py")
+	// Mirrors stt-handler.py emit_fetch_error: one marker-anchored line whose
+	// payload is the cause, JSON-encoded.
 	const script = `#!/usr/bin/env python3
-import sys
-print('[stt-handler] download failed: getFile failed (error_code=400): Bad Request: file is too big', file=sys.stderr)
+import json, sys
+sys.stderr.write('\n' + 'C3-STT-FETCH-ERROR-v1 ' + json.dumps('getFile failed (error_code=400): Bad Request: file is too big') + '\n')
 sys.exit(1)
 `
 	if err := os.WriteFile(handler, []byte(script), 0o755); err != nil {
@@ -157,5 +253,31 @@ sys.exit(1)
 	got, _ := h.voiceCallback(context.Background(), c3types.VoicePayload{MessageID: 1, FileID: "V1"})
 	if strings.HasPrefix(got, FetchFailedPrefix) {
 		t.Fatalf("marker = %q, want the [STT FAILED: …] form — a provider failure is not a fetch failure and must not borrow its surfaces", got)
+	}
+}
+
+// The fetch-error protocol has two ends in two languages. Nothing else in the
+// build would notice if one side drifted — the Go parser would simply stop
+// matching, and every specific server refusal would quietly become the generic
+// "[STT FAILED: error]" this finding is about. So the marker and the encoding
+// are pinned against the REAL handler source.
+func TestFetchErrorProtocol_HandlerAndShimAgree(t *testing.T) {
+	src, err := os.ReadFile(filepath.Join("..", "..", "..", "..", "plugins", "c3", "stt", "stt-handler.py"))
+	if err != nil {
+		t.Fatalf("read stt-handler.py: %v", err)
+	}
+	handler := string(src)
+
+	want := "FETCH_ERROR_MARKER = '" + fetchErrorMarker + "'"
+	if !strings.Contains(handler, want) {
+		t.Fatalf("stt-handler.py does not define %s — the shim would stop recognizing fetch failures and report them as transcription failures", want)
+	}
+	if !strings.Contains(handler, "FETCH_ERROR_MARKER + json.dumps(") {
+		t.Fatal("stt-handler.py no longer JSON-encodes the cause — an embedded newline would truncate it and a server description could fabricate a marker line")
+	}
+	// The readable form belongs in the handler's own log, never on stderr: an
+	// unencoded copy there is exactly the injection vector the encoding closes.
+	if strings.Contains(handler, "download failed: {e}', file=sys.stderr") {
+		t.Fatal("stt-handler.py prints the raw cause to stderr again — an unencoded copy re-opens the fabricated-line path")
 	}
 }

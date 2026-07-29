@@ -13,6 +13,7 @@ import (
 	"github.com/Andrometiq/c3/internal/channel"
 	"github.com/Andrometiq/c3/internal/ipc"
 	"github.com/Andrometiq/c3/internal/mappings"
+	"github.com/Andrometiq/c3/internal/queue"
 )
 
 // Voice fetchability gate — 2026-07-27 incident, Ask #1
@@ -571,5 +572,232 @@ func TestFlushInbounds_MixedTranscriptAndRefusal_HumanHearsBoth(t *testing.T) {
 	rbs := g.waitReadbacks(t, 1)
 	if !strings.Contains(rbs[0].Transcript, "transcript of V1") {
 		t.Fatalf("readback = %q, want the transcript that succeeded", rbs[0].Transcript)
+	}
+}
+
+// ── Codex review 3, finding 2 — nothing may be invisible ─────────────────────
+
+// The reviewer's exact trigger: voice(V1 ordinary STT failure), paragraph,
+// voice(V2 succeeds). V1's failure used to reach NEITHER surface — the agent
+// text was non-empty (rich block markers) so no failure text was written, and
+// V2's success made the readback fire instead of any notice.
+func TestFlushInbounds_OneVoiceFailsAnotherSucceeds_FailureIsNotSwallowed(t *testing.T) {
+	g := newGateChannel(100, nil)
+	b := gateBroker(t, g)
+	defer b.Shutdown()
+	b.Plugins.OnVoiceReceived(func(_ context.Context, p c3types.VoicePayload) (string, error) {
+		if p.FileID == "V1" {
+			return "", nil // fetched fine; the provider chain produced nothing
+		}
+		return "transcript of V2", nil
+	})
+
+	in := &c3types.Inbound{
+		Channel: "telegram", ChatID: -100, MessageID: 7200,
+		Text: "[voice_note]\n\nand another\n\n[voice_note]", // rich block markers
+		Attachments: []c3types.Attachment{
+			{Kind: "voice", FileID: "V1", Size: 100},
+			{Kind: "voice", FileID: "V2", Size: 100},
+		},
+	}
+	flushVoice(t, b, in)
+
+	if !strings.Contains(in.Text, "transcription failed") {
+		t.Fatalf("V1's STT failure never reached the agent — rich messages always have block text, so the old empty-text guard never fired; got %q", in.Text)
+	}
+	if !strings.Contains(in.Text, `file_id="V1"`) {
+		t.Fatalf("the failure must name the attachment that failed; got %q", in.Text)
+	}
+	if !strings.Contains(in.Text, "transcript of V2") {
+		t.Fatalf("the successful attachment must still surface; got %q", in.Text)
+	}
+	// …and the human is told too, even though a readback fires for V2.
+	g.waitReplyContaining(t, "Couldn't transcribe")
+	rbs := g.waitReadbacks(t, 1)
+	if !strings.Contains(rbs[0].Transcript, "transcript of V2") {
+		t.Fatalf("readback = %q, want V2's transcript", rbs[0].Transcript)
+	}
+}
+
+// N refusals with DISTINCT causes: every distinct cause reaches the human.
+// Keeping only the first silently dropped the later servers' words.
+func TestFlushInbounds_DistinctRefusalCauses_AllReachTheHuman(t *testing.T) {
+	g := newGateChannel(0, nil)
+	g.answer = func(fileID string) (int64, error) {
+		if fileID == "V1" {
+			return 0, tooBigErr()
+		}
+		return 0, errors.New("telegram: GetFile: unable to getFile: Bad Request: file reference expired")
+	}
+	b := gateBroker(t, g)
+	defer b.Shutdown()
+	countingSTT(b, "unused")
+
+	in := &c3types.Inbound{
+		Channel: "telegram", ChatID: -100, MessageID: 7201,
+		Attachments: []c3types.Attachment{
+			{Kind: "voice", FileID: "V1", Size: incidentVoiceBytes},
+			{Kind: "voice", FileID: "V2", Size: 100},
+		},
+	}
+	flushVoice(t, b, in)
+
+	g.waitReplyContaining(t, "file reference expired")
+	joined := ""
+	for _, rp := range g.sendRepliesSnapshot() {
+		joined += rp.Text + "\n"
+	}
+	if !strings.Contains(joined, "over the bot server's size limit") {
+		t.Fatalf("the FIRST refusal's cause was dropped from the human surface; got %q", joined)
+	}
+}
+
+// Identical causes are not repeated at the human — two attachments refused for
+// the same reason is one thing to say, not two.
+func TestFlushInbounds_IdenticalRefusalCauses_AreNotRepeated(t *testing.T) {
+	g := newGateChannel(0, tooBigErr())
+	b := gateBroker(t, g)
+	defer b.Shutdown()
+	countingSTT(b, "unused")
+
+	in := &c3types.Inbound{
+		Channel: "telegram", ChatID: -100, MessageID: 7202,
+		Attachments: []c3types.Attachment{
+			{Kind: "voice", FileID: "V1", Size: 100},
+			{Kind: "voice", FileID: "V2", Size: 100},
+		},
+	}
+	flushVoice(t, b, in)
+
+	g.waitReplyContaining(t, "over the bot server's size limit")
+	for _, rp := range g.sendRepliesSnapshot() {
+		if n := strings.Count(rp.Text, "over the bot server's size limit"); n > 1 {
+			t.Fatalf("the same cause was reported %d times in one notice; got %q", n, rp.Text)
+		}
+	}
+}
+
+// ── Codex review 3, finding 4 — retranscribe ─────────────────────────────────
+
+// A fetch marker is a FAILURE. It used to be handed back as Text (and written
+// into the queued message) as though it were a transcript.
+func TestHandleRetranscribe_HandlerFetchFailure_IsAnErrorNotATranscript(t *testing.T) {
+	t.Setenv("C3_QUEUE_DIR", t.TempDir())
+	pc := &probeChannel{fakeChannel: &fakeChannel{}, size: 100}
+	b := brokerWithProbe(t, pc)
+	defer b.Shutdown()
+	b.Plugins.OnVoiceReceived(func(context.Context, c3types.VoicePayload) (string, error) {
+		return "[STT FETCH FAILED: getFile failed (error_code=400): Bad Request: file is too big]", nil
+	})
+
+	resp := retranscribeOn(t, b, "V1")
+
+	if resp.Text != "" {
+		t.Fatalf("a control marker was returned as a transcript: %q — the agent would treat it as the user's words, and it would be written into the queued message", resp.Text)
+	}
+	if !strings.Contains(resp.Err, "Bad Request: file is too big") {
+		t.Fatalf("retranscribe must report the fetch cause the server gave; got %q", resp.Err)
+	}
+}
+
+// …and so is an ordinary STT failure marker.
+func TestHandleRetranscribe_STTFailureMarker_IsAnErrorNotATranscript(t *testing.T) {
+	t.Setenv("C3_QUEUE_DIR", t.TempDir())
+	pc := &probeChannel{fakeChannel: &fakeChannel{}, size: 100}
+	b := brokerWithProbe(t, pc)
+	defer b.Shutdown()
+	b.Plugins.OnVoiceReceived(func(context.Context, c3types.VoicePayload) (string, error) {
+		return "[STT FAILED: handler_missing — see /tmp/broker.log]", nil
+	})
+
+	resp := retranscribeOn(t, b, "V1")
+
+	if resp.Text != "" {
+		t.Fatalf("an STT failure marker was returned as a transcript: %q", resp.Text)
+	}
+	if resp.Err == "" {
+		t.Fatal("a failure marker must be reported as an error")
+	}
+}
+
+// wholeTextIsC3sVoiceWrite is the guard that keeps the in-place refresh from
+// replacing text C3 did not author alone.
+func TestWholeTextIsC3sVoiceWrite(t *testing.T) {
+	const prefix = "[Transcribed voice]: "
+	voice := []c3types.Attachment{{Kind: "voice", FileID: "V1"}}
+
+	for _, tc := range []struct {
+		name string
+		rec  c3types.Inbound
+		want bool
+	}{
+		{"C3's own transcript", c3types.Inbound{Text: prefix + "hello", Attachments: voice}, true},
+		{"C3's own STT failure", c3types.Inbound{Text: sttFailureOpening + " no_transcript] …", Attachments: voice}, true},
+		{"C3's own too-big marker", c3types.Inbound{Text: voiceTooBigOpening + " …", Attachments: voice}, true},
+		{"C3's own fetch-failed marker", c3types.Inbound{Text: voiceFetchFailedOpening + " …", Attachments: voice}, true},
+		{"a caption in front", c3types.Inbound{Text: "caption\n" + prefix + "hello", Attachments: voice}, false},
+		{"rich block markers in front", c3types.Inbound{Text: "[photo]\n\n" + prefix + "hello", Attachments: voice}, false},
+		{"more than one attachment", c3types.Inbound{Text: prefix + "hello", Attachments: []c3types.Attachment{{Kind: "photo"}, {Kind: "voice"}}}, false},
+		{"text C3 never wrote", c3types.Inbound{Text: "just the user talking", Attachments: voice}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := wholeTextIsC3sVoiceWrite(tc.rec, prefix); got != tc.want {
+				t.Fatalf("wholeTextIsC3sVoiceWrite(%q, %d attachment(s)) = %v, want %v — a whole-text replace destroys everything it does not own",
+					tc.rec.Text, len(tc.rec.Attachments), got, tc.want)
+			}
+		})
+	}
+}
+
+// The guard has to be WIRED IN, not merely correct: a queued message whose text
+// C3 did not author alone must come back from retranscribe unchanged. Store
+// .RefreshText replaces the whole field, so without this the caption, the rich
+// block markers, and every other attachment's outcome are destroyed by a
+// successful retranscribe of one voice.
+func TestHandleRetranscribe_DoesNotDestroyAMessageItDoesNotOwnEntirely(t *testing.T) {
+	t.Setenv("C3_QUEUE_DIR", t.TempDir())
+	pc := &probeChannel{fakeChannel: &fakeChannel{}, size: 100}
+	b := brokerWithProbe(t, pc)
+	defer b.Shutdown()
+	b.Plugins.OnVoiceReceived(func(context.Context, c3types.VoicePayload) (string, error) {
+		return "fresh transcript", nil
+	})
+
+	tid := int64(914)
+	key := MakeRouteKey("telegram", -100, &tid)
+	qrk := queue.RouteKey{Channel: "telegram", ChatID: -100, TopicID: &tid}
+	const stored = "[photo]\n\n[Transcribed voice]: the original words"
+	_ = b.Queue.Append(qrk, &c3types.Inbound{
+		Channel: "telegram", ChatID: -100, TopicID: &tid, MessageID: 5,
+		Text: stored,
+		Attachments: []c3types.Attachment{
+			{Kind: "photo", FileID: "P1"},
+			{Kind: "voice", FileID: "V1"},
+		},
+		Timestamp: time.Now(),
+	})
+
+	stub := claimedHolder(t, b, key)
+	stub.SetRoute(&key)
+
+	agentSide, brokerSide := newConnPair(t)
+	raw, _ := json.Marshal(ipc.RetranscribeReq{Op: ipc.OpRetranscribe, ID: "1", FileID: "V1", MessageID: 5})
+	go b.handleRetranscribe(brokerSide, stub, raw)
+	resp := readRetranscribeResp(t, agentSide)
+
+	// The agent still gets its transcript — the refresh is best-effort, the
+	// answer is not.
+	if resp.Text != "fresh transcript" {
+		t.Fatalf("retranscribe text = %q, want the transcript returned even when the refresh is refused", resp.Text)
+	}
+
+	fraw, _ := json.Marshal(ipc.FetchQueueReq{Op: ipc.OpFetchQueue, ID: "2", All: true, Ack: false})
+	go b.handleFetchQueue(brokerSide, stub, fraw)
+	fresp := readFetchResp(t, agentSide)
+	if len(fresp.Messages) != 1 {
+		t.Fatalf("fetch_queue returned %d messages, want 1", len(fresp.Messages))
+	}
+	if got := fresp.Messages[0].Text; got != stored {
+		t.Fatalf("the queued message was rewritten to %q; want it untouched (%q) — a whole-text replace destroys the photo marker and any other attachment's outcome", got, stored)
 	}
 }

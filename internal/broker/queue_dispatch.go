@@ -3,6 +3,7 @@ package broker
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"time"
@@ -203,7 +204,20 @@ func (b *Broker) handleRetranscribe(conn *ipc.Conn, stub *Stub, raw []byte) {
 		FileID:    req.FileID,
 	})
 	resp := ipc.RetranscribeResp{Op: ipc.OpRetranscribeResult, ID: req.ID}
-	if transcript == "" {
+	// A marker is a FAILURE, not a transcript. Every non-empty return used to be
+	// treated as success: the control marker was handed to the agent as Text AND
+	// written into the queued message, so a fetch refusal could overwrite a
+	// stored message with "[STT FETCH FAILED: …]" (Codex review 3, finding 4).
+	// The handler does its own getFile, so its fetch can fail here exactly as it
+	// can on the live path — and it is reported the same way, in the server's own
+	// words rather than as a provider outage.
+	if detail, ok := sttFetchFailure(transcript); ok {
+		resp.Err = "retranscribe: " + voiceFetchFailedAgentText(errors.New(detail))
+		log.Printf("retranscribe chan=%s file_id=%s msg=%d ok=false: the fetch failed, not the provider — %s", chanName, req.FileID, req.MessageID, detail)
+		_ = conn.WriteJSON(resp)
+		return
+	}
+	if transcript == "" || isSTTFailureMarker(transcript) {
 		resp.Err = "retranscribe: STT provider still failing (no transcript)"
 		log.Printf("retranscribe chan=%s file_id=%s msg=%d ok=false", chanName, req.FileID, req.MessageID)
 		_ = conn.WriteJSON(resp)

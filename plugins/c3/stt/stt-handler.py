@@ -109,6 +109,36 @@ def tg(token, method, **params):
     with urllib.request.urlopen(req, timeout=15) as r:
         return json.loads(r.read())
 
+# ── Fetch-error protocol (C3 review 3, finding 1) ─────────────────────────────
+#
+# The Go shim has to tell the broker EXACTLY why a fetch failed, and the broker
+# refuses to render a specific server refusal as a generic "transcription
+# failed". A human-readable stderr line cannot carry that: a server description
+# is attacker-influenced text that can contain the delimiter, embedded newlines,
+# or both — enough to fabricate a line, truncate itself, or make a non-fetch
+# diagnostic look like a fetch failure.
+#
+# So the cause travels as ONE structured line: a unique marker ANCHORED AT LINE
+# START, then the cause JSON-encoded. JSON escapes newlines, so the payload can
+# never span lines or end early no matter what the server said. Nothing else is
+# printed to stderr for a fetch failure — the readable form goes to the handler's
+# own log — so there is no unencoded copy to inject through.
+FETCH_ERROR_MARKER = 'C3-STT-FETCH-ERROR-v1 '
+
+
+def emit_fetch_error(cause):
+    """Report a fetch failure to the Go shim. Called FIRST on any fetch error,
+    before anything else that could raise, so a later crash cannot swallow it."""
+    try:
+        line = FETCH_ERROR_MARKER + json.dumps(str(cause))
+    except Exception:
+        line = FETCH_ERROR_MARKER + json.dumps('unprintable fetch error')
+    # Leading newline guarantees the marker starts a line even if earlier output
+    # left the stream mid-line; the shim matches only at line start.
+    sys.stderr.write('\n' + line + '\n')
+    sys.stderr.flush()
+
+
 class PermanentDownloadError(Exception):
     """A getFile/download failure that retrying cannot fix.
 
@@ -270,17 +300,18 @@ def main():
             # Exit WITHOUT burning the remaining retries on a guaranteed-permanent
             # failure. The Go shim sees empty stdout → [STT FAILED] marker, and the
             # broker sends the human "couldn't transcribe" notice.
+            emit_fetch_error(e)
             logging.error(f'Download permanently failed (non-retryable): {e}')
-            print(f'[stt-handler] download failed: {e}', file=sys.stderr)
             sys.exit(1)
         except Exception as e:
             logging.warning(f'Download failed [attempt {attempt}]: {e}')
             if attempt == 3:
+                emit_fetch_error(e)
                 logging.error(f'Download failed after 3 attempts: {e}')
-                print(f'[stt-handler] download failed: {e}', file=sys.stderr)
                 sys.exit(1)
             time.sleep(2)
     else:
+        emit_fetch_error('the download produced 0 bytes after 3 attempts')
         logging.error('Download produced 0 bytes after 3 attempts')
         sys.exit(1)
 

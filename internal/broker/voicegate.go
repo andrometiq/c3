@@ -140,6 +140,16 @@ func (b *Broker) attachmentFetchRefusal(chanName, fileID string) string {
 	return ""
 }
 
+// The openings C3 uses when it authors a voice message's whole agent-surface
+// text. They are named once, here, so wholeTextIsC3sVoiceWrite recognizes
+// exactly what the writers below produce — if a writer's wording changes, its
+// opening travels with it.
+const (
+	sttFailureOpening       = "⚠️ [voice transcription failed:"
+	voiceTooBigOpening      = "[voice too big:"
+	voiceFetchFailedOpening = "[voice download failed:"
+)
+
 // mbString renders a byte count in MiB with ONE decimal place. Integer MB is
 // useless at exactly the boundary these messages report on: 21,226,288 bytes and
 // a 20 MiB ceiling both floor to "20 MB", so a reader is shown two identical
@@ -168,7 +178,7 @@ func sizeSuffix(statedSize int64) string {
 // to re-record is the sender's own call, and neither recommending nor forbidding
 // it is C3's business (maintainer, 2026-07-29).
 func voiceTooBigAgentText(cause error, statedSize int64) string {
-	return fmt.Sprintf("[voice too big: %s%s. Unrecoverable via the bot API — the audio was NOT saved, and download_attachment / retranscribe will fail identically, so do not call them. Recovery: ask the sender to share the SAME file another way (a local file drop), or to SPLIT that same file and resend the parts.]",
+	return fmt.Sprintf(voiceTooBigOpening+" %s%s. Unrecoverable via the bot API — the audio was NOT saved, and download_attachment / retranscribe will fail identically, so do not call them. Recovery: ask the sender to share the SAME file another way (a local file drop), or to SPLIT that same file and resend the parts.]",
 		cause.Error(), sizeSuffix(statedSize))
 }
 
@@ -187,7 +197,7 @@ func voiceTooBigNotice(statedSize int64) string {
 // The agent is told plainly that STT never ran and why, instead of being handed
 // a transcription-failed message that names the wrong subsystem.
 func voiceFetchFailedAgentText(cause error) string {
-	return fmt.Sprintf("[voice download failed: %s. STT was NOT run — transcription begins with this same fetch, so it would have failed the same way. The audio was not transcribed. If the cause above is transient, retranscribe with the same file_id; if it persists, ask the sender to share the file another way.]",
+	return fmt.Sprintf(voiceFetchFailedOpening+" %s. STT was NOT run — transcription begins with this same fetch, so it would have failed the same way. The audio was not transcribed. If the cause above is transient, retranscribe with the same file_id; if it persists, ask the sender to share the file another way.]",
 		cause.Error())
 }
 
