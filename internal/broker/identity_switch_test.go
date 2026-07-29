@@ -17,7 +17,7 @@ const (
 
 func seedIdentitySwitchAttachment(mf *mappings.MappingsFile, id string, topicID int64, name, group string, chatID int64) {
 	tid := topicID
-	mf.UpsertSessionAttachment(id, mappings.SessionAttachment{
+	mf.UpsertSessionAttachment("claude", id, mappings.SessionAttachment{
 		Channel:        "telegram",
 		ChatID:         chatID,
 		TopicID:        &tid,
@@ -69,7 +69,7 @@ func switchRoute(topicID int64, chatID int64) RouteKey {
 
 func requireSwitchAttachment(t *testing.T, b *Broker, id string, topicID int64, detached bool) {
 	t.Helper()
-	sa, ok := b.Mappings().LookupSessionAttachment(id)
+	sa, ok := b.Mappings().LookupSessionAttachment("claude", id)
 	if !ok || sa.TopicID == nil || *sa.TopicID != topicID || sa.Detached != detached {
 		t.Fatalf("conversation %s attachment was not preserved: got %+v ok=%v, want topic=%d detached=%v", id, sa, ok, topicID, detached)
 	}
@@ -139,7 +139,7 @@ func TestRecoverSession_InAppSwitch_DoesNotRecordOldRouteUnderNewID(t *testing.T
 	}
 	_ = recoverIdentityOnPeer(t, peer, switchSessionB)
 
-	sa, ok := b.Mappings().LookupSessionAttachment(switchSessionB)
+	sa, ok := b.Mappings().LookupSessionAttachment("claude", switchSessionB)
 	if !ok || sa.TopicID == nil || *sa.TopicID != 412 {
 		t.Fatalf("identity switch recorded the old route topicA under new identity B: got %+v ok=%v; switch must release before recovering B", sa, ok)
 	}
@@ -308,7 +308,7 @@ func TestRecoverSession_ReconnectTransferWithoutIdentity_DoesNotRecordOldRouteUn
 	}
 
 	resp := recoverIdentityOnPeer(t, second, switchSessionB)
-	saB, ok := b.Mappings().LookupSessionAttachment(switchSessionB)
+	saB, ok := b.Mappings().LookupSessionAttachment("claude", switchSessionB)
 	if !ok || saB.TopicID == nil || *saB.TopicID != 412 {
 		t.Fatalf("claim-transfer corruption: recover(B) recorded conversation A's topic under B: got %+v ok=%v", saB, ok)
 	}
@@ -395,18 +395,18 @@ func TestRecoverSession_AnonymousReconnectTransfer_NonRecoverableRecordKeepsLive
 		{
 			name: "tombstoned",
 			makeNonRecoverable: func(_ *testing.T, mf *mappings.MappingsFile) {
-				mf.TombstoneSessionAttachment(switchSessionB)
+				mf.TombstoneSessionAttachment("claude", switchSessionB)
 			},
 		},
 		{
 			name: "ttl_expired",
 			makeNonRecoverable: func(t *testing.T, mf *mappings.MappingsFile) {
-				recorded, ok := mf.LookupSessionAttachment(switchSessionB)
+				recorded, ok := mf.LookupSessionAttachment("claude", switchSessionB)
 				if !ok {
 					t.Fatal("precondition: target session attachment is missing")
 				}
 				recorded.LastAttachedAt = time.Now().Add(-SessionAttachmentTTL - time.Hour)
-				mf.UpsertSessionAttachment(switchSessionB, recorded)
+				mf.UpsertSessionAttachment("claude", switchSessionB, recorded)
 			},
 		},
 	}
@@ -427,7 +427,7 @@ func TestRecoverSession_AnonymousReconnectTransfer_NonRecoverableRecordKeepsLive
 			if resp.Recovered {
 				t.Fatalf("T17 non-recoverable record unexpectedly took auto-recovery instead of record-only: %+v", resp)
 			}
-			recorded, ok := b.Mappings().LookupSessionAttachment(switchSessionB)
+			recorded, ok := b.Mappings().LookupSessionAttachment("claude", switchSessionB)
 			if !ok || recorded.TopicID == nil || *recorded.TopicID != 281 || recorded.Detached {
 				t.Fatalf("T17 surviving D4 claim was not recorded under the registering identity: got %+v ok=%v", recorded, ok)
 			}
@@ -505,7 +505,7 @@ func TestRecoverSession_ReconnectTransferWithoutIdentity_FirstIdentityRecordsRou
 	if !held || holder.StableSessionIDValue() != firstStableID {
 		t.Fatalf("N10 anonymous claim-transfer was treated as mismatched provenance and released instead of surviving first identity: held=%v holder=%+v", held, holder)
 	}
-	sa, ok := b.Mappings().LookupSessionAttachment(firstStableID)
+	sa, ok := b.Mappings().LookupSessionAttachment("claude", firstStableID)
 	if !ok || sa.TopicID == nil || *sa.TopicID != 281 || sa.Detached {
 		t.Fatalf("N10 first recover did not record the anonymous attach-first route: got %+v ok=%v", sa, ok)
 	}

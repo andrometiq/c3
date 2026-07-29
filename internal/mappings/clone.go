@@ -71,14 +71,28 @@ func (mf *MappingsFile) Clone() *MappingsFile {
 	if mf.SessionAttachments != nil {
 		out.SessionAttachments = make(map[string]SessionAttachment, len(mf.SessionAttachments))
 		for k, v := range mf.SessionAttachments {
-			if v.TopicID != nil { // deep-copy the pointer per the Clone contract
-				t := *v.TopicID
-				v.TopicID = &t
+			out.SessionAttachments[k] = cloneSessionAttachment(v)
+		}
+	}
+	if mf.SessionAttachmentsByCLI != nil {
+		out.SessionAttachmentsByCLI = make(map[string]map[string]SessionAttachment, len(mf.SessionAttachmentsByCLI))
+		for cli, entries := range mf.SessionAttachmentsByCLI {
+			cloned := make(map[string]SessionAttachment, len(entries))
+			for id, sa := range entries {
+				cloned[id] = cloneSessionAttachment(sa)
 			}
-			out.SessionAttachments[k] = v
+			out.SessionAttachmentsByCLI[cli] = cloned
 		}
 	}
 	return out
+}
+
+func cloneSessionAttachment(sa SessionAttachment) SessionAttachment {
+	if sa.TopicID != nil {
+		t := *sa.TopicID
+		sa.TopicID = &t
+	}
+	return sa
 }
 
 func cloneChannelConfig(cc ChannelConfig) ChannelConfig {

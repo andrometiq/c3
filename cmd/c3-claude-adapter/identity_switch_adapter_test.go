@@ -211,12 +211,12 @@ func reconnectSwitchMappings() *mappings.MappingsFile {
 	}
 	now := time.Now().UTC()
 	topicA := int64(281)
-	mf.UpsertSessionAttachment("conversation-a", mappings.SessionAttachment{
+	mf.UpsertSessionAttachment("claude", "conversation-a", mappings.SessionAttachment{
 		Channel: "telegram", ChatID: -100, TopicID: &topicA,
 		Name: "topic-a", Group: "main", LastAttachedAt: now,
 	})
 	topicB := int64(412)
-	mf.UpsertSessionAttachment("conversation-b", mappings.SessionAttachment{
+	mf.UpsertSessionAttachment("claude", "conversation-b", mappings.SessionAttachment{
 		Channel: "telegram", ChatID: -200, TopicID: &topicB,
 		Name: "topic-b", Group: "work", LastAttachedAt: now,
 	})
@@ -250,11 +250,11 @@ func waitForStableIdentity(t *testing.T, a *adapter, stableID string) {
 
 func requireReconnectSwitchIntegrity(t *testing.T, b *c3broker.Broker) {
 	t.Helper()
-	attachmentB, ok := b.Mappings().LookupSessionAttachment("conversation-b")
+	attachmentB, ok := b.Mappings().LookupSessionAttachment("claude", "conversation-b")
 	if !ok || attachmentB.TopicID == nil || *attachmentB.TopicID != 412 {
 		t.Fatalf("reconnect replay corrupted conversation B's attachment with conversation A's topic: got %+v ok=%v", attachmentB, ok)
 	}
-	attachmentA, ok := b.Mappings().LookupSessionAttachment("conversation-a")
+	attachmentA, ok := b.Mappings().LookupSessionAttachment("claude", "conversation-a")
 	if !ok || attachmentA.TopicID == nil || *attachmentA.TopicID != 281 || attachmentA.Detached {
 		t.Fatalf("reconnect switch damaged conversation A's independent attachment record: got %+v ok=%v", attachmentA, ok)
 	}
@@ -371,7 +371,7 @@ func TestRecoverBroker_OrdinaryRestartReplayKeepsClaimWithoutResumeNotice(t *tes
 				a.recoverMu.Lock()
 				a.recoverMu.Unlock()
 			}
-			attachmentA, ok := freshBroker.Mappings().LookupSessionAttachment("conversation-a")
+			attachmentA, ok := freshBroker.Mappings().LookupSessionAttachment("claude", "conversation-a")
 			if !ok || attachmentA.TopicID == nil || *attachmentA.TopicID != 281 || attachmentA.Detached {
 				t.Fatalf("T15 ordinary restart damaged the session attachment record: got %+v ok=%v", attachmentA, ok)
 			}
@@ -393,7 +393,7 @@ func TestRecoverBroker_AttachBeforeIdentityReplayAndReregisters(t *testing.T) {
 	disabled := false
 	mf := reconnectSwitchMappings()
 	mf.AutoAttachOnResume = &disabled
-	delete(mf.SessionAttachments, "conversation-a")
+	delete(mf.SessionAttachmentsByCLI["claude"], "conversation-a")
 	freshBroker := c3broker.New(mf)
 	t.Cleanup(freshBroker.Shutdown)
 	testChannel := &reconnectSwitchChannel{}
@@ -430,7 +430,7 @@ func TestRecoverBroker_AttachBeforeIdentityReplayAndReregisters(t *testing.T) {
 		"T16 attach-before-identity reconnect performed no usable replay/re-registration; the route or broker stable id is missing")
 	a.recoverMu.Lock()
 	a.recoverMu.Unlock()
-	attachmentA, ok := freshBroker.Mappings().LookupSessionAttachment("conversation-a")
+	attachmentA, ok := freshBroker.Mappings().LookupSessionAttachment("claude", "conversation-a")
 	if !ok || attachmentA.TopicID == nil || *attachmentA.TopicID != 281 || attachmentA.Detached {
 		t.Fatalf("T16 fresh broker did not record the attach-before-identity route under the settled stable id: got %+v ok=%v", attachmentA, ok)
 	}

@@ -72,7 +72,7 @@ func TestDetachBeforeIdentity_LateRecoverDoesNotReattach(t *testing.T) {
 	// survives this connection. Without it a broker bounce (routine — and the Grok
 	// adapter re-fires recovery on every reconnect) would hand the route back on
 	// the next connection, where the per-connection barrier no longer exists.
-	sa, ok := b.Mappings().LookupSessionAttachment("sess-1")
+	sa, ok := b.Mappings().LookupSessionAttachment("claude", "sess-1")
 	if !ok {
 		t.Fatal("the session attachment must still exist after a refused recovery")
 	}
@@ -113,7 +113,7 @@ func TestExplicitAttachClearsDetachBarrier(t *testing.T) {
 	if stub.ExplicitlyDetached() {
 		t.Fatal("an explicit attach must retire the detach barrier — otherwise the user's own re-attach leaves the session permanently unrecoverable")
 	}
-	if sa, ok := b.Mappings().LookupSessionAttachment("sess-1"); !ok || sa.Detached {
+	if sa, ok := b.Mappings().LookupSessionAttachment("claude", "sess-1"); !ok || sa.Detached {
 		t.Fatalf("an explicit attach must clear the tombstone; got %+v ok=%v", sa, ok)
 	}
 }

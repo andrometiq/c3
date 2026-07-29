@@ -62,7 +62,7 @@ func setupResumeBacklogEnv(t *testing.T, stableID string, writeAttach bool, queu
 
 	if writeAttach {
 		mf := &mappings.MappingsFile{SchemaVersion: 1}
-		mf.UpsertSessionAttachment(stableID, mappings.SessionAttachment{
+		mf.UpsertSessionAttachment("claude", stableID, mappings.SessionAttachment{
 			Channel: "telegram", ChatID: -100, TopicID: &resumeBacklogTopicID, Name: "myproject",
 			LastAttachedAt: time.Now().UTC(),
 		})

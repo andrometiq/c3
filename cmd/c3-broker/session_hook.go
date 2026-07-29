@@ -126,7 +126,13 @@ func runSessionHook() error {
 	// backlog into the agent's first-turn context so the durable queue drains
 	// without waiting for the user to ask. Best-effort; failures print nothing.
 	if in.Source == "resume" {
-		printResumeBacklogHint(in.SessionID)
+		cli := "claude"
+		if os.Getenv("ANTIGRAVITY_CONVERSATION_ID") != "" {
+			cli = "agy"
+		} else if os.Getenv("GROK_SESSION_ID") != "" || os.Getenv("GROK_HOOK_EVENT") != "" {
+			cli = "grok"
+		}
+		printResumeBacklogHint(cli, in.SessionID)
 	}
 	return nil
 }
@@ -143,7 +149,7 @@ func runSessionHook() error {
 // is only a hint. A SessionStart hook's stdout is added to the model's context
 // (Claude Code hooks contract, verified 2026-07-18), so one plain line suffices —
 // no structured JSON needed.
-func printResumeBacklogHint(stableID string) {
+func printResumeBacklogHint(cli, stableID string) {
 	path, err := mappings.DefaultPath()
 	if err != nil {
 		return
@@ -152,7 +158,7 @@ func printResumeBacklogHint(stableID string) {
 	if err != nil {
 		return
 	}
-	sa, ok := mf.LookupSessionAttachment(stableID)
+	sa, ok := mf.LookupSessionAttachment(cli, stableID)
 	if !ok {
 		return
 	}

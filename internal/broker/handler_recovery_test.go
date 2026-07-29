@@ -12,7 +12,7 @@ import (
 // seedSessionAttachment adds a recoverable c3/topic-281 attachment for id.
 func seedSessionAttachment(mf *mappings.MappingsFile, id string, lastAttached time.Time, detached bool) {
 	tid := int64(281)
-	mf.UpsertSessionAttachment(id, mappings.SessionAttachment{
+	mf.UpsertSessionAttachment("claude", id, mappings.SessionAttachment{
 		Channel: "telegram", ChatID: -100, TopicID: &tid, Name: "c3", Group: "main",
 		LastAttachedAt: lastAttached, Detached: detached,
 	})
@@ -52,7 +52,7 @@ func TestAttachDM_RecordsSessionAttachment(t *testing.T) {
 	}
 	// recordSessionAttachment runs synchronously before the ack is written, keyed
 	// on the stable id set by the recover op.
-	sa, ok := b.Mappings().LookupSessionAttachment("dm-sess")
+	sa, ok := b.Mappings().LookupSessionAttachment("claude", "dm-sess")
 	if !ok {
 		t.Fatal("DM attach must record a session attachment (keyed on the stable id)")
 	}
@@ -78,7 +78,7 @@ func TestHandleRelease_TombstonesSessionAttachment(t *testing.T) {
 	if stub.CurrentRoute() != nil {
 		t.Fatal("release should clear the stub's route")
 	}
-	sa, ok := b.Mappings().LookupSessionAttachment("sess-1")
+	sa, ok := b.Mappings().LookupSessionAttachment("claude", "sess-1")
 	if !ok || !sa.Detached {
 		t.Fatalf("explicit detach must tombstone the session attachment; got %+v ok=%v", sa, ok)
 	}
@@ -105,7 +105,7 @@ func TestConnDrop_DoesNotTombstone(t *testing.T) {
 	stub.SetStableSessionID("sess-1")
 	b.Routes.ReleaseAllByConnID(stub.ConnID) // the conn-drop path
 
-	sa, ok := b.Mappings().LookupSessionAttachment("sess-1")
+	sa, ok := b.Mappings().LookupSessionAttachment("claude", "sess-1")
 	if !ok || sa.Detached {
 		t.Fatalf("conn-drop must NOT tombstone; got %+v ok=%v", sa, ok)
 	}

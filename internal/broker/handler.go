@@ -14,7 +14,6 @@ import (
 
 	"github.com/Andrometiq/c3/internal/c3types"
 	"github.com/Andrometiq/c3/internal/ipc"
-	"github.com/Andrometiq/c3/internal/mappings"
 )
 
 // recoverRouteIdentity records the stable identity under which a route was
@@ -326,10 +325,9 @@ func (b *Broker) handleRelease(stub *Stub) {
 	// the durable tombstone below. tryClaim clears it on the next explicit attach.
 	stub.SetExplicitlyDetached(true)
 	if sid := stub.StableSessionIDValue(); sid != "" {
-		b.mutateMappings(func(mf *mappings.MappingsFile) {
-			mf.TombstoneSessionAttachment(sid)
-		})
-		_ = b.SaveMappings()
+		if b.tombstoneSessionAttachment(stub.CLI, sid) {
+			_ = b.SaveMappings()
+		}
 	}
 }
 
@@ -370,7 +368,7 @@ func (b *Broker) handleRecoverSession(conn *ipc.Conn, stub *Stub, raw []byte, ro
 	recordedRouteIdentityMismatch := false
 	if routeIdentity != nil && routeIdentity.automatic && !routeIdentity.requireMatch {
 		if cur := stub.CurrentRoute(); cur != nil {
-			if recorded, ok := b.Mappings().LookupSessionAttachment(req.StableSessionID); ok &&
+			if recorded, ok := b.lookupSessionAttachment(stub.CLI, req.StableSessionID); ok &&
 				recorded.Recoverable(time.Now(), SessionAttachmentTTL) {
 				recordedRouteIdentityMismatch = routeKeyFromSessionAttachment(recorded) != *cur
 			}
@@ -437,10 +435,9 @@ func (b *Broker) handleRecoverSession(conn *ipc.Conn, stub *Stub, raw []byte, ro
 		// identity arrived" already means at handleRelease, instead of a weaker
 		// promise that depends on invisible timing. It is also reversible in the
 		// normal way: any explicit attach upserts the attachment and clears it.
-		b.mutateMappings(func(mf *mappings.MappingsFile) {
-			mf.TombstoneSessionAttachment(req.StableSessionID)
-		})
-		_ = b.SaveMappings()
+		if b.tombstoneSessionAttachment(stub.CLI, req.StableSessionID) {
+			_ = b.SaveMappings()
+		}
 		log.Printf("recover: REFUSED session=%s — this connection was explicitly detached before its id was known; identity recorded, route NOT restored, attachment tombstoned", req.StableSessionID)
 	} else if !b.Mappings().AutoAttachOnResumeEnabled() {
 		// Gate (default ON post-redesign — nil ⇒ enabled; only an explicit
@@ -466,7 +463,7 @@ func (b *Broker) handleRecoverSession(conn *ipc.Conn, stub *Stub, raw []byte, ro
 		resp.QueuedSummary = preview
 		// Name/Group: prefer the recorded attachment, fall back to the topic
 		// registry. DM (no topic) reports name "dm".
-		if sa, ok := b.Mappings().LookupSessionAttachment(req.StableSessionID); ok {
+		if sa, ok := b.lookupSessionAttachment(stub.CLI, req.StableSessionID); ok {
 			resp.Name = sa.Name
 			resp.Group = sa.Group
 		}

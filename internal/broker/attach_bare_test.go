@@ -175,7 +175,7 @@ func TestAttachBare_TombstonedThenExplicitReenablesResume(t *testing.T) {
 	if !exp.OK || exp.Name != "c3" {
 		t.Fatalf("explicit attach c3 should succeed and clear the tombstone; got %+v", exp)
 	}
-	if sa, ok := b.Mappings().LookupSessionAttachment("sess-1"); !ok || sa.Detached {
+	if sa, ok := b.Mappings().LookupSessionAttachment("claude", "sess-1"); !ok || sa.Detached {
 		t.Fatalf("explicit attach must clear the tombstone; got %+v ok=%v", sa, ok)
 	}
 

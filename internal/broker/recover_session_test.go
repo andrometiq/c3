@@ -274,7 +274,7 @@ func TestHandleRecoverSession_DualPathRecordsCurrentRoute(t *testing.T) {
 		t.Fatal("attach-first must NOT report Recovered (no re-claim)")
 	}
 	// The current route (feature-x / 412) must be recorded under the stable id.
-	sa, ok := b.Mappings().LookupSessionAttachment("late-sess")
+	sa, ok := b.Mappings().LookupSessionAttachment("claude", "late-sess")
 	if !ok {
 		t.Fatal("dual-path: the current route must be recorded under the stable id")
 	}
@@ -316,7 +316,7 @@ func TestHandleRecoverSession_BadRequest(t *testing.T) {
 func TestRecoverSession_RefreshesStaleLastAttachedAt(t *testing.T) {
 	mf := mfWithTelegram()
 	t0 := time.Now().UTC().Add(-2 * time.Hour) // stale: > sessionRefreshInterval
-	mf.UpsertSessionAttachment("sess-1", mappings.SessionAttachment{
+	mf.UpsertSessionAttachment("claude", "sess-1", mappings.SessionAttachment{
 		Channel: "telegram", ChatID: -100, TopicID: func() *int64 { t := int64(281); return &t }(),
 		Name: "c3", LastAttachedAt: t0,
 	})
@@ -328,7 +328,7 @@ func TestRecoverSession_RefreshesStaleLastAttachedAt(t *testing.T) {
 	if _, _, _, ok := b.recoverSession(stub); !ok {
 		t.Fatal("expected recoverSession to succeed")
 	}
-	sa, _ := b.Mappings().LookupSessionAttachment("sess-1")
+	sa, _ := b.Mappings().LookupSessionAttachment("claude", "sess-1")
 	if !sa.LastAttachedAt.After(t0) {
 		t.Fatalf("stale attachment must be refreshed; %v not after %v", sa.LastAttachedAt, t0)
 	}
@@ -337,7 +337,7 @@ func TestRecoverSession_RefreshesStaleLastAttachedAt(t *testing.T) {
 func TestRecoverSession_SkipsRefreshWhenFresh(t *testing.T) {
 	mf := mfWithTelegram()
 	t0 := time.Now().UTC().Add(-time.Minute) // fresh: < sessionRefreshInterval
-	mf.UpsertSessionAttachment("sess-1", mappings.SessionAttachment{
+	mf.UpsertSessionAttachment("claude", "sess-1", mappings.SessionAttachment{
 		Channel: "telegram", ChatID: -100, TopicID: func() *int64 { t := int64(281); return &t }(),
 		Name: "c3", LastAttachedAt: t0,
 	})
@@ -349,7 +349,7 @@ func TestRecoverSession_SkipsRefreshWhenFresh(t *testing.T) {
 	if _, _, _, ok := b.recoverSession(stub); !ok {
 		t.Fatal("fresh attachment should still recover")
 	}
-	sa, _ := b.Mappings().LookupSessionAttachment("sess-1")
+	sa, _ := b.Mappings().LookupSessionAttachment("claude", "sess-1")
 	if !sa.LastAttachedAt.Equal(t0) {
 		t.Fatalf("fresh attachment must NOT be rewritten (churn); %v != %v", sa.LastAttachedAt, t0)
 	}
@@ -358,7 +358,7 @@ func TestRecoverSession_SkipsRefreshWhenFresh(t *testing.T) {
 func TestRecoverSession_DMRoute(t *testing.T) {
 	mf := mfWithTelegram()
 	mf.AutoAttachOnResume = boolPtr(true) // gate ON: recovery fires
-	mf.UpsertSessionAttachment("dm-sess", mappings.SessionAttachment{
+	mf.UpsertSessionAttachment("claude", "dm-sess", mappings.SessionAttachment{
 		Channel: "telegram", ChatID: 42, TopicID: nil, Name: "dm",
 		LastAttachedAt: time.Now().UTC(),
 	})

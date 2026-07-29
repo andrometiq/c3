@@ -788,7 +788,7 @@ func TestPersistMapping_RecordsSessionAttachment(t *testing.T) {
 	stub.SetStableSessionID("sess-xyz")
 	b.persistMapping(stub, "telegram", -100, 914, "c3", "main")
 
-	sa, ok := b.Mappings().LookupSessionAttachment("sess-xyz")
+	sa, ok := b.Mappings().LookupSessionAttachment("claude", "sess-xyz")
 	if !ok {
 		t.Fatal("session attachment not recorded")
 	}
@@ -805,8 +805,8 @@ func TestPersistMapping_EmptyStableIDNoOp(t *testing.T) {
 
 	stub := &Stub{CLI: "claude", PID: 1, CWD: t.TempDir()} // no stable id set
 	b.persistMapping(stub, "telegram", -100, 914, "c3", "main")
-	if len(b.Mappings().SessionAttachments) != 0 {
-		t.Fatalf("empty stable id must not record an attachment; got %d", len(b.Mappings().SessionAttachments))
+	if len(b.Mappings().SessionAttachmentsByCLI) != 0 {
+		t.Fatalf("empty stable id must not record an attachment; got %d CLI namespaces", len(b.Mappings().SessionAttachmentsByCLI))
 	}
 }
 
@@ -833,7 +833,7 @@ func TestPersistMapping_RecordsSessionAttachmentEvenOnRebindRefusal(t *testing.T
 	if got, ok := b.Mappings().LookupByCwd(root); !ok || got.TopicID != 914 {
 		t.Fatalf("cwd default should stay 914 (rebind refused), got %+v ok=%v", got, ok)
 	}
-	sa, ok := b.Mappings().LookupSessionAttachment("sess-2")
+	sa, ok := b.Mappings().LookupSessionAttachment("claude", "sess-2")
 	if !ok || sa.TopicID == nil || *sa.TopicID != 207 {
 		t.Fatalf("session attachment for sess-2 should record topic 207 despite cwd-rebind refusal, got %+v ok=%v", sa, ok)
 	}

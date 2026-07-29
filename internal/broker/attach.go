@@ -206,7 +206,7 @@ func (b *Broker) attachBare(conn *ipc.Conn, stub *Stub, chanName, cwd, group str
 	// re-introduce the §3c double-peek TOCTOU on this manual path).
 	if key, cnt, preview, ok := b.recoverSession(stub); ok {
 		name, groupName := "dm", ""
-		if sa, ok := b.Mappings().LookupSessionAttachment(stub.StableSessionIDValue()); ok {
+		if sa, ok := b.lookupSessionAttachment(stub.CLI, stub.StableSessionIDValue()); ok {
 			name = sa.Name
 			groupName = sa.Group
 		}
@@ -463,7 +463,7 @@ func recentSessionAttachments(mf *mappings.MappingsFile, chanName string) []mapp
 	}
 	now := time.Now()
 	var out []mappings.SessionAttachment
-	for _, sa := range mf.SessionAttachments {
+	for _, sa := range mf.AllSessionAttachments() {
 		if sa.Channel != chanName {
 			continue
 		}
@@ -1132,6 +1132,68 @@ func routeKeyFromSessionAttachment(sa mappings.SessionAttachment) RouteKey {
 	return MakeRouteKey(sa.Channel, sa.ChatID, sa.TopicID)
 }
 
+// lookupSessionAttachment resolves a CLI-namespaced recovery record. A legacy
+// unqualified entry is claimed exactly once under mutationMu: after one family
+// migrates it, another family with the same host-issued id cannot use it as
+// identity evidence.
+func (b *Broker) lookupSessionAttachment(cli, id string) (mappings.SessionAttachment, bool) {
+	if sa, ok := b.Mappings().LookupSessionAttachment(cli, id); ok {
+		return sa, true
+	}
+	if cli == "" || id == "" {
+		return mappings.SessionAttachment{}, false
+	}
+	if _, legacy := b.Mappings().SessionAttachments[id]; !legacy {
+		return mappings.SessionAttachment{}, false
+	}
+
+	b.mutationMu.Lock()
+	defer b.mutationMu.Unlock()
+
+	current := b.mappings.Load()
+	if sa, ok := current.LookupSessionAttachment(cli, id); ok {
+		return sa, true
+	}
+	if _, legacy := current.SessionAttachments[id]; !legacy {
+		return mappings.SessionAttachment{}, false
+	}
+	next := current.Clone()
+	sa, ok := next.ClaimLegacySessionAttachment(cli, id)
+	if !ok {
+		return mappings.SessionAttachment{}, false
+	}
+	path, err := mappings.DefaultPath()
+	if err != nil {
+		log.Printf("recover: REFUSED legacy session migration cli=%s session=%s: resolve mappings path: %v", cli, id, err)
+		return mappings.SessionAttachment{}, false
+	}
+	if err := mappings.Write(path, next); err != nil {
+		log.Printf("recover: REFUSED legacy session migration cli=%s session=%s: persist namespace claim: %v", cli, id, err)
+		return mappings.SessionAttachment{}, false
+	}
+	b.mappings.Store(next)
+	return sa, true
+}
+
+// tombstoneSessionAttachment claims a legacy entry, if necessary, and marks
+// only this CLI family's record detached. The caller persists when true.
+func (b *Broker) tombstoneSessionAttachment(cli, id string) bool {
+	if cli == "" || id == "" {
+		return false
+	}
+	var changed bool
+	b.mutateMappings(func(mf *mappings.MappingsFile) {
+		if _, ok := mf.LookupSessionAttachment(cli, id); !ok {
+			if _, ok := mf.ClaimLegacySessionAttachment(cli, id); !ok {
+				return
+			}
+		}
+		mf.TombstoneSessionAttachment(cli, id)
+		changed = true
+	})
+	return changed
+}
+
 // recoverSession attempts to re-claim the route the stub's STABLE session was
 // last attached to. Returns the claimed key, the held-backlog count, and ok.
 // No-op (ok=false) when: no stable id, no/expired/tombstoned attachment, the
@@ -1164,7 +1226,7 @@ func (b *Broker) recoverSession(stub *Stub) (RouteKey, int, []ipc.QueuedItem, bo
 	if sid == "" {
 		return RouteKey{}, 0, nil, false
 	}
-	sa, ok := b.Mappings().LookupSessionAttachment(sid)
+	sa, ok := b.lookupSessionAttachment(stub.CLI, sid)
 	if !ok || !sa.Recoverable(time.Now(), SessionAttachmentTTL) {
 		return RouteKey{}, 0, nil, false
 	}
@@ -1188,10 +1250,11 @@ func (b *Broker) recoverSession(stub *Stub) (RouteKey, int, []ipc.QueuedItem, bo
 	// stale-peek TOCTOU that §3c closes).
 	cnt, preview := b.backlogSummary(key)
 	if time.Since(sa.LastAttachedAt) > sessionRefreshInterval {
+		cli := stub.CLI
 		b.mutateMappings(func(mf *mappings.MappingsFile) {
-			if cur, ok := mf.LookupSessionAttachment(sid); ok {
+			if cur, ok := mf.LookupSessionAttachment(cli, sid); ok {
 				cur.LastAttachedAt = time.Now().UTC()
-				mf.UpsertSessionAttachment(sid, cur)
+				mf.UpsertSessionAttachment(cli, sid, cur)
 			}
 		})
 		_ = b.SaveMappings()
@@ -1245,7 +1308,7 @@ func (b *Broker) persistMapping(stub *Stub, chanName string, chatID, topicID int
 		// no recording (fail-closed). The DM route records via
 		// recordSessionAttachment instead (it must not also write a cwd default).
 		if stableID != "" {
-			mf.UpsertSessionAttachment(stableID, mappings.SessionAttachment{
+			mf.UpsertSessionAttachment(stub.CLI, stableID, mappings.SessionAttachment{
 				Channel: chanName, ChatID: chatID, TopicID: tidPtr,
 				Name: name, Group: group, CWD: cwd, LastAttachedAt: now,
 			})
@@ -1293,7 +1356,7 @@ func (b *Broker) recordSessionAttachment(stub *Stub, chanName string, chatID int
 		return
 	}
 	b.mutateMappings(func(mf *mappings.MappingsFile) {
-		mf.UpsertSessionAttachment(sid, mappings.SessionAttachment{
+		mf.UpsertSessionAttachment(stub.CLI, sid, mappings.SessionAttachment{
 			Channel: chanName, ChatID: chatID, TopicID: topicID,
 			Name: name, Group: group, CWD: stub.CWD, LastAttachedAt: time.Now().UTC(),
 		})

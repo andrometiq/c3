@@ -13,10 +13,16 @@ type MappingsFile struct {
 	Plugins       map[string]map[string]any `json:"plugins,omitempty"`
 	Allowlist     *Allowlist                `json:"allowlist,omitempty"`
 	Notifications *NotificationsConfig      `json:"notifications,omitempty"`
-	// SessionAttachments maps a host CLI's stable session id → the route it
-	// was last attached to, powering auto-attach-on-resume. omitempty keeps
-	// pre-feature config files byte-identical until the first session attaches.
+	// SessionAttachments is the legacy, pre-namespace session-id → route store.
+	// New writes go to SessionAttachmentsByCLI. On first recovery, the broker
+	// atomically moves a legacy entry under the requesting CLI family; after that
+	// the unqualified key cannot be evidence for a second family.
 	SessionAttachments map[string]SessionAttachment `json:"session_attachments,omitempty"`
+	// SessionAttachmentsByCLI keys recovery state by (CLI family, stable id)
+	// without a delimiter-concatenated synthetic key. Host session-id domains
+	// are not globally unique: Claude, Codex, Grok, and future CLIs may issue the
+	// same opaque string for unrelated conversations.
+	SessionAttachmentsByCLI map[string]map[string]SessionAttachment `json:"session_attachments_by_cli,omitempty"`
 	// AutoAttachOnResume gates whether a resumed session is automatically
 	// re-attached to its last topic (broker.handleRecoverSession). nil/absent ⇒
 	// ENABLED (the redesign default: a resume re-claims the session's OWN route,
@@ -149,8 +155,8 @@ type Mapping struct {
 }
 
 // SessionAttachment records the last topic a CLI session was attached to,
-// keyed by the host CLI's stable session id (Claude: CLAUDE_CODE_SESSION_ID),
-// so a resumed session re-attaches automatically regardless of its launch dir.
+// keyed by CLI family and the host's stable session id, so a resumed session
+// re-attaches automatically regardless of its launch dir.
 // TopicID is a pointer so a DM route (no topic) is representable as nil.
 // Detached is a tombstone: a deliberate `detach` sets it so the resumed session
 // stays unattached until it attaches again (which clears it).
