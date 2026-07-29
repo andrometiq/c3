@@ -113,6 +113,45 @@ func fetchOverIPC(t *testing.T, b *Broker, stub *Stub, req ipc.FetchQueueReq) (i
 	}
 }
 
+// waitForFetchPending waits for the durable queue state the response claims.
+// handleFetchQueue writes its result before the worker's follow-on channel
+// notification, so a one-shot read can observe the old state on a busy runner.
+// This keeps the loss assertions exact: the queue must reach this count, not
+// merely change eventually.
+func waitForFetchPending(t *testing.T, b *Broker, qrk queue.RouteKey, want int, desc string) int {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		got, _ := b.Queue.Pending(qrk)
+		if got == want {
+			return got
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("defect: %s: fetch_queue reported %d remaining but the durable queue stayed at %d; an async result was asserted before its queue mutation settled", desc, want, got)
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+}
+
+// waitForFetchReplyWhere waits for the asynchronous operator-facing notice
+// emitted after an oversized record is moved aside. It does not accept a reply
+// merely because one appeared: pred pins the content and route the test needs.
+func waitForFetchReplyWhere(t *testing.T, fc *fakeChannel, desc string, pred func(c3types.ReplyArgs) bool) c3types.ReplyArgs {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		for _, reply := range fc.sendRepliesSnapshot() {
+			if pred(reply) {
+				return reply
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("defect: %s: the asynchronous fetch_queue operator notice never arrived; replies sent: %+v", desc, fc.sendRepliesSnapshot())
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+}
+
 // frameSize is what WriteJSON measures against ipc.MaxFrameSize.
 func frameSize(t *testing.T, resp ipc.FetchQueueResp) int {
 	t.Helper()
@@ -193,12 +232,13 @@ func TestFetchQueue_OversizeHeadRecord_DoesNotDestroyTheQueueBehindIt(t *testing
 	}
 
 	resp, ok := fetchOverIPC(t, b, stub, ipc.FetchQueueReq{Op: ipc.OpFetchQueue, ID: "t1", All: true, Ack: true})
-	after, _ := b.Queue.Pending(qrk)
 	if !ok {
+		after, _ := b.Queue.Pending(qrk)
 		t.Fatalf("MESSAGE LOSS: the response was never written (an unencodable frame), yet the queue went from %d pending to %d — "+
 			"the queue was consumed before the response was known to be encodable; %d messages were destroyed and the caller was told nothing",
 			before, after, before-after)
 	}
+	_ = waitForFetchPending(t, b, qrk, resp.Remaining, "oversize-head fetch")
 	if got := frameSize(t, resp); got > ipc.MaxFrameSize {
 		t.Fatalf("response frame is %d bytes (cap %d) — it cannot be written, so everything it reports as delivered is lost", got, ipc.MaxFrameSize)
 	}
@@ -228,14 +268,11 @@ func TestFetchQueue_OversizeHeadRecord_DoesNotDestroyTheQueueBehindIt(t *testing
 
 	// And so is the OPERATOR, on the route itself. A message that leaves the
 	// queue without the human hearing about it is the incident, not the bug.
-	told := false
-	for _, r := range fc.sendRepliesSnapshot() {
-		if strings.Contains(r.Text, "too large") {
-			told = true
-		}
-	}
-	if !told {
-		t.Errorf("the operator was never told on the route that a message had been moved out of the queue; replies sent: %d", len(fc.sendRepliesSnapshot()))
+	notice := waitForFetchReplyWhere(t, fc, "oversize-head record moved aside", func(r c3types.ReplyArgs) bool {
+		return r.Channel == qrk.Channel && r.ChatID == qrk.ChatID && r.TopicID != nil && *r.TopicID == *qrk.TopicID && strings.Contains(r.Text, "too large")
+	})
+	if notice.ReplyTo != nil {
+		t.Errorf("oversize fetch notice should address the route, not quote one arbitrary message: %+v", notice)
 	}
 }
 
@@ -251,12 +288,13 @@ func TestFetchQueue_LimitedFetchIsBudgetedToo(t *testing.T) {
 
 	before, _ := b.Queue.Pending(qrk)
 	resp, ok := fetchOverIPC(t, b, stub, ipc.FetchQueueReq{Op: ipc.OpFetchQueue, ID: "t2", Limit: count, Ack: true})
-	after, _ := b.Queue.Pending(qrk)
 	if !ok {
+		after, _ := b.Queue.Pending(qrk)
 		t.Fatalf("MESSAGE LOSS: limit=%d was never budgeted — the response was unencodable and never written, but pending went %d → %d: "+
 			"the queue was consumed before the response was known to be encodable; %d messages were destroyed and the caller was told nothing",
 			count, before, after, before-after)
 	}
+	after := waitForFetchPending(t, b, qrk, resp.Remaining, "limited fetch")
 	if got := frameSize(t, resp); got > ipc.MaxFrameSize {
 		t.Fatalf("limited fetch produced a %d-byte frame (cap %d) — unwritable", got, ipc.MaxFrameSize)
 	}
@@ -291,11 +329,12 @@ func TestFetchQueue_HugeAdapterLimitCannotDrainWhatItCannotSend(t *testing.T) {
 
 	before, _ := b.Queue.Pending(qrk)
 	resp, ok := fetchOverIPC(t, b, stub, ipc.FetchQueueReq{Op: ipc.OpFetchQueue, ID: "t3", Limit: 2000, Ack: true})
-	after, _ := b.Queue.Pending(qrk)
 	if !ok {
+		after, _ := b.Queue.Pending(qrk)
 		t.Fatalf("MESSAGE LOSS: limit=2000 was forwarded verbatim and never budgeted — nothing was written back but pending went %d → %d: "+
 			"%d messages were consumed before the response was known to be encodable and the caller was told nothing", before, after, before-after)
 	}
+	after := waitForFetchPending(t, b, qrk, resp.Remaining, "huge adapter-limit fetch")
 	if len(resp.Messages)+after != before {
 		t.Fatalf("MESSAGE LOSS: delivered %d + queued %d != %d originally queued", len(resp.Messages), after, before)
 	}
@@ -317,12 +356,13 @@ func TestFetchQueue_OversizeRequestIDIsRefusedWithoutConsuming(t *testing.T) {
 
 	before, _ := b.Queue.Pending(qrk)
 	resp, ok := fetchOverIPC(t, b, stub, ipc.FetchQueueReq{Op: ipc.OpFetchQueue, ID: bigID, All: true, Ack: true})
-	after, _ := b.Queue.Pending(qrk)
 	if !ok {
+		after, _ := b.Queue.Pending(qrk)
 		t.Fatalf("MESSAGE LOSS: the %d-byte echoed id pushed the response past the frame cap so nothing was written, but pending went %d → %d: "+
 			"%d messages were consumed before the response was known to be encodable and the caller was told nothing",
 			len(bigID), before, after, before-after)
 	}
+	after := waitForFetchPending(t, b, qrk, before, "refused oversize-id fetch")
 	if resp.Err == "" {
 		t.Fatalf("a %d-byte correlation id was accepted silently; it is echoed into the same %d-byte frame as the messages",
 			len(bigID), ipc.MaxFrameSize)
@@ -357,12 +397,13 @@ func TestFetchQueue_EscapingHeavyRequestIDIsEchoedAndPaidFor(t *testing.T) {
 
 	before, _ := b.Queue.Pending(qrk)
 	resp, ok := fetchOverIPC(t, b, stub, ipc.FetchQueueReq{Op: ipc.OpFetchQueue, ID: escID, All: true, Ack: true})
-	after, _ := b.Queue.Pending(qrk)
 	if !ok {
+		after, _ := b.Queue.Pending(qrk)
 		t.Fatalf("MESSAGE LOSS: an id of %d raw bytes encodes to ~%d and overflowed the frame; nothing was written but pending went %d → %d — "+
 			"%d messages were consumed before the response was known to be encodable and the caller was told nothing",
 			len(escID), len(escID)*6, before, after, before-after)
 	}
+	after := waitForFetchPending(t, b, qrk, resp.Remaining, "escaping-id fetch")
 	if resp.Err != "" {
 		t.Fatalf("an id inside the bound was refused: %s", resp.Err)
 	}
@@ -466,10 +507,10 @@ func TestFetchQueue_PeekOverOversizeHeadMutatesNothing(t *testing.T) {
 
 	before, _ := b.Queue.Pending(qrk)
 	resp, ok := fetchOverIPC(t, b, stub, ipc.FetchQueueReq{Op: ipc.OpFetchQueue, ID: "t4", All: true, Ack: false})
-	after, _ := b.Queue.Pending(qrk)
 	if !ok {
 		t.Fatal("the peek response was never written — the caller got silence instead of an explanation")
 	}
+	after := waitForFetchPending(t, b, qrk, resp.Remaining, "oversize-head peek")
 	if after != before {
 		t.Fatalf("a PEEK mutated the queue: pending %d → %d (observe.go rides this path and must never consume)", before, after)
 	}
