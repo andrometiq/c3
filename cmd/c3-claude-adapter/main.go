@@ -544,11 +544,12 @@ const recoverBrokerAdviseAfter = 6
 
 // recoverBroker loops with exponential backoff until reconnectBroker
 // succeeds, or ctx cancellation aborts the loop (returns false).
-// After a successful reconnect, replays the last successful attach
-// (best-effort) so the route claim is restored. If the broker is still
-// unreachable after recoverBrokerAdviseAfter attempts (~30s), it surfaces a
-// one-shot loud advisory so the user knows inbound is down (D5 / adapter-ipc-5)
-// — the session otherwise looks alive.
+// After a successful reconnect, restores the last successful attach only when
+// the terminal identity is unchanged; an in-app switch skips that stale replay
+// and recovers the new identity directly. If the broker is still unreachable
+// after recoverBrokerAdviseAfter attempts (~30s), it surfaces a one-shot loud
+// advisory so the user knows inbound is down (D5 / adapter-ipc-5) — the session
+// otherwise looks alive.
 func (a *adapter) recoverBroker(ctx context.Context) bool {
 	const (
 		base       = 500 * time.Millisecond
@@ -564,8 +565,7 @@ func (a *adapter) recoverBroker(ctx context.Context) bool {
 		if err == nil {
 			log.Printf("broker reconnected (attempt %d)", attempt)
 			a.clearBrokerDownAdvisory()
-			a.replayLastAttach()
-			a.refireRecoverOnReconnect(ctx)
+			a.restoreSessionAfterReconnect(ctx)
 			return true
 		}
 		log.Printf("broker reconnect attempt %d failed: %v (retry in %v)", attempt, err, backoff)
@@ -734,46 +734,73 @@ func (a *adapter) replayLastAttach() {
 	}
 }
 
-// refireRecoverOnReconnect re-registers this session's stable id on a FRESH
-// broker connection (§3d2). A broker restart yields a fresh stub with no stable
-// id and no reconnect-transfer, so without this the new broker never learns the
-// sid: persistMapping no-ops on an empty stable id, the recorded attachment goes
-// stale, and a later --resume silently recovers an OLDER own topic. It resets
-// recoverFired (demoting the guard from once-per-process to once-per-connection),
-// re-reads the handoff, and re-fires RecoverSessionReq — in a goroutine, because
-// fireRecover blocks on the RecoverSessionResp that brokerReader (this same
-// goroutine's loop) must be free to read.
-//
-// Ordering is safe: replayLastAttach's synchronous write above already put the
-// replayed attach on the wire before this fires, and the broker's same-conn
-// serial dispatch processes that attach FIRST — so the recover takes the
-// record-only branch when the replay restored the route (and the gated own-route
-// recover when the replay's proposal was discarded).
-func (a *adapter) refireRecoverOnReconnect(ctx context.Context) {
+// reconnectTerminalHandoff resolves the current terminal identity once, before
+// any reconnect replay is written. A missing handoff is the ordinary
+// non-resumed-session case.
+func reconnectTerminalHandoff() (sessionhandoff.Entry, bool) {
 	inst := instanceIDFromEnv()
 	if inst == "" {
-		return
+		return sessionhandoff.Entry{}, false
 	}
-	e, ok := resolveTerminalHandoff(inst)
-	if !ok {
-		return // not a resumed/hook session — nothing to re-register.
-	}
-	go func() {
-		if current, settled := a.currentStableIdentity(); settled && current.StableSessionID != e.StableSessionID {
-			a.beginIdentitySwitch(ctx, current.StableSessionID, e)
+	return resolveTerminalHandoff(inst)
+}
+
+// restoreSessionAfterReconnect restores adapter state onto a FRESH broker
+// connection. Same identity: preserve the deliberate replay-before-recover
+// ordering so the fresh stub reclaims the live route, then records it under the
+// known id. Switched identity: never replay the previous conversation's attach;
+// start the switch sequence first, which synchronously clears stale conversation
+// state and opens the new gate before its asynchronous recovery round-trip.
+func (a *adapter) restoreSessionAfterReconnect(ctx context.Context) {
+	entry, found := reconnectTerminalHandoff()
+	if found {
+		if current, settled := a.currentStableIdentity(); settled && current.StableSessionID != entry.StableSessionID {
+			log.Printf("recover-session: reconnect resolved identity switch %s → %s — skipping stale attach replay", current.StableSessionID, entry.StableSessionID)
+			a.refireResolvedHandoffOnReconnect(ctx, entry)
 			return
 		}
+	}
 
+	a.replayLastAttach()
+	if found {
+		a.refireResolvedHandoffOnReconnect(ctx, entry)
+	}
+}
+
+// refireRecoverOnReconnect re-resolves and re-registers this session's stable id
+// on a fresh broker connection. Kept as the direct reconnect entry point for
+// tests and callers outside recoverBroker; recoverBroker itself resolves before
+// replay via restoreSessionAfterReconnect.
+func (a *adapter) refireRecoverOnReconnect(ctx context.Context) {
+	entry, found := reconnectTerminalHandoff()
+	if !found {
+		return
+	}
+	a.refireResolvedHandoffOnReconnect(ctx, entry)
+}
+
+// refireResolvedHandoffOnReconnect re-registers one already-resolved terminal
+// handoff. A switch begins synchronously (its broker wait remains asynchronous)
+// so stale conversation state is gone before reconnect recovery returns to the
+// broker reader. Same-id re-registration stays in a goroutine because that
+// round-trip is answered by the broker reader itself.
+func (a *adapter) refireResolvedHandoffOnReconnect(ctx context.Context, entry sessionhandoff.Entry) {
+	if current, settled := a.currentStableIdentity(); settled && current.StableSessionID != entry.StableSessionID {
+		a.beginIdentitySwitch(ctx, current.StableSessionID, entry)
+		return
+	}
+
+	go func() {
 		a.recoverMu.Lock()
 		current, settled := a.currentStableIdentity()
-		if settled && current.StableSessionID != e.StableSessionID {
+		if settled && current.StableSessionID != entry.StableSessionID {
 			a.recoverMu.Unlock()
-			a.beginIdentitySwitch(ctx, current.StableSessionID, e)
+			a.beginIdentitySwitch(ctx, current.StableSessionID, entry)
 			return
 		}
 		a.recoverFired.Store(false)
 		a.recoverStarted.Store(true)
-		outcome := a.fireRecoverLocked(ctx, e)
+		outcome := a.fireRecoverLocked(ctx, entry)
 		if outcome.attempted {
 			a.markIdentitySettled()
 		}
@@ -2152,6 +2179,16 @@ func (a *adapter) clearConversationStateForSwitch() string {
 	return oldTopic
 }
 
+func renderIdentitySwitchUnattachedNotice(oldTopic string) string {
+	if oldTopic == "" {
+		return "session switched conversations — the previous conversation's topic was released; this conversation is not attached. Use attach to claim a topic."
+	}
+	return fmt.Sprintf(
+		"session switched conversations — released topic %q (it belonged to the previous conversation); this conversation is not attached. Use attach to claim a topic.",
+		oldTopic,
+	)
+}
+
 // beginIdentitySwitch waits for the old identity epoch, then synchronously
 // establishes the new open epoch before returning. The broker round-trip runs
 // in a goroutine so the caller can immediately wait on that fresh gate. The
@@ -2182,11 +2219,8 @@ func (a *adapter) beginIdentitySwitch(ctx context.Context, expectedCurrent strin
 		close(ready)
 
 		outcome := a.fireRecoverLocked(fireCtx, terminal)
-		if outcome.registered && !outcome.recovered {
-			a.setPendingRecoverNotice(fmt.Sprintf(
-				"session switched conversations — released topic %q (it belonged to the previous conversation); this conversation is not attached. Use attach to claim a topic.",
-				oldTopic,
-			))
+		if !outcome.recovered {
+			a.setPendingRecoverNotice(renderIdentitySwitchUnattachedNotice(oldTopic))
 		}
 		if outcome.attempted {
 			a.markIdentitySettled()
