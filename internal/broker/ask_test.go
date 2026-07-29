@@ -36,7 +36,7 @@ func TestResolveAsk_SingleSelect(t *testing.T) {
 	stub.SetRoute(&key)
 
 	options := []string{"A", "B", "C"}
-	b.Asks.register(&pendingAsk{askID: "abc12345", route: key, question: "Pick one", options: options, messageID: 77})
+	b.Asks.register(&pendingAsk{askID: "abc12345", route: key, question: "Pick one", options: options, messageID: 77, owner: stub})
 
 	// A non-ask callback must NOT resolve — the generic event path must proceed.
 	if b.resolveAsk(key, &c3types.CallbackEvent{Data: "vote:abc12345:1"}) {
@@ -116,9 +116,10 @@ func TestAskRegistry_ExpiresStale(t *testing.T) {
 
 	key := RouteKey{Channel: "telegram", ChatID: -100, HasTopic: true, TopicID: 5}
 
+	owner := pendingOwner(t, b, key)
 	stale := &pendingAsk{
 		askID: "stale123", route: key, question: "Old?", options: []string{"A", "B"},
-		selected: make([]bool, 2), messageID: 55,
+		selected: make([]bool, 2), messageID: 55, owner: owner,
 		createdAt: time.Now().Add(-askExpiryTTL - time.Minute),
 	}
 	if !b.registerAsk(stale) {
@@ -126,7 +127,7 @@ func TestAskRegistry_ExpiresStale(t *testing.T) {
 	}
 	fresh := &pendingAsk{
 		askID: "fresh123", route: key, question: "New?", options: []string{"A"},
-		selected: make([]bool, 1), messageID: 66, createdAt: time.Now(),
+		selected: make([]bool, 1), messageID: 66, createdAt: time.Now(), owner: owner,
 	}
 	if !b.registerAsk(fresh) {
 		t.Fatal("register fresh failed")
@@ -165,6 +166,7 @@ func TestAskRegistry_CapEvictsOldest(t *testing.T) {
 
 	key := RouteKey{Channel: "telegram", ChatID: -100, HasTopic: true, TopicID: 5}
 	base := time.Now().Add(-time.Hour)
+	owner := pendingOwner(t, b, key)
 
 	// Fill exactly to the cap; the i==0 entry is the oldest (smallest createdAt)
 	// and carries messageID 1 so we can assert the eviction edit targets it.
@@ -172,7 +174,7 @@ func TestAskRegistry_CapEvictsOldest(t *testing.T) {
 		p := &pendingAsk{
 			askID: fmt.Sprintf("cap%05d", i), route: key, question: "Q",
 			options: []string{"A"}, selected: make([]bool, 1), messageID: int64(i + 1),
-			createdAt: base.Add(time.Duration(i) * time.Millisecond),
+			createdAt: base.Add(time.Duration(i) * time.Millisecond), owner: owner,
 		}
 		if !b.registerAsk(p) {
 			t.Fatalf("register %d failed", i)
@@ -185,7 +187,7 @@ func TestAskRegistry_CapEvictsOldest(t *testing.T) {
 	// One more, over cap → evict the oldest (cap00000, messageID 1).
 	over := &pendingAsk{
 		askID: "capOVER01", route: key, question: "Q2", options: []string{"A"},
-		selected: make([]bool, 1), messageID: 9999, createdAt: time.Now(),
+		selected: make([]bool, 1), messageID: 9999, createdAt: time.Now(), owner: owner,
 	}
 	if !b.registerAsk(over) {
 		t.Fatal("over-cap register failed")
@@ -306,7 +308,7 @@ func TestResolveAsk_MultiSelect_ToggleThenDone(t *testing.T) {
 	options := []string{"A", "B", "C"}
 	b.Asks.register(&pendingAsk{
 		askID: "multi1234", route: key, question: "Pick some", options: options,
-		multi: true, selected: make([]bool, len(options)), messageID: 77,
+		multi: true, selected: make([]bool, len(options)), messageID: 77, owner: stub,
 	})
 
 	// Toggle idx0 ON — handled (true), keyboard edited, ask still registered, NO answer pushed.
@@ -414,7 +416,7 @@ func TestResolveAsk_Skip(t *testing.T) {
 
 	b.Asks.register(&pendingAsk{
 		askID: "skip1234", route: key, question: "Pick or skip", options: []string{"A", "B"},
-		allowSkip: true, selected: make([]bool, 2), messageID: 88,
+		allowSkip: true, selected: make([]bool, 2), messageID: 88, owner: stub,
 	})
 
 	done := make(chan ipc.AskResultMsg, 1)

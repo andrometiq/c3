@@ -613,9 +613,16 @@ func (b *Broker) handleAskRegister(conn *ipc.Conn, stub *Stub, raw []byte) {
 	// round-trip returns still finds a live ask to resolve. Phase 2 carries the
 	// multi / allow_skip flags + per-option selection state (sized to the option
 	// list) so toggles and the Done/Skip buttons resolve correctly.
+	//
+	// owner is THIS stub, the session that asked — not a holder re-read from the
+	// routes table at register time. The route was resolved from stub.CurrentRoute()
+	// above, so the asking session is already in hand; re-deriving it later reopens
+	// the window in which a force_steal makes the NEW holder the owner of this
+	// session's question (see pendingAsk.owner).
 	p := &pendingAsk{
 		askID: req.AskID, route: *route, question: req.Question, options: req.Options,
 		multi: req.Multi, allowSkip: req.AllowSkip, selected: make([]bool, len(req.Options)),
+		owner: stub,
 	}
 	if !b.registerAsk(p) {
 		_ = conn.WriteJSON(ipc.AskRegisteredMsg{
@@ -693,7 +700,13 @@ func (b *Broker) handlePermissionRequest(_ *ipc.Conn, stub *Stub, raw []byte) {
 
 	// Register BEFORE the send so a fast operator tap (before the sendMessage
 	// round-trip returns) still finds a live perm to resolve.
-	p := &pendingPerm{requestID: req.RequestID, route: *route, toolName: req.ToolName, preview: req.Preview}
+	//
+	// owner is THIS stub, the session whose tool call is waiting — not a holder
+	// re-read from the routes table at register time. The route came from
+	// stub.CurrentRoute(), so the requesting session is already in hand; deriving
+	// the owner later stamps whoever holds the route by then, which a force_steal
+	// in that window makes a DIFFERENT session (see pendingPerm.owner).
+	p := &pendingPerm{requestID: req.RequestID, route: *route, toolName: req.ToolName, preview: req.Preview, owner: stub}
 	if !b.registerPerm(p) {
 		log.Printf("perm DROP id=%s: request id collision", req.RequestID)
 		return

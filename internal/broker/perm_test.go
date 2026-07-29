@@ -3,6 +3,7 @@ package broker
 import (
 	"encoding/json"
 	"net"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -30,6 +31,21 @@ type permFakeChannel struct {
 	fakeChannel
 	ansMu   sync.Mutex
 	answers []answeredCallback
+	// onCapabilities, when set, runs ONCE inside Capabilities() and then clears
+	// itself. Capabilities() is the one broker call that lands AFTER
+	// handlePermissionRequest / handleAskRegister has resolved the requesting
+	// session and BEFORE the pending entry is registered, so it is the injection
+	// point for anything that must happen inside the registration window (the
+	// force_steal race the owner binding exists to survive).
+	onCapabilities func()
+}
+
+func (f *permFakeChannel) Capabilities() c3types.Capabilities {
+	if hook := f.onCapabilities; hook != nil {
+		f.onCapabilities = nil
+		hook()
+	}
+	return f.fakeChannel.Capabilities()
 }
 
 func (f *permFakeChannel) AnswerCallback(callbackID, text string, showAlert bool) error {
@@ -83,6 +99,20 @@ func permBrokerWithOperator(t *testing.T, key RouteKey) (*Broker, *permFakeChann
 	return b, fc, agentConn
 }
 
+// pendingOwner returns the session a hand-built pendingPerm/pendingAsk must name
+// as its owner. Production stamps the REQUESTING stub at registration and an
+// unowned record is refused at resolve time (ownerStillHolds), so a test record
+// that omits it is not a simpler record — it is a dead one. Prefers the route's
+// live holder (what the two production sites bind); falls back to a fresh stub
+// for registry-lifecycle tests that never claim a route.
+func pendingOwner(t *testing.T, b *Broker, key RouteKey) *Stub {
+	t.Helper()
+	if holder, ok := b.Routes.Holder(key); ok {
+		return holder
+	}
+	return b.Stubs.Register("claude", os.Getpid(), "/work", nil)
+}
+
 // TestResolvePerm_AllowDeny drives the broker-side permission resolution: a
 // registered pendingPerm, tapped by the operator with "perm:allow:<id>",
 // resolves with behavior "allow" pushed to the holder conn as an
@@ -93,7 +123,7 @@ func TestResolvePerm_AllowDeny(t *testing.T) {
 	b, fc, agentConn := permBrokerWithOperator(t, key)
 	defer b.Shutdown()
 
-	b.Perms.register(&pendingPerm{requestID: "abcde", route: key, toolName: "Bash", preview: "rm -rf /tmp/x", messageID: 77})
+	b.Perms.register(&pendingPerm{requestID: "abcde", route: key, toolName: "Bash", preview: "rm -rf /tmp/x", messageID: 77, owner: pendingOwner(t, b, key)})
 
 	// A non-perm callback must NOT resolve a perm (generic event path proceeds).
 	if b.resolvePerm(key, &c3types.CallbackEvent{Data: "ask:abcde:0", Actor: c3types.Sender{UserID: testOperatorUID}}) {
@@ -177,7 +207,7 @@ func TestResolvePerm_Deny(t *testing.T) {
 	b, fc, agentConn := permBrokerWithOperator(t, key)
 	defer b.Shutdown()
 
-	b.Perms.register(&pendingPerm{requestID: "bcdef", route: key, toolName: "Write", messageID: 8})
+	b.Perms.register(&pendingPerm{requestID: "bcdef", route: key, toolName: "Write", messageID: 8, owner: pendingOwner(t, b, key)})
 
 	done := make(chan ipc.PermissionVerdictMsg, 1)
 	go func() {
@@ -217,7 +247,7 @@ func TestResolvePerm_NonOperatorIgnored(t *testing.T) {
 	b, fc, agentConn := permBrokerWithOperator(t, key)
 	defer b.Shutdown()
 
-	b.Perms.register(&pendingPerm{requestID: "cdefg", route: key, toolName: "Bash", messageID: 9})
+	b.Perms.register(&pendingPerm{requestID: "cdefg", route: key, toolName: "Bash", messageID: 9, owner: pendingOwner(t, b, key)})
 
 	// Any unexpected write to the holder conn would block; guard with a reader
 	// that records whether anything arrived.
@@ -257,7 +287,7 @@ func TestResolvePerm_NonOperatorTap_AnswersNotAuthorized(t *testing.T) {
 	b, fc, _ := permBrokerWithOperator(t, key)
 	defer b.Shutdown()
 
-	b.Perms.register(&pendingPerm{requestID: "fghij", route: key, toolName: "Bash", messageID: 11})
+	b.Perms.register(&pendingPerm{requestID: "fghij", route: key, toolName: "Bash", messageID: 11, owner: pendingOwner(t, b, key)})
 
 	const intruderUID = int64(99999999)
 	if b.resolvePerm(key, &c3types.CallbackEvent{
@@ -314,7 +344,7 @@ func TestResolvePerm_TapOutcomes_AllAnswered(t *testing.T) {
 		t.Fatal("malformed perm payload must not resolve")
 	}
 	// 3. Wrong route → answered, perm re-registered.
-	b.Perms.register(&pendingPerm{requestID: "klmno", route: other, toolName: "Bash", messageID: 12})
+	b.Perms.register(&pendingPerm{requestID: "klmno", route: other, toolName: "Bash", messageID: 12, owner: pendingOwner(t, b, key)})
 	if b.resolvePerm(key, &c3types.CallbackEvent{CallbackID: "cb-wrongroute", Data: "perm:allow:klmno", Actor: op}) {
 		t.Fatal("wrong-route tap must not resolve")
 	}
@@ -322,7 +352,7 @@ func TestResolvePerm_TapOutcomes_AllAnswered(t *testing.T) {
 		t.Fatal("wrong-route tap must re-register the perm")
 	}
 	// 4. Operator allow → resolved with a verdict toast.
-	b.Perms.register(&pendingPerm{requestID: "pqrst", route: key, toolName: "Bash", messageID: 13})
+	b.Perms.register(&pendingPerm{requestID: "pqrst", route: key, toolName: "Bash", messageID: 13, owner: pendingOwner(t, b, key)})
 	if !b.resolvePerm(key, &c3types.CallbackEvent{CallbackID: "cb-allow", Data: "perm:allow:pqrst", MessageID: 13, Actor: op}) {
 		t.Fatal("operator allow tap must resolve")
 	}
@@ -411,15 +441,16 @@ func TestPermRegistry_ExpiresStale(t *testing.T) {
 	b := brokerWithChannel(t, mf, fc)
 	defer b.Shutdown()
 
+	owner := pendingOwner(t, b, key)
 	stale := &pendingPerm{
 		requestID: "stale", route: key, toolName: "Bash", messageID: 55,
-		createdAt: time.Now().Add(-permExpiryTTL - time.Minute),
+		createdAt: time.Now().Add(-permExpiryTTL - time.Minute), owner: owner,
 	}
 	if !b.registerPerm(stale) {
 		t.Fatal("register stale failed")
 	}
 	fresh := &pendingPerm{
-		requestID: "fresh", route: key, toolName: "Read", messageID: 66, createdAt: time.Now(),
+		requestID: "fresh", route: key, toolName: "Read", messageID: 66, createdAt: time.Now(), owner: owner,
 	}
 	if !b.registerPerm(fresh) {
 		t.Fatal("register fresh failed")
@@ -636,6 +667,7 @@ func TestResolvePerm_VerdictEditRendersVerbatim(t *testing.T) {
 	const preview = `git commit -m "fix _underscores_ and *stars*"`
 	b.Perms.register(&pendingPerm{
 		requestID: "zzzzz", route: key, toolName: "Bash", preview: preview, messageID: 900,
+		owner: pendingOwner(t, b, key),
 	})
 
 	go func() { _, _ = agentConn.ReadFrame() }() // drain the verdict push

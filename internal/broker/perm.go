@@ -82,17 +82,23 @@ type pendingPerm struct {
 	preview   string
 	messageID int64
 
-	// owner is the SESSION this prompt was relayed FOR: the holder of `route` at
-	// registration time. handlePermissionRequest routes via stub.CurrentRoute(),
-	// so that holder IS the requesting stub. A verdict authorises THAT session's
-	// tool call, so it must reach that session and no other — without this the
+	// owner is the SESSION this prompt was relayed FOR — the requesting stub
+	// ITSELF, stamped by handlePermissionRequest, which already holds it (it
+	// routed via stub.CurrentRoute()). A verdict authorises THAT session's tool
+	// call, so it must reach that session and no other — without this the
 	// recipient is re-derived from the routes table at TAP time (deliverPermVerdict
 	// → Routes.Holder), and a route that changed hands in between (a confirmed
 	// force_steal, or the holder exiting and a new session attaching the topic
 	// inside permExpiryTTL) delivers one session's authorisation to another while
 	// the chat records "✅ Allowed" for an approval the asking session never got.
-	// Stamped by registerPerm; nil only on a record built by hand (tests), which
-	// leaves the check inert rather than refusing a legitimate verdict.
+	//
+	// It is deliberately NOT derived at registration time either. Deriving it
+	// there re-read the holder the caller had ALREADY resolved, so a force_steal
+	// landing between the two reads stamped the newcomer as owner of this
+	// session's request, and a route that was momentarily unclaimed stamped
+	// nothing at all. nil therefore means "no session was ever bound to this
+	// prompt", which the resolve gate REFUSES (ownerRecipient) — a prompt nobody
+	// owns can never authorise anything.
 	owner *Stub
 
 	// createdAt is when the perm was registered, stamped by register. The reaper
@@ -416,14 +422,15 @@ func (b *Broker) editPermMessage(route RouteKey, requestID string, messageID int
 // clears the evicted (oldest) perm's now-orphaned keyboard. Returns false on a
 // requestID collision so the caller drops the relay.
 func (b *Broker) registerPerm(p *pendingPerm) bool {
-	// Stamp the OWNER before the entry can be tapped: the session holding p.route
-	// right now is the session this prompt is being relayed for. Only when unset,
-	// so resolvePerm's defensive re-registers keep the ORIGINAL owner instead of
-	// adopting whoever holds the route by then.
+	// The owner is stamped by the CALLER, from the stub it already has in hand —
+	// never derived here from the routes table (see pendingPerm.owner: that read
+	// is the race). An entry with no owner is a caller bug: it is still
+	// registered (a keyboard may already be out, and the reaper must be able to
+	// clear it) but it can never resolve, so say so once, loudly, rather than let
+	// it look like a working prompt.
 	if p.owner == nil {
-		if holder, ok := b.Routes.Holder(p.route); ok {
-			p.owner = holder
-		}
+		log.Printf("perm REGISTER-NO-OWNER chan=%s chat=%d topic=%s id=%s: no owning session was bound at registration — every verdict for this prompt will be refused",
+			p.route.Channel, p.route.ChatID, TopicKeyStr(p.route), p.requestID)
 	}
 	evicted, ok := b.Perms.register(p)
 	if evicted != nil {
@@ -454,13 +461,16 @@ func (b *Broker) registerPerm(p *pendingPerm) bool {
 // end. This function's guarantee therefore RESTS on that one — do not relax it
 // there without re-reading this.
 //
-// A nil owner means none was recorded (a pending built directly, as the older
-// perm/ask tests do): there is nothing to compare, so the check stays inert
-// rather than refusing a legitimate verdict. Every production registration goes
-// through registerPerm/registerAsk, which stamp it.
+// A nil owner REFUSES. Every production registration now binds the requesting
+// stub itself (handlePermissionRequest / handleAskRegister), so nil means no
+// session was ever bound to this prompt — there is nobody whose authorisation
+// this could be. Treating it as "nothing to compare, carry on" made the whole
+// gate INERT for any entry that reached the registry unowned, which is exactly
+// the state a momentarily-unclaimed route used to produce. Fail closed: a
+// verdict nobody can be shown to have asked for is not delivered.
 func (b *Broker) ownerStillHolds(owner *Stub, route RouteKey) bool {
 	if owner == nil {
-		return true
+		return false
 	}
 	holder, claimed := b.Routes.Holder(route)
 	if !claimed || holder == nil {

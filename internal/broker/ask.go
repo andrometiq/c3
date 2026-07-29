@@ -60,14 +60,18 @@ type pendingAsk struct {
 	selected  []bool
 	messageID int64
 
-	// owner is the SESSION this question was asked FOR: the holder of `route` at
-	// registration time (handleAskRegister routes via stub.CurrentRoute(), so that
-	// holder IS the asking stub). deliverAskResult re-derives the recipient from
-	// the routes table at TAP time, so without this an answer is delivered to
-	// whoever holds the topic when the human taps — a different session than the
-	// one blocked on the question — while the chat records "✅ <option>" as though
-	// that session's question had been answered. Stamped by registerAsk; nil only
-	// on a record built by hand (tests), which leaves the check inert.
+	// owner is the SESSION this question was asked FOR — the asking stub ITSELF,
+	// stamped by handleAskRegister, which already holds it (it routed via
+	// stub.CurrentRoute()). Without it the recipient is re-derived from the routes
+	// table at TAP time, so an answer is delivered to whoever holds the topic when
+	// the human taps — a different session than the one blocked on the question —
+	// while the chat records "✅ <option>" as though that session's question had
+	// been answered.
+	//
+	// It is deliberately NOT derived at registration time either: that read races
+	// a force_steal landing between the caller resolving the route and the
+	// registry stamping it. nil means no session was ever bound to this question,
+	// which the resolve gate REFUSES (ownerRecipient).
 	owner *Stub
 
 	// createdAt is when the ask was registered, stamped by register (FIX-1). The
@@ -573,13 +577,14 @@ func (b *Broker) editAskMessage(route RouteKey, askID string, messageID int64, t
 // registration. The eviction keyboard-clear lives here, not in askRegistry,
 // because clearing requires a channel edit the registry has no handle on.
 func (b *Broker) registerAsk(p *pendingAsk) bool {
-	// Stamp the OWNER before the entry can be tapped: the session holding p.route
-	// right now is the session this question is being asked for. Only when unset,
-	// so the defensive re-registers above keep the ORIGINAL owner.
+	// The owner is stamped by the CALLER, from the stub it already has in hand —
+	// never derived here from the routes table (see pendingAsk.owner: that read is
+	// the race). An entry with no owner is a caller bug: it is still registered (a
+	// keyboard may already be out, and the reaper must be able to clear it) but it
+	// can never resolve, so say so once, loudly.
 	if p.owner == nil {
-		if holder, ok := b.Routes.Holder(p.route); ok {
-			p.owner = holder
-		}
+		log.Printf("ask REGISTER-NO-OWNER chan=%s chat=%d topic=%s ask=%s: no owning session was bound at registration — every answer for this question will be refused",
+			p.route.Channel, p.route.ChatID, TopicKeyStr(p.route), p.askID)
 	}
 	evicted, ok := b.Asks.register(p)
 	if evicted != nil {
