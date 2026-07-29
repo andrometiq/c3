@@ -327,6 +327,14 @@ func (c *Channel) React(args c3types.ReactArgs) error {
 	if err := c.rate.Wait(c.ctx, args.ChatID); err != nil {
 		return fmt.Errorf("telegram: rate-wait: %w", err)
 	}
+	// Self-arm BEFORE the call (2026-07-27 incident, Issue B). C3's own reaction
+	// is the most common trigger for the phantom edited_message this suppressor
+	// exists for, and it is the one case where C3 knows the (chat, message_id)
+	// in advance — so it says so instead of waiting to recognize the echo from a
+	// baseline it may not have. Arming after the call would race the update.
+	if c.editSupp != nil {
+		c.editSupp.armReact(args.ChatID, args.MessageID)
+	}
 	if _, err := c.bot.SetMessageReaction(args.ChatID, args.MessageID, opts); err != nil {
 		c.recordOutboundErr(err)
 		return c.scrubTokenf("telegram: SetMessageReaction: %w", err)

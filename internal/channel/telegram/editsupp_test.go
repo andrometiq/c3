@@ -17,12 +17,17 @@ import (
 // unavailable or not actively used by your bot" — and C3 re-ran STT and
 // delivered the same transcription twice).
 
+// voiceMsg is dated NOW, i.e. well inside the edit window, because that is the
+// state every test in this file means: an edit that a user could actually have
+// made. The age rule (2026-07-27) reads msg.Date, so a fixed date in the past
+// would silently turn these into ancient-message tests. Ancient cases are
+// constructed explicitly with voiceMsgAged.
 func voiceMsg(msgID int64, uniqueID string) *gotgbot.Message {
 	return &gotgbot.Message{
 		MessageId: msgID,
 		From:      &gotgbot.User{Id: 42},
 		Chat:      gotgbot.Chat{Id: 42},
-		Date:      1715151931,
+		Date:      time.Now().Unix(),
 		Voice: &gotgbot.Voice{
 			FileId:       "file-" + uniqueID,
 			FileUniqueId: uniqueID,
@@ -174,11 +179,11 @@ func TestDispatchMessage_UnknownMessageEditDelivered(t *testing.T) {
 func TestEditSuppressor_TTLExpiry(t *testing.T) {
 	s := newEditSuppressor(10, 30*time.Millisecond)
 	s.record(42, 300, 801, "fp-A")
-	if !s.shouldSuppress(42, 300, 802, "fp-A") {
+	if !suppressed(s, 42, 300, 802, "fp-A") {
 		t.Fatal("fresh identical fingerprint must suppress")
 	}
 	time.Sleep(60 * time.Millisecond)
-	if s.shouldSuppress(42, 300, 803, "fp-A") {
+	if suppressed(s, 42, 300, 803, "fp-A") {
 		t.Fatal("expired baseline must not suppress")
 	}
 }
@@ -189,10 +194,10 @@ func TestEditSuppressor_CapacityEviction(t *testing.T) {
 	s.record(42, 1, 801, "fp-1")
 	s.record(42, 2, 802, "fp-2")
 	s.record(42, 3, 803, "fp-3") // evicts msg 1
-	if s.shouldSuppress(42, 1, 900, "fp-1") {
+	if suppressed(s, 42, 1, 900, "fp-1") {
 		t.Fatal("evicted baseline must not suppress")
 	}
-	if !s.shouldSuppress(42, 3, 900, "fp-3") {
+	if !suppressed(s, 42, 3, 900, "fp-3") {
 		t.Fatal("retained baseline must suppress")
 	}
 }
@@ -202,14 +207,14 @@ func TestEditSuppressor_CapacityEviction(t *testing.T) {
 func TestEditSuppressor_RebaselineOnRealEdit(t *testing.T) {
 	s := newEditSuppressor(10, time.Hour)
 	s.record(42, 300, 801, "fp-A")
-	if s.shouldSuppress(42, 300, 802, "fp-B") {
+	if suppressed(s, 42, 300, 802, "fp-B") {
 		t.Fatal("changed fingerprint must not suppress")
 	}
 	s.record(42, 300, 802, "fp-B")
-	if !s.shouldSuppress(42, 300, 803, "fp-B") {
+	if !suppressed(s, 42, 300, 803, "fp-B") {
 		t.Fatal("re-baselined fingerprint must suppress the next phantom")
 	}
-	if s.shouldSuppress(42, 300, 803, "fp-A") {
+	if suppressed(s, 42, 300, 803, "fp-A") {
 		t.Fatal("stale fingerprint must not suppress after re-baseline")
 	}
 }

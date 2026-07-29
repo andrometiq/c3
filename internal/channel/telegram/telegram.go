@@ -354,9 +354,10 @@ func (c *Channel) Start(ctx context.Context, host channel.Host) error {
 	c.health = newFetchHealth()
 	c.reach = newReachability() // constructs its own owned outbound-health machine
 	c.dedup = newUpdateDedup(2000, 5*time.Minute)
-	// 48h = Telegram's user edit window; 8192 baselines ≈ a few weeks of dogfood
-	// traffic across every topic, bounded to ~1 MiB.
-	c.editSupp = newEditSuppressor(8192, 48*time.Hour)
+	// TTL = the edit window itself (editsupp.go), so the baseline outlives every
+	// edit it could have to explain and no longer. 8192 baselines ≈ a few weeks
+	// of dogfood traffic across every topic, bounded to ~1 MiB.
+	c.editSupp = newEditSuppressor(8192, userEditWindow)
 	c.rate = newRateLimiter()
 	c.sentPolls = newSentPollMap(2000)
 	if store, sErr := newOffsetStore(Name); sErr == nil {

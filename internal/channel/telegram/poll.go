@@ -1206,17 +1206,23 @@ func (c *Channel) dispatchMessage(updateID int64, msg *gotgbot.Message, edited b
 	// used by your bot"; the live trigger is a REACTION on the message,
 	// including C3's own `react` tool. Re-dispatching one re-runs STT and
 	// delivers the same transcription again (2026-07-19 duplicate report), so
-	// an edit whose deliverable fingerprint is unchanged is dropped here. A
-	// same-update_id redelivery is exempt (the loss-free Append-retry path
-	// must re-dispatch). Runs AFTER the gate so non-allowlisted senders can
-	// never populate the baseline memory.
+	// an edit whose deliverable fingerprint is unchanged is dropped here — as
+	// is one on a message too old to edit, or one echoing C3's own react
+	// (2026-07-27, editsupp.go suppressReason). A same-update_id redelivery is
+	// exempt (the loss-free Append-retry path must re-dispatch), and so is any
+	// edit whose content actually changed. Runs AFTER the gate so
+	// non-allowlisted senders can never populate the baseline memory.
 	if c.editSupp != nil {
 		fp := editFingerprint(in, msg)
-		if edited && c.editSupp.shouldSuppress(msg.Chat.Id, msg.MessageId, updateID, fp) {
-			c.host.Logf("telegram: suppress phantom edit update=%d msg=%d chat=%d thread=%d kind=%s — deliverable content unchanged (reaction-triggered edited_message); not re-dispatched",
-				updateID, msg.MessageId, msg.Chat.Id, msg.MessageThreadId, kind)
-			c.markUpdateDone(updateID)
-			return
+		// msg.Date is the ORIGINAL send time and stays put across an edit, so it
+		// dates the message, not the update — which is what the age rule needs.
+		if edited {
+			if why := c.editSupp.suppressReason(msg.Chat.Id, msg.MessageId, updateID, fp, msg.Date); why != "" {
+				c.host.Logf("telegram: suppress phantom edit update=%d msg=%d chat=%d thread=%d kind=%s — %s; not re-dispatched",
+					updateID, msg.MessageId, msg.Chat.Id, msg.MessageThreadId, kind, why)
+				c.markUpdateDone(updateID)
+				return
+			}
 		}
 		// Baseline the just-dispatched content (original OR real edit).
 		// Recorded before Emit: a capacity-dropped Emit leaves the baseline
