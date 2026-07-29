@@ -3,6 +3,7 @@ package stt
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"os"
 	"os/exec"
@@ -32,6 +33,22 @@ func (e *endpointChannel) APIBaseURL() string { return e.base }
 
 // plainChannel cannot report an endpoint — the fallback case.
 type plainChannel struct{ channel.Channel }
+
+func TestNewFetchNonce(t *testing.T) {
+	first := newFetchNonce()
+	second := newFetchNonce()
+	for i, nonce := range []string{first, second} {
+		if len(nonce) != 32 {
+			t.Fatalf("fetch nonce %d has length %d, want 32 hex characters", i+1, len(nonce))
+		}
+		if _, err := hex.DecodeString(nonce); err != nil {
+			t.Fatalf("fetch nonce %d is not hexadecimal: %q (%v)", i+1, nonce, err)
+		}
+	}
+	if first == second {
+		t.Fatal("fetch nonce repeated — reports from separate handler invocations could be authenticated as each other")
+	}
+}
 
 func hostWithChannel(ch channel.Channel, mappingsBase string) *fakeHost {
 	return &fakeHost{

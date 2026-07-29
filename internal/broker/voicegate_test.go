@@ -784,6 +784,11 @@ func TestReplaceC3VoiceSegment(t *testing.T) {
 			want: "caption\n" + prefix + "NEW", ok: true,
 		},
 		{
+			name: "a download failure placeholder is C3's segment too",
+			text: "caption\n" + voiceFetchFailedOpening + " getFile refused]",
+			want: "caption\n" + prefix + "NEW", ok: true,
+		},
+		{
 			// A multi-line transcript must not be split on its own newlines.
 			name: "C3's transcript spans several lines",
 			text: "caption\n" + prefix + "line one\nline two\nline three",
@@ -802,7 +807,7 @@ func TestReplaceC3VoiceSegment(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			got, ok := replaceC3VoiceSegment(tc.text, prefix, "NEW")
 			if ok != tc.ok {
-				t.Fatalf("replaceC3VoiceSegment(%q) ok=%v, want %v", tc.text, ok, tc.ok)
+				t.Fatalf("replaceC3VoiceSegment(%q) ok=%v, want %v — a C3-authored trailing segment went stale after successful retranscription", tc.text, ok, tc.ok)
 			}
 			if ok && got != tc.want {
 				t.Fatalf("replaceC3VoiceSegment(%q)\n got %q\nwant %q — everything before C3's own segment belongs to someone else", tc.text, got, tc.want)

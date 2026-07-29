@@ -242,13 +242,17 @@ type fetchReport struct {
 
 // newFetchNonce mints the per-invocation secret that gives a fetch report its
 // PROVENANCE. Crypto-random and never reused, so it cannot be predicted by
-// anything that produced its bytes before this run started.
-func newFetchNonce() (string, error) {
+// anything that produced its bytes before this run started. On Go >=1.25,
+// rand.Read either fills the buffer or terminates the process irrecoverably;
+// there is no nonce-less runtime branch.
+func newFetchNonce() string {
 	var b [16]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(b[:]), nil
+	fillFetchNonce(b[:])
+	return hex.EncodeToString(b[:])
+}
+
+func fillFetchNonce(b []byte) {
+	rand.Read(b)
 }
 
 // fetchFailureDetail returns the handler's reported fetch cause from its stderr,
@@ -340,14 +344,9 @@ func runHandler(ctx context.Context, host plugin.Host, cfg Config, token, apiBas
 	// Rolling-window audio retention: the handler keeps the newest N .oga in its
 	// inbox and prunes older ones after each transcription (recent audio stays
 	// available for retranscribe/testing). N is passed from config.
-	// One fresh secret per invocation. If it cannot be minted we run WITHOUT one,
-	// which makes every fetch report unauthenticated and therefore ignored: a
-	// generic transcription failure is the honest degradation, never an
-	// unauthenticated cause dressed up as the server's word.
-	nonce, nerr := newFetchNonce()
-	if nerr != nil {
-		host.Logf("stt: msg=%d could not mint a fetch-report nonce (%v); fetch causes will not be authenticated this run", p.MessageID, nerr)
-	}
+	// One fresh secret per invocation. Go >=1.25's rand.Read either fills it or
+	// terminates the process; the handler never receives an empty nonce.
+	nonce := newFetchNonce()
 	cmd.Env = handlerEnv(apiBaseURL, apiBaseAnswered, nonce, cfg.AudioRetention)
 
 	// I-7: kill the whole process group on the ctx deadline, not just the direct
