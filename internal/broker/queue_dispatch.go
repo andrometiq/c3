@@ -176,6 +176,16 @@ func (b *Broker) handleRetranscribe(conn *ipc.Conn, stub *Stub, raw []byte) {
 		_ = conn.WriteJSON(ipc.RetranscribeResp{Op: ipc.OpRetranscribeResult, ID: req.ID, Err: "no STT plugin registered"})
 		return
 	}
+	// Size gate, same rule as the live path (voicegate.go, 2026-07-27 incident
+	// Ask #1) — asked by file_id, since a retranscribe request carries no size.
+	// Without it an over-limit file re-runs the whole chain and comes back as
+	// "STT provider still failing (no transcript)", which sends the agent hunting
+	// for a provider outage that isn't there: the file is simply unfetchable.
+	if refusal := b.attachmentTooBigRefusal(chanName, req.FileID); refusal != "" {
+		log.Printf("retranscribe chan=%s file_id=%s msg=%d ok=false: refused, over the bot download limit", chanName, req.FileID, req.MessageID)
+		_ = conn.WriteJSON(ipc.RetranscribeResp{Op: ipc.OpRetranscribeResult, ID: req.ID, Err: "retranscribe: " + refusal})
+		return
+	}
 	// Bound the STT chain (network download + provider call) so a slow/hung
 	// provider cannot block this adapter's single-threaded IPC read loop forever.
 	// FireOnVoiceReceived honors ctx (the STT builtin wires its subprocess to a

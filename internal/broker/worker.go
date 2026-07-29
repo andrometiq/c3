@@ -513,16 +513,36 @@ func (w *RouteWorker) flushInbounds(ctx context.Context, batch []*c3types.Inboun
 				MIME:      in.Attachments[0].MIME,
 				Size:      in.Attachments[0].Size,
 			}
-			// Per-call deadline so a hung download can't block the worker
-			// goroutine (and the JobFetch/JobConsume jobs queued behind it).
-			// cancel() runs immediately (not deferred) because this is a
-			// per-inbound loop — a deferred cancel would leak every iteration's
-			// timer until flushInbounds returns. A "" result (incl. on timeout)
-			// flows to the sttFailureText placeholder path below.
-			sttCtx, cancel := context.WithTimeout(ctx, sttFlushTimeout)
-			transcript := w.broker.Plugins.FireOnVoiceReceived(sttCtx, payload)
-			cancel()
+			// Size gate BEFORE the STT chain (voicegate.go, 2026-07-27 incident
+			// Ask #1): a voice note over the channel's bot download ceiling can
+			// never be fetched, so running the handler only earns two HTTP 400s
+			// and a recovery message that lies. The size came in on the update
+			// itself, so this costs nothing.
+			var transcript, failNotice string
+			limit, tooBig := w.broker.voiceOverDownloadLimit(in.Channel, voiceAttachmentSize(in))
+			if tooBig {
+				size := voiceAttachmentSize(in)
+				failNotice = voiceTooBigNotice(size, limit)
+				log.Printf("stt SKIPPED chan=%s chat=%d topic=%s msg=%d: voice is %d bytes, over the channel's %d-byte bot download limit — unfetchable, handler not run",
+					w.key.Channel, w.key.ChatID, TopicKeyStr(w.key), in.MessageID, size, limit)
+			} else {
+				// Per-call deadline so a hung download can't block the worker
+				// goroutine (and the JobFetch/JobConsume jobs queued behind it).
+				// cancel() runs immediately (not deferred) because this is a
+				// per-inbound loop — a deferred cancel would leak every iteration's
+				// timer until flushInbounds returns. A "" result (incl. on timeout)
+				// flows to the sttFailureText placeholder path below.
+				sttCtx, cancel := context.WithTimeout(ctx, sttFlushTimeout)
+				transcript = w.broker.Plugins.FireOnVoiceReceived(sttCtx, payload)
+				cancel()
+			}
 			switch {
+			case tooBig:
+				// Same "don't clobber a deliberate caption" rule as the failure
+				// path below; the human notice carries the news either way.
+				if in.Text == "" {
+					in.Text = voiceTooBigAgentText(voiceAttachmentSize(in), limit)
+				}
 			case transcript != "" && !isSTTFailureMarker(transcript):
 				in.Text = w.sttPrefix(in.Channel) + transcript
 			case in.Text == "":
@@ -575,7 +595,7 @@ func (w *RouteWorker) flushInbounds(ctx context.Context, batch []*c3types.Inboun
 			mine := make(chan struct{})
 			w.prevEchoDone = mine
 			inCopy := *in
-			go func(in *c3types.Inbound, transcript string, prev, mine chan struct{}) {
+			go func(in *c3types.Inbound, transcript, failNotice string, prev, mine chan struct{}) {
 				// Deferred LIFO: close(mine) is registered FIRST so it runs LAST —
 				// the chain always advances even if the readback path panics.
 				// recoverGoroutine is registered SECOND so it runs FIRST, recovering
@@ -588,8 +608,8 @@ func (w *RouteWorker) flushInbounds(ctx context.Context, batch []*c3types.Inboun
 				case <-ctx.Done():
 					return // shutdown: drop; close(mine) unblocks the next
 				}
-				w.echoReadback(in, transcript) // ctx-aware retry aborts fast on shutdown
-			}(&inCopy, transcript, prev, mine)
+				w.echoReadback(in, transcript, failNotice) // ctx-aware retry aborts fast on shutdown
+			}(&inCopy, transcript, failNotice, prev, mine)
 		}
 	}
 
@@ -786,7 +806,12 @@ func isSTTFailureMarker(transcript string) bool {
 //     short human-facing notice via the channel's normal SendReply (this
 //     replaces Python's notify_transcription_failed). Once per failed voice
 //     inbound, best-effort.
-func (w *RouteWorker) echoReadback(in *c3types.Inbound, transcript string) {
+//
+// failNotice, when non-empty, REPLACES the generic failure wording. The voice
+// size gate uses it to tell the sender the one true thing about an over-limit
+// note — its size, the ceiling, and that resending in parts is the only fix —
+// instead of "try again", which cannot work (voicegate.go).
+func (w *RouteWorker) echoReadback(in *c3types.Inbound, transcript, failNotice string) {
 	if w.broker == nil {
 		return
 	}
@@ -799,9 +824,13 @@ func (w *RouteWorker) echoReadback(in *c3types.Inbound, transcript string) {
 	// Failure: an empty transcript or the STT failure marker → a human notice,
 	// not a transcript. The agent-surface marker path (in.Text) is unchanged.
 	if transcript == "" || isSTTFailureMarker(transcript) {
+		notice := failNotice
+		if notice == "" {
+			notice = "⚠️ Couldn't transcribe that voice note — see logs / try again."
+		}
 		if _, serr := ch.SendReply(c3types.ReplyArgs{
 			Channel: in.Channel, ChatID: in.ChatID, TopicID: in.TopicID, ReplyTo: &in.MessageID,
-			Text: "⚠️ Couldn't transcribe that voice note — see logs / try again.",
+			Text: notice,
 		}); serr != nil {
 			log.Printf("readback notice chan=%s chat=%d topic=%s msg=%d: send failed (non-fatal): %v",
 				w.key.Channel, w.key.ChatID, TopicKeyStr(w.key), in.MessageID, serr)

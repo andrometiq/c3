@@ -13,6 +13,7 @@ import (
 	"github.com/PaulSonOfLars/gotgbot/v2"
 
 	"github.com/Andrometiq/c3/internal/c3types"
+	"github.com/Andrometiq/c3/internal/channel"
 )
 
 // SendReply sends ONE Telegram part and returns its message_id. A part carries
@@ -334,6 +335,56 @@ func (c *Channel) React(args c3types.ReactArgs) error {
 	return nil
 }
 
+// getFileTooBigDesc is the description Telegram returns from getFile for a file
+// above the bot download ceiling: {"ok":false,"error_code":400,"description":
+// "Bad Request: file is too big"}. Observed live 2026-07-27 on a 21,226,288-byte
+// voice note, and documented at https://core.telegram.org/bots/api#getfile —
+// "For the moment, bots can download files of up to 20MB in size."
+const getFileTooBigDesc = "file is too big"
+
+// getFileErr classifies a getFile failure. The SIZE case gets its own sentinel
+// (channel.ErrAttachmentTooLarge) because it is categorically different from
+// every other fetch failure: it is permanent, it is not retryable by any C3
+// path, and the only fix is on the sender's side. Callers above this package
+// read the sentinel, not the wording, so no raw Bot-API limit leaks upward.
+//
+// The size message is built from our OWN words and never interpolates the
+// gotgbot error — a Bot-API error can carry the request URL (token included),
+// and scrubToken deliberately does not wrap, so scrubbing here would destroy the
+// sentinel. Every other failure keeps the existing scrubbed wrapping.
+func (c *Channel) getFileErr(err error) error {
+	if strings.Contains(err.Error(), getFileTooBigDesc) {
+		return fmt.Errorf("telegram: getFile refused: the file is over the %.1f MB bot download limit, so a bot cannot fetch it at all: %w",
+			float64(maxDownloadBytes)/(1024*1024), channel.ErrAttachmentTooLarge)
+	}
+	return c.scrubTokenf("telegram: GetFile: %w", err)
+}
+
+// AttachmentSize reports a file's size in bytes WITHOUT downloading it: one
+// getFile call, no body transfer. It is the cheap probe the broker uses to
+// answer "is this too big to fetch?" before spending an STT run on a file the
+// Bot API will never hand over (2026-07-27 incident: retranscribe re-ran the
+// whole chain on a 21 MB voice note and reported "STT provider still failing",
+// hiding the real, permanent cause).
+//
+// It is deliberately NOT on the channel.Channel interface — it is an optional
+// capability the broker type-asserts for, so channels without a size probe need
+// no change. A file already over the ceiling makes getFile itself fail, so the
+// too-big answer arrives as channel.ErrAttachmentTooLarge rather than a number.
+func (c *Channel) AttachmentSize(fileID string) (int64, error) {
+	if c.bot == nil {
+		return 0, errors.New("telegram: channel not started")
+	}
+	f, err := c.bot.GetFile(fileID, &gotgbot.GetFileOpts{
+		RequestOpts: c.requestOptsFor("getFile"),
+	})
+	if err != nil {
+		c.recordOutboundErr(err)
+		return 0, c.getFileErr(err)
+	}
+	return f.FileSize, nil
+}
+
 // DownloadAttachment fetches a Telegram file by file_id and saves it to a
 // local cache dir. Returns the local path. Bot API caps at 20MB.
 //
@@ -350,7 +401,7 @@ func (c *Channel) DownloadAttachment(fileID string) (string, error) {
 	})
 	if err != nil {
 		c.recordOutboundErr(err)
-		return "", c.scrubTokenf("telegram: GetFile: %w", err)
+		return "", c.getFileErr(err)
 	}
 	if f.FilePath == "" {
 		return "", errors.New("telegram: GetFile returned empty file_path (file may be too large or expired)")
@@ -363,9 +414,13 @@ func (c *Channel) DownloadAttachment(fileID string) (string, error) {
 	// with a clear MB-vs-limit message rather than a late copy failure. FileSize
 	// can be 0/absent for some kinds; in that case we fall through and rely on the
 	// HTTP layer (a 20 MiB+ file won't have produced a FilePath above anyway).
+	//
+	// One DECIMAL place, not integer MB: 21,226,288 bytes and the 20 MiB ceiling
+	// both floor to "20 MB", so the old message read "20 MB > 20 MB limit" — a
+	// number that proves nothing to whoever reads it.
 	if f.FileSize > maxDownloadBytes {
-		return "", fmt.Errorf("telegram: attachment too large to download (%d MB > %d MB limit)",
-			f.FileSize/(1024*1024), int64(maxDownloadBytes)/(1024*1024))
+		return "", fmt.Errorf("telegram: attachment too large to download (%.1f MB > %.1f MB limit): %w",
+			float64(f.FileSize)/(1024*1024), float64(maxDownloadBytes)/(1024*1024), channel.ErrAttachmentTooLarge)
 	}
 
 	cacheDir, err := attachmentsCacheDir()

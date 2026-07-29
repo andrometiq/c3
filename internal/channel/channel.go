@@ -4,9 +4,20 @@ package channel
 
 import (
 	"context"
+	"errors"
 
 	"github.com/Andrometiq/c3/internal/c3types"
 )
+
+// ErrAttachmentTooLarge marks a failure whose cause is SIZE: the attachment is
+// over the transport's download ceiling, so the bot cannot fetch it at all —
+// not now, not on retry, and not through any C3 recovery path. Callers use
+// errors.Is to tell this apart from a transient fetch failure and say so to the
+// human ("resend it in shorter parts") instead of offering a retry that is
+// guaranteed to fail. (2026-07-27 incident: a 21 MB voice note failed STT twice
+// and surfaced "the audio is saved and recoverable", which was false on every
+// clause.)
+var ErrAttachmentTooLarge = errors.New("attachment over the channel's download limit")
 
 // Channel is the contract every transport implements. Methods are called by
 // the broker on its own goroutine — implementations must be safe for
