@@ -630,33 +630,51 @@ func TestReconnectIdentitySwitch_DoesNotBlockBrokerReaderDispatch(t *testing.T) 
 }
 
 // N4 pins §3d2: reconnect demotes recoverFired from once-per-process to
-// once-per-connection. A same-identity fresh broker must receive a new
-// RecoverSessionReq even though the previous connection already fired one.
+// once-per-connection. N14 pins both same-identity inputs: a resolved handoff
+// takes the second restore arm, while a missing handoff plus settled identity
+// takes the third. Either way, the fresh broker must learn the stable identity.
 func TestReconnectSameIdentity_ResetsRecoverFiredAndReregisters(t *testing.T) {
-	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	t.Setenv("CLAUDE_CODE_SESSION_ID", "spawn")
-	writeIdentityHandoff(t, "spawn", "conversation-a", 10)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
-	a := newAdapter()
-	a.runCtx = ctx
-	broker := newRecoveryBroker(t, a)
-	establishSettledIdentity(a, sessionhandoff.Entry{
-		StableSessionID: "conversation-a", CWD: "/projects/a", UnixNano: 10,
-	})
-
-	a.restoreSessionAfterReconnect(ctx)
-	select {
-	case raw := <-broker.frames:
-		var req ipc.RecoverSessionReq
-		if err := json.Unmarshal(raw, &req); err != nil || req.Op != ipc.OpRecoverSession || req.StableSessionID != "conversation-a" {
-			t.Fatalf("same-identity reconnect sent the wrong re-registration frame: req=%+v err=%v", req, err)
-		}
-	case <-time.After(500 * time.Millisecond):
-		t.Fatal("same-identity reconnect did not reset recoverFired; the fresh broker never received this session's stable identity")
+	tests := []struct {
+		name         string
+		writeHandoff bool
+	}{
+		{name: "resolved_handoff", writeHandoff: true},
+		{name: "settled_identity_without_handoff", writeHandoff: false},
 	}
-	answerRecover(t, a)
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			t.Setenv("CLAUDE_CODE_SESSION_ID", "spawn")
+			if tt.writeHandoff {
+				writeIdentityHandoff(t, "spawn", "conversation-a", 10)
+			}
+			if _, found := reconnectTerminalHandoff(); found != tt.writeHandoff {
+				t.Fatalf("N14 precondition: terminal handoff found=%v, want %v", found, tt.writeHandoff)
+			}
+
+			ctx, cancel := context.WithCancel(context.Background())
+			t.Cleanup(cancel)
+			a := newAdapter()
+			a.runCtx = ctx
+			broker := newRecoveryBroker(t, a)
+			establishSettledIdentity(a, sessionhandoff.Entry{
+				StableSessionID: "conversation-a", CWD: "/projects/a", UnixNano: 10,
+			})
+
+			a.restoreSessionAfterReconnect(ctx)
+			select {
+			case raw := <-broker.frames:
+				var req ipc.RecoverSessionReq
+				if err := json.Unmarshal(raw, &req); err != nil || req.Op != ipc.OpRecoverSession || req.StableSessionID != "conversation-a" {
+					t.Fatalf("same-identity reconnect sent the wrong re-registration frame: req=%+v err=%v", req, err)
+				}
+			case <-time.After(500 * time.Millisecond):
+				t.Fatal("same-identity reconnect did not reset recoverFired; the fresh broker never received this session's stable identity")
+			}
+			answerRecover(t, a)
+		})
+	}
 }
 
 func TestReconnectRefire_ReresolvesBeforeAsyncDispatch(t *testing.T) {

@@ -324,6 +324,120 @@ func TestRecoverSession_ReconnectTransferWithoutIdentity_DoesNotRecordOldRouteUn
 	}
 }
 
+// anonymousCarriageThenRecover reproduces the D4 attach-before-identity window
+// followed by a connection drop with the PID alive. The first connection makes
+// an anonymous human attach, the second hello transfers that claim, and the
+// first stable identity then registers.
+func anonymousCarriageThenRecover(t *testing.T, mf *mappings.MappingsFile, stableID, cwd string) (ipc.RecoverSessionResp, *Broker) {
+	t.Helper()
+	b := brokerWithChannel(t, mf, &fakeChannel{})
+	t.Cleanup(b.Shutdown)
+	pid := os.Getpid()
+
+	first, closeFirst := peerPair(t, b)
+	if err := first.WriteJSON(ipc.HelloMsg{Op: ipc.OpHello, CLI: "claude", PID: pid, CWD: cwd}); err != nil {
+		t.Fatalf("first hello: %v", err)
+	}
+	if _, err := first.ReadFrame(); err != nil {
+		t.Fatalf("first hello ack: %v", err)
+	}
+	topicA := int64(281)
+	if err := first.WriteJSON(ipc.AttachReq{
+		Op: ipc.OpAttach, TopicID: &topicA, ChatID: -100, Group: "main", CWD: cwd,
+	}); err != nil {
+		t.Fatalf("anonymous human attach: %v", err)
+	}
+	raw, err := first.ReadFrame()
+	if err != nil {
+		t.Fatalf("read attach response: %v", err)
+	}
+	var attached ipc.AttachedMsg
+	if err := json.Unmarshal(raw, &attached); err != nil || !attached.OK {
+		t.Fatalf("precondition: anonymous attach failed: attached=%+v err=%v", attached, err)
+	}
+	closeFirst()
+
+	keyA := switchRoute(281, -100)
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		holder, held := b.Routes.Holder(keyA)
+		if held && !holder.IsConnected() {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("precondition: anonymous claim did not become reconnectable: held=%v holder=%+v", held, holder)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	second, closeSecond := peerPair(t, b)
+	t.Cleanup(closeSecond)
+	if err := second.WriteJSON(ipc.HelloMsg{Op: ipc.OpHello, CLI: "claude", PID: pid, CWD: cwd}); err != nil {
+		t.Fatalf("reconnect hello: %v", err)
+	}
+	if _, err := second.ReadFrame(); err != nil {
+		t.Fatalf("reconnect hello ack: %v", err)
+	}
+	if holder, held := b.Routes.Holder(keyA); !held || holder.StableSessionIDValue() != "" {
+		t.Fatalf("precondition: reconnect did not transfer the anonymous route: held=%v holder=%+v", held, holder)
+	}
+	return recoverIdentityOnPeer(t, second, stableID), b
+}
+
+// T17: a non-recoverable record cannot conflict with an anonymously carried
+// D4 attach. Releasing the live claim would be destructive because recovery
+// refuses both tombstoned and TTL-expired records and has nothing to replace it.
+func TestRecoverSession_AnonymousReconnectTransfer_NonRecoverableRecordKeepsLiveClaim(t *testing.T) {
+	tests := []struct {
+		name               string
+		makeNonRecoverable func(*testing.T, *mappings.MappingsFile)
+	}{
+		{
+			name: "tombstoned",
+			makeNonRecoverable: func(_ *testing.T, mf *mappings.MappingsFile) {
+				mf.TombstoneSessionAttachment(switchSessionB)
+			},
+		},
+		{
+			name: "ttl_expired",
+			makeNonRecoverable: func(t *testing.T, mf *mappings.MappingsFile) {
+				recorded, ok := mf.LookupSessionAttachment(switchSessionB)
+				if !ok {
+					t.Fatal("precondition: target session attachment is missing")
+				}
+				recorded.LastAttachedAt = time.Now().Add(-SessionAttachmentTTL - time.Hour)
+				mf.UpsertSessionAttachment(switchSessionB, recorded)
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mf := identitySwitchMappings(true)
+			tt.makeNonRecoverable(t, mf)
+			resp, b := anonymousCarriageThenRecover(t, mf, switchSessionB, "/projects/non-recoverable-"+tt.name)
+
+			keyA := switchRoute(281, -100)
+			holder, held := b.Routes.Holder(keyA)
+			if !held || holder.StableSessionIDValue() != switchSessionB {
+				t.Fatalf("T17 non-recoverable record destroyed the D4 attach-first claim "+
+					"(recovered=%v topic=%v): held=%v holder=%+v",
+					resp.Recovered, resp.TopicID, held, holder)
+			}
+			if resp.Recovered {
+				t.Fatalf("T17 non-recoverable record unexpectedly took auto-recovery instead of record-only: %+v", resp)
+			}
+			recorded, ok := b.Mappings().LookupSessionAttachment(switchSessionB)
+			if !ok || recorded.TopicID == nil || *recorded.TopicID != 281 || recorded.Detached {
+				t.Fatalf("T17 surviving D4 claim was not recorded under the registering identity: got %+v ok=%v", recorded, ok)
+			}
+			if _, held := b.Routes.Holder(switchRoute(412, -200)); held {
+				t.Fatal("T17 non-recoverable prior route was claimed despite being ineligible for recovery")
+			}
+		})
+	}
+}
+
 // N10: the same anonymous reconnect transfer is legitimate when the first
 // identity has no conflicting server-side record. Absence is not mismatched
 // provenance: recover must name and record the carried attach-first route.

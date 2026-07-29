@@ -369,7 +369,8 @@ func (b *Broker) handleRecoverSession(conn *ipc.Conn, stub *Stub, raw []byte, ro
 	recordedRouteIdentityMismatch := false
 	if routeIdentity != nil && routeIdentity.automatic && !routeIdentity.requireMatch {
 		if cur := stub.CurrentRoute(); cur != nil {
-			if recorded, ok := b.Mappings().LookupSessionAttachment(req.StableSessionID); ok {
+			if recorded, ok := b.Mappings().LookupSessionAttachment(req.StableSessionID); ok &&
+				recorded.Recoverable(time.Now(), SessionAttachmentTTL) {
 				recordedRouteIdentityMismatch = routeKeyFromSessionAttachment(recorded) != *cur
 			}
 		}
@@ -388,7 +389,6 @@ func (b *Broker) handleRecoverSession(conn *ipc.Conn, stub *Stub, raw []byte, ro
 		*routeIdentity = recoverRouteIdentity{
 			stableID:     req.StableSessionID,
 			requireMatch: true,
-			automatic:    true,
 		}
 	}()
 	if switched {
