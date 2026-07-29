@@ -1,12 +1,14 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"net"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -125,6 +127,9 @@ func TestStartAppServer_MovesToAnotherPortAfterLosingOne(t *testing.T) {
 	t.Setenv(fakeAppServerEnv, "1")
 	t.Setenv(fakePoisonPortEnv, strconv.Itoa(port))
 	t.Setenv(fakeSignalDirEnv, dir)
+	fakePIDs := filepath.Join(dir, "fake-app-server-pids")
+	t.Setenv(fakeAppServerPIDsEnv, fakePIDs)
+	cleanupFakeAppServerGroups(t, fakePIDs)
 
 	// The rival launcher, which wins the contended port while our first child is
 	// still up — so when that child dies the port is live and owned by someone else.
@@ -154,14 +159,19 @@ func TestStartAppServer_MovesToAnotherPortAfterLosingOne(t *testing.T) {
 		t.Fatalf("startAppServer returned the CONTENDED url %s — it adopted the process that won "+
 			"that port instead of starting its own app-server elsewhere", got)
 	}
+	pid := appServerPID(t, got)
+	if pgid, err := syscall.Getpgid(pid); err != nil || pgid != pid {
+		t.Fatalf("defect: app-server pid %d is not isolated in its own process group (pgid=%d, err=%v); cleanup would kill only its parent and leak helpers", pid, pgid, err)
+	}
 }
 
 // fakeAppServerEnv turns a re-executed copy of this test binary into a stand-in
 // Codex app-server: it binds the --listen port it was given and stays up.
 const (
-	fakeAppServerEnv  = "C3_TEST_FAKE_APP_SERVER"
-	fakePoisonPortEnv = "C3_TEST_FAKE_APP_SERVER_POISON_PORT"
-	fakeSignalDirEnv  = "C3_TEST_FAKE_APP_SERVER_SIGNAL_DIR"
+	fakeAppServerEnv     = "C3_TEST_FAKE_APP_SERVER"
+	fakePoisonPortEnv    = "C3_TEST_FAKE_APP_SERVER_POISON_PORT"
+	fakeSignalDirEnv     = "C3_TEST_FAKE_APP_SERVER_SIGNAL_DIR"
+	fakeAppServerPIDsEnv = "C3_TEST_FAKE_APP_SERVER_PIDS"
 )
 
 // init runs before the test framework parses flags, so a child process started
@@ -170,6 +180,21 @@ const (
 // be overtaken, exit) instead of binding; on any other port it binds and holds,
 // which is what a real app-server does.
 func init() {
+	if os.Getenv(holdLauncherLockEnv) != "" {
+		lock, err := acquireAppServerLaunchLock()
+		if err != nil {
+			os.Exit(2)
+		}
+		defer lock.Release()
+		_ = os.WriteFile(os.Getenv(lockReadyFileEnv), nil, 0o600)
+		for i := 0; i < 1000; i++ {
+			if _, err := os.Stat(os.Getenv(lockReleaseFileEnv)); err == nil {
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		os.Exit(2)
+	}
 	if os.Getenv(fakeAppServerEnv) == "" {
 		return
 	}
@@ -181,6 +206,15 @@ func init() {
 	}
 	if addr == "" {
 		os.Exit(2)
+	}
+	if started := os.Getenv(startSignalFileEnv); started != "" {
+		_ = os.WriteFile(started, nil, 0o600)
+	}
+	if pids := os.Getenv(fakeAppServerPIDsEnv); pids != "" {
+		if file, err := os.OpenFile(pids, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600); err == nil {
+			_, _ = fmt.Fprintf(file, "%d\n", os.Getpid())
+			_ = file.Close()
+		}
 	}
 	if poison := os.Getenv(fakePoisonPortEnv); poison != "" && strings.HasSuffix(addr, ":"+poison) {
 		dir := os.Getenv(fakeSignalDirEnv)
@@ -203,4 +237,76 @@ func init() {
 
 func isLostPortRace(err error) bool {
 	return err != nil && strings.Contains(err.Error(), errAppServerLostPortRace.Error())
+}
+
+func cleanupFakeAppServerGroups(t *testing.T, pidFile string) {
+	t.Helper()
+	t.Cleanup(func() {
+		data, err := os.ReadFile(pidFile)
+		if err != nil && !os.IsNotExist(err) {
+			t.Errorf("read fake app-server PID registry: %v", err)
+			return
+		}
+		for _, line := range strings.Fields(string(data)) {
+			pid, err := strconv.Atoi(line)
+			if err != nil || pid <= 0 {
+				t.Errorf("invalid fake app-server PID %q in cleanup registry", line)
+				continue
+			}
+			pgid, err := syscall.Getpgid(pid)
+			if err == syscall.ESRCH {
+				continue
+			}
+			if err != nil {
+				t.Errorf("read fake app-server process group for pid %d: %v", pid, err)
+				continue
+			}
+			if pgid != pid {
+				t.Errorf("defect: fake app-server pid %d shares process group %d; group cleanup would kill the test runner instead of leaked helpers", pid, pgid)
+				_ = syscall.Kill(pid, syscall.SIGKILL)
+				continue
+			}
+			if err := killAppServerProcessGroup(pid); err != nil {
+				t.Errorf("kill fake app-server process group %d: %v", pid, err)
+				continue
+			}
+			waitForProcessGroupExit(t, pid)
+		}
+	})
+}
+
+func appServerPID(t *testing.T, wsURL string) int {
+	t.Helper()
+	_, port, err := parseWSURL(wsURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(appServerMetaPath(port))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var meta struct {
+		PID int `json:"pid"`
+	}
+	if err := json.Unmarshal(data, &meta); err != nil || meta.PID <= 0 {
+		t.Fatalf("invalid app-server metadata for %s: pid=%d err=%v", wsURL, meta.PID, err)
+	}
+	return meta.PID
+}
+
+func waitForProcessGroupExit(t *testing.T, pgid int) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		err := syscall.Kill(-pgid, 0)
+		if err == syscall.ESRCH {
+			return
+		}
+		if err != nil {
+			t.Errorf("probe fake app-server process group %d after cleanup: %v", pgid, err)
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Errorf("defect: fake app-server process group %d survived test cleanup; it will become an orphan", pgid)
 }

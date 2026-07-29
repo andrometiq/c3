@@ -18,6 +18,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/Andrometiq/c3/internal/broker"
 )
 
 const defaultWSURL = "ws://127.0.0.1:8766"
@@ -202,10 +204,20 @@ func tomlString(s string) string {
 	return string(data)
 }
 
-// chooseAppServerURL picks a ws:// URL for this launch. A busy port is never
-// adopted — see the never-adopt rationale on ensureAppServer — so the only
-// question here is which port is free.
+// chooseAppServerURL picks a ws:// URL for this launch. The normal default is
+// an OS-assigned ephemeral loopback port; an explicit override keeps its
+// existing busy-port behavior. A busy port is never adopted — see ensureAppServer.
 func chooseAppServerURL(requestedWSURL string) string {
+	// The normal launcher path deliberately does not reuse its fixed default
+	// port. Ask the kernel for an ephemeral port while the interprocess launch
+	// lock is held instead. That removes the predictable collision point shared
+	// by every Codex session. An explicit override remains an override.
+	if requestedWSURL == defaultWSURL {
+		if wsURL, err := ephemeralWSURL("127.0.0.1"); err == nil {
+			return wsURL
+		}
+		return requestedWSURL
+	}
 	if requestedWSURL != defaultWSURL && !strings.HasPrefix(requestedWSURL, "ws://127.0.0.1:") {
 		return requestedWSURL
 	}
@@ -222,6 +234,22 @@ func chooseAppServerURL(requestedWSURL string) string {
 		}
 	}
 	return requestedWSURL
+}
+
+// ephemeralWSURL asks the OS to allocate a free TCP port. The caller holds the
+// launcher flock through child readiness, so another C3 launcher cannot claim
+// the released port between this probe and the app-server's bind.
+func ephemeralWSURL(host string) (string, error) {
+	listener, err := net.Listen("tcp", net.JoinHostPort(host, "0"))
+	if err != nil {
+		return "", err
+	}
+	defer listener.Close()
+	_, portText, err := net.SplitHostPort(listener.Addr().String())
+	if err != nil {
+		return "", err
+	}
+	return "ws://" + net.JoinHostPort(host, portText), nil
 }
 
 func parseWSURL(wsURL string) (string, int, error) {
@@ -297,6 +325,10 @@ func ensureAppServer(realCodex, adapterPath, wsURL, cwd, topic string) error {
 		logFile = os.Stderr
 	}
 	cmd := exec.Command(argv[0], argv[1:]...)
+	// An app-server can itself start helpers. Give this launch its own process
+	// group so a failed startup can reap the whole tree rather than leaving a
+	// helper alive after its direct parent is gone.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Stdin = nil
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
@@ -343,8 +375,18 @@ func ensureAppServer(realCodex, adapterPath, wsURL, cwd, topic string) error {
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
-	_ = cmd.Process.Kill()
+	_ = killAppServerProcessGroup(cmd.Process.Pid)
 	return fmt.Errorf("codex app-server did not become reachable at %s", wsURL)
+}
+
+func killAppServerProcessGroup(pid int) error {
+	if pid <= 0 {
+		return nil
+	}
+	if err := syscall.Kill(-pid, syscall.SIGKILL); err != nil && err != syscall.ESRCH {
+		return err
+	}
+	return nil
 }
 
 // errAppServerLostPortRace means another launcher won the port between our
@@ -354,12 +396,17 @@ var errAppServerLostPortRace = errors.New("app-server port lost to a concurrent 
 
 // startAppServer picks a port and launches an app-server on it, retrying on a
 // fresh port when it loses a startup race. Each retry re-runs chooseAppServerURL,
-// which now sees the winner listening and walks past it, so two launchers racing
-// converge on two ports instead of colliding on one. Returns the URL actually
-// used, which is what the Codex TUI must be pointed at.
+// which obtains another kernel-assigned port on the normal path (or walks past a
+// busy explicit override), so a retry never adopts the winner. Returns the URL
+// actually used, which is what the Codex TUI must be pointed at.
 func startAppServer(realCodex, adapterPath, requestedWS, cwd, topic string) (string, error) {
+	lock, err := acquireAppServerLaunchLock()
+	if err != nil {
+		return "", err
+	}
+	defer lock.Release()
+
 	const attempts = 5
-	var err error
 	for i := 0; i < attempts; i++ {
 		wsURL := chooseAppServerURL(requestedWS)
 		if err = ensureAppServer(realCodex, adapterPath, wsURL, cwd, topic); err == nil {
@@ -371,6 +418,40 @@ func startAppServer(realCodex, adapterPath, requestedWS, cwd, topic string) (str
 		fmt.Fprintf(os.Stderr, "c3: %v — trying another port\n", err)
 	}
 	return "", err
+}
+
+// appServerLaunchLock is the per-user interprocess guard for the window from
+// port selection through child readiness. Its file shares the broker's
+// validated runtime directory, rather than /tmp, so a second user cannot
+// interfere with this user's launcher startup.
+type appServerLaunchLock struct {
+	file *os.File
+}
+
+func acquireAppServerLaunchLock() (*appServerLaunchLock, error) {
+	pidFile, err := broker.PidFilePath()
+	if err != nil {
+		return nil, fmt.Errorf("resolve C3 runtime directory for Codex launcher lock: %w", err)
+	}
+	path := filepath.Join(filepath.Dir(pidFile), "c3-codex-launcher.lock")
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, fmt.Errorf("open Codex launcher lock %s: %w", path, err)
+	}
+	if err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX); err != nil {
+		_ = file.Close()
+		return nil, fmt.Errorf("flock Codex launcher lock %s: %w", path, err)
+	}
+	return &appServerLaunchLock{file: file}, nil
+}
+
+func (l *appServerLaunchLock) Release() {
+	if l == nil || l.file == nil {
+		return
+	}
+	_ = syscall.Flock(int(l.file.Fd()), syscall.LOCK_UN)
+	_ = l.file.Close()
+	l.file = nil
 }
 
 func requiredFeatureArgs(existing []string) []string {
