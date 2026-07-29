@@ -244,7 +244,7 @@ func TestCoveredByPush_BoundedFailTowardKeeping(t *testing.T) {
 	defer w.Stop()
 
 	for i := 1; i <= maxCoveredByPush+10; i++ {
-		w.recordCoveredByPush(int64(i), []int64{int64(i)})
+		w.recordCoveredByPush(int64(i), "", []int64{int64(i)})
 	}
 	if got := len(w.coveredByPush); got != maxCoveredByPush {
 		t.Errorf("map must stay bounded at %d; got %d", maxCoveredByPush, got)
@@ -252,10 +252,10 @@ func TestCoveredByPush_BoundedFailTowardKeeping(t *testing.T) {
 	if got := len(w.coveredOrder); got != maxCoveredByPush {
 		t.Errorf("order list must stay bounded at %d; got %d", maxCoveredByPush, got)
 	}
-	if ids := w.takeCoveredByPush(1); len(ids) != 1 || ids[0] != 1 {
+	if ids := w.takeCoveredByPush(1, ""); len(ids) != 1 || ids[0] != 1 {
 		t.Errorf("the oldest outstanding record must survive the cap; got %v", ids)
 	}
-	if ids := w.takeCoveredByPush(int64(maxCoveredByPush + 10)); ids != nil {
+	if ids := w.takeCoveredByPush(int64(maxCoveredByPush+10), ""); ids != nil {
 		t.Errorf("a push beyond the cap must be left untracked; got %v", ids)
 	}
 }
@@ -265,25 +265,25 @@ func TestCoveredByPush_BoundedFailTowardKeeping(t *testing.T) {
 // the first record makes the first ack consume the second push's lines.
 func TestCoveredByPush_DuplicatePushIDQueuesFIFO(t *testing.T) {
 	w := &RouteWorker{}
-	w.recordCoveredByPush(7, []int64{1, 7})
-	w.recordCoveredByPush(7, []int64{2, 7})
+	w.recordCoveredByPush(7, "first", []int64{1, 7})
+	w.recordCoveredByPush(7, "second", []int64{2, 7})
 
-	first := w.takeCoveredByPush(7)
-	second := w.takeCoveredByPush(7)
+	first := w.takeCoveredByPush(7, "first")
+	second := w.takeCoveredByPush(7, "second")
 	if len(first) != 2 || first[0] != 1 || first[1] != 7 {
 		t.Fatalf("first duplicate-key record overwritten: got %v", first)
 	}
 	if len(second) != 2 || second[0] != 2 || second[1] != 7 {
 		t.Fatalf("second duplicate-key record missing/out of order: got %v", second)
 	}
-	if w.takeCoveredByPush(7) != nil {
+	if w.takeCoveredByPush(7, "first") != nil {
 		t.Error("both queued records should be cleared after two takes")
 	}
 }
 
 func TestFlushPendingAck_ClearsCoveredRecordsWithoutPendingTurn(t *testing.T) {
 	w := &RouteWorker{}
-	w.recordCoveredByPush(7, []int64{7})
+	w.recordCoveredByPush(7, "", []int64{7})
 
 	// An outbound can clear pendingAck before the holder dies, while its
 	// delivered-ack identity record is still outstanding. Death must still clear

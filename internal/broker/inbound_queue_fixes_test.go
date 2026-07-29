@@ -425,11 +425,11 @@ func TestHandleInboundDelivered_DispatchesConsume(t *testing.T) {
 	b.Workers.mu.Lock()
 	w := b.Workers.spawnLocked(key)
 	b.Workers.mu.Unlock()
-	w.recordCoveredByPush(1, []int64{1})
+	w.recordCoveredByPush(1, "", []int64{1})
 	// The other half of the synthetic push: the ack is routed by the route the
 	// push went out on, recorded on the stub at push time (see Stub.pushRoutes).
 	// Without it this fabricated ack matches no push and consumes nothing.
-	stub.RecordPushRoute(1, key)
+	stub.RecordPushRoute(1, "", key)
 
 	raw, _ := json.Marshal(ipc.InboundDeliveredMsg{Op: ipc.OpInboundDelivered, UpdateID: 1, OK: true, Count: 1})
 	b.handleInboundDelivered(stub, raw)

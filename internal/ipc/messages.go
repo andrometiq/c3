@@ -27,6 +27,11 @@ type InboundMsg struct {
 	// would orphan N-1 as phantom backlog). Defaults to 1 (single-message push /
 	// older brokers).
 	Covered int `json:"covered,omitempty"`
+	// DeliveryToken is a broker-minted, per-push correlation token. Adapters
+	// echo it in InboundDeliveredMsg so the broker can identify the exact route
+	// and durable records this ack covers even when two outstanding pushes share
+	// one MessageID. Empty is the legacy wire shape.
+	DeliveryToken string `json:"delivery_token,omitempty"`
 }
 
 // ToolCallReq is the adapter → broker forward of an MCP tool call. The broker
@@ -128,13 +133,15 @@ type ObserveResp struct {
 // reported failure (the broker leaves it queued and may retry). Count is the
 // number of durable queue lines this (possibly merged) push covered — the
 // adapter echoes InboundMsg.Covered back so the broker Consumes exactly that many
-// off the head (a merged batch of N must drop N lines, not 1). Count<=0 is
-// treated as 1.
+// lines. DeliveryToken echoes InboundMsg.DeliveryToken and identifies the exact
+// pushed route + durable records; empty invokes the fail-toward-duplicate legacy
+// MessageID fallback.
 type InboundDeliveredMsg struct {
-	Op       Op    `json:"op"` // = OpInboundDelivered
-	UpdateID int64 `json:"update_id"`
-	OK       bool  `json:"ok"`
-	Count    int   `json:"count,omitempty"`
+	Op            Op     `json:"op"` // = OpInboundDelivered
+	UpdateID      int64  `json:"update_id"`
+	OK            bool   `json:"ok"`
+	Count         int    `json:"count,omitempty"`
+	DeliveryToken string `json:"delivery_token,omitempty"`
 }
 
 // RetranscribeReq is the adapter → broker request to re-run the STT chain over a

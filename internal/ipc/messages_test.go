@@ -346,9 +346,30 @@ func TestFetchQueueRespCarriesInbound(t *testing.T) {
 }
 
 func TestInboundDeliveredAndRetranscribeRoundTrip(t *testing.T) {
-	d, _ := json.Marshal(InboundDeliveredMsg{Op: OpInboundDelivered, UpdateID: 42, OK: true})
+	withoutToken, _ := json.Marshal(InboundDeliveredMsg{Op: OpInboundDelivered, UpdateID: 42, OK: true})
+	if containsJSONField(string(withoutToken), "delivery_token") {
+		t.Fatalf("legacy delivered wire shape must omit delivery_token: %s", withoutToken)
+	}
+	d, _ := json.Marshal(InboundDeliveredMsg{
+		Op: OpInboundDelivered, UpdateID: 42, OK: true, DeliveryToken: "broker-a-1",
+	})
 	if op, _ := PeekOp(d); op != OpInboundDelivered {
 		t.Fatalf("delivered op = %q", op)
+	}
+	var delivered InboundDeliveredMsg
+	if err := json.Unmarshal(d, &delivered); err != nil {
+		t.Fatal(err)
+	}
+	if delivered.DeliveryToken != "broker-a-1" {
+		t.Fatalf("delivery token did not round-trip: %+v", delivered)
+	}
+	legacy := []byte(`{"op":"inbound_delivered","update_id":42,"ok":true,"count":1}`)
+	delivered = InboundDeliveredMsg{}
+	if err := json.Unmarshal(legacy, &delivered); err != nil {
+		t.Fatalf("legacy no-token delivered frame must still parse: %v", err)
+	}
+	if delivered.DeliveryToken != "" {
+		t.Fatalf("legacy no-token delivered frame decoded a token: %+v", delivered)
 	}
 	r, _ := json.Marshal(RetranscribeReq{Op: OpRetranscribe, ID: "9", FileID: "vf", MessageID: 5})
 	if op, _ := PeekOp(r); op != OpRetranscribe {
@@ -360,6 +381,46 @@ func TestInboundDeliveredAndRetranscribeRoundTrip(t *testing.T) {
 	}
 	if gr.FileID != "vf" || gr.MessageID != 5 {
 		t.Errorf("retranscribe req mismatch: %+v", gr)
+	}
+}
+
+func TestInboundMsg_DeliveryTokenIsAdditiveAndOmitEmpty(t *testing.T) {
+	legacy := InboundMsg{
+		Op: OpInbound,
+		Inbound: c3types.Inbound{
+			Channel: "telegram", ChatID: -100, MessageID: 42, Text: "hello",
+		},
+		Covered: 1,
+	}
+	raw, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if containsJSONField(string(raw), "delivery_token") {
+		t.Fatalf("legacy inbound wire shape must omit delivery_token: %s", raw)
+	}
+
+	legacyRaw := []byte(`{"op":"inbound","inbound":{"channel":"telegram","chat_id":-100,"message_id":42,"text":"hello"},"covered":1}`)
+	var decoded InboundMsg
+	if err := json.Unmarshal(legacyRaw, &decoded); err != nil {
+		t.Fatalf("legacy no-token inbound frame must still parse: %v", err)
+	}
+	if decoded.DeliveryToken != "" {
+		t.Fatalf("legacy no-token inbound frame decoded a token: %+v", decoded)
+	}
+
+	withToken := legacy
+	withToken.DeliveryToken = "broker-a-1"
+	raw, err = json.Marshal(withToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var roundTrip InboundMsg
+	if err := json.Unmarshal(raw, &roundTrip); err != nil {
+		t.Fatal(err)
+	}
+	if roundTrip.DeliveryToken != "broker-a-1" {
+		t.Fatalf("delivery token did not round-trip: %+v", roundTrip)
 	}
 }
 

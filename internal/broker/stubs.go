@@ -99,20 +99,25 @@ type Stub struct {
 	hasReplied         bool
 
 	// pushRoutes records, per outstanding live push, the ROUTE that push went out
-	// on — keyed by the pushed MessageID, which every adapter echoes back verbatim
-	// as InboundDeliveredMsg.UpdateID. The ack carries NO route, while the stub's
-	// CURRENT route can move between push and ack (the agent attaches to another
-	// topic mid-turn). Routing the destructive consume by CurrentRoute() therefore
-	// dispatches it to a worker that never made the push, which across two chats —
-	// Telegram message ids are unique per CHAT, not globally — removes lines from
-	// the WRONG route's queue. Authoritative state has to be CARRIED with the
-	// thing that depends on it, not re-inferred later.
+	// on. DeliveryToken is the primary key: unlike MessageID it is unique across
+	// routes and edits. MessageID remains only for legacy adapters that do not echo
+	// the token, and that fallback consumes only when exactly one matching record
+	// exists — ambiguity leaves every durable line queued.
 	//
-	// FIFO per key (an edited_message re-pushes one id); bounded by
-	// maxCoveredByPush. Written by the route worker goroutine, read by this
-	// connection's handler goroutine, so both go through stubMu.
-	pushRoutes map[int64][]RouteKey
-	pushOrder  []int64
+	// Bounded by maxCoveredByPush. Written by the route worker goroutine, read by
+	// this connection's handler goroutine, so both go through stubMu.
+	pushRoutes map[int64][]pushRouteRecord
+	pushOrder  []pushRouteOrder
+}
+
+type pushRouteRecord struct {
+	token string
+	key   RouteKey
+}
+
+type pushRouteOrder struct {
+	messageID int64
+	token     string
 }
 
 // MarkDisconnected records that the stub's conn has dropped. The claim
@@ -303,12 +308,11 @@ func (s *Stub) HasReplied() bool {
 	return s.hasReplied
 }
 
-// RecordPushRoute remembers the route a live push went out on, keyed by the
-// pushed MessageID the adapter echoes back on its delivered-ack. Called on the
-// route worker goroutine BEFORE the frame is written — a fast adapter acks on
-// this connection's own goroutine and can beat the worker to the next statement.
-// See the pushRoutes field doc.
-func (s *Stub) RecordPushRoute(pushID int64, key RouteKey) {
+// RecordPushRoute remembers the route a live push went out on, keyed primarily
+// by its broker-minted token and secondarily by MessageID for legacy adapters.
+// Called BEFORE the frame is written — a fast adapter can ack on this
+// connection's handler goroutine before the worker reaches its next statement.
+func (s *Stub) RecordPushRoute(pushID int64, token string, key RouteKey) {
 	if pushID == 0 {
 		return
 	}
@@ -321,38 +325,64 @@ func (s *Stub) RecordPushRoute(pushID int64, key RouteKey) {
 	for len(s.pushOrder) >= maxCoveredByPush {
 		oldest := s.pushOrder[0]
 		s.pushOrder = s.pushOrder[1:]
-		if recs := s.pushRoutes[oldest]; len(recs) > 1 {
-			s.pushRoutes[oldest] = recs[1:]
+		recs := s.pushRoutes[oldest.messageID]
+		for i := range recs {
+			if recs[i].token != oldest.token {
+				continue
+			}
+			recs = append(recs[:i], recs[i+1:]...)
+			break
+		}
+		if len(recs) == 0 {
+			delete(s.pushRoutes, oldest.messageID)
 		} else {
-			delete(s.pushRoutes, oldest)
+			s.pushRoutes[oldest.messageID] = recs
 		}
 	}
 	if s.pushRoutes == nil {
-		s.pushRoutes = make(map[int64][]RouteKey, maxCoveredByPush)
+		s.pushRoutes = make(map[int64][]pushRouteRecord, maxCoveredByPush)
 	}
-	s.pushRoutes[pushID] = append(s.pushRoutes[pushID], key)
-	s.pushOrder = append(s.pushOrder, pushID)
+	s.pushRoutes[pushID] = append(s.pushRoutes[pushID], pushRouteRecord{token: token, key: key})
+	s.pushOrder = append(s.pushOrder, pushRouteOrder{messageID: pushID, token: token})
 }
 
-// TakePushRoute returns and clears the route the push with this id went out on,
-// or nil when this connection has no record of such a push — a broker restart, a
-// record evicted at the cap, or an ack replayed/fabricated for a push we never
-// made. Oldest-first when one id has several outstanding pushes.
-func (s *Stub) TakePushRoute(pushID int64) *RouteKey {
+// TakePushRoute returns and clears the exact tokened push route. For a legacy
+// no-token ack, it succeeds only when exactly one outstanding record matches the
+// MessageID; two matching routes/edits are ambiguous and remain queued.
+func (s *Stub) TakePushRoute(pushID int64, token string) *RouteKey {
 	s.stubMu.Lock()
 	defer s.stubMu.Unlock()
 	recs := s.pushRoutes[pushID]
 	if len(recs) == 0 {
 		return nil
 	}
-	k := recs[0]
-	if len(recs) == 1 {
+	idx := -1
+	if token == "" {
+		if len(recs) != 1 {
+			return nil
+		}
+		idx = 0
+	} else {
+		for i := range recs {
+			if recs[i].token == token {
+				idx = i
+				break
+			}
+		}
+		if idx < 0 {
+			return nil
+		}
+	}
+	k := recs[idx].key
+	recordToken := recs[idx].token
+	recs = append(recs[:idx], recs[idx+1:]...)
+	if len(recs) == 0 {
 		delete(s.pushRoutes, pushID)
 	} else {
-		s.pushRoutes[pushID] = recs[1:]
+		s.pushRoutes[pushID] = recs
 	}
-	for i, id := range s.pushOrder {
-		if id == pushID {
+	for i, record := range s.pushOrder {
+		if record.messageID == pushID && record.token == recordToken {
 			s.pushOrder = append(s.pushOrder[:i], s.pushOrder[i+1:]...)
 			break
 		}

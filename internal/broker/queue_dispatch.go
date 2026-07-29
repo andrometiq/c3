@@ -297,7 +297,9 @@ func (b *Broker) handleInboundDelivered(stub *Stub, raw []byte) {
 		log.Printf("inbound_delivered update=%d count=%d — route not confirmed by an explicit claim; consume DROPPED (§5 tripwire, Count lines remain as backlog)", msg.UpdateID, msg.Count)
 		return
 	}
-	// The ack carries NO route, and the stub's CURRENT route can have moved
+	// The ack carries no route. Its broker-minted delivery token identifies the
+	// exact outstanding push; a legacy no-token ack is accepted only when exactly
+	// one record matches UpdateID. The stub's CURRENT route can have moved
 	// between the push and the ack: the agent attaches to another topic mid-turn
 	// while the grok adapter is still inside injectWithRetry's backoff (~2 min over
 	// 12 attempts — it is retrying precisely BECAUSE the agent is mid-turn). Using
@@ -311,16 +313,20 @@ func (b *Broker) handleInboundDelivered(stub *Stub, raw []byte) {
 	// the correlation when it wrote the frame. Deliberately NOT taken from the
 	// adapter either — the least-trusted party must not get to name the queue it
 	// drains.
-	route := stub.TakePushRoute(msg.UpdateID)
+	route := stub.TakePushRoute(msg.UpdateID, msg.DeliveryToken)
 	if route == nil {
-		log.Printf("inbound_delivered update=%d count=%d conn=%d: no live push recorded for this session (broker restart / record cap / ack for a push we never made) — consume DROPPED (the line stays queued, recoverable via fetch_queue)", msg.UpdateID, msg.Count, stub.ConnID)
+		log.Printf("inbound_delivered update=%d count=%d conn=%d: no unique live push correlation for this session (unknown token / broker restart / record cap / ambiguous legacy MessageID) — consume DROPPED (the line stays queued, recoverable via fetch_queue)", msg.UpdateID, msg.Count, stub.ConnID)
 		return
 	}
 	// ALSO (whole-branch review): surface a dropped consume like the sibling
 	// handlers (handleFetchQueue / handleToolCall) do, so a full/stopped worker
 	// queue that silently swallows the live-ack — leaving Count lines stranded as
 	// phantom backlog — is visible in broker.log rather than lost.
-	if ok := b.Workers.Submit(*route, Job{Kind: JobConsume, Consume: &ConsumeJob{MessageID: msg.UpdateID, Count: msg.Count}}); !ok {
+	if ok := b.Workers.Submit(*route, Job{Kind: JobConsume, Consume: &ConsumeJob{
+		MessageID: msg.UpdateID,
+		Token:     msg.DeliveryToken,
+		Count:     msg.Count,
+	}}); !ok {
 		log.Printf("inbound_delivered update=%d count=%d: worker queue full or stopped — consume DROPPED (Count lines remain as backlog)", msg.UpdateID, msg.Count)
 	}
 }

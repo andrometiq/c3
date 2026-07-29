@@ -305,6 +305,7 @@ type adapter struct {
 type grokForwardReq struct {
 	inbound c3types.Inbound
 	covered int
+	token   string
 	conn    *ipc.Conn
 	epoch   uint64
 }
@@ -685,7 +686,10 @@ func (a *adapter) handleInbound(raw []byte) {
 	if err := json.Unmarshal(raw, &msg); err != nil {
 		return
 	}
-	req := grokForwardReq{inbound: msg.Inbound, covered: msg.Covered, conn: a.currentConn(), epoch: a.forwardEpoch.Load()}
+	req := grokForwardReq{
+		inbound: msg.Inbound, covered: msg.Covered, token: msg.DeliveryToken,
+		conn: a.currentConn(), epoch: a.forwardEpoch.Load(),
+	}
 	select {
 	case a.forwardCh <- req:
 	default:
@@ -821,7 +825,8 @@ func (a *adapter) grokForwardLoop() {
 		// fetch_queue — the safe side). Claude/codex parity.
 		if req.conn != nil && req.covered >= 1 {
 			_ = req.conn.WriteJSON(ipc.InboundDeliveredMsg{
-				Op: ipc.OpInboundDelivered, UpdateID: req.inbound.MessageID, OK: true, Count: req.covered,
+				Op: ipc.OpInboundDelivered, UpdateID: req.inbound.MessageID, OK: true,
+				Count: req.covered, DeliveryToken: req.token,
 			})
 		}
 	}

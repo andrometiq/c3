@@ -972,7 +972,10 @@ func (a *adapter) handleInbound(ctx context.Context, raw []byte) {
 	// events broker-side too), and handleConsume would otherwise Consume a real
 	// queued backlog message the event never delivered, silently dropping it.
 	if conn := a.currentConn(); conn != nil && !in.Inbound.IsEvent() {
-		_ = conn.WriteJSON(ipc.InboundDeliveredMsg{Op: ipc.OpInboundDelivered, UpdateID: in.Inbound.MessageID, OK: true, Count: in.Covered})
+		_ = conn.WriteJSON(ipc.InboundDeliveredMsg{
+			Op: ipc.OpInboundDelivered, UpdateID: in.Inbound.MessageID, OK: true,
+			Count: in.Covered, DeliveryToken: in.DeliveryToken,
+		})
 	}
 }
 

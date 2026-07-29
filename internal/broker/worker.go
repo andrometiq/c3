@@ -151,6 +151,7 @@ func (l *fetchLease) cancel() bool {
 // toward keeping the queue rather than falling back to destructive head-consume.
 type ConsumeJob struct {
 	MessageID int64
+	Token     string
 	Count     int
 }
 
@@ -244,10 +245,9 @@ type RouteWorker struct {
 	pendingAck []*c3types.Inbound
 
 	// coveredByPush records, per live push, the durable queue lines that push
-	// actually covered — keyed by the pushed message's MessageID, which every
-	// adapter echoes back verbatim as InboundDeliveredMsg.UpdateID. handleConsume
-	// uses it to remove EXACTLY those lines (Queue.RemoveIDs) instead of dropping
-	// Covered lines off the queue HEAD.
+	// actually covered. The broker-minted DeliveryToken is the primary
+	// correlation; MessageID remains only for a legacy no-token fallback which
+	// refuses two or more matching outstanding records.
 	//
 	// Head-drop is only equivalent to "the lines this push covered" when the queue
 	// was EMPTY before flushInbounds appended them. It is not: the push path right
@@ -259,14 +259,14 @@ type RouteWorker struct {
 	// the delivered one queued to be re-delivered. Found and reproduced during the
 	// v0.1.0 release audit, 2026-07-25.
 	//
-	// Multiple pushes can share one MessageID (edited_message), so each key owns a
-	// FIFO of records rather than one overwriteable record. Worker-goroutine-only
-	// (recorded in forwardOrFallback, read+cleared in handleConsume), so it needs
-	// no lock. Bounded by maxCoveredByPush outstanding records.
-	coveredByPush map[int64][][]int64
+	// Multiple pushes can share one MessageID (edited_message or different chats),
+	// so each key owns tokened records rather than one overwriteable record.
+	// Worker-goroutine-only (recorded in forwardOrFallback, read+cleared in
+	// handleConsume), so it needs no lock. Bounded by maxCoveredByPush records.
+	coveredByPush map[int64][]coveredPushRecord
 	// coveredOrder is record insertion order (duplicates included), used to cap
 	// the total outstanding records.
-	coveredOrder []int64
+	coveredOrder []coveredPushOrder
 
 	// prevEchoDone chains the per-topic voice-readback echoes so they post in
 	// strict arrival order (spec Phase 3 — the maintainer: "processed one by one"). The
@@ -279,6 +279,16 @@ type RouteWorker struct {
 	// its own `mine`. Initialized PRE-CLOSED in newRouteWorker so the first echo's
 	// `<-prev` proceeds immediately (a nil channel would block forever).
 	prevEchoDone chan struct{}
+}
+
+type coveredPushRecord struct {
+	token string
+	ids   []int64
+}
+
+type coveredPushOrder struct {
+	messageID int64
+	token     string
 }
 
 // debounceWindow / debounceMax defaults from spec §7.3 + §6.
@@ -1164,6 +1174,10 @@ func (w *RouteWorker) forwardOrFallbackCovering(_ context.Context, in *c3types.I
 		}
 		// Does this push cover durable lines whose ack must consume them?
 		tracked := !in.IsEvent() && covered > 0 && len(coveredIDs) > 0
+		deliveryToken := ""
+		if tracked {
+			deliveryToken = w.broker.mintDeliveryToken()
+		}
 		// Record the ROUTE on the pushed SESSION *before* the frame goes out. The
 		// delivered-ack carries no route (handleInboundDelivered resolves it from
 		// here), and the adapter can ack the instant the frame lands — on the
@@ -1177,9 +1191,12 @@ func (w *RouteWorker) forwardOrFallbackCovering(_ context.Context, in *c3types.I
 		// below is made only on success, so such an ack resolves to the route and
 		// then hits handleConsume's "covered identity unavailable" skip.
 		if tracked {
-			holder.RecordPushRoute(in.MessageID, w.key)
+			holder.RecordPushRoute(in.MessageID, deliveryToken, w.key)
 		}
-		if err := conn.WriteJSON(ipc.InboundMsg{Op: ipc.OpInbound, Inbound: *in, Covered: covered, Pending: pending}); err != nil {
+		if err := conn.WriteJSON(ipc.InboundMsg{
+			Op: ipc.OpInbound, Inbound: *in, Covered: covered, Pending: pending,
+			DeliveryToken: deliveryToken,
+		}); err != nil {
 			log.Printf("deliver FAIL chan=%s chat=%d topic=%s msg=%d to cli=%s pid=%d: %v — %s",
 				w.key.Channel, w.key.ChatID, TopicKeyStr(w.key), in.MessageID,
 				holder.CLI, holder.PID, err, fallbackSummary(in))
@@ -1191,7 +1208,7 @@ func (w *RouteWorker) forwardOrFallbackCovering(_ context.Context, in *c3types.I
 		// whose caller knew their ids; otherwise the ack keeps the legacy
 		// head-consume path.
 		if tracked {
-			w.recordCoveredByPush(in.MessageID, coveredIDs)
+			w.recordCoveredByPush(in.MessageID, deliveryToken, coveredIDs)
 		}
 		// Live delivery: the message stays queued until the adapter sends
 		// OpInboundDelivered{ok:true}, which Consumes it (queue dispatch task).
@@ -1844,7 +1861,7 @@ func (w *RouteWorker) handleConsume(_ context.Context, job *ConsumeJob) {
 	// the head-drop destroys messages nobody ever saw AND leaves the delivered one
 	// queued for re-delivery. RemoveIDs snapshots to .trash before rewriting and is
 	// idempotent, so an id already evicted/consumed simply matches nothing.
-	if ids := w.takeCoveredByPush(job.MessageID); len(ids) > 0 {
+	if ids := w.takeCoveredByPush(job.MessageID, job.Token); len(ids) > 0 {
 		// 1-based occurrence ordinals per id. A queue can legitimately hold two
 		// pending lines with one MessageID (an edited message re-dispatches with
 		// the same id), in which case this selects the OLDEST occurrence rather
@@ -1884,10 +1901,10 @@ func (w *RouteWorker) handleConsume(_ context.Context, job *ConsumeJob) {
 		w.key.Channel, w.key.ChatID, TopicKeyStr(w.key), job.MessageID, n)
 }
 
-// recordCoveredByPush remembers which durable lines a live push covered, keyed by
-// the pushed MessageID the adapter echoes back on its delivered-ack. Bounded FIFO;
+// recordCoveredByPush remembers which durable lines a live push covered, keyed
+// by its broker-minted token plus MessageID for legacy peers. Bounded;
 // worker-goroutine-only, so no lock. See RouteWorker.coveredByPush.
-func (w *RouteWorker) recordCoveredByPush(pushID int64, ids []int64) {
+func (w *RouteWorker) recordCoveredByPush(pushID int64, token string, ids []int64) {
 	if pushID == 0 || len(ids) == 0 {
 		return
 	}
@@ -1897,17 +1914,18 @@ func (w *RouteWorker) recordCoveredByPush(pushID int64, ids []int64) {
 		return
 	}
 	if w.coveredByPush == nil {
-		w.coveredByPush = make(map[int64][][]int64, maxCoveredByPush)
+		w.coveredByPush = make(map[int64][]coveredPushRecord, maxCoveredByPush)
 	}
 	// Copy: the caller's slice is flushInbounds' batch-local buffer.
 	record := append([]int64(nil), ids...)
-	w.coveredByPush[pushID] = append(w.coveredByPush[pushID], record)
-	w.coveredOrder = append(w.coveredOrder, pushID)
+	w.coveredByPush[pushID] = append(w.coveredByPush[pushID], coveredPushRecord{token: token, ids: record})
+	w.coveredOrder = append(w.coveredOrder, coveredPushOrder{messageID: pushID, token: token})
 }
 
-// takeCoveredByPush returns and clears the covered-line record for a push, or nil
-// when there is none. Worker-goroutine-only.
-func (w *RouteWorker) takeCoveredByPush(pushID int64) []int64 {
+// takeCoveredByPush returns and clears the exact tokened record. For a legacy
+// no-token ack it succeeds only when exactly one outstanding record matches the
+// MessageID; ambiguity leaves every record intact. Worker-goroutine-only.
+func (w *RouteWorker) takeCoveredByPush(pushID int64, token string) []int64 {
 	if w.coveredByPush == nil {
 		return nil
 	}
@@ -1915,14 +1933,33 @@ func (w *RouteWorker) takeCoveredByPush(pushID int64) []int64 {
 	if len(records) == 0 {
 		return nil
 	}
-	ids := records[0]
-	if len(records) == 1 {
+	idx := -1
+	if token == "" {
+		if len(records) != 1 {
+			return nil
+		}
+		idx = 0
+	} else {
+		for i := range records {
+			if records[i].token == token {
+				idx = i
+				break
+			}
+		}
+		if idx < 0 {
+			return nil
+		}
+	}
+	ids := records[idx].ids
+	recordToken := records[idx].token
+	records = append(records[:idx], records[idx+1:]...)
+	if len(records) == 0 {
 		delete(w.coveredByPush, pushID)
 	} else {
-		w.coveredByPush[pushID] = records[1:]
+		w.coveredByPush[pushID] = records
 	}
-	for i, id := range w.coveredOrder {
-		if id == pushID {
+	for i, record := range w.coveredOrder {
+		if record.messageID == pushID && record.token == recordToken {
 			w.coveredOrder = append(w.coveredOrder[:i], w.coveredOrder[i+1:]...)
 			break
 		}

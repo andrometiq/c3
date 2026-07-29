@@ -2,6 +2,7 @@ package broker
 
 import (
 	"encoding/json"
+	"net"
 	"os"
 	"testing"
 	"time"
@@ -51,6 +52,47 @@ func waitPush(t *testing.T, ch <-chan struct{}) {
 	}
 }
 
+func liveHolderFrames(t *testing.T, b *Broker, key RouteKey) (*Stub, <-chan ipc.InboundMsg) {
+	t.Helper()
+	adapterEnd, holderEnd := net.Pipe()
+	t.Cleanup(func() { _ = adapterEnd.Close(); _ = holderEnd.Close() })
+	adapterConn := ipc.NewConn(adapterEnd)
+	pushed := make(chan ipc.InboundMsg, 4)
+	go func() {
+		defer close(pushed)
+		for {
+			raw, err := adapterConn.ReadFrame()
+			if err != nil {
+				return
+			}
+			if op, _ := ipc.PeekOp(raw); op != ipc.OpInbound {
+				continue
+			}
+			var msg ipc.InboundMsg
+			if json.Unmarshal(raw, &msg) == nil {
+				pushed <- msg
+			}
+		}
+	}()
+	stub := &Stub{CLI: "claude", PID: os.Getpid(), CWD: "/work", ConnID: 1}
+	stub.Reattach(ipc.NewConn(holderEnd), 1)
+	if _, ok := b.Routes.Claim(key, stub); !ok {
+		t.Fatal("claim live holder")
+	}
+	return stub, pushed
+}
+
+func waitInboundPush(t *testing.T, ch <-chan ipc.InboundMsg) ipc.InboundMsg {
+	t.Helper()
+	select {
+	case msg := <-ch:
+		return msg
+	case <-time.After(5 * time.Second):
+		t.Fatal("no live push observed")
+		return ipc.InboundMsg{}
+	}
+}
+
 // pendingWithin polls a route's pending count until it reaches want or the
 // deadline expires, then returns whatever it last read. The consume is dispatched
 // asynchronously onto the route's worker, so a bare read races it.
@@ -67,15 +109,12 @@ func pendingWithin(t *testing.T, b *Broker, key RouteKey, want int) int {
 	}
 }
 
-// The destructive case, end to end: one session, two topics in DIFFERENT chats.
-// Telegram message ids are unique per CHAT, not globally, so the same id can be
-// outstanding on both — which is exactly what lets a mis-routed ack destroy a
-// real line rather than merely miss.
-//
-// This drives REAL pushes through the worker pool (not a hand-planted
-// coveredByPush entry), so it exercises the production record site as well as the
-// routing decision.
-func TestInboundDelivered_LateAckAfterCrossChatSwitch_ConsumesPushedRoute(t *testing.T) {
+// TestInboundDelivered_TokenPreventsSameMessageIDCrossRouteLoss is the live B3
+// trigger. Session A's push is never acked (its host notification failed), the
+// session switches routes, and session B successfully renders a different push
+// with the same Telegram MessageID. B's token must consume only B. Falling back
+// to MessageID FIFO consumes A's never-rendered line instead.
+func TestInboundDelivered_TokenPreventsSameMessageIDCrossRouteLoss(t *testing.T) {
 	t.Setenv("C3_QUEUE_DIR", t.TempDir())
 	b := brokerWithChannel(t, fastDebounceTelegram(), &fakeChannel{})
 	defer b.Shutdown()
@@ -84,7 +123,7 @@ func TestInboundDelivered_LateAckAfterCrossChatSwitch_ConsumesPushedRoute(t *tes
 	keyA := MakeRouteKey("telegram", -100, &tidA) // group 1
 	keyB := MakeRouteKey("telegram", -200, &tidB) // group 2 — ids collide across chats
 
-	stub, pushed := liveHolder(t, b, keyA)
+	stub, pushed := liveHolderFrames(t, b, keyA)
 	stub.SetRoute(&keyA)
 	stub.MarkRouteConfirmed()
 
@@ -93,7 +132,7 @@ func TestInboundDelivered_LateAckAfterCrossChatSwitch_ConsumesPushedRoute(t *tes
 	if !b.Workers.Submit(keyA, Job{Kind: JobInbound, Inbound: inboundOn(-100, &tidA, 42, "the-A-message")}) {
 		t.Fatal("submit inbound on route A")
 	}
-	waitPush(t, pushed)
+	pushA := waitInboundPush(t, pushed)
 
 	// Mid-turn, the agent attaches to a topic in ANOTHER group.
 	b.Routes.Claim(keyB, stub)
@@ -105,7 +144,13 @@ func TestInboundDelivered_LateAckAfterCrossChatSwitch_ConsumesPushedRoute(t *tes
 	if !b.Workers.Submit(keyB, Job{Kind: JobInbound, Inbound: inboundOn(-200, &tidB, 42, "the-B-message")}) {
 		t.Fatal("submit inbound on route B")
 	}
-	waitPush(t, pushed)
+	pushB := waitInboundPush(t, pushed)
+	if pushA.DeliveryToken == "" || pushB.DeliveryToken == "" {
+		t.Fatalf("tracked pushes must carry delivery tokens: A=%q B=%q", pushA.DeliveryToken, pushB.DeliveryToken)
+	}
+	if pushA.DeliveryToken == pushB.DeliveryToken {
+		t.Fatalf("two pushes shared delivery token %q: ack correlation is not unique", pushA.DeliveryToken)
+	}
 
 	if n := pendingWithin(t, b, keyA, 1); n != 1 {
 		t.Fatalf("setup: route A pending=%d, want 1", n)
@@ -114,15 +159,66 @@ func TestInboundDelivered_LateAckAfterCrossChatSwitch_ConsumesPushedRoute(t *tes
 		t.Fatalf("setup: route B pending=%d, want 1", n)
 	}
 
-	// The late ack for A's push finally lands, while the stub holds B.
-	raw, _ := json.Marshal(ipc.InboundDeliveredMsg{Op: ipc.OpInboundDelivered, UpdateID: 42, OK: true, Count: 1})
+	// A's notification failed, so it sent no ack. B rendered and echoes B's token.
+	raw, _ := json.Marshal(ipc.InboundDeliveredMsg{
+		Op: ipc.OpInboundDelivered, UpdateID: 42, OK: true, Count: 1,
+		DeliveryToken: pushB.DeliveryToken,
+	})
 	b.handleInboundDelivered(stub, raw)
 
-	if n := pendingWithin(t, b, keyA, 0); n != 0 {
-		t.Errorf("the ack must consume the line on the route the push went out on; route A pending=%d, want 0 — the delivered line stays queued and fetch_queue hands it out again as a duplicate, with a permanently inflated held count", n)
+	if n := pendingWithin(t, b, keyB, 0); n != 0 {
+		aPending, _ := b.Queue.Pending(queueRouteKey(keyA))
+		t.Fatalf("B's tokened ack correlated to the wrong push: route A pending=%d (want 1, never rendered), route B pending=%d (want 0, rendered) — MessageID FIFO replaced delivery-token correlation", aPending, n)
 	}
-	if n := pendingWithin(t, b, keyB, 1); n != 1 {
-		t.Errorf("DATA LOSS: the ack for route A's push consumed route B's line; route B pending=%d, want 1 — the delivered-ack was dispatched to the stub's CURRENT route instead of the route the push actually went out on", n)
+	if n, _ := b.Queue.Pending(queueRouteKey(keyA)); n != 1 {
+		t.Fatalf("DATA LOSS: B's successful ack removed A's never-rendered line; route A pending=%d, want 1 — delivery-token correlation was replaced by MessageID FIFO", n)
+	}
+}
+
+// TestInboundDelivered_LegacyAmbiguousMessageIDKeepsBothRoutes pins the
+// compatibility ruling: an old adapter that echoes no token may consume a
+// single unambiguous outstanding MessageID, but two matches must refuse rather
+// than guess FIFO. Duplicate delivery is recoverable; deleting A because B
+// happened to ack first is not.
+func TestInboundDelivered_LegacyAmbiguousMessageIDKeepsBothRoutes(t *testing.T) {
+	t.Setenv("C3_QUEUE_DIR", t.TempDir())
+	b := brokerWithChannel(t, fastDebounceTelegram(), &fakeChannel{})
+	defer b.Shutdown()
+
+	tidA, tidB := int64(281), int64(412)
+	keyA := MakeRouteKey("telegram", -100, &tidA)
+	keyB := MakeRouteKey("telegram", -200, &tidB)
+
+	stub, pushed := liveHolderFrames(t, b, keyA)
+	stub.SetRoute(&keyA)
+	stub.MarkRouteConfirmed()
+	if !b.Workers.Submit(keyA, Job{Kind: JobInbound, Inbound: inboundOn(-100, &tidA, 10, "never-rendered-A")}) {
+		t.Fatal("submit inbound on route A")
+	}
+	_ = waitInboundPush(t, pushed)
+
+	b.Routes.Claim(keyB, stub)
+	b.Routes.Release(keyA, stub.ConnID)
+	stub.SetRoute(&keyB)
+	stub.MarkRouteConfirmed()
+	if !b.Workers.Submit(keyB, Job{Kind: JobInbound, Inbound: inboundOn(-200, &tidB, 10, "rendered-B")}) {
+		t.Fatal("submit inbound on route B")
+	}
+	_ = waitInboundPush(t, pushed)
+
+	raw, _ := json.Marshal(ipc.InboundDeliveredMsg{
+		Op: ipc.OpInboundDelivered, UpdateID: 10, OK: true, Count: 1,
+	})
+	b.handleInboundDelivered(stub, raw)
+
+	deadline := time.Now().Add(400 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		aPending, _ := b.Queue.Pending(queueRouteKey(keyA))
+		bPending, _ := b.Queue.Pending(queueRouteKey(keyB))
+		if aPending != 1 || bPending != 1 {
+			t.Fatalf("ambiguous legacy ack consumed a line: route A pending=%d, route B pending=%d, both want 1 — no-token fallback must refuse 2+ MessageID matches and fail toward duplicate", aPending, bPending)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 
@@ -160,7 +256,7 @@ func TestInboundDelivered_StrayAckNeverDeletesTheWrongRoutesMergedBatch(t *testi
 	b.Workers.mu.Lock()
 	wB := b.Workers.spawnLocked(keyB)
 	b.Workers.mu.Unlock()
-	wB.recordCoveredByPush(42, []int64{40, 41, 42})
+	wB.recordCoveredByPush(42, "", []int64{40, 41, 42})
 
 	// The agent switches to B mid-turn; A's ack lands afterwards claiming ONE line.
 	b.Routes.Claim(keyB, stub)
@@ -206,7 +302,7 @@ func TestConsume_PushRouteKnownButNoCoveredIdentity_LeavesQueueIntact(t *testing
 	// The push route IS known — only the covered-line identities are missing (the
 	// push covered lines whose ids the caller could not enumerate, or the worker
 	// was reaped between push and ack).
-	stub.RecordPushRoute(7, key)
+	stub.RecordPushRoute(7, "", key)
 
 	raw, _ := json.Marshal(ipc.InboundDeliveredMsg{Op: ipc.OpInboundDelivered, UpdateID: 7, OK: true, Count: 2})
 	b.handleInboundDelivered(stub, raw)
@@ -308,8 +404,8 @@ func TestHelloReconnect_AckForPrereconnectPushStillConsumes(t *testing.T) {
 	b.Workers.mu.Lock()
 	w := b.Workers.spawnLocked(key)
 	b.Workers.mu.Unlock()
-	w.recordCoveredByPush(1, []int64{1})
-	old.RecordPushRoute(1, key)
+	w.recordCoveredByPush(1, "", []int64{1})
+	old.RecordPushRoute(1, "", key)
 
 	// The adapter reconnects, then its ack for that push finally lands.
 	reconnectHello(t, b, pid, cwd)

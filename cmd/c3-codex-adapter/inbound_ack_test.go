@@ -242,9 +242,10 @@ func TestHandleInbound_Codex_ForwardSuccessSendsDeliveredAck(t *testing.T) {
 	a, peer := adapterWithBrokerConn(t)
 
 	msg := ipc.InboundMsg{
-		Op:      ipc.OpInbound,
-		Covered: 1,
-		Inbound: c3types.Inbound{Channel: "telegram", ChatID: -100, MessageID: 7, Text: "hi"},
+		Op:            ipc.OpInbound,
+		Covered:       1,
+		DeliveryToken: "broker-a-7",
+		Inbound:       c3types.Inbound{Channel: "telegram", ChatID: -100, MessageID: 7, Text: "hi"},
 	}
 	raw, _ := json.Marshal(msg)
 	a.handleInbound(raw)
@@ -253,8 +254,8 @@ func TestHandleInbound_Codex_ForwardSuccessSendsDeliveredAck(t *testing.T) {
 	if !got {
 		t.Fatal("a successful live forward must send an OpInboundDelivered ack so the broker consumes the queued copy")
 	}
-	if !ack.OK || ack.UpdateID != 7 || ack.Count != 1 {
-		t.Fatalf("ack = %+v, want {OK:true UpdateID:7 Count:1}", ack)
+	if !ack.OK || ack.UpdateID != 7 || ack.Count != 1 || ack.DeliveryToken != "broker-a-7" {
+		t.Fatalf("ack = %+v, want {OK:true UpdateID:7 Count:1 DeliveryToken:broker-a-7}", ack)
 	}
 }
 

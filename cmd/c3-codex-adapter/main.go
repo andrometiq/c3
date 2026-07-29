@@ -272,6 +272,7 @@ type adapter struct {
 type codexForwardReq struct {
 	inbound c3types.Inbound
 	covered int
+	token   string
 	conn    *ipc.Conn
 }
 
@@ -708,7 +709,10 @@ func (a *adapter) handleInbound(raw []byte) {
 	// (D-RC2); on failure it never acks and the content stays queued for fetch_queue
 	// recovery. Inbound is copied by value so the loop owns it.
 	if codexForwardingAllowed() {
-		req := codexForwardReq{inbound: msg.Inbound, covered: msg.Covered, conn: a.currentConn()}
+		req := codexForwardReq{
+			inbound: msg.Inbound, covered: msg.Covered,
+			token: msg.DeliveryToken, conn: a.currentConn(),
+		}
 		select {
 		case a.forwardCh <- req:
 		default:
@@ -837,7 +841,10 @@ func (a *adapter) codexForwardLoop() {
 		// forward can't make this land on a route the stub no longer holds.
 		// ipc.Conn.WriteJSON is wmu-guarded, so this write is safe from the goroutine.
 		if req.conn != nil && !req.inbound.IsEvent() && req.covered >= 1 {
-			_ = req.conn.WriteJSON(ipc.InboundDeliveredMsg{Op: ipc.OpInboundDelivered, UpdateID: req.inbound.MessageID, OK: true, Count: req.covered})
+			_ = req.conn.WriteJSON(ipc.InboundDeliveredMsg{
+				Op: ipc.OpInboundDelivered, UpdateID: req.inbound.MessageID, OK: true,
+				Count: req.covered, DeliveryToken: req.token,
+			})
 		}
 	}
 }

@@ -2,6 +2,7 @@ package broker
 
 import (
 	"context"
+	"crypto/rand"
 	"fmt"
 	"log"
 	"sync"
@@ -56,6 +57,13 @@ type Broker struct {
 	// the keyboard is sent and resolved on the route worker goroutine when the
 	// operator taps. See perm.go.
 	Perms *permRegistry
+
+	// deliveryTokenPrefix is random per broker lifetime; deliveryTokenSeq makes
+	// each tracked live push unique within that lifetime. The prefix is
+	// load-bearing: after a broker restart, a stale adapter ack must never collide
+	// with a fresh push's token and consume its durable record.
+	deliveryTokenPrefix string
+	deliveryTokenSeq    atomic.Uint64
 
 	// Queue is the durable per-route inbound hold buffer. All file ops for a
 	// route are funneled through that route's RouteWorker goroutine (single
@@ -127,19 +135,20 @@ const defaultWorkerIdle = 60 * time.Second
 func New(mf *mappings.MappingsFile) *Broker {
 	ctx, cancel := context.WithCancel(context.Background())
 	b := &Broker{
-		Stubs:              NewStubRegistry(),
-		Routes:             NewRoutes(),
-		Fallbacks:          newFallbackTracker(defaultFallbackCooldown),
-		HeldNotices:        newFallbackTracker(defaultHeldNoticeCooldown),
-		Pairing:            newPairingState(),
-		Asks:               newAskRegistry(),
-		Perms:              newPermRegistry(),
-		ctx:                ctx,
-		cancel:             cancel,
-		channels:           map[string]*channelRegistration{},
-		desktopNotifier:    newDesktopNotifier(), // desktop notifications removed 2026-07-07 per maintainer; retained dormant, health surfaces only on the status line
-		lastHealth:         map[string]c3types.HealthEvent{},
-		sessionPIDResolver: proctree.CLISessionPID,
+		Stubs:               NewStubRegistry(),
+		Routes:              NewRoutes(),
+		Fallbacks:           newFallbackTracker(defaultFallbackCooldown),
+		HeldNotices:         newFallbackTracker(defaultHeldNoticeCooldown),
+		Pairing:             newPairingState(),
+		Asks:                newAskRegistry(),
+		Perms:               newPermRegistry(),
+		deliveryTokenPrefix: rand.Text(),
+		ctx:                 ctx,
+		cancel:              cancel,
+		channels:            map[string]*channelRegistration{},
+		desktopNotifier:     newDesktopNotifier(), // desktop notifications removed 2026-07-07 per maintainer; retained dormant, health surfaces only on the status line
+		lastHealth:          map[string]c3types.HealthEvent{},
+		sessionPIDResolver:  proctree.CLISessionPID,
 	}
 	b.mappings.Store(mf)
 	// Durable inbound queue. A queue init failure must NOT stop the broker (it
@@ -157,6 +166,10 @@ func New(mf *mappings.MappingsFile) *Broker {
 	b.Workers = NewWorkerPool(ctx, defaultWorkerIdle, b)
 	b.Plugins = newPluginHost(b)
 	return b
+}
+
+func (b *Broker) mintDeliveryToken() string {
+	return fmt.Sprintf("%s-%x", b.deliveryTokenPrefix, b.deliveryTokenSeq.Add(1))
 }
 
 // Mappings returns a read-only snapshot of the current mappings file.

@@ -310,7 +310,7 @@ func TestGrokForward_InjectSuccess_AcksCovered(t *testing.T) {
 	a, peer := newForwardTestAdapter(t, l.sock)
 
 	a.handleInbound(inboundRaw(t, ipc.InboundMsg{
-		Op: ipc.OpInbound, Covered: 2,
+		Op: ipc.OpInbound, Covered: 2, DeliveryToken: "broker-a-7",
 		Inbound: c3types.Inbound{Channel: "telegram", ChatID: -100, MessageID: 7, Text: "hi from phone"},
 	}))
 
@@ -318,8 +318,8 @@ func TestGrokForward_InjectSuccess_AcksCovered(t *testing.T) {
 	if !got {
 		t.Fatal("a successful live inject must send an OpInboundDelivered ack so the broker consumes the queued copy")
 	}
-	if !ack.OK || ack.UpdateID != 7 || ack.Count != 2 {
-		t.Fatalf("ack = %+v, want {OK:true UpdateID:7 Count:2} (Covered echoed verbatim)", ack)
+	if !ack.OK || ack.UpdateID != 7 || ack.Count != 2 || ack.DeliveryToken != "broker-a-7" {
+		t.Fatalf("ack = %+v, want {OK:true UpdateID:7 Count:2 DeliveryToken:broker-a-7}", ack)
 	}
 	if text := waitServed(t, l, time.Second); !strings.HasPrefix(text, "hi from phone") {
 		t.Fatalf("injected turn should lead with the body, got %q", text)
