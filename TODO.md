@@ -1,27 +1,28 @@
 # TODO — C3 v0.1 release
 
-The v0.1 finish line — open release work across code, documentation, tests,
-packaging, and human verification that blocks the tag or release safety. Shipped
-history is in git; future and unbuilt work lives in [`ROADMAP.md`](ROADMAP.md).
+The v0.1 finish line is closed. Shipped history is in git; future and unbuilt
+work lives in [`ROADMAP.md`](ROADMAP.md).
 
 ## Release gates
 
-- [ ] **Full release-readiness audit — AFTER the maintainer's final go-ahead, BEFORE the
+- [x] **Full release-readiness audit — AFTER the maintainer's final go-ahead, BEFORE the
       v0.1.0 tag.** The pre-rc1 audit no longer holds: the code has changed substantially
       since (loss-path fixes, identity fixes, degraded mode, port race, recovery ordering).
       Deliberately NOT run for release candidates — final tag only. Expect findings; fix
       only what is genuinely required, then push and tag. (Maintainer's instruction,
-      2026-07-27.)
+      2026-07-27.) **PASSED 2026-07-30** — final-tree build, vet, tests, race tests,
+      formatting, shell syntax, all release cross-builds, archive inspection, launcher
+      signal tests, adversarial cross-review (GO; no SEV1/SEV2), and exact-tree PII audit
+      all passed before `v0.1.0`.
 
-Need a live human tap — run these in a real Telegram session before the tag:
+Live human checks:
 
 - [x] `ask` live-verify: button tap → choice returns to Claude — **PASSED 2026-07-29**
       (post-restart broker at 32f5c7d; tapped choice returned as the tool result)
-- [ ] Permission-relay live-verify: a real Claude Code permission prompt → approve/deny over
-      Telegram. **Cannot fire from an auto-approve session** (no prompt exists to relay — two
-      forced probes auto-ran, broker log shows no registration). Run in the maintainer's final
-      test session under normal permission mode: first non-allowlisted tool call relays; one
-      Allow tap closes this. Mechanism last fully verified live 2026-07-12 on earlier code.
+- [x] Permission-relay live-verify: a real Claude Code permission prompt → approve/deny over
+      Telegram — **PASSED 2026-07-30**. A manual-mode Claude session registered Bash request
+      `jkzfo`; the maintainer tapped Allow in `perm-test`; the broker logged the matching
+      resolution; Claude resumed without local approval and created the requested probe file.
 - [x] Smoke-test visual tails (expandable show-more; inline-button callback) — **PASSED
       2026-07-29** (expandable `||` blockquote collapsed + expanded; inline-button callback
       proven by the `ask` taps). Note: first attempt was a mis-authored test — a plain `>`
@@ -30,9 +31,18 @@ Need a live human tap — run these in a real Telegram session before the tag:
 
 Post-v0.1.0 publication — the stable release must exist before these can run:
 
-- [ ] Fresh-machine install validation against the published stable artifacts
-- [ ] Auto-update live end-to-end verify: status-line notice → `/c3:update` →
-      checksum-verified atomic swap, against a real published release
+- [x] Fresh-machine install validation against the published stable artifacts —
+      **PASSED 2026-07-30**. All six published archives matched the published
+      `SHA256SUMS`; the Linux archive contained all nine binaries and complete STT/Grok
+      assets; an isolated stable broker boot installed and registered the embedded STT
+      runtime successfully.
+- [x] Auto-update live end-to-end verify: status-line notice → `/c3:update` →
+      checksum-verified atomic swap, against a real published release — **PASSED
+      2026-07-30**. An isolated published rc1 broker detected v0.1.0 and wrote the
+      status-line update fields; the published rc1 updater downloaded v0.1.0, verified
+      `SHA256SUMS`, atomically replaced the binary-only install, and the resulting stable
+      broker booted with a repaired complete STT runtime. The installed stable binary now
+      reports up to date.
 
 ## Pre-tag polish (non-blocking SEV3s from the cross-review rounds, 2026-07-29)
 
@@ -48,12 +58,16 @@ Post-v0.1.0 publication — the stable release must exist before these can run:
 
 ## Packaging
 
-- [ ] GitHub-source marketplace edit — paired with the first published release
+- [x] GitHub-source marketplace edit — paired with the first published release.
+      The released manifest uses repository `https://github.com/Andrometiq/c3` with
+      source `./plugins/c3`, the correct GitHub marketplace-relative plugin path.
 
 ## Ship
 
-- [ ] Final PII audit immediately before the push (standing rule — re-run on the exact tree
-      being pushed, not on an earlier one)
-- [ ] Ship WITH the documented `--dangerously-load-development-channels` flag
-- [ ] Every release bumps `plugin.json` `version` — a fixed version string pins the plugin, and
-      Claude Code's auto-update won't ship it to existing users until it's bumped
+- [x] Final PII audit immediately before the push (standing rule — re-run on the exact tree
+      being pushed, not on an earlier one) — **PASSED 2026-07-30**: working tree and
+      full-history gitleaks clean; wordlist findings reviewed as intentional public names
+      or generic C3 paths; no absolute symlink leaks.
+- [x] Ship WITH the documented `--dangerously-load-development-channels` flag —
+      exercised on the released install during the final live permission-relay test.
+- [x] Every release bumps `plugin.json` `version` — v0.1.0 ships plugin version `0.1.1`.
