@@ -1,0 +1,25 @@
+#!/bin/sh
+
+set -eu
+
+repo_root=$(git rev-parse --show-toplevel)
+cd "$repo_root"
+
+echo "==> pre-commit: checking the exact staged tree"
+
+if ! git diff --quiet --ignore-submodules --; then
+	echo "pre-commit: tracked unstaged changes exist." >&2
+	echo "Stage or stash them so the checks exercise exactly what will be committed." >&2
+	exit 1
+fi
+
+untracked=$(git ls-files --others --exclude-standard)
+if [ -n "$untracked" ]; then
+	echo "pre-commit: untracked, non-ignored files exist:" >&2
+	printf '%s\n' "$untracked" >&2
+	echo "Stage, remove, or ignore them so they cannot influence the checks." >&2
+	exit 1
+fi
+
+git diff --cached --check
+exec ./scripts/ci.sh

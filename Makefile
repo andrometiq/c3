@@ -1,4 +1,4 @@
-.PHONY: build test clean install install-codex dist
+.PHONY: build test ci hooks clean install install-codex dist
 
 BIN_DIR := bin
 DIST_DIR := dist
@@ -29,6 +29,13 @@ build:
 
 test:
 	go test ./...
+
+ci:
+	./scripts/ci.sh
+
+hooks:
+	git config core.hooksPath .githooks
+	@echo "installed C3 git hooks from .githooks/"
 
 clean:
 	rm -rf $(BIN_DIR)

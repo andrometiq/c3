@@ -25,39 +25,7 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: Check formatting (advisory)
-        run: |
-          unformatted="$(gofmt -l .)"
-          if [ -n "$unformatted" ]; then
-            echo "::warning::These files are not gofmt-clean; run 'gofmt -w .':"
-            echo "$unformatted"
-          fi
-
-      - name: Build
-        run: go build ./...
-
-      - name: Vet
-        run: go vet ./...
-
-      # The release ships six platform tarballs, but everything above only ever
-      # compiles for the runner's own linux/amd64. Without this step a break in
-      # any GOOS-specific file (there are ~224 lines of windows-only source, and
-      # 16 runtime.GOOS branches) stays green through every PR and first surfaces
-      # inside release.yml's `make dist` — i.e. AFTER the v* tag is already
-      # public, leaving a tag with no artifacts. CGO is disabled, so this costs
-      # no extra runners and only a few seconds.
-      - name: Cross-compile every release target
-        run: |
-          set -eu
-          for t in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64 windows/arm64; do
-            echo "==> $t"
-            GOOS="${t%/*}" GOARCH="${t#*/}" CGO_ENABLED=0 go build ./...
-          done
-
-      # Vet the windows-only sources too: `go vet ./...` above skips files this
-      # platform doesn't build.
-      - name: Vet (windows)
-        run: GOOS=windows go vet ./...
-
-      - name: Test
-        run: go test ./...
+      # The same gate runs from .githooks/pre-commit. Keeping the command list
+      # in one script prevents local checks and hosted CI from drifting apart.
+      - name: Commit gate
+        run: make ci

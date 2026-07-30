@@ -16,6 +16,8 @@ and `docs/` for the architecture.
 - Test:    `go test ./...`    — hermetic; no network required
 - Vet:     `go vet ./...`
 - Format:  `gofmt -l .` should print nothing
+- Full CI gate: `make ci`
+- Install the repository pre-commit gate once per clone: `make hooks`
 
 Keep the tree green: build + `go test ./...` must pass before a change is considered done.
 
