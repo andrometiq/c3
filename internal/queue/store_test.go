@@ -1,6 +1,7 @@
 package queue
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -145,6 +146,45 @@ func TestEvictOverCap_DropsOldestAndAdjustsCursor(t *testing.T) {
 	got, _ := s.Peek(rk, 1)
 	if got[0].MessageID != 6 {
 		t.Fatalf("oldest after evict = %d, want 6", got[0].MessageID)
+	}
+}
+
+func TestEvictOverCap_RewriteFailureCannotHidePendingBehindOldCursor(t *testing.T) {
+	s := newStore(t)
+	rk := RouteKey{Channel: "telegram", ChatID: -100}
+	for i := int64(1); i <= MaxMessages+1; i++ {
+		if err := s.Append(rk, msg(i, "m")); err != nil {
+			t.Fatalf("append %d: %v", i, err)
+		}
+	}
+	if got, err := s.Consume(rk, 900); err != nil || len(got) != 900 {
+		t.Fatalf("consume 900 = %d, %v", len(got), err)
+	}
+
+	injected := errors.New("crash before JSONL rewrite")
+	s.rewriteTestHook = func() error { return injected }
+	if _, err := s.EvictOverCap(rk); !errors.Is(err, injected) {
+		t.Fatalf("EvictOverCap error = %v, want injected rewrite failure", err)
+	}
+
+	// Re-open as after a process crash. JSONL is still the old long file, but
+	// the lowered cursor is already durable, so every originally pending
+	// record (901..1001) remains visible. Message 900 may replay; that is the
+	// deliberate fail-toward-duplicate side of the contract.
+	reopened, err := NewStore(QueueDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := reopened.RecoverOnStartup(); err != nil {
+		t.Fatal(err)
+	}
+	pending, err := reopened.Peek(rk, -1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 102 || pending[0].MessageID != 900 || pending[len(pending)-1].MessageID != MaxMessages+1 {
+		t.Fatalf("crash state pending = %d (%d..%d), want duplicate-safe 102 (900..1001)",
+			len(pending), pending[0].MessageID, pending[len(pending)-1].MessageID)
 	}
 }
 

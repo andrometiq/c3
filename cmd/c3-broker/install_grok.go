@@ -9,6 +9,8 @@ import (
 	"strings"
 )
 
+var grokExecutablePath = os.Executable
+
 // runInstallGrok configures the host for C3 × Grok Build:
 //   - ensures [cli] use_leader = true (required for live inject)
 //   - pins [mcp_servers.c3] command = c3-grok-adapter
@@ -461,6 +463,18 @@ func lookPath(file string) (string, error) {
 }
 
 func findGrokPluginSource() string {
+	// Prebuilt installs keep the packaged plugin beside c3-broker. Prefer it
+	// over ambient CWD so `install-grok` is one-command usable after the source
+	// archive has been discarded.
+	if exe, err := grokExecutablePath(); err == nil {
+		if resolved, resolveErr := filepath.EvalSymlinks(exe); resolveErr == nil {
+			exe = resolved
+		}
+		if plugin := existingGrokPlugin(filepath.Join(filepath.Dir(exe), "plugins", "c3-grok")); plugin != "" {
+			return plugin
+		}
+	}
+
 	// Walk up from the working directory looking for the plugin dir — the
 	// documented flow runs install-grok from a source checkout.
 	dir, err := os.Getwd()
@@ -469,9 +483,8 @@ func findGrokPluginSource() string {
 	}
 	for {
 		c := filepath.Join(dir, "plugins", "c3-grok")
-		if st, err := os.Stat(filepath.Join(c, ".mcp.json")); err == nil && !st.IsDir() {
-			abs, _ := filepath.Abs(c)
-			return abs
+		if plugin := existingGrokPlugin(c); plugin != "" {
+			return plugin
 		}
 		parent := filepath.Dir(dir)
 		if parent == dir {
@@ -479,4 +492,18 @@ func findGrokPluginSource() string {
 		}
 		dir = parent
 	}
+}
+
+func existingGrokPlugin(dir string) string {
+	for _, required := range []string{".mcp.json", "plugin.json", filepath.Join("hooks", "hooks.json")} {
+		info, err := os.Stat(filepath.Join(dir, required))
+		if err != nil || !info.Mode().IsRegular() || info.Size() == 0 {
+			return ""
+		}
+	}
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return ""
+	}
+	return abs
 }

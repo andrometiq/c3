@@ -36,6 +36,7 @@ import (
 
 	"github.com/Andrometiq/c3/internal/c3types"
 	"github.com/Andrometiq/c3/internal/plugin"
+	"github.com/Andrometiq/c3/internal/updater"
 )
 
 // Name is the plugin identifier and the mappings.json:plugins key.
@@ -576,17 +577,24 @@ func defaultHandlerPath() string {
 		if resolved, rerr := filepath.EvalSymlinks(exe); rerr == nil {
 			exe = resolved
 		}
-		if path := existingHandlerPath(filepath.Join(filepath.Dir(exe), sttHandlerRelativePath)); path != "" {
+		if path := existingReleaseHandlerPath(filepath.Join(filepath.Dir(exe), sttHandlerRelativePath)); path != "" {
 			return path
 		}
 	}
 	if home, err := os.UserHomeDir(); err == nil && home != "" {
-		if path := existingHandlerPath(filepath.Join(home, ".local", "share", "c3", sttHandlerRelativePath)); path != "" {
+		if path := existingReleaseHandlerPath(filepath.Join(home, ".local", "share", "c3", sttHandlerRelativePath)); path != "" {
 			return path
 		}
 		return existingHandlerPath(filepath.Join(home, "src", "c3", sttHandlerRelativePath))
 	}
 	return ""
+}
+
+func existingReleaseHandlerPath(path string) string {
+	if err := updater.ValidateSTTBundle(filepath.Dir(path)); err != nil {
+		return ""
+	}
+	return existingHandlerPath(path)
 }
 
 func existingHandlerPath(path string) string {

@@ -261,12 +261,7 @@ func TestDefaultHandlerPath_PrefersPresentClaudePluginHandler(t *testing.T) {
 func TestDefaultHandlerPath_UsesBundleBesideReleaseBinary(t *testing.T) {
 	release := t.TempDir()
 	handler := filepath.Join(release, sttHandlerRelativePath)
-	if err := os.MkdirAll(filepath.Dir(handler), 0o755); err != nil {
-		t.Fatalf("mkdir bundled handler parent: %v", err)
-	}
-	if err := os.WriteFile(handler, []byte("# bundled handler\n"), 0o644); err != nil {
-		t.Fatalf("write bundled handler: %v", err)
-	}
+	writeCompleteReleaseSTTBundle(t, filepath.Dir(handler))
 	t.Setenv("CLAUDE_PLUGIN_ROOT", "")
 	t.Setenv("C3_SRC_DIR", "")
 	t.Setenv("HOME", t.TempDir())
@@ -282,12 +277,7 @@ func TestDefaultHandlerPath_UsesBundleBesideReleaseBinary(t *testing.T) {
 func TestDefaultHandlerPath_UsesDocumentedLocalMarketplaceCheckout(t *testing.T) {
 	home := t.TempDir()
 	handler := filepath.Join(home, ".local", "share", "c3", sttHandlerRelativePath)
-	if err := os.MkdirAll(filepath.Dir(handler), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(handler, []byte("# marketplace handler\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	writeCompleteReleaseSTTBundle(t, filepath.Dir(handler))
 	t.Setenv("CLAUDE_PLUGIN_ROOT", "")
 	t.Setenv("C3_SRC_DIR", "")
 	t.Setenv("HOME", home)
@@ -297,5 +287,50 @@ func TestDefaultHandlerPath_UsesDocumentedLocalMarketplaceCheckout(t *testing.T)
 
 	if got := defaultHandlerPath(); got != handler {
 		t.Fatalf("defaultHandlerPath() = %q, want documented local-marketplace handler %q", got, handler)
+	}
+}
+
+func TestDefaultHandlerPath_SkipsPartialAdjacentBundleForRepairedFallback(t *testing.T) {
+	release := t.TempDir()
+	partial := filepath.Join(release, sttHandlerRelativePath)
+	if err := os.MkdirAll(filepath.Dir(partial), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(partial, []byte("# handler without runtime\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	home := t.TempDir()
+	repaired := filepath.Join(home, ".local", "share", "c3", sttHandlerRelativePath)
+	writeCompleteReleaseSTTBundle(t, filepath.Dir(repaired))
+	t.Setenv("CLAUDE_PLUGIN_ROOT", "")
+	t.Setenv("C3_SRC_DIR", "")
+	t.Setenv("HOME", home)
+	previous := sttExecutablePath
+	sttExecutablePath = func() (string, error) { return filepath.Join(release, "c3-broker"), nil }
+	t.Cleanup(func() { sttExecutablePath = previous })
+
+	if got := defaultHandlerPath(); got != repaired {
+		t.Fatalf("defaultHandlerPath() = %q, want complete repaired fallback %q", got, repaired)
+	}
+}
+
+func writeCompleteReleaseSTTBundle(t *testing.T, bundle string) {
+	t.Helper()
+	for _, relative := range []string{
+		"stt-handler.py",
+		filepath.Join("stt-pkg", "stt.py"),
+		filepath.Join("stt-pkg", "vocabulary.txt"),
+		filepath.Join("stt-pkg", "providers", "gemini-3-flash-openrouter.py"),
+		filepath.Join("stt-pkg", "providers", "soniox-stt-async-v5.py"),
+		filepath.Join("stt-pkg", "providers", "elevenlabs-scribe-v2.py"),
+		filepath.Join("stt-pkg", "providers", "sarvam-saaras-v3.py"),
+	} {
+		path := filepath.Join(bundle, relative)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte("# runtime\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
 	}
 }

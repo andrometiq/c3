@@ -5,8 +5,8 @@
 #   e.g. scripts/package.sh linux amd64 v1.0.0 dist
 #
 # Produces: <outdir>/c3_<version>_<goos>_<goarch>.tar.gz
-# Each tarball contains the nine compiled binaries, the runtime STT bundle,
-# LICENSE, and a MANIFEST.txt.
+# Each tarball contains the nine compiled binaries, runtime STT + Grok plugin
+# assets, project and third-party licenses, and a MANIFEST.txt.
 # Pure-Go cross-compile (CGO disabled), so every target builds on any host.
 #
 # Shared by .github/workflows/release.yml and the Makefile `dist` target so the
@@ -43,6 +43,7 @@ PKG="c3_${VERSION}_${GOOS}_${GOARCH}"
 STAGE="$(mktemp -d)"
 DEST="$STAGE/$PKG"
 mkdir -p "$DEST"
+trap 'rm -rf "$STAGE"' 0 1 2 15
 
 COMMIT="$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)"
 GOVER="$(cd "$ROOT" && go version | awk '{print $3}')"
@@ -62,10 +63,51 @@ for b in $BINS; do
 done
 
 cp "$ROOT/LICENSE" "$DEST/LICENSE"
+
+# Every resolved module whose source directory is present contributes its
+# top-level LICENSE/COPYING/NOTICE files. The module list and destination
+# layout are stable, contain no machine paths, and fail closed: publishing code
+# with no discoverable notice requires an explicit, reviewed packaging change.
+MODULES="$STAGE/go-modules.txt"
+(cd "$ROOT" && go list -m -f '{{if and (not .Main) .Dir}}{{.Path}}|{{.Version}}|{{.Dir}}{{end}}' all) \
+	>"$MODULES.unsorted"
+sed '/^$/d' "$MODULES.unsorted" | LC_ALL=C sort -u >"$MODULES"
+mkdir -p "$DEST/THIRD_PARTY_LICENSES"
+: >"$DEST/THIRD_PARTY_LICENSES/MODULES.txt"
+while IFS='|' read -r module version module_dir; do
+	[ -n "$module" ] || continue
+	case "$module" in
+		/* | ../* | */../* | */..)
+			echo "package: unsafe module path in go list output: $module" >&2
+			exit 1
+			;;
+	esac
+	license_dest="$DEST/THIRD_PARTY_LICENSES/${module}@${version}"
+	found=0
+	for pattern in LICENSE 'LICENSE.*' 'LICENSE-*' COPYING 'COPYING.*' 'COPYING-*' NOTICE 'NOTICE.*' 'NOTICE-*'; do
+		for license_src in "$module_dir"/$pattern; do
+			[ -f "$license_src" ] || continue
+			mkdir -p "$license_dest"
+			license_name=${license_src##*/}
+			cp "$license_src" "$license_dest/$license_name"
+			chmod 0644 "$license_dest/$license_name"
+			found=1
+		done
+	done
+	if [ "$found" -ne 1 ]; then
+		echo "package: resolved module ${module}@${version} has no top-level LICENSE/COPYING/NOTICE file" >&2
+		exit 1
+	fi
+	printf '%s %s\n' "$module" "$version" >>"$DEST/THIRD_PARTY_LICENSES/MODULES.txt"
+done <"$MODULES"
+
 mkdir -p "$DEST/plugins/c3/stt/stt-pkg/providers"
 cp "$ROOT/plugins/c3/stt/stt-handler.py" "$DEST/plugins/c3/stt/"
 cp "$ROOT/plugins/c3/stt/stt-pkg/stt.py" "$ROOT/plugins/c3/stt/stt-pkg/vocabulary.txt" "$DEST/plugins/c3/stt/stt-pkg/"
 cp "$ROOT/plugins/c3/stt/stt-pkg/providers/"*.py "$DEST/plugins/c3/stt/stt-pkg/providers/"
+mkdir -p "$DEST/plugins/c3-grok/hooks"
+cp "$ROOT/plugins/c3-grok/.mcp.json" "$ROOT/plugins/c3-grok/plugin.json" "$ROOT/plugins/c3-grok/README.md" "$DEST/plugins/c3-grok/"
+cp "$ROOT/plugins/c3-grok/hooks/hooks.json" "$DEST/plugins/c3-grok/hooks/"
 
 # MANIFEST.txt — provenance + per-binary checksums + install hint.
 {
@@ -82,8 +124,10 @@ cp "$ROOT/plugins/c3/stt/stt-pkg/providers/"*.py "$DEST/plugins/c3/stt/stt-pkg/p
 	done
 	echo
 	echo "Install: keep plugins/c3/stt beside the installed binaries (it is a"
-	echo "runtime asset, not source-only data). Put/symlink the binaries on PATH,"
-	echo "copy the plugins directory alongside them, then follow INSTALL.md."
+	echo "runtime asset, not source-only data). Keep plugins/c3-grok there too."
+	echo "Put/symlink the binaries on PATH, copy the plugins directory alongside"
+	echo "them, then follow INSTALL.md. Third-party notices are under"
+	echo "THIRD_PARTY_LICENSES/."
 	echo "C3's /c3:build rebuilds binaries from source if needed."
 } >"$DEST/MANIFEST.txt"
 

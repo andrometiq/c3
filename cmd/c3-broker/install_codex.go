@@ -47,16 +47,15 @@ func runInstallCodexShim(args []string) error {
 // ensureCodexLauncher materializes the opt-in launcher next to c3-broker from
 // the off-PATH staging location used by the install guide. A file that is not
 // positively identified as C3's launcher is never replaced without --force.
-// If both paths are C3 launchers, the staged copy refreshes the live one.
+// An already-valid live launcher is authoritative: the staged copy may be from
+// an older prebuilt install and must never downgrade it.
 func ensureCodexLauncher(launcher, staged string, force bool, isC3 func(string) bool) error {
 	liveIsC3 := isC3(launcher)
-	stagedIsC3 := isC3(staged)
 
-	if liveIsC3 && !stagedIsC3 {
-		// Legacy/source installs may already have a valid launcher but no staged
-		// copy. Keep using it.
+	if liveIsC3 {
 		return nil
 	}
+	stagedIsC3 := isC3(staged)
 	if !stagedIsC3 {
 		return fmt.Errorf("C3 codex launcher is not staged at %s; re-run install §1 (prebuilt) or build it with `go build -o %s ./cmd/codex` from the C3 source tree", staged, staged)
 	}

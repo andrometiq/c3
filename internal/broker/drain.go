@@ -9,21 +9,19 @@ package broker
 // The 4-step flow, each durable step on the route's OWNING worker so the
 // store's single-owner discipline holds (internal/queue/store.go):
 //
-//	Step A  JobDrainPeek   on the SOURCE worker — freeze the selection as a
-//	        per-id set of 1-based OCCURRENCE ORDINALS (each id's position among
-//	        its OWN pending occurrences) + the captured lines (A2: edited
-//	        messages re-dispatch with the SAME id, so a queue can legitimately
-//	        hold two lines with one id; ordinals number LINES, not unique ids).
-//	Step B  JobDrainAppend on the TARGET worker — presence-check per
-//	        (MessageID, DrainedFrom) COUNTS, stamp DrainedFrom with the
-//	        canonical NUMERIC source key (B6), rewrite the routing fields,
-//	        bake the provenance banner into Text, fsync'd Append. This is the
-//	        durability commit (INV-1). The target's deliveredDedup is NEVER
-//	        seeded (INV-8).
-//	Step C  JobDrainRemove on the SOURCE worker — RemoveIDs with the frozen
-//	        occurrence ordinals; surviving-intersection semantics (INV-5): a
-//	        frozen line a concurrent fetch consumed meanwhile is reported, not
-//	        an error.
+//	Step A  JobDrainPeek on the SOURCE worker — freeze the captured lines plus
+//	        their immutable queue-private RecordIDs. Edited messages can reuse
+//	        MessageID; durable line identity, not a recomputed ordinal, names
+//	        what was selected.
+//	Step B  JobDrainAppend on the TARGET worker — presence-check each exact
+//	        source RecordID, privately stamp that provenance on the copy, stamp
+//	        public DrainedFrom with the canonical numeric source key (B6),
+//	        rewrite routing, bake the banner into Text, fsync'd append. This is
+//	        the durability commit (INV-1). deliveredDedup is never seeded.
+//	Step C  JobDrainRemove on the SOURCE worker — RemoveRecordIDs with the
+//	        frozen identities; surviving-intersection semantics (INV-5): a
+//	        frozen line consumed meanwhile is reported, never replaced by a
+//	        same-MessageID edit that shifted into its old position.
 //	Step D  advisory, best-effort — a live alive holder on the target gets a
 //	        targeted SystemEvent nudge via a DIRECT conn write (A4: never the
 //	        forwardOrFallback/worker push path); otherwise ONE drain-notice is
@@ -38,6 +36,7 @@ import (
 
 	"github.com/Andrometiq/c3/internal/c3types"
 	"github.com/Andrometiq/c3/internal/ipc"
+	"github.com/Andrometiq/c3/internal/queue"
 )
 
 // DrainSpec is the fully-RESOLVED input to Broker.Drain. The command layer
@@ -306,21 +305,25 @@ func (b *Broker) Drain(spec DrainSpec) (DrainResult, error) {
 	if !b.Workers.Submit(spec.Source, Job{Kind: JobDrainPeek, DrainPeek: &DrainPeekJob{ResultCh: peekCh}}) {
 		return res, &DrainBusyError{Step: DrainStepFreeze}
 	}
-	var pending []c3types.Inbound
+	var pendingTracked []queue.TrackedInbound
 	select {
 	case r := <-peekCh:
 		if r.Err != nil {
 			return res, fmt.Errorf("drain: freeze peek on «%s»: %w", res.SourceName, r.Err)
 		}
-		pending = r.Pending
+		pendingTracked = r.Tracked
 	case <-time.After(workerJobTimeout):
 		// Peek is non-destructive: abandoning a genuinely stalled worker (e.g. a
 		// >30s STT flush ahead of us) changes nothing — the late result is
 		// dropped by the cap-1 channel and the operator just retries.
 		return res, fmt.Errorf("drain: source worker did not respond within %s — nothing was changed; try again", workerJobTimeout)
 	}
-	if len(pending) == 0 {
+	if len(pendingTracked) == 0 {
 		return res, &EmptySourceError{Source: res.SourceName}
+	}
+	pending := make([]c3types.Inbound, len(pendingTracked))
+	for i := range pendingTracked {
+		pending[i] = pendingTracked[i].Inbound
 	}
 	captured, lo, hi, clamped, err := applyDrainSelector(pending, spec.Selector)
 	if err != nil {
@@ -330,22 +333,12 @@ func (b *Broker) Drain(spec DrainSpec) (DrainResult, error) {
 	res.WindowLo, res.WindowHi = lo, hi
 	res.Clamped = clamped
 	res.FirstPreview = drainPreview(&captured[0])
-	// Frozen selection (A2, by OCCURRENCE POSITION): sel[id] lists the 1-based
-	// occurrence ordinals — id's position among its OWN pending occurrences,
-	// oldest→newest — that fall inside the selected window. Two same-id lines
-	// (an edited message re-dispatches with the SAME id) are distinct
-	// occurrences, so a window naming only the LATER one removes exactly that
-	// line; a per-id count would silently take the first (wrong-line removal).
-	// applyDrainSelector's window [lo,hi] is contiguous over pending for every
-	// selector kind, so one walk over the FULL snapshot assigns the ordinals.
-	sel := make(map[int64][]int, len(captured))
-	occ := make(map[int64]int, len(pending))
-	for i := range pending {
-		id := pending[i].MessageID
-		occ[id]++
-		if i >= lo-1 && i < hi {
-			sel[id] = append(sel[id], occ[id])
-		}
+	// Freeze immutable source-line IDs for both target presence and source
+	// removal. Empty IDs are legacy records: they may be copied, but are never
+	// guessed at during removal and never presence-skipped on retry.
+	sourceRecordIDs := make([]string, len(captured))
+	for i := range sourceRecordIDs {
+		sourceRecordIDs[i] = pendingTracked[lo-1+i].RecordID
 	}
 	log.Printf("drain freeze src=%s dst=%s pending=%d frozen=%d window=%d-%d clamped=%v",
 		srcKey, dstKey, len(pending), len(captured), lo, hi, clamped)
@@ -363,7 +356,7 @@ func (b *Broker) Drain(spec DrainSpec) (DrainResult, error) {
 	// frozen as captured at Step A by design (B4): a late source RefreshText
 	// between A and C reaches only .trash, the documented cost of the ⚠-warned
 	// attached-source path.
-	moved := make([]c3types.Inbound, len(captured))
+	moved := make([]DrainAppendMessage, len(captured))
 	for i := range captured {
 		m := captured[i]
 		banner := drainBanner(res.SourceName, &m)
@@ -377,7 +370,7 @@ func (b *Broker) Drain(spec DrainSpec) (DrainResult, error) {
 			m.TopicID = nil
 		}
 		m.Text = banner + m.Text
-		moved[i] = m
+		moved[i] = DrainAppendMessage{Inbound: m, SourceRecordID: sourceRecordIDs[i]}
 	}
 	appendCh := make(chan DrainAppendResult, 1)
 	if !b.Workers.Submit(spec.Target, Job{Kind: JobDrainAppend, DrainAppend: &DrainAppendJob{From: srcKey, Messages: moved, ResultCh: appendCh}}) {
@@ -397,10 +390,11 @@ func (b *Broker) Drain(spec DrainSpec) (DrainResult, error) {
 
 	// ---- Step C: remove on the SOURCE worker. --------------------------------
 	// Every frozen line durably landed (appended or presence-skipped), so the
-	// remove uses the FULL frozen selection. RemoveIDs skips occurrence
-	// ordinals no longer pending — the surviving intersection (INV-5).
+	// remove uses the FULL frozen identity selection. RemoveRecordIDs skips
+	// identities no longer pending — the surviving intersection (INV-5) — and
+	// cannot delete a same-MessageID line that shifted after a concurrent fetch.
 	removeCh := make(chan DrainRemoveResult, 1)
-	if !b.Workers.Submit(spec.Source, Job{Kind: JobDrainRemove, DrainRemove: &DrainRemoveJob{Sel: sel, ResultCh: removeCh}}) {
+	if !b.Workers.Submit(spec.Source, Job{Kind: JobDrainRemove, DrainRemove: &DrainRemoveJob{RecordIDs: sourceRecordIDs, ResultCh: removeCh}}) {
 		return res, &DrainBusyError{Step: DrainStepRemove, CopiesLanded: true}
 	}
 	// B1: durable mutation — block indefinitely.
@@ -593,6 +587,7 @@ type DrainPeekJob struct {
 // DrainPeekResult carries the pending snapshot back to Drain.
 type DrainPeekResult struct {
 	Pending []c3types.Inbound
+	Tracked []queue.TrackedInbound
 	Err     error
 }
 
@@ -600,18 +595,22 @@ type DrainPeekResult struct {
 // already-transformed (stamped/rewritten/bannered) copies, oldest-first. The
 // fsync'd Append is the durability commit (INV-1).
 //
-// Idempotency (INV-3 via A2 counts): ONE Peek at job start tallies how many
-// copies per (MessageID, DrainedFrom==From) are already pending, and exactly
-// that many incoming lines are skipped — a crash-retry re-issue converges
-// instead of double-appending, while a genuine second same-id line still
-// lands. Rescoped by B6: convergence holds only while the prior copy is STILL
-// PENDING in the target (a chained onward drain or a consume defeats the
-// check → re-copy; ≥1 house posture holds).
+// Idempotency (INV-3): ONE PeekTracked at job start indexes pending copies by
+// (DrainedFrom==From, private source RecordID). A retry skips only the exact
+// source line already landed; a later edit reusing MessageID has a new RecordID
+// and lands independently. Legacy copies without provenance never prove
+// presence, so uncertainty fails toward a duplicate. Convergence holds only
+// while the prior copy is still pending in the target (B6).
+type DrainAppendMessage struct {
+	Inbound        c3types.Inbound
+	SourceRecordID string
+}
+
 type DrainAppendJob struct {
 	// From is the canonical numeric source route key — the DrainedFrom value
-	// stamped on every message and the presence-check discriminator (B6).
+	// stamped on every message and half of the presence discriminator (B6).
 	From     string
-	Messages []c3types.Inbound
+	Messages []DrainAppendMessage
 	ResultCh chan<- DrainAppendResult
 }
 
@@ -624,14 +623,13 @@ type DrainAppendResult struct {
 	Err      error
 }
 
-// DrainRemoveJob (Step C) runs on the SOURCE worker: RemoveIDs with the frozen
-// per-id occurrence-ordinal selection (Sel[id] = the 1-based positions among
-// id's pending occurrences to remove). Ordinals no longer pending are skipped
-// by the store (surviving intersection, INV-5); the removed lines were
-// snapshotted to .trash/ first (INV-4).
+// DrainRemoveJob (Step C) runs on the SOURCE worker: RemoveRecordIDs with the
+// immutable identities frozen at Step A. Missing/already-consumed/legacy
+// untracked records are skipped (surviving intersection, INV-5); a shifted
+// same-MessageID edit can never match. Removed lines are snapshotted first.
 type DrainRemoveJob struct {
-	Sel      map[int64][]int
-	ResultCh chan<- DrainRemoveResult
+	RecordIDs []string
+	ResultCh  chan<- DrainRemoveResult
 }
 
 // DrainRemoveResult carries the removed lines (file order) back to Drain.
@@ -655,14 +653,18 @@ func (w *RouteWorker) handleDrainPeek(job *DrainPeekJob) {
 		job.ResultCh <- DrainPeekResult{Err: errOutboundNotImpl}
 		return
 	}
-	pending, err := w.broker.Queue.Peek(queueRouteKey(w.key), -1)
+	pending, err := w.broker.Queue.PeekTracked(queueRouteKey(w.key), -1)
 	if err != nil {
 		job.ResultCh <- DrainPeekResult{Err: err}
 		return
 	}
 	log.Printf("drain peek chan=%s chat=%d topic=%s pending=%d",
 		w.key.Channel, w.key.ChatID, TopicKeyStr(w.key), len(pending))
-	job.ResultCh <- DrainPeekResult{Pending: pending}
+	public := make([]c3types.Inbound, len(pending))
+	for i := range pending {
+		public[i] = pending[i].Inbound
+	}
+	job.ResultCh <- DrainPeekResult{Pending: public, Tracked: pending}
 }
 
 // handleDrainAppend services Step B on the target's worker goroutine. See
@@ -691,30 +693,27 @@ func (w *RouteWorker) handleDrainAppend(job *DrainAppendJob) {
 		return
 	}
 	qrk := queueRouteKey(w.key)
-	pending, err := w.broker.Queue.Peek(qrk, -1)
+	pending, err := w.broker.Queue.PeekTracked(qrk, -1)
 	if err != nil {
 		job.ResultCh <- DrainAppendResult{Err: fmt.Errorf("presence peek: %w", err)}
 		return
 	}
-	// Presence tally: copies of THIS source already pending in the target
-	// (per-id counts, A2). Tallied once at job start; the loop below decrements
-	// as it matches, so exactly as many incoming copies are skipped as already
-	// landed.
-	existing := map[int64]int{}
+	// Presence is exact immutable source-line provenance. Empty provenance on
+	// an old target copy cannot prove anything and is deliberately ignored.
+	existing := map[string]bool{}
 	for i := range pending {
-		if pending[i].DrainedFrom == job.From {
-			existing[pending[i].MessageID]++
+		if pending[i].Inbound.DrainedFrom == job.From && pending[i].SourceRecordID != "" {
+			existing[pending[i].SourceRecordID] = true
 		}
 	}
 	appended, skipped := 0, 0
 	for i := range job.Messages {
 		m := job.Messages[i]
-		if existing[m.MessageID] > 0 {
-			existing[m.MessageID]--
+		if m.SourceRecordID != "" && existing[m.SourceRecordID] {
 			skipped++
 			continue
 		}
-		if aerr := w.broker.Queue.Append(qrk, &m); aerr != nil {
+		if _, aerr := w.broker.Queue.AppendDrainedTracked(qrk, &m.Inbound, m.SourceRecordID); aerr != nil {
 			total, _ := w.broker.Queue.Pending(qrk)
 			job.ResultCh <- DrainAppendResult{Appended: appended, Skipped: skipped, Pending: total,
 				Err: fmt.Errorf("append line %d of %d: %w", i+1, len(job.Messages), aerr)}
@@ -743,7 +742,7 @@ func (w *RouteWorker) handleDrainRemove(job *DrainRemoveJob) {
 		job.ResultCh <- DrainRemoveResult{Err: errOutboundNotImpl}
 		return
 	}
-	removed, err := w.broker.Queue.RemoveIDs(queueRouteKey(w.key), job.Sel)
+	removed, err := w.broker.Queue.RemoveRecordIDs(queueRouteKey(w.key), job.RecordIDs)
 	if err != nil {
 		log.Printf("drain remove FAIL chan=%s chat=%d topic=%s: %v",
 			w.key.Channel, w.key.ChatID, TopicKeyStr(w.key), err)
@@ -751,6 +750,6 @@ func (w *RouteWorker) handleDrainRemove(job *DrainRemoveJob) {
 		return
 	}
 	log.Printf("drain remove chan=%s chat=%d topic=%s requested=%d removed=%d",
-		w.key.Channel, w.key.ChatID, TopicKeyStr(w.key), len(job.Sel), len(removed))
+		w.key.Channel, w.key.ChatID, TopicKeyStr(w.key), len(job.RecordIDs), len(removed))
 	job.ResultCh <- DrainRemoveResult{Removed: removed}
 }

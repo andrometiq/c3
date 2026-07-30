@@ -211,6 +211,56 @@ func TestHandleRetranscribe_RefreshesQueuedMessageInPlace(t *testing.T) {
 	}
 }
 
+// A drained voice copy and an unrelated organic target message can share the
+// same Telegram MessageID. Retranscribe must not validate the drained voice,
+// then let the store skip it and rewrite the organic collision.
+func TestHandleRetranscribe_DrainedVoiceCollisionDoesNotRewriteOrganicMessage(t *testing.T) {
+	t.Setenv("C3_QUEUE_DIR", t.TempDir())
+	b := brokerWithChannel(t, mfWithTelegram(), &fakeChannel{})
+	defer b.Shutdown()
+	b.Plugins.OnVoiceReceived(func(context.Context, c3types.VoicePayload) (string, error) {
+		return "fresh transcript", nil
+	})
+
+	tid := int64(914)
+	key := MakeRouteKey("telegram", -100, &tid)
+	qrk := queue.RouteKey{Channel: "telegram", ChatID: -100, TopicID: &tid}
+	const drainedText = "[Transcribed voice]: frozen source transcript"
+	if err := b.Queue.Append(qrk, &c3types.Inbound{
+		Channel: "telegram", ChatID: -100, TopicID: &tid, MessageID: 5,
+		Text:        drainedText,
+		DrainedFrom: "telegram__-200__412",
+		Attachments: []c3types.Attachment{{Kind: "voice", FileID: "V1"}},
+		Timestamp:   time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	const organicText = "unrelated organic target message"
+	if err := b.Queue.Append(qrk, &c3types.Inbound{
+		Channel: "telegram", ChatID: -100, TopicID: &tid, MessageID: 5,
+		Text: organicText, Timestamp: time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	stub := claimedHolder(t, b, key)
+	stub.SetRoute(&key)
+	agentSide, brokerSide := newConnPair(t)
+	raw, _ := json.Marshal(ipc.RetranscribeReq{Op: ipc.OpRetranscribe, ID: "collision", FileID: "V1", MessageID: 5})
+	go b.handleRetranscribe(brokerSide, stub, raw)
+	if resp := readRetranscribeResp(t, agentSide); resp.Text != "fresh transcript" || resp.Err != "" {
+		t.Fatalf("retranscribe response = %+v, want transcript returned despite queue no-op", resp)
+	}
+
+	got, err := b.Queue.Peek(qrk, -1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got[0].Text != drainedText || got[1].Text != organicText {
+		t.Fatalf("collision refresh rewrote a different queue record: %+v", got)
+	}
+}
+
 // Item B (retranscribe timeout): a slow/hung STT provider must NOT block the IPC
 // read goroutine forever. handleRetranscribe bounds FireOnVoiceReceived with
 // retranscribeTimeout; an OnVoiceReceived callback that respects ctx (returns ""

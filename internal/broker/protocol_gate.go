@@ -51,6 +51,12 @@ func refuseIncompatibleStateChange(conn *ipc.Conn, stub *Stub, op ipc.Op, raw []
 		refuse()
 		_ = conn.WriteJSON(ipc.RecoverSessionResp{Op: ipc.OpRecoverSessionResult, Err: reason})
 		return true
+	case ipc.OpRetranscribe:
+		var req ipc.RetranscribeReq
+		_ = json.Unmarshal(raw, &req)
+		refuse()
+		_ = conn.WriteJSON(ipc.RetranscribeResp{Op: ipc.OpRetranscribeResult, ID: req.ID, Err: reason})
+		return true
 	default:
 		return false
 	}

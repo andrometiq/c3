@@ -92,18 +92,21 @@ curl -fsSL -O "$base/${pkg}.tar.gz"
 grep " ${pkg}.tar.gz$" SHA256SUMS > SHA256SUMS.this
 sha256sum -c SHA256SUMS.this || shasum -a 256 -c SHA256SUMS.this
 
-# The tarball unpacks into a ${pkg}/ directory — install the core binaries out
-# of it. Stage the optional Codex launcher OFF PATH for §5.
+# The tarball unpacks into a ${pkg}/ directory — install the core binaries and
+# their STT/Grok runtime assets. Stage the optional Codex launcher OFF PATH for
+# §5.
 # NOTE: `codex` is deliberately NOT installed here. It is C3's Codex *launcher*,
 # and installing it onto PATH would SHADOW the user's real `codex` (this guide
 # puts ~/.local/bin FIRST on PATH) for someone who never asked for Codex support.
 # §5 installs it, and only if the user wants Codex integration.
 tar xzf "${pkg}.tar.gz"
-mkdir -p ~/.local/bin ~/.local/libexec/c3
+mkdir -p ~/.local/bin/plugins/c3/stt ~/.local/bin/plugins/c3-grok ~/.local/libexec/c3
 for b in c3-broker c3-claude-adapter c3-codex-adapter c3-grok-adapter \
          c3-agy-adapter c3-desktop-adapter claude-shim migrate-legacy; do
   install -m 0755 "${pkg}/${b}" ~/.local/bin/
 done
+cp -R "${pkg}/plugins/c3/stt/." ~/.local/bin/plugins/c3/stt/
+cp -R "${pkg}/plugins/c3-grok/." ~/.local/bin/plugins/c3-grok/
 install -m 0755 "${pkg}/codex" ~/.local/libexec/c3/codex
 ```
 
@@ -450,8 +453,10 @@ fi
 c3-broker install-codex-shim
 ```
 
-The installer verifies the staged executable is C3's launcher, copies it next
-to `c3-broker`, then symlinks it into `~/.local/bin/codex` and every
+The installer verifies the staged executable is C3's launcher. If no live C3
+launcher exists yet it copies the staged file next to `c3-broker`; an existing
+live C3 launcher is authoritative, so a stale staged file can never downgrade
+it. It then symlinks the live launcher into `~/.local/bin/codex` and every
 `~/.nvm/versions/node/*/bin/` so existing shells (which hash `codex` to the NVM
 path) bypass NVM in favor of the launcher. It refuses to replace an unrelated
 regular file without `--force`. It's idempotent; re-running is safe. Tell the

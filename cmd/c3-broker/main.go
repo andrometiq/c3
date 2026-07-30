@@ -274,6 +274,17 @@ func runDaemon() (err error) {
 		}
 	}()
 
+	// v0.1.0-rc1's updater copied only binaries. A stable release broker carries
+	// the runtime and repairs that legacy layout on its first restart. Failure is
+	// loud but non-fatal: text routing must stay available when STT storage is
+	// unwritable.
+	if repaired, repairErr := ensureEmbeddedReleaseSTT(); repairErr != nil {
+		log.Printf("c3-broker: WARNING embedded STT repair failed: %v", repairErr)
+		fmt.Fprintf(os.Stderr, "c3-broker: WARNING embedded STT repair failed: %v\n", repairErr)
+	} else if repaired {
+		log.Printf("c3-broker: installed embedded STT runtime into the user-data fallback")
+	}
+
 	mfPath, err := mappings.DefaultPath()
 	if err != nil {
 		return fmt.Errorf("resolve mappings path: %w", err)

@@ -14,7 +14,7 @@ import (
 // message.
 //
 // This inverts the original I4 behaviour. I4 marked the update done on a
-// worker-queue-full drop so a >64 burst could not wedge the contiguous-prefix
+// worker-queue-full drop so a >64 burst could not wedge the observed-prefix
 // offset for every route — but the cost was silent, unrecoverable loss of a
 // message the user sent, with no notice and no .trash copy. The maintainer's call
 // (v0.1.0 release audit) is that redelivery churn is preferable to deliberate
@@ -231,7 +231,7 @@ func TestSeam_CrossChatSameMessageID_ResolvesPerChat(t *testing.T) {
 	// message_id-keyed FIFO, which is chat A's updA.
 	c.onPersisted(&c3types.Inbound{ChatID: chatB, MessageID: msgID})
 
-	// updA is still mid-STT and unpersisted, so the CONTIGUOUS prefix cannot move
+	// updA is still mid-STT and unpersisted, so the observed prefix cannot move
 	// at all: 1002 done with 1001 in flight leaves committed at 1000.
 	if got := c.offTrk.Committed(); got != 1000 {
 		t.Fatalf("MESSAGE LOSS: committed advanced to %d over chat A's unpersisted update %d; want 1000 — Telegram never redelivers an acked update", got, updA)

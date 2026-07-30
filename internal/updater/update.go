@@ -170,7 +170,7 @@ func updateForOS(ctx context.Context, opts Options, goos string) (*Result, error
 		srcPaths[fname] = p
 	}
 	bundlePath := filepath.Join(pkgDir, sttBundleRelativePath)
-	if err := validateSTTBundle(bundlePath); err != nil {
+	if err := ValidateSTTBundle(bundlePath); err != nil {
 		return res, fmt.Errorf("release tarball has invalid STT bundle: %w", err)
 	}
 

@@ -46,7 +46,7 @@ func TestPollOffsetWiring_NoAdvancePastUnpersisted(t *testing.T) {
 }
 
 // A gated/dropped/non-message/`/status` update is marked done immediately via
-// markUpdateDone and must not block the contiguous prefix.
+// markUpdateDone and must not block the completed observed prefix.
 func TestPollOffsetWiring_MarkUpdateDoneUnblocks(t *testing.T) {
 	c := &Channel{}
 	c.offTrk = newOffsetTracker(200)

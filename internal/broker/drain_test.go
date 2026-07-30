@@ -368,12 +368,13 @@ func TestDrain_RenderIncapableHolder_FallsBackToNotice(t *testing.T) {
 func TestDrain_StepBReRunIsIdempotent(t *testing.T) {
 	b, _ := drainTestBroker(t)
 	srcFile := queueRouteKey(drainSrc()).File()
-	copies := make([]c3types.Inbound, 2)
+	copies := make([]DrainAppendMessage, 2)
+	sourceIDs := []string{"source-record-a", "source-record-b"}
 	for i, id := range []int64{1, 2} {
 		m := drainSrcMsg(id, "copy")
 		m.DrainedFrom = srcFile
 		m.ChatID, m.TopicID = -200, ptrI64(412)
-		copies[i] = *m
+		copies[i] = DrainAppendMessage{Inbound: *m, SourceRecordID: sourceIDs[i]}
 	}
 	w := newRouteWorker(context.Background(), drainDst(), time.Hour, b)
 	defer w.Stop()
@@ -397,6 +398,31 @@ func TestDrain_StepBReRunIsIdempotent(t *testing.T) {
 	}
 }
 
+func TestDrain_LegacyTargetCopyWithoutSourceIdentityDoesNotProvePresence(t *testing.T) {
+	b, _ := drainTestBroker(t)
+	drainSeed(t, b, drainSrc(), drainSrcMsg(5, "source"))
+
+	legacy := drainSrcMsg(5, "legacy landed copy")
+	legacy.DrainedFrom = queueRouteKey(drainSrc()).File()
+	legacy.ChatID, legacy.TopicID = -200, ptrI64(412)
+	// Plain Append deliberately simulates the old private envelope: it has its
+	// own queue ID but no _c3_drained_record_id provenance.
+	if err := b.Queue.Append(queueRouteKey(drainDst()), legacy); err != nil {
+		t.Fatalf("append legacy copy: %v", err)
+	}
+
+	res, err := b.Drain(drainSpec())
+	if err != nil {
+		t.Fatalf("Drain: %v", err)
+	}
+	if res.Appended != 1 || res.PresenceSkipped != 0 || res.RemovedFromSource != 1 {
+		t.Fatalf("legacy ambiguous copy must fail toward a duplicate, not a false presence match: %+v", res)
+	}
+	if got := drainPeekAll(t, b, drainDst()); len(got) != 2 {
+		t.Fatalf("target pending = %d, want legacy copy plus exact-provenance copy", len(got))
+	}
+}
+
 // TestDrain_CrashBetweenCopyAndRemove_ReissueConverges: copies landed (Step B)
 // but the source was never cleaned (crash before Step C). Re-issuing the same
 // drain presence-skips every copy, cleans the source, and leaves NO doubles
@@ -404,14 +430,19 @@ func TestDrain_StepBReRunIsIdempotent(t *testing.T) {
 func TestDrain_CrashBetweenCopyAndRemove_ReissueConverges(t *testing.T) {
 	b, _ := drainTestBroker(t)
 	drainSeed(t, b, drainSrc(), drainSrcMsg(1, "one"), drainSrcMsg(2, "two"))
+	source, err := b.Queue.PeekTracked(queueRouteKey(drainSrc()), -1)
+	if err != nil {
+		t.Fatalf("peek tracked source: %v", err)
+	}
 	// Simulate the crashed prior attempt's landed copies: stamped with the
-	// canonical source key, routed to the target — what Step B durably wrote.
+	// canonical source key and exact private source identity, routed to the
+	// target — what Step B durably wrote.
 	srcFile := queueRouteKey(drainSrc()).File()
-	for _, id := range []int64{1, 2} {
+	for i, id := range []int64{1, 2} {
 		cp := drainSrcMsg(id, "landed earlier")
 		cp.DrainedFrom = srcFile
 		cp.ChatID, cp.TopicID = -200, ptrI64(412)
-		if err := b.Queue.Append(queueRouteKey(drainDst()), cp); err != nil {
+		if _, err := b.Queue.AppendDrainedTracked(queueRouteKey(drainDst()), cp, source[i].RecordID); err != nil {
 			t.Fatalf("simulate landed copy: %v", err)
 		}
 	}
@@ -456,6 +487,67 @@ func TestDrain_DuplicateMessageIDMultiset_MovesFirstOccurrenceOnly(t *testing.T)
 	dstGot := drainPeekAll(t, b, drainDst())
 	if len(dstGot) != 1 || !strings.HasSuffix(dstGot[0].Text, "\noriginal") {
 		t.Fatalf("the FIRST occurrence must be the moved one: %+v", dstGot)
+	}
+}
+
+// A concurrent fetch between Steps B and C can consume the frozen first
+// occurrence and shift a same-MessageID edit into its old ordinal. Step C must
+// remove only the frozen durable identity, never the edit that moved.
+func TestDrain_SameIDConsumeBetweenCopyAndRemove_DoesNotDeleteEdit(t *testing.T) {
+	b, _ := drainTestBroker(t)
+	drainSeed(t, b, drainSrc(), drainSrcMsg(5, "original"), drainSrcMsg(5, "edited"))
+	drainTestHookAfterCopy = func() {
+		ch := make(chan FetchResult, 1)
+		if !b.Workers.Submit(drainSrc(), Job{Kind: JobFetch, Fetch: &FetchJob{Limit: 1, Ack: true, ResultCh: ch}}) {
+			t.Error("hook: submit consume failed")
+			return
+		}
+		if r := <-ch; r.Err != nil || len(r.Messages) != 1 || r.Messages[0].Text != "original" {
+			t.Errorf("hook: consumed %+v err=%v, want only original", r.Messages, r.Err)
+		}
+	}
+	defer func() { drainTestHookAfterCopy = nil }()
+
+	res, err := b.Drain(drainSpec(DrainSelector{Kind: SelectFirstN, N: 1}))
+	if err != nil {
+		t.Fatalf("Drain: %v", err)
+	}
+	if res.Requested != 1 || res.Appended != 1 || res.RemovedFromSource != 0 || res.AlreadyGone != 1 {
+		t.Fatalf("identity-based survival counts wrong: %+v", res)
+	}
+	left := drainPeekAll(t, b, drainSrc())
+	if len(left) != 1 || left[0].Text != "edited" {
+		t.Fatalf("same-ID edit was deleted after shifting into the consumed original's position: %+v", left)
+	}
+	target := drainPeekAll(t, b, drainDst())
+	if len(target) != 1 || !strings.HasSuffix(target[0].Text, "\noriginal") {
+		t.Fatalf("target must hold exactly the frozen original copy: %+v", target)
+	}
+}
+
+// Presence idempotency is per immutable source line, not MessageID. A later
+// edit with the same MessageID must get its own copy even while the original
+// drain copy is still pending in the target.
+func TestDrain_LaterSameIDEditGetsItsOwnCopy(t *testing.T) {
+	b, _ := drainTestBroker(t)
+	drainSeed(t, b, drainSrc(), drainSrcMsg(5, "original"))
+	if _, err := b.Drain(drainSpec()); err != nil {
+		t.Fatalf("first Drain: %v", err)
+	}
+
+	drainSeed(t, b, drainSrc(), drainSrcMsg(5, "edited"))
+	res, err := b.Drain(drainSpec())
+	if err != nil {
+		t.Fatalf("second Drain: %v", err)
+	}
+	if res.Appended != 1 || res.PresenceSkipped != 0 || res.RemovedFromSource != 1 {
+		t.Fatalf("later same-ID edit was conflated with the old landed copy: %+v", res)
+	}
+	target := drainPeekAll(t, b, drainDst())
+	if len(target) != 2 ||
+		!strings.HasSuffix(target[0].Text, "\noriginal") ||
+		!strings.HasSuffix(target[1].Text, "\nedited") {
+		t.Fatalf("target must retain distinct original and edited source records: %+v", target)
 	}
 }
 

@@ -11,6 +11,7 @@ import (
 	"github.com/Andrometiq/c3/internal/broker"
 	"github.com/Andrometiq/c3/internal/mappings"
 	"github.com/Andrometiq/c3/internal/plugin/builtins/stt"
+	"github.com/Andrometiq/c3/internal/updater"
 )
 
 var (
@@ -288,13 +289,15 @@ func discoveredSTTHandlerPath() string {
 			exe = resolved
 		}
 		path := filepath.Join(filepath.Dir(exe), "plugins", "c3", "stt", "stt-handler.py")
-		if info, err := os.Stat(path); err == nil && !info.IsDir() {
+		if info, err := os.Stat(path); err == nil && !info.IsDir() &&
+			updater.ValidateSTTBundle(filepath.Dir(path)) == nil {
 			return path
 		}
 	}
 	if home, err := os.UserHomeDir(); err == nil && home != "" {
 		path := filepath.Join(home, ".local", "share", "c3", "plugins", "c3", "stt", "stt-handler.py")
-		if info, err := os.Stat(path); err == nil && !info.IsDir() {
+		if info, err := os.Stat(path); err == nil && !info.IsDir() &&
+			updater.ValidateSTTBundle(filepath.Dir(path)) == nil {
 			return path
 		}
 	}

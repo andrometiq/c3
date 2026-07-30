@@ -2,7 +2,7 @@ package telegram
 
 import "testing"
 
-func TestOffsetTracker_ContiguousPrefixAdvance(t *testing.T) {
+func TestOffsetTracker_ObservedPrefixAdvance(t *testing.T) {
 	tr := newOffsetTracker(0)
 	tr.Register(1)
 	tr.Register(2)
@@ -19,6 +19,38 @@ func TestOffsetTracker_ContiguousPrefixAdvance(t *testing.T) {
 	tr.MarkDone(3)
 	if got := tr.Committed(); got != 3 {
 		t.Fatalf("committed after all done = %d, want 3", got)
+	}
+}
+
+func TestOffsetTracker_FreshArbitraryFirstID(t *testing.T) {
+	tr := newOffsetTracker(0)
+	const first = int64(483747726)
+	tr.Register(first)
+	tr.MarkDone(first)
+	if got := tr.Committed(); got != first {
+		t.Fatalf("committed after arbitrary first update = %d, want %d", got, first)
+	}
+}
+
+func TestOffsetTracker_NumericGapsDoNotBlockObservedPrefix(t *testing.T) {
+	tr := newOffsetTracker(10)
+	for _, id := range []int64{101, 105, 900} {
+		tr.Register(id)
+	}
+
+	// Later observed updates can finish first, but the earliest observed
+	// in-flight update still holds the loss-free frontier.
+	tr.MarkDone(900)
+	tr.MarkDone(105)
+	if got := tr.Committed(); got != 10 {
+		t.Fatalf("committed past observed in-flight 101 = %d, want 10", got)
+	}
+
+	// Once 101 finishes, numeric holes contain no delivered work and therefore
+	// do not wedge the offset.
+	tr.MarkDone(101)
+	if got := tr.Committed(); got != 900 {
+		t.Fatalf("committed across valid numeric gaps = %d, want 900", got)
 	}
 }
 

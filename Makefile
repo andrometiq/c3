@@ -48,7 +48,7 @@ install-codex:
 # Mirrors what .github/workflows/release.yml runs on a v* tag, for local testing.
 dist:
 	@rm -rf $(DIST_DIR) && mkdir -p $(DIST_DIR)
-	@for p in $(PLATFORMS); do \
+	@set -eu; for p in $(PLATFORMS); do \
 		os=$${p%/*}; arch=$${p#*/}; \
 		sh scripts/package.sh $$os $$arch $(VERSION) $(DIST_DIR); \
 	done

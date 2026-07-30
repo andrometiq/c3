@@ -5,6 +5,7 @@ import (
 	"compress/gzip"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -132,7 +133,10 @@ func installStagedBinaries(staged map[string]string) error {
 // these checks still refuse a malformed extracted layout or a symlinked install
 // target that could redirect the copy outside the binary directory.
 func InstallSTTBundle(destDir, srcDir string) error {
-	if err := validateSTTBundle(srcDir); err != nil {
+	if err := ValidateSTTBundle(srcDir); err != nil {
+		return fmt.Errorf("install STT bundle: %w", err)
+	}
+	if err := ensureRealDir(destDir); err != nil {
 		return fmt.Errorf("install STT bundle: %w", err)
 	}
 	if err := dirWritable(destDir); err != nil {
@@ -186,6 +190,82 @@ func InstallSTTBundle(destDir, srcDir string) error {
 		return err
 	}
 	return nil
+}
+
+// InstallSTTBundleFS installs an STT runtime supplied as an fs.FS through the
+// same validation, custom-provider preservation, symlink defenses, and atomic
+// replacement path as InstallSTTBundle. Release c3-broker builds use this to
+// repair the binary-only layout produced by the v0.1.0-rc1 updater.
+func InstallSTTBundleFS(destDir string, src fs.FS) error {
+	if src == nil {
+		return fmt.Errorf("install STT bundle: nil source filesystem")
+	}
+	materialized, err := os.MkdirTemp("", "c3-embedded-stt-")
+	if err != nil {
+		return fmt.Errorf("install STT bundle: materialize: %w", err)
+	}
+	defer os.RemoveAll(materialized)
+
+	var copied int64
+	err = fs.WalkDir(src, ".", func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if path == "." {
+			return nil
+		}
+		if !fs.ValidPath(path) {
+			return fmt.Errorf("invalid embedded path %q", path)
+		}
+		dest := filepath.Join(materialized, filepath.FromSlash(path))
+		if entry.IsDir() {
+			return os.MkdirAll(dest, 0o755)
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("refusing non-regular embedded file %s", path)
+		}
+		if copied+info.Size() > maxSTTBundleBytes {
+			return fmt.Errorf("embedded STT bundle exceeds %d-byte cap", int64(maxSTTBundleBytes))
+		}
+		in, err := src.Open(path)
+		if err != nil {
+			return err
+		}
+		if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
+			_ = in.Close()
+			return err
+		}
+		out, err := os.OpenFile(dest, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+		if err != nil {
+			_ = in.Close()
+			return err
+		}
+		n, copyErr := io.Copy(out, io.LimitReader(in, maxSTTBundleBytes-copied+1))
+		closeInErr := in.Close()
+		closeOutErr := out.Close()
+		if copyErr != nil {
+			return copyErr
+		}
+		if closeInErr != nil {
+			return closeInErr
+		}
+		if closeOutErr != nil {
+			return closeOutErr
+		}
+		copied += n
+		if copied > maxSTTBundleBytes {
+			return fmt.Errorf("embedded STT bundle exceeds %d-byte cap", int64(maxSTTBundleBytes))
+		}
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("install STT bundle: materialize: %w", err)
+	}
+	return InstallSTTBundle(destDir, materialized)
 }
 
 // preserveCustomSTTProviders carries the documented drop-in provider seam
@@ -269,7 +349,10 @@ func ensureRealDir(path string) error {
 	return nil
 }
 
-func validateSTTBundle(dir string) error {
+// ValidateSTTBundle verifies that dir contains the complete runnable release
+// asset set. Callers use it before treating a discovered bundle as
+// authoritative; a lone handler with a missing runner/provider is not usable.
+func ValidateSTTBundle(dir string) error {
 	for _, name := range requiredSTTBundleFiles {
 		path := filepath.Join(dir, name)
 		info, err := os.Stat(path)

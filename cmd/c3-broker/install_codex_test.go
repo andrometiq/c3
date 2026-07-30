@@ -58,7 +58,7 @@ func TestEnsureCodexLauncher_InstallsStagedCopyWithoutClobberingRealCodex(t *tes
 	}
 }
 
-func TestEnsureCodexLauncher_RefreshesKnownC3Launcher(t *testing.T) {
+func TestEnsureCodexLauncher_LiveC3LauncherIsAuthoritative(t *testing.T) {
 	dir := t.TempDir()
 	launcher := filepath.Join(dir, "bin", "codex")
 	staged := filepath.Join(dir, "libexec", "codex")
@@ -76,8 +76,34 @@ func TestEnsureCodexLauncher_RefreshesKnownC3Launcher(t *testing.T) {
 	if err := ensureCodexLauncher(launcher, staged, false, launcherBodyIsC3); err != nil {
 		t.Fatal(err)
 	}
-	if body, err := os.ReadFile(launcher); err != nil || string(body) != "C3 LAUNCHER v2" {
-		t.Fatalf("launcher was not refreshed: body=%q err=%v", body, err)
+	if body, err := os.ReadFile(launcher); err != nil || string(body) != "C3 LAUNCHER v1" {
+		t.Fatalf("valid live launcher was overwritten by staged copy: body=%q err=%v", body, err)
+	}
+}
+
+// REGRESSION: rc1's updater refreshed the live launcher binary but could not
+// refresh the off-PATH staged copy. Re-running install-codex-shim must not copy
+// that stale rc1 file back over the stable launcher.
+func TestEnsureCodexLauncher_StaleStagedCopyCannotDowngradeLive(t *testing.T) {
+	dir := t.TempDir()
+	launcher := filepath.Join(dir, "bin", "codex")
+	staged := filepath.Join(dir, "libexec", "codex")
+	for path, body := range map[string]string{
+		launcher: "C3 LAUNCHER stable",
+		staged:   "C3 LAUNCHER rc1",
+	} {
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(body), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := ensureCodexLauncher(launcher, staged, true, launcherBodyIsC3); err != nil {
+		t.Fatal(err)
+	}
+	if body, err := os.ReadFile(launcher); err != nil || string(body) != "C3 LAUNCHER stable" {
+		t.Fatalf("stale staged launcher downgraded live stable launcher: body=%q err=%v", body, err)
 	}
 }
 

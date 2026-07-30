@@ -111,6 +111,79 @@ func TestPackageScriptShipsSTTBundle(t *testing.T) {
 	}
 }
 
+func TestPackageScriptShipsGrokPluginAndThirdPartyNotices(t *testing.T) {
+	src := packageScript(t)
+	for _, command := range []string{
+		`cp "$ROOT/plugins/c3-grok/.mcp.json" "$ROOT/plugins/c3-grok/plugin.json" "$ROOT/plugins/c3-grok/README.md" "$DEST/plugins/c3-grok/"`,
+		`cp "$ROOT/plugins/c3-grok/hooks/hooks.json" "$DEST/plugins/c3-grok/hooks/"`,
+		`go list -m -f`,
+		`"$DEST/THIRD_PARTY_LICENSES/MODULES.txt"`,
+		`LICENSE 'LICENSE.*' 'LICENSE-*' COPYING 'COPYING.*' 'COPYING-*' NOTICE 'NOTICE.*' 'NOTICE-*'`,
+		`has no top-level LICENSE/COPYING/NOTICE file`,
+	} {
+		if !strings.Contains(src, command) {
+			t.Fatalf("scripts/package.sh is missing release contract %q", command)
+		}
+	}
+}
+
+func TestPrebuiltInstallCopiesEveryPackagedRuntime(t *testing.T) {
+	for _, doc := range []string{"INSTALL.md", filepath.Join("docs", "INSTALL.md")} {
+		data, err := os.ReadFile(filepath.Join("..", "..", doc))
+		if err != nil {
+			t.Fatalf("read %s: %v", doc, err)
+		}
+		text := string(data)
+		for _, command := range []string{
+			`cp -R "${pkg}/plugins/c3/stt/." ~/.local/bin/plugins/c3/stt/`,
+			`cp -R "${pkg}/plugins/c3-grok/." ~/.local/bin/plugins/c3-grok/`,
+		} {
+			if !strings.Contains(text, command) {
+				t.Fatalf("%s prebuilt install omits %q", doc, command)
+			}
+		}
+	}
+}
+
+func TestReleasePipelineFailsClosedOnPartialPlatformSet(t *testing.T) {
+	makefile, err := os.ReadFile(filepath.Join("..", "..", "Makefile"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(makefile), "@set -eu; for p in $(PLATFORMS)") {
+		t.Fatal("Makefile dist loop is not fail-fast; a non-final package failure could be masked")
+	}
+
+	workflow, err := os.ReadFile(filepath.Join("..", "..", ".github", "workflows", "release.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(workflow)
+	for _, platform := range []string{
+		"linux_amd64", "linux_arm64",
+		"darwin_amd64", "darwin_arm64",
+		"windows_amd64", "windows_arm64",
+	} {
+		needle := `"dist/c3_${TAG}_` + platform + `.tar.gz"`
+		if strings.Count(text, needle) != 2 {
+			t.Fatalf("release workflow must name %s exactly in verification and publication", platform)
+		}
+	}
+	for _, contract := range []string{
+		`[ "$(find dist -maxdepth 1 -type f -name '*.tar.gz' | wc -l)" -eq 6 ]`,
+		`[ "$(awk 'NF {n++} END {print n+0}' dist/SHA256SUMS)" -eq 6 ]`,
+		`[ "$actual_names" = "$expected_names" ]`,
+		`gh release create "$TAG" "$@" dist/SHA256SUMS`,
+	} {
+		if !strings.Contains(text, contract) {
+			t.Fatalf("release workflow is missing fail-closed contract %q", contract)
+		}
+	}
+	if strings.Contains(text, "gh release create \"$TAG\" \\\n            dist/*.tar.gz") {
+		t.Fatal("release publication still uses a wildcard that permits a partial platform set")
+	}
+}
+
 // TestTarballNameMatchesPackageScript pins the release-asset filename. The
 // updater downloads an asset by exact name; if package.sh's PKG pattern and
 // TarballNameFor ever disagree, every `c3-broker update` fails to find its

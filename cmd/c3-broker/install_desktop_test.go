@@ -63,12 +63,7 @@ func TestRunInstallDesktop_RecordsHandlerFromReleaseBundle(t *testing.T) {
 	isolateDesktopInstallRuntime(t)
 	release := t.TempDir()
 	handler := filepath.Join(release, "plugins", "c3", "stt", "stt-handler.py")
-	if err := os.MkdirAll(filepath.Dir(handler), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(handler, []byte("# bundled handler\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	writeCompleteSTTBundleAt(t, filepath.Dir(handler))
 	t.Setenv("C3_SRC_DIR", filepath.Join(t.TempDir(), "missing"))
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("HOME", t.TempDir())

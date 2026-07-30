@@ -54,6 +54,7 @@ const endpointFailoverThreshold = 5
 const (
 	defaultConflictBackoffBase = 5 * time.Second
 	defaultConflictBackoffMax  = 60 * time.Second
+	defaultPollStopWait        = 5 * time.Second
 )
 
 // telegramAPIURLEnv is the env override for the primary Bot-API base URL. It
@@ -113,7 +114,7 @@ func (c Config) RichInboundEnabled() bool {
 // message_id and adding it buys nothing; and if Telegram ever reported an
 // edited_message with a different message_thread_id than its original, keying on
 // it would put the edit in a DIFFERENT bucket, its update_id would never be
-// marked done, and the contiguous-prefix offset would wedge PERMANENTLY. Chat-only
+// marked done, and the observed-prefix offset would wedge PERMANENTLY. Chat-only
 // keying degrades to a self-healing mis-attribution in that same scenario —
 // prefer the recoverable failure.
 //
@@ -156,6 +157,10 @@ type Channel struct {
 	// production code — Start leaves them zero so pollLoop uses the defaults.
 	conflictBackoffBase time.Duration
 	conflictBackoffMax  time.Duration
+	// pollStopWait bounds Stop's wait for pollLoop to finish its deferred final
+	// offset Save. Zero means defaultPollStopWait; tests shorten it when proving
+	// that a misbehaving BotClient cannot hang shutdown forever.
+	pollStopWait time.Duration
 
 	// identityLogged guards the one-time "connected as @<name>" log emitted by
 	// the heartbeat on its first successful getMe. Because boot is offline-safe
@@ -371,7 +376,7 @@ func (c *Channel) Start(ctx context.Context, host channel.Host) error {
 	// dropped / non-message / handled command). Seed it from the persisted store
 	// so a restart resumes from the last SAVED offset. The broker fires
 	// SetPersistedCallback once per stored inbound; we MarkDone the source
-	// update_id, advancing the contiguous prefix.
+	// update_id, advancing the completed observed prefix.
 	var loaded int64
 	if c.offsets != nil {
 		loaded, _ = c.offsets.Load()
@@ -775,10 +780,28 @@ func (c *Channel) recordHeartbeatSuccess() {
 	c.reportHealth(c.health.RecordSuccess())
 }
 
-// Stop halts the polling loop and shuts down the bot.
+// Stop halts the polling loop and waits, within a fixed bound, for pollLoop's
+// deferred final offset Save. A BotClient that ignores context cancellation
+// cannot hang broker shutdown forever.
 func (c *Channel) Stop() error {
 	if c.cancel != nil {
 		c.cancel()
+	}
+	if c.pollDone == nil {
+		return nil
+	}
+	wait := c.pollStopWait
+	if wait <= 0 {
+		wait = defaultPollStopWait
+	}
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+	select {
+	case <-c.pollDone:
+	case <-timer.C:
+		if c.host != nil {
+			c.host.Logf("telegram: poll loop did not stop within %v; shutdown continues (final offset Save may be incomplete)", wait)
+		}
 	}
 	return nil
 }

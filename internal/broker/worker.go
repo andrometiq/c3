@@ -158,11 +158,10 @@ type ConsumeJob struct {
 	Count     int
 }
 
-// RefreshTextJob asks the worker to refresh, in place, the stored Text of the
-// still-queued line whose MessageID matches (retranscribe in-place refresh, spec
-// Component 5). Routed through the single-owner worker so the cap-safe rewrite
-// never touches the route's files off the worker goroutine. The result (whether a
-// line was refreshed) returns via ResultCh.
+// RefreshTextJob asks the worker to refresh, in place, the exact still-queued
+// organic voice record identified by MessageID + FileID. The worker resolves
+// that record to its durable queue-private ID before rewriting, so a collision
+// can never validate one line and mutate another.
 type RefreshTextJob struct {
 	MessageID int64
 	// FileID identifies WHICH voice attachment this refresh is for. Without it
@@ -2032,11 +2031,10 @@ func (w *RouteWorker) takeCoveredByPush(pushID int64, token string) []string {
 	return ids
 }
 
-// handleRefreshText rewrites, in place, the stored Text of the still-queued line
-// whose MessageID matches (retranscribe in-place refresh, spec Component 5). Runs
-// on the route's single-owner worker so the cap-safe rewrite never races other
-// file ops for this route. A miss (message not queued / already consumed) is a
-// clean no-op reported as Refreshed=false.
+// handleRefreshText rewrites, in place, the stored Text of the exact still-
+// queued organic voice record (retranscribe in-place refresh, spec Component 5).
+// Runs on the route's single-owner worker so selection and rewrite cannot race
+// another file operation for this route. A miss is a clean no-op.
 func (w *RouteWorker) handleRefreshText(_ context.Context, job *RefreshTextJob) {
 	if job == nil || job.ResultCh == nil {
 		return
@@ -2068,26 +2066,21 @@ func (w *RouteWorker) handleRefreshText(_ context.Context, job *RefreshTextJob) 
 	// Checked here rather than in the store: the store has no idea what C3
 	// authored, and this runs on the route's single owner so the read cannot race
 	// its own rewrite.
-	rec, found := w.queuedRecord(qrk, job.MessageID)
+	rec, found := w.queuedVoiceRecord(qrk, job.MessageID, job.FileID)
 	if !found {
-		// Nothing queued under that id — a clean no-op, exactly as before.
+		// Nothing tracked and organic under that id owns this voice. Legacy
+		// untracked and drained records deliberately fail toward no mutation.
 		job.ResultCh <- RefreshResult{Refreshed: false}
 		return
 	}
-	if !recordOwnsVoice(rec, job.FileID) {
-		log.Printf("retranscribe refresh chan=%s chat=%d topic=%s msg=%d file_id=%s: SKIPPED — that message does not carry exactly this one voice attachment (%d attachment(s)); refreshing it would rewrite a message this transcript is not about. The transcript is still returned to the agent.",
-			w.key.Channel, w.key.ChatID, TopicKeyStr(w.key), job.MessageID, job.FileID, len(rec.Attachments))
-		job.ResultCh <- RefreshResult{Refreshed: false}
-		return
-	}
-	newText, ok := replaceC3VoiceSegment(rec.Text, w.sttPrefix(w.key.Channel), job.Transcript)
+	newText, ok := replaceC3VoiceSegment(rec.Inbound.Text, w.sttPrefix(w.key.Channel), job.Transcript)
 	if !ok {
 		log.Printf("retranscribe refresh chan=%s chat=%d topic=%s msg=%d file_id=%s: SKIPPED — the stored text contains no segment C3 wrote for this voice, so there is nothing to replace without overwriting someone else's words. The transcript is still returned to the agent.",
 			w.key.Channel, w.key.ChatID, TopicKeyStr(w.key), job.MessageID, job.FileID)
 		job.ResultCh <- RefreshResult{Refreshed: false}
 		return
 	}
-	refreshed, err := w.broker.Queue.RefreshText(qrk, job.MessageID, newText)
+	refreshed, err := w.broker.Queue.RefreshRecordText(qrk, rec.RecordID, newText)
 	if err != nil {
 		log.Printf("retranscribe refresh FAIL chan=%s chat=%d topic=%s msg=%d: %v",
 			w.key.Channel, w.key.ChatID, TopicKeyStr(w.key), job.MessageID, err)
@@ -2099,24 +2092,23 @@ func (w *RouteWorker) handleRefreshText(_ context.Context, job *RefreshTextJob) 
 	job.ResultCh <- RefreshResult{Refreshed: refreshed}
 }
 
-// queuedRecord returns the still-pending queued line for messageID. ok=false
-// means there is nothing queued under that id, in which case the refresh is
-// already a clean no-op and needs no judgement.
-func (w *RouteWorker) queuedRecord(qrk queue.RouteKey, messageID int64) (c3types.Inbound, bool) {
-	pending, _ := w.broker.Queue.Pending(qrk)
-	if pending <= 0 {
-		return c3types.Inbound{}, false
-	}
-	lines, err := w.broker.Queue.Peek(qrk, pending)
+// queuedVoiceRecord returns the exact pending organic tracked line that owns
+// fileID. Same-MessageID edits are searched independently; drained-in and
+// legacy untracked lines are never eligible for an organic retranscribe write.
+func (w *RouteWorker) queuedVoiceRecord(qrk queue.RouteKey, messageID int64, fileID string) (queue.TrackedInbound, bool) {
+	lines, err := w.broker.Queue.PeekTracked(qrk, -1)
 	if err != nil {
-		return c3types.Inbound{}, false
+		return queue.TrackedInbound{}, false
 	}
 	for _, rec := range lines {
-		if rec.MessageID == messageID {
+		if rec.RecordID != "" &&
+			rec.Inbound.DrainedFrom == "" &&
+			rec.Inbound.MessageID == messageID &&
+			recordOwnsVoice(rec.Inbound, fileID) {
 			return rec, true
 		}
 	}
-	return c3types.Inbound{}, false
+	return queue.TrackedInbound{}, false
 }
 
 // recordOwnsVoice reports whether rec is the message this refresh is about:

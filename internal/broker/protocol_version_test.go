@@ -2,6 +2,7 @@ package broker
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"log"
 	"os"
@@ -240,6 +241,37 @@ func TestProtocolMismatch_RefusesDestructiveAndOwnershipChangingOps(t *testing.T
 	}
 	if n, _ := b.Queue.Pending(qrk); n != 1 {
 		t.Fatalf("incompatible inbound_delivered consumed the queue; pending=%d, want 1", n)
+	}
+
+	// Retranscribe is not a read-only operation: a successful call can rewrite
+	// the queued record's durable Text. Refuse it before the STT callback runs.
+	sttCalled := false
+	b.Plugins.OnVoiceReceived(func(context.Context, c3types.VoicePayload) (string, error) {
+		sttCalled = true
+		return "replacement", nil
+	})
+	if err := peer.WriteJSON(ipc.RetranscribeReq{
+		Op: ipc.OpRetranscribe, ID: "retry-voice", FileID: "voice-7", MessageID: 7,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	raw, err = peer.ReadFrame()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var retranscribed ipc.RetranscribeResp
+	if json.Unmarshal(raw, &retranscribed) != nil || retranscribed.ID != "retry-voice" || retranscribed.Err == "" {
+		t.Fatalf("incompatible retranscribe was not refused with its request ID: %s", raw)
+	}
+	if sttCalled {
+		t.Fatal("incompatible retranscribe reached the STT callback")
+	}
+	queued, err := b.Queue.Peek(qrk, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(queued) != 1 || queued[0].Text != "must remain durable" {
+		t.Fatalf("incompatible retranscribe changed durable queue state: %+v", queued)
 	}
 
 	// Attach/recover/release are all ownership changes and must leave A held.

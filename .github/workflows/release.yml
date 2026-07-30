@@ -32,8 +32,28 @@ jobs:
       - name: Build release tarballs
         run: make dist VERSION="${GITHUB_REF_NAME}"
 
-      - name: List artifacts
-        run: ls -l dist
+      - name: Verify complete release set
+        run: |
+          set -eu
+          TAG="${GITHUB_REF_NAME}"
+          set -- \
+            "dist/c3_${TAG}_linux_amd64.tar.gz" \
+            "dist/c3_${TAG}_linux_arm64.tar.gz" \
+            "dist/c3_${TAG}_darwin_amd64.tar.gz" \
+            "dist/c3_${TAG}_darwin_arm64.tar.gz" \
+            "dist/c3_${TAG}_windows_amd64.tar.gz" \
+            "dist/c3_${TAG}_windows_arm64.tar.gz"
+          [ "$(find dist -maxdepth 1 -type f -name '*.tar.gz' | wc -l)" -eq 6 ]
+          for archive in "$@"; do
+            [ -f "$archive" ]
+          done
+          [ -f dist/SHA256SUMS ]
+          expected_names="$(printf '%s\n' "$@" | sed 's#^dist/##' | LC_ALL=C sort)"
+          actual_names="$(awk 'NF {print $2}' dist/SHA256SUMS | LC_ALL=C sort)"
+          [ "$(awk 'NF {n++} END {print n+0}' dist/SHA256SUMS)" -eq 6 ]
+          [ "$actual_names" = "$expected_names" ]
+          (cd dist && sha256sum -c SHA256SUMS)
+          ls -l dist
 
       - name: Create GitHub release
         env:
@@ -45,8 +65,14 @@ jobs:
             *-*) prerelease="--prerelease" ;; # v1.0.0-rc1 etc. → prerelease
             *)   prerelease="" ;;
           esac
-          gh release create "$TAG" \
-            dist/*.tar.gz dist/SHA256SUMS \
+          set -- \
+            "dist/c3_${TAG}_linux_amd64.tar.gz" \
+            "dist/c3_${TAG}_linux_arm64.tar.gz" \
+            "dist/c3_${TAG}_darwin_amd64.tar.gz" \
+            "dist/c3_${TAG}_darwin_arm64.tar.gz" \
+            "dist/c3_${TAG}_windows_amd64.tar.gz" \
+            "dist/c3_${TAG}_windows_arm64.tar.gz"
+          gh release create "$TAG" "$@" dist/SHA256SUMS \
             --title "$TAG" \
             --verify-tag \
             $notes_flags $prerelease

@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -231,13 +233,162 @@ func TestRun_ReapsAppServerWhenTUIExits(t *testing.T) {
 	}
 }
 
+func TestRun_SignalsReapAppServerTree(t *testing.T) {
+	for _, tc := range []struct {
+		name              string
+		sig               syscall.Signal
+		ignoreInTUI       bool
+		duringStartup     bool
+		wantLauncherError bool
+	}{
+		{name: "SIGINT", sig: syscall.SIGINT},
+		{name: "SIGTERM", sig: syscall.SIGTERM},
+		{name: "SIGHUP", sig: syscall.SIGHUP},
+		{
+			name:              "SIGTERM_ignored_by_TUI",
+			sig:               syscall.SIGTERM,
+			ignoreInTUI:       true,
+			wantLauncherError: true,
+		},
+		{
+			name:              "SIGTERM_during_app-server_startup",
+			sig:               syscall.SIGTERM,
+			duringStartup:     true,
+			wantLauncherError: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			pidFile := filepath.Join(dir, "fake-app-server-pids")
+			helperPIDFile := filepath.Join(dir, "fake-app-server-helper-pid")
+			listenAddrFile := filepath.Join(dir, "fake-app-server-listen-addr")
+			appServerStartedFile := filepath.Join(dir, "fake-app-server-started")
+			tuiPIDFile := filepath.Join(dir, "fake-tui-pid")
+			tuiReadyFile := filepath.Join(dir, "fake-tui-ready")
+			tuiSignalFile := filepath.Join(dir, "fake-tui-signal")
+			cleanupFakeAppServerGroups(t, pidFile)
+
+			launcher := exec.Command(os.Args[0], "-test.run=^TestSignalLauncherHelper$")
+			launcher.Dir = dir
+			launcher.Env = append(os.Environ(),
+				signalLauncherHelperEnv+"=1",
+				"C3_CODEX_REAL="+os.Args[0],
+				"C3_CODEX_ADAPTER="+filepath.Join(dir, "adapter"),
+				"C3_CODEX_APP_SERVER_WS=",
+				"C3_CODEX_DISABLE=0",
+				"XDG_RUNTIME_DIR="+dir,
+				fakeAppServerPIDsEnv+"="+pidFile,
+				fakeAppServerHelperPIDEnv+"="+helperPIDFile,
+				fakeAppServerListenAddrEnv+"="+listenAddrFile,
+				fakeTUIReadyFileEnv+"="+tuiReadyFile,
+				fakeTUIPIDFileEnv+"="+tuiPIDFile,
+				fakeTUISignalFileEnv+"="+tuiSignalFile,
+			)
+			if tc.ignoreInTUI {
+				launcher.Env = append(launcher.Env, fakeTUIIgnoreSignalsEnv+"=1")
+			}
+			if tc.duringStartup {
+				launcher.Env = append(launcher.Env,
+					fakeAppServerPauseFileEnv+"="+appServerStartedFile)
+			}
+			if err := launcher.Start(); err != nil {
+				t.Fatal(err)
+			}
+			waited := make(chan error, 1)
+			go func() { waited <- launcher.Wait() }()
+			t.Cleanup(func() { _ = launcher.Process.Kill() })
+
+			readyFile := tuiReadyFile
+			if tc.duringStartup {
+				readyFile = appServerStartedFile
+			}
+			waitForFile(t, readyFile)
+			if err := launcher.Process.Signal(tc.sig); err != nil {
+				t.Fatalf("signal launcher with %s: %v", tc.name, err)
+			}
+			select {
+			case err := <-waited:
+				if err != nil && !tc.wantLauncherError {
+					t.Fatalf("launcher did not exit cleanly after %s: %v", tc.name, err)
+				}
+				if err == nil && tc.wantLauncherError {
+					t.Fatalf("launcher reported success after it had to kill a TUI that ignored %s", tc.name)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatalf("launcher did not exit after %s", tc.name)
+			}
+
+			appServerPID := readPIDFile(t, pidFile)
+			helperPID := readPIDFile(t, helperPIDFile)
+			waitForPIDExit(t, "app-server", appServerPID)
+			waitForPIDExit(t, "app-server helper", helperPID)
+			waitForProcessGroupExit(t, appServerPID)
+			if tc.duringStartup {
+				if _, err := os.Stat(tuiPIDFile); !os.IsNotExist(err) {
+					t.Fatalf("TUI was started after %s interrupted app-server startup: %v", tc.name, err)
+				}
+				return
+			}
+
+			signalData, err := os.ReadFile(tuiSignalFile)
+			if err != nil {
+				t.Fatalf("read signal received by fake TUI: %v", err)
+			}
+			if got, want := strings.TrimSpace(string(signalData)), strconv.Itoa(int(tc.sig)); got != want {
+				t.Fatalf("fake TUI received signal %q, want %s (%s)", got, want, tc.name)
+			}
+			listenAddrData, err := os.ReadFile(listenAddrFile)
+			if err != nil {
+				t.Fatalf("read fake app-server listener address: %v", err)
+			}
+			host, portText, err := net.SplitHostPort(strings.TrimSpace(string(listenAddrData)))
+			if err != nil {
+				t.Fatalf("parse fake app-server listener address %q: %v", listenAddrData, err)
+			}
+			port, err := strconv.Atoi(portText)
+			if err != nil {
+				t.Fatalf("parse fake app-server listener port %q: %v", portText, err)
+			}
+			t.Cleanup(func() { _ = os.Remove(appServerMetaPath(port)) })
+
+			tuiPID := readPIDFile(t, tuiPIDFile)
+			waitForPIDExit(t, "TUI", tuiPID)
+			if tcpReachable(host, port, 100*time.Millisecond) {
+				t.Fatalf("app-server listener on port %d survived launcher cleanup after %s", port, tc.name)
+			}
+			if _, err := os.Stat(appServerMetaPath(port)); !os.IsNotExist(err) {
+				t.Fatalf("app-server metadata survived launcher cleanup after %s: %v", tc.name, err)
+			}
+		})
+	}
+}
+
+func TestSignalLauncherHelper(t *testing.T) {
+	if os.Getenv(signalLauncherHelperEnv) == "" {
+		return
+	}
+	t.Setenv(fakeAppServerEnv, "1")
+	if err := run(nil, filepath.Join(t.TempDir(), "launcher")); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // fakeAppServerEnv turns a re-executed copy of this test binary into a stand-in
 // Codex app-server: it binds the --listen port it was given and stays up.
 const (
-	fakeAppServerEnv     = "C3_TEST_FAKE_APP_SERVER"
-	fakePoisonPortEnv    = "C3_TEST_FAKE_APP_SERVER_POISON_PORT"
-	fakeSignalDirEnv     = "C3_TEST_FAKE_APP_SERVER_SIGNAL_DIR"
-	fakeAppServerPIDsEnv = "C3_TEST_FAKE_APP_SERVER_PIDS"
+	fakeAppServerEnv           = "C3_TEST_FAKE_APP_SERVER"
+	fakePoisonPortEnv          = "C3_TEST_FAKE_APP_SERVER_POISON_PORT"
+	fakeSignalDirEnv           = "C3_TEST_FAKE_APP_SERVER_SIGNAL_DIR"
+	fakeAppServerPIDsEnv       = "C3_TEST_FAKE_APP_SERVER_PIDS"
+	fakeAppServerHelperEnv     = "C3_TEST_FAKE_APP_SERVER_HELPER"
+	fakeAppServerHelperPIDEnv  = "C3_TEST_FAKE_APP_SERVER_HELPER_PID"
+	fakeAppServerListenAddrEnv = "C3_TEST_FAKE_APP_SERVER_LISTEN_ADDR"
+	fakeAppServerPauseFileEnv  = "C3_TEST_FAKE_APP_SERVER_PAUSE_FILE"
+	fakeTUIReadyFileEnv        = "C3_TEST_FAKE_TUI_READY_FILE"
+	fakeTUIPIDFileEnv          = "C3_TEST_FAKE_TUI_PID_FILE"
+	fakeTUISignalFileEnv       = "C3_TEST_FAKE_TUI_SIGNAL_FILE"
+	fakeTUIIgnoreSignalsEnv    = "C3_TEST_FAKE_TUI_IGNORE_SIGNALS"
+	signalLauncherHelperEnv    = "C3_TEST_SIGNAL_LAUNCHER_HELPER"
 )
 
 // init runs before the test framework parses flags, so a child process started
@@ -246,6 +397,11 @@ const (
 // be overtaken, exit) instead of binding; on any other port it binds and holds,
 // which is what a real app-server does.
 func init() {
+	if os.Getenv(fakeAppServerHelperEnv) != "" {
+		for {
+			time.Sleep(time.Hour)
+		}
+	}
 	if os.Getenv(holdLauncherLockEnv) != "" {
 		lock, err := acquireAppServerLaunchLock()
 		if err != nil {
@@ -271,6 +427,25 @@ func init() {
 		}
 	}
 	if addr == "" {
+		if ready := os.Getenv(fakeTUIReadyFileEnv); ready != "" {
+			signals := make(chan os.Signal, 1)
+			signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
+			if pidFile := os.Getenv(fakeTUIPIDFileEnv); pidFile != "" {
+				_ = os.WriteFile(pidFile, []byte(strconv.Itoa(os.Getpid())), 0o600)
+			}
+			_ = os.WriteFile(ready, nil, 0o600)
+			for {
+				sig := <-signals
+				if signalFile := os.Getenv(fakeTUISignalFileEnv); signalFile != "" {
+					_ = os.WriteFile(signalFile,
+						[]byte(strconv.Itoa(int(sig.(syscall.Signal)))), 0o600)
+				}
+				if os.Getenv(fakeTUIIgnoreSignalsEnv) == "" {
+					signal.Stop(signals)
+					os.Exit(0)
+				}
+			}
+		}
 		os.Exit(2)
 	}
 	if started := os.Getenv(startSignalFileEnv); started != "" {
@@ -280,6 +455,20 @@ func init() {
 		if file, err := os.OpenFile(pids, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600); err == nil {
 			_, _ = fmt.Fprintf(file, "%d\n", os.Getpid())
 			_ = file.Close()
+		}
+	}
+	if helperPIDFile := os.Getenv(fakeAppServerHelperPIDEnv); helperPIDFile != "" {
+		helper := exec.Command(os.Args[0])
+		helper.Env = append(os.Environ(), fakeAppServerHelperEnv+"=1")
+		if err := helper.Start(); err != nil {
+			os.Exit(2)
+		}
+		_ = os.WriteFile(helperPIDFile, []byte(strconv.Itoa(helper.Process.Pid)), 0o600)
+	}
+	if startedFile := os.Getenv(fakeAppServerPauseFileEnv); startedFile != "" {
+		_ = os.WriteFile(startedFile, nil, 0o600)
+		for {
+			time.Sleep(time.Hour)
 		}
 	}
 	if poison := os.Getenv(fakePoisonPortEnv); poison != "" && strings.HasSuffix(addr, ":"+poison) {
@@ -298,6 +487,9 @@ func init() {
 		os.Exit(1)
 	}
 	defer ln.Close()
+	if addrFile := os.Getenv(fakeAppServerListenAddrEnv); addrFile != "" {
+		_ = os.WriteFile(addrFile, []byte(ln.Addr().String()), 0o600)
+	}
 	select {} // hold the port until the parent kills us
 }
 
@@ -358,6 +550,31 @@ func appServerPID(t *testing.T, wsURL string) int {
 		t.Fatalf("invalid app-server metadata for %s: pid=%d err=%v", wsURL, meta.PID, err)
 	}
 	return meta.PID
+}
+
+func readPIDFile(t *testing.T, path string) int {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil || pid <= 0 {
+		t.Fatalf("invalid PID file %s: %q (err=%v)", path, data, err)
+	}
+	return pid
+}
+
+func waitForPIDExit(t *testing.T, process string, pid int) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if err := syscall.Kill(pid, 0); err == syscall.ESRCH {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("%s pid %d survived launcher cleanup", process, pid)
 }
 
 func waitForProcessGroupExit(t *testing.T, pgid int) {

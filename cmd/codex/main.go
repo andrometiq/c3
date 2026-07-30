@@ -13,6 +13,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -23,6 +24,8 @@ import (
 )
 
 const defaultWSURL = "ws://127.0.0.1:8766"
+
+const tuiTerminationGrace = 2 * time.Second
 
 var codexSubcommands = map[string]bool{
 	"exec":        true,
@@ -61,6 +64,10 @@ func run(args []string, self string) error {
 	if shouldBypass(args) {
 		return execReal(realCodex, args, os.Environ())
 	}
+	signals := make(chan os.Signal, 3)
+	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
+	defer signal.Stop(signals)
+
 	adapterPath, err := findAdapter(self)
 	if err != nil {
 		return err
@@ -83,7 +90,9 @@ func run(args []string, self string) error {
 	if requestedWS == "" {
 		requestedWS = defaultWSURL
 	}
-	appServer, err := startAppServerTracked(realCodex, adapterPath, requestedWS, cwd, topic)
+	appServer, err := startAppServerTrackedWithSignals(
+		realCodex, adapterPath, requestedWS, cwd, topic, signals,
+	)
 	if err != nil {
 		return err
 	}
@@ -108,7 +117,54 @@ func run(args []string, self string) error {
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	cmd.Env = env
-	return cmd.Run()
+	return runTUI(cmd, signals)
+}
+
+func runTUI(cmd *exec.Cmd, signals <-chan os.Signal) error {
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	exited := make(chan error, 1)
+	go func() {
+		exited <- cmd.Wait()
+	}()
+
+	var terminationTimer *time.Timer
+	var terminationDeadline <-chan time.Time
+	defer func() {
+		if terminationTimer != nil {
+			terminationTimer.Stop()
+		}
+	}()
+
+	for {
+		select {
+		case err := <-exited:
+			return err
+		case <-terminationDeadline:
+			killErr := cmd.Process.Kill()
+			waitErr := <-exited
+			if killErr != nil &&
+				!errors.Is(killErr, os.ErrProcessDone) &&
+				!errors.Is(killErr, syscall.ESRCH) {
+				return fmt.Errorf("kill unresponsive Codex TUI: %w", killErr)
+			}
+			return waitErr
+		case sig := <-signals:
+			if err := cmd.Process.Signal(sig); err != nil &&
+				!errors.Is(err, os.ErrProcessDone) &&
+				!errors.Is(err, syscall.ESRCH) {
+				_ = cmd.Process.Kill()
+				<-exited
+				return fmt.Errorf("forward %s to Codex TUI: %w", sig, err)
+			}
+			if terminationTimer == nil &&
+				(sig == syscall.SIGTERM || sig == syscall.SIGHUP) {
+				terminationTimer = time.NewTimer(tuiTerminationGrace)
+				terminationDeadline = terminationTimer.C
+			}
+		}
+	}
 }
 
 func shouldBypass(args []string) bool {
@@ -305,6 +361,19 @@ func ensureAppServer(realCodex, adapterPath, wsURL, cwd, topic string) error {
 }
 
 func launchAppServer(realCodex, adapterPath, wsURL, cwd, topic string) (*appServerHandle, error) {
+	return launchAppServerWithSignals(realCodex, adapterPath, wsURL, cwd, topic, nil)
+}
+
+func launchAppServerWithSignals(
+	realCodex, adapterPath, wsURL, cwd, topic string,
+	signals <-chan os.Signal,
+) (*appServerHandle, error) {
+	select {
+	case sig := <-signals:
+		return nil, fmt.Errorf("received %s while starting Codex app-server", sig)
+	default:
+	}
+
 	host, port, err := parseWSURL(wsURL)
 	if err != nil {
 		return nil, err
@@ -403,7 +472,13 @@ func launchAppServer(realCodex, adapterPath, wsURL, cwd, topic string) (*appServ
 			writeAppServerMeta(wsURL, cwd, topic, adapterPath, cmd.Process.Pid)
 			return &appServerHandle{URL: wsURL, PID: cmd.Process.Pid, done: exited}, nil
 		}
-		time.Sleep(200 * time.Millisecond)
+		select {
+		case sig := <-signals:
+			_ = killAppServerProcessGroup(cmd.Process.Pid)
+			<-exited
+			return nil, fmt.Errorf("received %s while starting Codex app-server", sig)
+		case <-time.After(200 * time.Millisecond):
+		}
 	}
 	_ = killAppServerProcessGroup(cmd.Process.Pid)
 	<-exited
@@ -439,6 +514,13 @@ func startAppServer(realCodex, adapterPath, requestedWS, cwd, topic string) (str
 }
 
 func startAppServerTracked(realCodex, adapterPath, requestedWS, cwd, topic string) (*appServerHandle, error) {
+	return startAppServerTrackedWithSignals(realCodex, adapterPath, requestedWS, cwd, topic, nil)
+}
+
+func startAppServerTrackedWithSignals(
+	realCodex, adapterPath, requestedWS, cwd, topic string,
+	signals <-chan os.Signal,
+) (*appServerHandle, error) {
 	lock, err := acquireAppServerLaunchLock()
 	if err != nil {
 		return nil, err
@@ -449,7 +531,9 @@ func startAppServerTracked(realCodex, adapterPath, requestedWS, cwd, topic strin
 	for i := 0; i < attempts; i++ {
 		wsURL := chooseAppServerURL(requestedWS)
 		var handle *appServerHandle
-		if handle, err = launchAppServer(realCodex, adapterPath, wsURL, cwd, topic); err == nil {
+		if handle, err = launchAppServerWithSignals(
+			realCodex, adapterPath, wsURL, cwd, topic, signals,
+		); err == nil {
 			return handle, nil
 		}
 		if !errors.Is(err, errAppServerLostPortRace) {

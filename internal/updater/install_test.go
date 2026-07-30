@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"testing/fstest"
 )
 
 var expectedSTTRuntimeAssets = []string{
@@ -186,6 +187,49 @@ func TestInstallSTTBundle_InstallsVerifiedBundleWithoutFollowingDestinationSymli
 	}
 }
 
+func TestInstallSTTBundleFS_UsesVerifiedAtomicInstaller(t *testing.T) {
+	source := fstest.MapFS{}
+	for _, name := range expectedSTTRuntimeAssets {
+		source[filepath.ToSlash(name)] = &fstest.MapFile{
+			Data: []byte("embedded-" + filepath.Base(name)),
+			Mode: 0o644,
+		}
+	}
+	dest := t.TempDir()
+	old := writeSTTBundle(t, dest, "old")
+	custom := filepath.Join(old, "stt-pkg", "providers", "custom.py")
+	if err := os.WriteFile(custom, []byte("custom"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := InstallSTTBundleFS(dest, source); err != nil {
+		t.Fatalf("InstallSTTBundleFS: %v", err)
+	}
+	handler := filepath.Join(dest, sttBundleRelativePath, "stt-handler.py")
+	if got, err := os.ReadFile(handler); err != nil || string(got) != "embedded-stt-handler.py" {
+		t.Fatalf("installed embedded handler=%q err=%v", got, err)
+	}
+	if got, err := os.ReadFile(custom); err != nil || string(got) != "custom" {
+		t.Fatalf("embedded repair lost custom provider: body=%q err=%v", got, err)
+	}
+}
+
+func TestInstallSTTBundle_RefusesSymlinkDestinationRoot(t *testing.T) {
+	src := writeSTTBundle(t, t.TempDir(), "new")
+	parent := t.TempDir()
+	outside := t.TempDir()
+	dest := filepath.Join(parent, "c3")
+	if err := os.Symlink(outside, dest); err != nil {
+		t.Fatal(err)
+	}
+	if err := InstallSTTBundle(dest, src); err == nil {
+		t.Fatal("symlink destination root must be refused")
+	}
+	if _, err := os.Stat(filepath.Join(outside, sttBundleRelativePath)); !os.IsNotExist(err) {
+		t.Fatalf("installer followed destination-root symlink: err=%v", err)
+	}
+}
+
 func TestValidateSTTBundle_RequiresEveryRuntimeAsset(t *testing.T) {
 	for _, missing := range expectedSTTRuntimeAssets {
 		t.Run(filepath.ToSlash(missing), func(t *testing.T) {
@@ -193,7 +237,7 @@ func TestValidateSTTBundle_RequiresEveryRuntimeAsset(t *testing.T) {
 			if err := os.Remove(filepath.Join(src, missing)); err != nil {
 				t.Fatal(err)
 			}
-			if err := validateSTTBundle(src); err == nil {
+			if err := ValidateSTTBundle(src); err == nil {
 				t.Fatalf("bundle without %s passed validation — updater could install an STT chain that cannot run", missing)
 			}
 		})
@@ -207,7 +251,7 @@ func TestValidateSTTBundle_RejectsEmptyRuntimeAssets(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(src, empty), nil, 0o755); err != nil {
 				t.Fatal(err)
 			}
-			if err := validateSTTBundle(src); err == nil {
+			if err := ValidateSTTBundle(src); err == nil {
 				t.Fatalf("bundle with empty %s passed validation — updater advertised a runnable STT runtime that cannot run", empty)
 			}
 		})

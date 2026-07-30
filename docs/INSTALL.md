@@ -99,8 +99,8 @@ C3 ships nine Go binaries:
 - `migrate-legacy` — one-shot migrator from a legacy Python-prototype config layout (only relevant if you have such a config)
 
 **Prebuilt (recommended).** Download the release tarball for your platform,
-verify it, and install the binaries plus their `plugins/c3/stt` runtime bundle
-into a directory on your `PATH`. There is
+verify it, and install the binaries plus their `plugins/c3/stt` and
+`plugins/c3-grok` runtime assets into a directory on your `PATH`. There is
 **no version to edit** — `releases/latest/download/` always resolves to the
 newest published release:
 
@@ -123,16 +123,17 @@ grep " ${pkg}.tar.gz$" SHA256SUMS > SHA256SUMS.this
 sha256sum -c SHA256SUMS.this || shasum -a 256 -c SHA256SUMS.this
 
 # The tarball unpacks into a ${pkg}/ directory — install the core binaries,
-# their runtime STT bundle, and stage the optional Codex launcher off PATH for
-# Step 5. Do not copy only the binaries: Desktop, Grok, Antigravity, and
+# their runtime STT/Grok assets, and stage the optional Codex launcher off PATH
+# for Step 5. Do not copy only the binaries: Desktop, Grok, Antigravity, and
 # systemd do not receive Claude Code's plugin-root environment.
 tar xzf "${pkg}.tar.gz"
-mkdir -p ~/.local/bin/plugins/c3/stt ~/.local/libexec/c3
+mkdir -p ~/.local/bin/plugins/c3/stt ~/.local/bin/plugins/c3-grok ~/.local/libexec/c3
 for b in c3-broker c3-claude-adapter c3-codex-adapter c3-grok-adapter \
          c3-agy-adapter c3-desktop-adapter claude-shim migrate-legacy; do
   install -m 0755 "${pkg}/${b}" ~/.local/bin/
 done
 cp -R "${pkg}/plugins/c3/stt/." ~/.local/bin/plugins/c3/stt/
+cp -R "${pkg}/plugins/c3-grok/." ~/.local/bin/plugins/c3-grok/
 install -m 0755 "${pkg}/codex" ~/.local/libexec/c3/codex
 ```
 
@@ -286,7 +287,7 @@ c3-broker install-codex-shim
 
 This is a Go subcommand that idempotently:
 
-1. Verifies the staged executable is C3's launcher, copies it next to `c3-broker`, and refuses to replace an unrelated regular file unless you pass `--force`.
+1. Verifies the staged executable is C3's launcher and, when no live C3 launcher exists yet, copies it next to `c3-broker`. A valid live C3 launcher is authoritative (a stale staged file cannot downgrade it); an unrelated regular file is still refused unless you pass `--force`.
 2. Symlinks `~/.local/bin/codex` to the C3 `codex` launcher — **skipped on the prebuilt install**, where the launcher already *is* `~/.local/bin/codex` and there is nothing to shim.
 3. Walks `~/.nvm/versions/node/*/bin/` and creates the same symlink in each version's bin dir. **This is required, not optional** — long-running shells hash `codex` to the NVM path; without these symlinks, your existing terminals bypass the C3 bridge entirely.
 4. Prints a one-line audit of every symlink it created or confirmed.

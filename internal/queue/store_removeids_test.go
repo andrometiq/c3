@@ -2,6 +2,7 @@ package queue
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -390,6 +391,159 @@ func TestAppendTracked_PrivateIdentityIsOldReaderCompatible(t *testing.T) {
 	}
 	if oldReader.MessageID != want.MessageID || oldReader.Text != want.Text {
 		t.Fatalf("old Inbound reader changed the public record: got %+v want msg=%d text=%q", oldReader, want.MessageID, want.Text)
+	}
+}
+
+func TestTrackedDrainProvenanceIsPrivateAndSurvivesPeek(t *testing.T) {
+	s := newStore(t)
+	dir := QueueDir()
+	rk := RouteKey{Channel: "telegram", ChatID: -100}
+	in := drainedMsg(7, "copy", "telegram__-200__42")
+	const sourceRecordID = "immutable-source-record"
+	targetRecordID, err := s.AppendDrainedTracked(rk, in, sourceRecordID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tracked, err := s.PeekTracked(rk, -1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tracked) != 1 || tracked[0].RecordID != targetRecordID ||
+		tracked[0].SourceRecordID != sourceRecordID ||
+		tracked[0].Inbound.MessageID != 7 {
+		t.Fatalf("tracked drain provenance lost: %+v", tracked)
+	}
+	otherID, err := s.AppendTracked(rk, msg(8, "rewrite trigger"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.RemoveRecordIDs(rk, []string{otherID}); err != nil {
+		t.Fatal(err)
+	}
+	tracked, err = s.PeekTracked(rk, -1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tracked) != 1 || tracked[0].SourceRecordID != sourceRecordID {
+		t.Fatalf("private drain provenance did not survive a queue rewrite: %+v", tracked)
+	}
+	lines := rawJSONL(t, dir, rk)
+	if len(lines) != 1 ||
+		!strings.Contains(lines[0], `"_c3_queue_id":"`+targetRecordID+`"`) ||
+		!strings.Contains(lines[0], `"_c3_drained_record_id":"`+sourceRecordID+`"`) {
+		t.Fatalf("private drain envelope missing from disk: %v", lines)
+	}
+	var oldReader c3types.Inbound
+	if err := json.Unmarshal([]byte(lines[0]), &oldReader); err != nil {
+		t.Fatalf("old Inbound reader rejected additive drain provenance: %v", err)
+	}
+	if oldReader.MessageID != 7 || oldReader.DrainedFrom != in.DrainedFrom || oldReader.Text != in.Text {
+		t.Fatalf("old reader changed the public record: %+v", oldReader)
+	}
+}
+
+func TestRefreshRecordText_MutatesOnlyExactTrackedOrganicLine(t *testing.T) {
+	s := newStore(t)
+	rk := RouteKey{Channel: "telegram", ChatID: -100}
+	if _, err := s.AppendDrainedTracked(rk, drainedMsg(5, "drained", "telegram__-200__42"), "source"); err != nil {
+		t.Fatal(err)
+	}
+	firstID, err := s.AppendTracked(rk, msg(5, "first organic"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondID, err := s.AppendTracked(rk, msg(5, "second organic"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if firstID == secondID {
+		t.Fatal("test setup produced duplicate record IDs")
+	}
+
+	ok, err := s.RefreshRecordText(rk, secondID, "second refreshed")
+	if err != nil || !ok {
+		t.Fatalf("RefreshRecordText = %v, %v", ok, err)
+	}
+	got, err := s.Peek(rk, -1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 3 ||
+		got[0].Text != "drained" ||
+		got[1].Text != "first organic" ||
+		got[2].Text != "second refreshed" {
+		t.Fatalf("exact refresh touched the wrong same-MessageID line: %+v", got)
+	}
+	if ok, err := s.RefreshRecordText(rk, "", "must not land"); err != nil || ok {
+		t.Fatalf("empty legacy identity must be a no-op, got %v, %v", ok, err)
+	}
+}
+
+func writeCorruptCursorFixture(t *testing.T, s *Store, rk RouteKey, records ...storedInbound) {
+	t.Helper()
+	data := []byte("{not-json}\n")
+	for _, rec := range records {
+		line, err := json.Marshal(rec)
+		if err != nil {
+			t.Fatal(err)
+		}
+		data = append(data, line...)
+		data = append(data, '\n')
+	}
+	if err := os.WriteFile(s.jsonlPath(rk), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// The corrupt first line and first real record are consumed. Rewriting
+	// strips the corrupt line, so the correct remapped cursor is 1.
+	if err := s.writeCursor(rk, 2); err != nil {
+		t.Fatal(err)
+	}
+	s.refreshIndex(rk)
+}
+
+func TestRefreshRecordText_RewriteFailureLeavesEveryPendingRecordVisible(t *testing.T) {
+	s := newStore(t)
+	rk := RouteKey{Channel: "telegram", ChatID: -100}
+	writeCorruptCursorFixture(t, s, rk,
+		storedInbound{Inbound: *msg(1, "consumed"), RecordID: "record-1"},
+		storedInbound{Inbound: *msg(2, "pending"), RecordID: "record-2"},
+	)
+	injected := errors.New("crash before JSONL rewrite")
+	s.rewriteTestHook = func() error { return injected }
+	if _, err := s.RefreshRecordText(rk, "record-2", "refreshed"); !errors.Is(err, injected) {
+		t.Fatalf("RefreshRecordText error = %v, want injected rewrite failure", err)
+	}
+
+	reopened, err := NewStore(QueueDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := peekIDs(t, reopened, rk); !reflect.DeepEqual(got, []int64{1, 2}) {
+		t.Fatalf("crash state pending IDs = %v, want replay-safe [1 2]", got)
+	}
+}
+
+func TestRemoveRecordIDs_RewriteFailureLeavesUnremovedPendingVisible(t *testing.T) {
+	s := newStore(t)
+	rk := RouteKey{Channel: "telegram", ChatID: -100}
+	writeCorruptCursorFixture(t, s, rk,
+		storedInbound{Inbound: *msg(1, "consumed"), RecordID: "record-1"},
+		storedInbound{Inbound: *msg(2, "selected"), RecordID: "record-2"},
+		storedInbound{Inbound: *msg(3, "must survive"), RecordID: "record-3"},
+	)
+	injected := errors.New("crash before JSONL rewrite")
+	s.rewriteTestHook = func() error { return injected }
+	if _, err := s.RemoveRecordIDs(rk, []string{"record-2"}); !errors.Is(err, injected) {
+		t.Fatalf("RemoveRecordIDs error = %v, want injected rewrite failure", err)
+	}
+
+	reopened, err := NewStore(QueueDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := peekIDs(t, reopened, rk); !reflect.DeepEqual(got, []int64{1, 2, 3}) {
+		t.Fatalf("crash state pending IDs = %v, want replay-safe [1 2 3]", got)
 	}
 }
 

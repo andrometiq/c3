@@ -1,6 +1,8 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -198,5 +200,37 @@ func TestPatchGrokConfig_NeverDuplicatesTables(t *testing.T) {
 			continue
 		}
 		assertNoDuplicateTables(t, out)
+	}
+}
+
+func TestFindGrokPluginSource_PrefersFreshPrebuiltLayout(t *testing.T) {
+	release := t.TempDir()
+	plugin := filepath.Join(release, "plugins", "c3-grok")
+	for name, body := range map[string]string{
+		".mcp.json":                          "{}\n",
+		"plugin.json":                        "{}\n",
+		filepath.Join("hooks", "hooks.json"): "{}\n",
+	} {
+		path := filepath.Join(plugin, name)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	oldExecutable := grokExecutablePath
+	grokExecutablePath = func() (string, error) {
+		return filepath.Join(release, "c3-broker"), nil
+	}
+	t.Cleanup(func() { grokExecutablePath = oldExecutable })
+
+	got := findGrokPluginSource()
+	want, err := filepath.Abs(plugin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != want {
+		t.Fatalf("findGrokPluginSource() = %q, want packaged plugin %q", got, want)
 	}
 }

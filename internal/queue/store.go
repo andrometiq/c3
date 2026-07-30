@@ -62,14 +62,32 @@ type Store struct {
 	// whole queue: the store runs with retirePair hard-deleting (deletePair) and
 	// snapshotDropped / gcTrash no-op'ing. Read-only after NewStore, so no lock.
 	retentionDisabled bool
+
+	// rewriteTestHook injects a failure immediately before rewrite mutates the
+	// JSONL. Tests use it to pin cursor-first crash semantics.
+	rewriteTestHook func() error
 }
 
 // storedInbound is the queue's private on-disk envelope. Embedding keeps every
-// frozen Inbound key at the top level; _c3_queue_id is additive, ignored by old
-// readers, and never appears on the public IPC Inbound.
+// frozen Inbound key at the top level. Both _c3_* keys are additive, ignored by
+// old readers, and never appear on the public IPC Inbound:
+//
+//   - RecordID is this queue line's immutable identity.
+//   - SourceRecordID is the immutable identity of the source line copied by a
+//     drain. It lets a retry distinguish later edits that reuse MessageID.
 type storedInbound struct {
 	c3types.Inbound
-	RecordID string `json:"_c3_queue_id,omitempty"`
+	RecordID       string `json:"_c3_queue_id,omitempty"`
+	SourceRecordID string `json:"_c3_drained_record_id,omitempty"`
+}
+
+// TrackedInbound exposes queue-private identity only to broker internals. The
+// public Inbound remains unchanged, so neither private field can leak over IPC.
+// Empty IDs identify legacy lines written before the private envelope existed.
+type TrackedInbound struct {
+	Inbound        c3types.Inbound
+	RecordID       string
+	SourceRecordID string
 }
 
 // NewStore creates the queue dir (0700) and returns a Store. Call
@@ -108,6 +126,18 @@ func (s *Store) Append(rk RouteKey, in *c3types.Inbound) error {
 // The identity survives queue rewrites and lets a live-delivery ack remove that
 // line even when another pending edit has the same channel MessageID.
 func (s *Store) AppendTracked(rk RouteKey, in *c3types.Inbound) (string, error) {
+	return s.appendTracked(rk, in, "")
+}
+
+// AppendDrainedTracked appends a drain copy and privately records the immutable
+// source-line identity it represents. An empty sourceRecordID is accepted for a
+// legacy untracked source: retries then fail toward another copy, never toward
+// mistaking an unrelated same-MessageID line for the landed record.
+func (s *Store) AppendDrainedTracked(rk RouteKey, in *c3types.Inbound, sourceRecordID string) (string, error) {
+	return s.appendTracked(rk, in, sourceRecordID)
+}
+
+func (s *Store) appendTracked(rk RouteKey, in *c3types.Inbound, sourceRecordID string) (string, error) {
 	// Stamp the record format version on the way to disk. Append is the ONLY
 	// place a record enters the queue, so it is the only place that has to do
 	// this — rewrite() and snapshotDropped() re-serialize records that were
@@ -127,7 +157,11 @@ func (s *Store) AppendTracked(rk RouteKey, in *c3types.Inbound) (string, error) 
 		if cp.V == 0 {
 			cp.V = c3types.InboundRecordVersion
 		}
-		rec = &storedInbound{Inbound: cp, RecordID: rand.Text()}
+		rec = &storedInbound{
+			Inbound:        cp,
+			RecordID:       rand.Text(),
+			SourceRecordID: sourceRecordID,
+		}
 	}
 	data, err := json.Marshal(rec)
 	if err != nil {
@@ -403,18 +437,31 @@ func (s *Store) countPendingLines(rk RouteKey) (int, error) {
 
 // pendingFrom returns the non-corrupt lines after the cursor.
 func pendingFrom(lines []storedInbound, cursor int) []c3types.Inbound {
+	tracked := pendingTrackedFrom(lines, cursor)
+	out := make([]c3types.Inbound, 0, len(tracked))
+	for _, in := range tracked {
+		out = append(out, in.Inbound)
+	}
+	return out
+}
+
+func pendingTrackedFrom(lines []storedInbound, cursor int) []TrackedInbound {
 	if cursor < 0 {
 		cursor = 0
 	}
 	if cursor > len(lines) {
 		cursor = len(lines)
 	}
-	out := make([]c3types.Inbound, 0, len(lines)-cursor)
+	out := make([]TrackedInbound, 0, len(lines)-cursor)
 	for _, in := range lines[cursor:] {
 		if in.Channel == corruptSentinel {
 			continue
 		}
-		out = append(out, in.Inbound)
+		out = append(out, TrackedInbound{
+			Inbound:        in.Inbound,
+			RecordID:       in.RecordID,
+			SourceRecordID: in.SourceRecordID,
+		})
 	}
 	return out
 }
@@ -426,6 +473,21 @@ func (s *Store) Peek(rk RouteKey, n int) ([]c3types.Inbound, error) {
 		return nil, err
 	}
 	pending := pendingFrom(lines, cursor)
+	if n >= 0 && n < len(pending) {
+		pending = pending[:n]
+	}
+	return pending, nil
+}
+
+// PeekTracked is Peek plus each pending line's queue-private durable identity
+// and drain provenance. It is for broker mutation bookkeeping only; callers
+// must send only TrackedInbound.Inbound over public IPC.
+func (s *Store) PeekTracked(rk RouteKey, n int) ([]TrackedInbound, error) {
+	lines, cursor, err := s.readLines(rk)
+	if err != nil {
+		return nil, err
+	}
+	pending := pendingTrackedFrom(lines, cursor)
 	if n >= 0 && n < len(pending) {
 		pending = pending[:n]
 	}
@@ -639,19 +701,28 @@ func (s *Store) EvictOverCap(rk RouteKey) (int, error) {
 	if err := s.quarantineCorrupt(rk, corrupt); err != nil {
 		return 0, err
 	}
-	if err := s.rewrite(rk, kept); err != nil {
-		return 0, err
-	}
 	newCursor := cursorReal - drop
 	if newCursor < 0 {
 		newCursor = 0
 	}
-	if newCursor >= len(kept) {
+	retire := newCursor >= len(kept)
+	// Commit a lowered cursor before shortening the file. If the rewrite then
+	// fails or the process dies, the old file may replay a consumed line; the
+	// inverse order leaves an old, larger cursor on the short file and silently
+	// hides a pending line.
+	if !retire {
+		if err := s.writeCursor(rk, newCursor); err != nil {
+			return 0, err
+		}
+	}
+	if err := s.rewrite(rk, kept); err != nil {
+		s.refreshIndex(rk)
+		return 0, err
+	}
+	if retire {
 		if err := s.retirePair(rk); err != nil {
 			return 0, err
 		}
-	} else if err := s.writeCursor(rk, newCursor); err != nil {
-		return 0, err
 	}
 	s.refreshIndex(rk)
 	return drop, nil
@@ -672,6 +743,25 @@ func (s *Store) RefreshText(rk RouteKey, messageID int64, newText string) (bool,
 	if messageID == 0 {
 		return false, nil // unidentifiable; never refresh
 	}
+	return s.refreshText(rk, newText, func(in storedInbound) bool {
+		return in.MessageID == messageID
+	})
+}
+
+// RefreshRecordText rewrites only the pending organic line with recordID.
+// Empty (legacy/untracked) identities and drained-in copies are clean no-ops:
+// retranscribe must never validate one line and mutate another same-MessageID
+// occurrence.
+func (s *Store) RefreshRecordText(rk RouteKey, recordID, newText string) (bool, error) {
+	if recordID == "" {
+		return false, nil
+	}
+	return s.refreshText(rk, newText, func(in storedInbound) bool {
+		return in.RecordID == recordID
+	})
+}
+
+func (s *Store) refreshText(rk RouteKey, newText string, match func(storedInbound) bool) (bool, error) {
 	lines, cursor, err := s.readLines(rk)
 	if err != nil || len(lines) == 0 {
 		return false, err
@@ -700,7 +790,7 @@ func (s *Store) RefreshText(rk RouteKey, messageID int64, newText string) (bool,
 		if real[idx].DrainedFrom != "" {
 			continue
 		}
-		if real[idx].MessageID == messageID {
+		if match(real[idx]) {
 			real[idx].Text = newText
 			found = true
 			break
@@ -712,19 +802,17 @@ func (s *Store) RefreshText(rk RouteKey, messageID int64, newText string) (bool,
 	if err := s.quarantineCorrupt(rk, corrupt); err != nil {
 		return false, err
 	}
-	if err := s.rewrite(rk, real); err != nil {
-		return false, err
-	}
-	// rewrite() may have dropped corrupt lines that sat before the cursor; persist
-	// the remapped cursor so consumed lines stay consumed.
+	// rewrite strips corrupt lines, so this remapped cursor can only be lower.
+	// Persist it first: interruption then replays consumed data from the old
+	// file instead of hiding pending data in the shortened file.
 	if cursorReal != cursor {
-		if cursorReal >= len(real) {
-			if err := s.retirePair(rk); err != nil {
-				return false, err
-			}
-		} else if err := s.writeCursor(rk, cursorReal); err != nil {
+		if err := s.writeCursor(rk, cursorReal); err != nil {
 			return false, err
 		}
+	}
+	if err := s.rewrite(rk, real); err != nil {
+		s.refreshIndex(rk)
+		return false, err
 	}
 	s.refreshIndex(rk)
 	return true, nil
@@ -842,18 +930,23 @@ func (s *Store) removeRecords(rk RouteKey, match func(storedInbound) bool) (remo
 	if err := s.quarantineCorrupt(rk, corrupt); err != nil {
 		return nil, err
 	}
+	retire := cursorReal >= len(kept)
+	// Removing pending lines leaves the consumed region unchanged, while
+	// stripping corrupt lines can lower its coordinate. Commit that lower
+	// cursor before shortening JSONL so interruption can only replay.
+	if !retire {
+		if err := s.writeCursor(rk, cursorReal); err != nil {
+			return nil, err
+		}
+	}
 	if err := s.rewrite(rk, kept); err != nil {
+		s.refreshIndex(rk)
 		return nil, err
 	}
-	// The consumed region is unchanged, so the new cursor is cursorReal (the count of
-	// consumed real lines). rewrite() stripped any corrupt lines, so the .cur must be
-	// persisted into the corrupt-free coordinate space regardless of its old value.
-	if cursorReal >= len(kept) {
+	if retire {
 		if err := s.retirePair(rk); err != nil {
 			return nil, err
 		}
-	} else if err := s.writeCursor(rk, cursorReal); err != nil {
-		return nil, err
 	}
 	s.refreshIndex(rk)
 	return removed, nil
@@ -1111,7 +1204,7 @@ func (s *Store) quarantineCorrupt(rk RouteKey, raws []string) error {
 	if s.retentionDisabled {
 		// Retention off (item G) means no .trash/ to retain into — but "never
 		// silent" is not part of the degradation: still log the destruction.
-		log.Printf("queue: %s: DESTROYING %d unparseable line(s) — .trash retention is disabled, no copy kept", base, len(raws))
+		log.Printf("queue: %s: pending rewrite is DESTROYING %d unparseable line(s) if it commits; .trash retention is disabled, so no recovery copy can be kept", base, len(raws))
 		return nil
 	}
 	stamp := firstFreeStamp(time.Now().UnixNano(), func(st int64) bool {
@@ -1125,7 +1218,7 @@ func (s *Store) quarantineCorrupt(rk RouteKey, raws []string) error {
 	if err := s.writeTrashLines(final, payload); err != nil {
 		return err
 	}
-	log.Printf("queue: %s: removed %d unparseable line(s) from the live queue; raw bytes retained at %s for TrashTTL — a torn/partial write may have swallowed a real message", base, len(raws), final)
+	log.Printf("queue: %s: quarantined %d unparseable line(s) at %s for TrashTTL; the pending live rewrite will omit them — a torn/partial write may have swallowed a real message", base, len(raws), final)
 	s.gcTrash(time.Now())
 	return nil
 }
@@ -1314,6 +1407,11 @@ func (s *Store) sweepTrashCaps(now time.Time, ttl time.Duration, maxBytes int64,
 // rewrite atomically replaces the jsonl with the given lines (the cap valve
 // EvictOverCap, the STT-fix RefreshText, and the drain primitive RemoveIDs).
 func (s *Store) rewrite(rk RouteKey, lines []storedInbound) error {
+	if s.rewriteTestHook != nil {
+		if err := s.rewriteTestHook(); err != nil {
+			return err
+		}
+	}
 	tmp := s.jsonlPath(rk) + ".tmp"
 	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0600)
 	if err != nil {

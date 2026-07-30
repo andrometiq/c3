@@ -157,7 +157,7 @@ func (c *Channel) pollLoop() {
 	// only Save on a real advance. With the persisted-offset tracker (offTrk,
 	// set in Start), the tracker is the source of truth across a supervised
 	// panic-restart (it lives on the Channel, not re-seeded here), so we resume
-	// from its committed prefix; the next fetch is Committed()+1.
+	// from its completed observed prefix; the next fetch is Committed()+1.
 	var offset int64
 	var lastSaved int64
 	if c.offTrk != nil {
@@ -402,17 +402,20 @@ func (c *Channel) pollLoop() {
 		// dedup-skip (the un-acked-frontier spin signature) — that is the signal to
 		// pace the next no-progress re-poll (see pollIdleBackoff at loop end).
 		var dispatchedAny bool
+		// Register the COMPLETE returned batch before dispatching any update.
+		// MarkDone can run synchronously for no-op outcomes or concurrently from a
+		// fast broker persist callback. Because Telegram update_ids start at an
+		// arbitrary positive number and may contain valid numeric gaps, the
+		// tracker advances over observed ids rather than committed+1; pre-registering
+		// the batch ensures such an early completion can never pass another update
+		// that this same response already delivered but the loop had not reached.
+		if c.offTrk != nil {
+			for i := range updates {
+				c.offTrk.Register(updates[i].UpdateId)
+			}
+		}
 		for i := range updates {
 			u := updates[i]
-			// Register the accepted update as in-flight in the persisted-offset
-			// tracker BEFORE dispatch. The committed offset advances past it only
-			// once its message is durably persisted (the broker's persist callback
-			// MarkDone-s it) or it is a no-op outcome (markUpdateDone below). When
-			// offTrk is nil (conflict/resilience unit tests), we fall back to the
-			// legacy highest-seen in-memory advance.
-			if c.offTrk != nil {
-				c.offTrk.Register(u.UpdateId)
-			}
 			if c.dedup != nil && c.dedup.SeenOrAdd(&u) {
 				lastInflightRefetchLogged = c.logDedupSkip(u.UpdateId, lastInflightRefetchLogged)
 				// A dedup-skip is NOT a persist. With offTrk, this is either a
@@ -439,17 +442,18 @@ func (c *Channel) pollLoop() {
 				advanced = true
 			}
 		}
-		// Persist the offset. With the tracker, save only the highest CONTIGUOUS
-		// durably-persisted (or no-op) update_id — never past an update whose
-		// Append is still in-flight (that is the whole safety property). Without
-		// it (unit tests), fall back to the legacy highest-seen advance.
+		// Persist the offset. With the tracker, save only the highest observed
+		// update_id whose ordered prefix is durably persisted (or a no-op) — never
+		// past an update whose Append is still in-flight (the safety property).
+		// Numeric gaps between observed update_ids are valid and do not block.
+		// Without the tracker (unit tests), fall back to highest-seen advance.
 		var saveTo int64
 		var doSave bool
 		if c.offTrk != nil {
 			if cur := c.offTrk.Committed(); cur > lastSaved {
 				saveTo, doSave = cur, true
 			}
-			// The next getUpdates resumes from the contiguous-committed prefix so
+			// The next getUpdates resumes from the completed observed prefix so
 			// an in-flight (unpersisted) update is re-fetched after a crash and
 			// never silently acked. Steady-state re-fetches are suppressed by the
 			// dedup map.
@@ -511,7 +515,7 @@ func (c *Channel) dispatchGuarded(u *gotgbot.Update, richRaw json.RawMessage) {
 			c.host.Logf("telegram: dispatch PANIC recovered (update=%d skipped): %v\n%s", u.UpdateId, r, buf[:n])
 			// A panicked (poison) update is SKIPPED: mark it done so the
 			// persisted offset advances past it rather than re-fetching it
-			// forever (the contiguous-prefix tracker would otherwise wedge here).
+			// forever (the observed-prefix tracker would otherwise wedge here).
 			c.markUpdateDone(u.UpdateId)
 		}
 	}()
@@ -548,7 +552,7 @@ func (c *Channel) dispatchUpdate(u *gotgbot.Update, richRaw json.RawMessage) {
 		// Any other subscribed-but-unhandled type. Should not occur given the
 		// allowedUpdates list, but log metadata so a future subscription that
 		// forgets its handler is visible rather than silently dropped. Never
-		// persisted — mark done so it does not wedge the contiguous prefix.
+		// persisted — mark done so it does not wedge the observed prefix.
 		c.host.Logf("telegram: drop update=%d (subscribed type with no dispatch handler)", u.UpdateId)
 		c.markUpdateDone(u.UpdateId)
 	}
@@ -1252,7 +1256,7 @@ func (c *Channel) dispatchMessage(updateID int64, msg *gotgbot.Message, edited b
 	// bounded grace window (submitGraceWindow). The seam above already staged
 	// msgToUpdate + the tracker's in-flight registration for this update.
 	//
-	// This used to mark the update done so the contiguous-prefix offset advanced
+	// This used to mark the update done so the observed-prefix offset advanced
 	// past it (I4), on the reasoning that a >64 burst must not wedge all inbound.
 	// But Telegram never redelivers an ACKNOWLEDGED update, so advancing destroyed
 	// a message the user sent — silently, and only visible in broker.log. The
@@ -1262,7 +1266,7 @@ func (c *Channel) dispatchMessage(updateID int64, msg *gotgbot.Message, edited b
 		// The route worker is saturated and this message was NOT persisted anywhere.
 		//
 		// Do NOT mark the update done. Leaving it in-flight holds the
-		// contiguous-prefix offset, so Telegram retains the update and redelivers
+		// observed-prefix offset, so Telegram retains the update and redelivers
 		// it once the route drains — the message survives instead of being dropped.
 		// This is the same loss-free shape as a failed durable Append.
 		//
