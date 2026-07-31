@@ -18,8 +18,9 @@ Telegram config are shared; only the host-integration wiring differs.
 | **Claude Desktop** | the desktop app's **Chat / Code** tabs | `c3-broker install-desktop` (see [`DESKTOP.md`](DESKTOP.md)) | **poll-only** — `fetch_queue` |
 | **CoWork** | Claude Desktop's **Cowork** tab (± hourly poll task) | same `install-desktop` | **poll-only** + optional scheduled poll |
 
-Codex is an optional add-on to any of these (Step 5). **Grok Build** and the **Antigravity
-CLI** are supported too — same binaries, same config, one extra command each (Step 5B).
+Codex is an optional add-on to any of these (Step 5). **Grok Build**, the **Antigravity
+CLI**, and **Cursor Agent CLI** are supported too — same binaries, same config, one extra
+command each (Step 5B).
 
 **Platform support.** **Linux is primary and fully supported.** **macOS** is
 supported (prebuilt binaries; `launchd` instead of systemd). **Windows (Claude
@@ -93,6 +94,7 @@ C3 ships nine Go binaries:
 - `c3-codex-adapter` — Codex MCP server
 - `c3-grok-adapter` — Grok Build MCP server
 - `c3-agy-adapter` — Antigravity CLI MCP server
+- `c3-cursor-adapter` — Cursor Agent CLI MCP server (the `install-cursor` target)
 - `c3-desktop-adapter` — Claude Desktop MCP server (the `install-desktop` target)
 - `claude-shim` — the `claude` wrapper that auto-injects the dev-channels flag (symlinked into PATH by `install-claude-shim`; see Step 4.5)
 - `codex` — the C3 Codex **launcher**. Deliberately NOT installed by the step below: it is named `codex` so it can take the place of the real one, and this guide puts `~/.local/bin` first on `PATH`, so installing it would silently reroute every `codex` invocation on your machine through C3. Step 5 installs it, and only if you want Codex integration.
@@ -129,7 +131,7 @@ sha256sum -c SHA256SUMS.this || shasum -a 256 -c SHA256SUMS.this
 tar xzf "${pkg}.tar.gz"
 mkdir -p ~/.local/bin/plugins/c3/stt ~/.local/bin/plugins/c3-grok ~/.local/libexec/c3
 for b in c3-broker c3-claude-adapter c3-codex-adapter c3-grok-adapter \
-         c3-agy-adapter c3-desktop-adapter claude-shim migrate-legacy; do
+         c3-agy-adapter c3-cursor-adapter c3-desktop-adapter claude-shim migrate-legacy; do
   install -m 0755 "${pkg}/${b}" ~/.local/bin/
 done
 cp -R "${pkg}/plugins/c3/stt/." ~/.local/bin/plugins/c3/stt/
@@ -294,14 +296,15 @@ This is a Go subcommand that idempotently:
 
 Open a fresh terminal (or `hash -r` your existing one) and run `which codex`. It should resolve to `~/.local/bin/codex`. From now on every `codex` invocation goes through the C3 launcher → app-server → adapter chain. Use Codex normally.
 
-## Step 5B (optional): Grok Build / Antigravity CLI
+## Step 5B (optional): Grok Build / Antigravity / Cursor
 
-Both are add-ons to the install above, not alternatives to it — they reuse the same binaries
+All three are add-ons to the install above, not alternatives to it — they reuse the same binaries
 (Step 2) and the same `mappings.json` (Step 3):
 
 ```bash
 c3-broker install-grok    # Grok Build
 c3-broker install-agy     # Antigravity CLI
+c3-broker install-cursor  # Cursor Agent CLI
 ```
 
 `install-grok` patches `~/.grok/config.toml`, touching only the keys C3 owns: it turns on
@@ -314,6 +317,12 @@ works, but inbound is pull-only. See [`GROK-INJECT.md`](GROK-INJECT.md).
 `c3-agy-adapter`. Antigravity has no async push, so inbound there is **poll-only** —
 `fetch_queue`. It's the newest adapter and the least travelled; expect rougher edges than the
 Claude Code path.
+
+`install-cursor` merges `mcpServers.c3` → `c3-cursor-adapter` into `~/.cursor/mcp.json`.
+Cursor's stock interactive TUI has no idle-wake / channel push, so inbound is **poll-only** —
+`fetch_queue`, or the `/fetch` / `/c3-fetch` slash commands (and the MCP prompt `fetch-queue`)
+installed into `~/.cursor/commands/`. Do not use `c3-claude-adapter` under Cursor (black-hole
+risk). Enable with `agent mcp enable c3` if prompted.
 
 ## Step 6: Verify
 
@@ -463,7 +472,7 @@ bindir="$(go env GOBIN)"; [ -n "$bindir" ] || bindir="$(go env GOPATH)/bin"
 for d in "$HOME/.local/bin" "$bindir"; do
   [ -d "$d" ] || continue
   rm -f "$d"/c3-broker "$d"/c3-claude-adapter "$d"/c3-codex-adapter \
-        "$d"/c3-grok-adapter "$d"/c3-agy-adapter "$d"/c3-desktop-adapter \
+        "$d"/c3-grok-adapter "$d"/c3-agy-adapter "$d"/c3-cursor-adapter "$d"/c3-desktop-adapter \
         "$d"/claude-shim "$d"/migrate-legacy
   # "$d"/codex is C3's launcher shim shadowing your real codex — the line above
   # already restores it for ~/.local/bin; delete it here only if you installed

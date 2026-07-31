@@ -30,9 +30,9 @@ C3 runs under three host environments. **Ask the user which one they want**
 | **Claude Desktop** | the desktop app's **Chat / Code** tabs | §3B — `c3-broker install-desktop` | **poll-only** — pull with `fetch_queue` |
 | **CoWork** | Claude Desktop's **Cowork** tab (optionally on a scheduled timer) | §3B — same `install-desktop` | **poll-only** + optional hourly poll task |
 
-(Codex is an optional add-on to any of these — §5. **Grok Build** and the **Antigravity
-CLI** are also supported; they are one-command add-ons layered on the same binaries and
-config — §5B.)
+(Codex is an optional add-on to any of these — §5. **Grok Build**, the **Antigravity
+CLI**, and **Cursor Agent CLI** are also supported; they are one-command add-ons layered on
+the same binaries and config — §5B.)
 
 ### Platform support
 
@@ -61,9 +61,9 @@ config — §5B.)
 
 ## 1. Install the binaries (all environments)
 
-C3 ships nine binaries: `c3-broker`, `c3-claude-adapter`, `c3-codex-adapter`,
-`c3-grok-adapter`, `c3-agy-adapter`, `c3-desktop-adapter`, `claude-shim`,
-`codex`, `migrate-legacy`. Prefer the prebuilt release tarball; build from
+C3 ships ten binaries: `c3-broker`, `c3-claude-adapter`, `c3-codex-adapter`,
+`c3-grok-adapter`, `c3-agy-adapter`, `c3-cursor-adapter`, `c3-desktop-adapter`,
+`claude-shim`, `codex`, `migrate-legacy`. Prefer the prebuilt release tarball; build from
 source only if there's no tarball for the user's platform. (**Windows:** a
 prebuilt tarball *is* published, but Windows is **beta** — see §7 for the
 Windows-specific steps and caveats.)
@@ -102,7 +102,7 @@ sha256sum -c SHA256SUMS.this || shasum -a 256 -c SHA256SUMS.this
 tar xzf "${pkg}.tar.gz"
 mkdir -p ~/.local/bin/plugins/c3/stt ~/.local/bin/plugins/c3-grok ~/.local/libexec/c3
 for b in c3-broker c3-claude-adapter c3-codex-adapter c3-grok-adapter \
-         c3-agy-adapter c3-desktop-adapter claude-shim migrate-legacy; do
+         c3-agy-adapter c3-cursor-adapter c3-desktop-adapter claude-shim migrate-legacy; do
   install -m 0755 "${pkg}/${b}" ~/.local/bin/
 done
 cp -R "${pkg}/plugins/c3/stt/." ~/.local/bin/plugins/c3/stt/
@@ -140,7 +140,7 @@ build:
 [ -d ~/.local/share/c3/.git ] && git -C ~/.local/share/c3 pull || git clone https://github.com/Andrometiq/c3 ~/.local/share/c3
 cd ~/.local/share/c3 && go install \
   ./cmd/c3-broker ./cmd/c3-claude-adapter ./cmd/c3-codex-adapter \
-  ./cmd/c3-grok-adapter ./cmd/c3-agy-adapter ./cmd/c3-desktop-adapter \
+  ./cmd/c3-grok-adapter ./cmd/c3-agy-adapter ./cmd/c3-cursor-adapter ./cmd/c3-desktop-adapter \
   ./cmd/claude-shim ./cmd/migrate-legacy
 ```
 
@@ -152,7 +152,7 @@ above, or the prebuilt tarball.)
 ### Verify the binaries are installed
 
 ```bash
-for bin in c3-broker c3-claude-adapter c3-codex-adapter c3-grok-adapter c3-agy-adapter c3-desktop-adapter claude-shim migrate-legacy; do
+for bin in c3-broker c3-claude-adapter c3-codex-adapter c3-grok-adapter c3-agy-adapter c3-cursor-adapter c3-desktop-adapter claude-shim migrate-legacy; do
   command -v "$bin" >/dev/null && echo "  ✓ $bin" || echo "  ✗ $bin (missing)"
 done
 command -v c3-broker >/dev/null || echo "WARNING: the install dir is not on \$PATH"
@@ -475,10 +475,10 @@ after `npm install -g @openai/codex` (or however they get Codex).
 (On Windows, Codex has no symlink/NVM equivalent yet and stays poll-only —
 tracked as a beta follow-up.)
 
-## 5B. (Optional) Grok Build / Antigravity CLI
+## 5B. (Optional) Grok Build / Antigravity / Cursor
 
-Both are add-ons to the install above — same binaries (§1), same `mappings.json` (§2), one
-extra command each. Neither replaces a §3 host; you can run them alongside one.
+All three are add-ons to the install above — same binaries (§1), same `mappings.json` (§2), one
+extra command each. None replaces a §3 host; you can run them alongside one.
 
 **Grok Build:**
 
@@ -505,6 +505,19 @@ Writes a `c3` plugin into `~/.gemini/antigravity-cli/plugins/c3/` (`plugin.json`
 steps. Antigravity has no async push, so inbound is **poll-only** — pull it with
 `fetch_queue`. This is the newest adapter and the least travelled; expect rougher edges than
 the Claude Code path.
+
+**Cursor Agent CLI:**
+
+```bash
+c3-broker install-cursor
+```
+
+Merges `mcpServers.c3` → `c3-cursor-adapter` into `~/.cursor/mcp.json` (preserves other
+servers) and installs `~/.cursor/commands/{fetch,c3-fetch}.md`. Cursor's stock interactive TUI
+has no idle-wake / channel push, so inbound is **poll-only** — call `fetch_queue`, or use
+`/fetch` / `/c3-fetch` (or the MCP prompt `fetch-queue`). Do not point Cursor at
+`c3-claude-adapter` (black-hole risk). After install: `agent mcp enable c3` if prompted, then
+`agent` and `attach`.
 
 ## 6. (Optional, Linux only) Supervise the broker with systemd
 

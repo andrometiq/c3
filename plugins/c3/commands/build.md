@@ -2,7 +2,7 @@
 description: Rebuild C3's eight core binaries from source (the Codex launcher remains opt-in).
 ---
 
-!cd "${CLAUDE_PLUGIN_ROOT}/../.." && go install ./cmd/c3-broker ./cmd/c3-claude-adapter ./cmd/c3-codex-adapter ./cmd/c3-grok-adapter ./cmd/c3-agy-adapter ./cmd/c3-desktop-adapter ./cmd/claude-shim ./cmd/migrate-legacy
+!cd "${CLAUDE_PLUGIN_ROOT}/../.." && go install ./cmd/c3-broker ./cmd/c3-claude-adapter ./cmd/c3-codex-adapter ./cmd/c3-grok-adapter ./cmd/c3-agy-adapter ./cmd/c3-cursor-adapter ./cmd/c3-desktop-adapter ./cmd/claude-shim ./cmd/migrate-legacy
 !command -v c3-broker >/dev/null && c3-broker --help 2>&1 | head -1
 
 If the build succeeded, tell the user: "core binaries installed; the PATH-shadowing Codex launcher is deliberately excluded and remains opt-in via INSTALL.md §5. To load the new code, quit Claude Code (Ctrl-D or `/exit`) and relaunch with `claude --dangerously-load-development-channels plugin:c3@c3` (append `--resume` to pick your session back up) — the next adapter spawn auto-spawns a fresh broker. A bare `claude` would leave inbound silently dead. Don't try to bounce the broker from inside Claude Code; it kills the MCP server. `/c3:reload-config` is for mappings.json edits only; it won't reload binaries."

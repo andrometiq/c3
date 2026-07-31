@@ -168,6 +168,57 @@ func isClaudeHost(args []string) bool {
 	return false
 }
 
+// isCursorHost reports whether argv looks like Cursor Agent CLI. Cursor loads
+// Claude Code plugins from ~/.claude/plugins, so this adapter can be spawned
+// under `agent` / `cursor-agent` alongside c3-cursor-adapter — a dual-MCP
+// footgun that makes Telegram welcome say "claude" and can black-hole inbound.
+func isCursorHost(args []string) bool {
+	if len(args) == 0 {
+		return false
+	}
+	base := filepath.Base(args[0])
+	switch base {
+	case "agent", "cursor-agent", "cursor-agent-local", "agent-local":
+		return true
+	}
+	for _, a := range args {
+		if strings.Contains(a, "cursor-agent/versions/") || strings.Contains(a, "cursor-agent-local/") {
+			return true
+		}
+	}
+	return false
+}
+
+// hostIsCursorAgent walks the /proc ancestor chain looking for a Cursor Agent
+// CLI host. Used to refuse startup under Cursor so install-cursor's
+// c3-cursor-adapter is the only C3 MCP that can claim routes.
+func hostIsCursorAgent() bool {
+	if runtime.GOOS == "windows" {
+		return false // no /proc walk; Cursor-on-Windows dual-load is rarer today
+	}
+	return detectCursorHost(os.Getpid(), procReaders{cmdline: readProcCmdline, ppid: readProcPPID})
+}
+
+func detectCursorHost(startPID int, r procReaders) bool {
+	const maxDepth = 40
+	pid := startPID
+	for depth := 0; depth < maxDepth; depth++ {
+		args, ok := r.cmdline(pid)
+		if !ok {
+			break
+		}
+		if isCursorHost(args) {
+			return true
+		}
+		parent, ok := r.ppid(pid)
+		if !ok || parent <= 1 || parent == pid {
+			break
+		}
+		pid = parent
+	}
+	return false
+}
+
 // readProcCmdline reads /proc/<pid>/cmdline (NUL-separated argv). Returns ok=false
 // when the file is absent (non-Linux) or unreadable. A process with an empty
 // cmdline (kernel threads, zombies) yields ok=false so the walk treats it as

@@ -45,6 +45,7 @@ The first is cleaner; the second is far easier to reason about when it misbehave
 - Per-user access control — who is allowed to drive which CLI.
 - Trusted-operator authorization for actions the CLI would otherwise hard-deny.
 - Permission-relay niceties: "see more" expansion, a text `y/n` fallback.
+- **CLI-resolved permission prompts leave a stale Allow/Deny keyboard on Telegram.** When the human Allow/Deny's in the CLI terminal, the broker never hears about it, so the Telegram inline keyboard stays live (and a later tap can race a already-settled request). Needs an adapter→broker "permission settled locally" signal that clears/edits the prompt message. Observed on Cursor; likely any host that can resolve permissions outside the channel path.
 
 ## Reach
 

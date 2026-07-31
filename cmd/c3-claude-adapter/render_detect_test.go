@@ -232,6 +232,59 @@ func TestIsClaudeHost(t *testing.T) {
 	}
 }
 
+func TestIsCursorHost(t *testing.T) {
+	yes := [][]string{
+		{"/home/u/.local/bin/agent", "--use-system-ca", "/home/u/.local/share/cursor-agent/versions/2026.07.23/index.js"},
+		{"cursor-agent"},
+		{"/usr/bin/node", "/home/u/.local/share/cursor-agent/versions/x/index.js"},
+	}
+	for _, a := range yes {
+		if !isCursorHost(a) {
+			t.Errorf("expected Cursor host for %v", a)
+		}
+	}
+	no := [][]string{
+		{"claude"},
+		{"c3-claude-adapter"},
+		{"/usr/bin/node", "some-other-app/index.js"},
+	}
+	for _, a := range no {
+		if isCursorHost(a) {
+			t.Errorf("expected NOT Cursor host for %v", a)
+		}
+	}
+}
+
+func TestDetectCursorHost_AncestorWalk(t *testing.T) {
+	tree := map[int]struct {
+		args []string
+		ppid int
+	}{
+		10: {args: []string{"c3-claude-adapter"}, ppid: 20},
+		20: {args: []string{"agent", "--use-system-ca", "/x/cursor-agent/versions/1/index.js"}, ppid: 1},
+	}
+	r := procReaders{
+		cmdline: func(pid int) ([]string, bool) {
+			n, ok := tree[pid]
+			return n.args, ok
+		},
+		ppid: func(pid int) (int, bool) {
+			n, ok := tree[pid]
+			return n.ppid, ok
+		},
+	}
+	if !detectCursorHost(10, r) {
+		t.Fatal("adapter under agent/cursor-agent must be detected as Cursor host")
+	}
+	tree[20] = struct {
+		args []string
+		ppid int
+	}{args: []string{"claude"}, ppid: 1}
+	if detectCursorHost(10, r) {
+		t.Fatal("adapter under claude must NOT be detected as Cursor host")
+	}
+}
+
 // buildInstructions must carry the degraded-delivery warning only when the host
 // cannot render, and never on the capable fast path.
 func TestBuildInstructions_DegradedWarningGate(t *testing.T) {

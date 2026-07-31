@@ -3,6 +3,22 @@
 Entries are newest first. This is the public architecture record: it records
 rulings and rationale, never private operational details.
 
+## D018: Cursor Agent CLI is poll-only (stock TUI over ACP inject)
+
+**Date:** 2026-07-31
+
+**Decision:** Ship `c3-cursor-adapter` as a poll-only MCP adapter (agy-shaped:
+`CannotRenderChannels: true`, `fetch_queue` for inbound) plus
+`c3-broker install-cursor` merging `~/.cursor/mcp.json`. Do **not** drive Cursor
+via ACP for C3 inbound, and do **not** reuse `c3-claude-adapter` under Cursor.
+
+**Why:** Cursor's interactive `agent` TUI has no idle-wake / inject API and no
+Claude-style channel renderer. ACP `session/prompt` can start turns but replaces
+the stock terminal client. The maintainer required zero TUI degradation, so
+poll-only + durable queue is the honest contract. Pointing Cursor at
+`c3-claude-adapter` is unsafe: render detection defaults capable and can
+black-hole Telegram inbound.
+
 ## D017: Final release discipline — independent review, then a direct v0.1.0 release
 
 **Date:** 2026-07-29
@@ -110,7 +126,7 @@ system.
 
 **Structural choices baked in:**
 
-- One Go module and nine release binaries: `c3-broker`, five CLI adapters,
+- One Go module and ten release binaries: `c3-broker`, six CLI adapters,
   `codex`, `claude-shim`, and `migrate-legacy`.
 - Telegram channel implementation in Go; typed IPC structs and operations; and
   a value-typed route key.

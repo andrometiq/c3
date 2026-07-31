@@ -113,6 +113,14 @@ func run() error {
 
 	a := newAdapter()
 	a.runCtx = ctx
+	// Cursor Agent CLI also loads Claude Code plugins from ~/.claude/plugins, so
+	// this binary can be spawned next to c3-cursor-adapter. Refuse that host —
+	// Claude-channel pushes black-hole under Cursor, and dual MCP makes welcome
+	// say "claude" while /mcp lists two C3 servers.
+	if hostIsCursorAgent() {
+		log.Printf("adapter: exit pid=%d reason=cursor-host — use c3-cursor-adapter (c3-broker install-cursor); disable plugin-c3-c3 via: agent mcp disable plugin-c3-c3", os.Getpid())
+		return fmt.Errorf("c3-claude-adapter must not run under Cursor Agent CLI; use c3-cursor-adapter (c3-broker install-cursor). Disable the Claude-plugin MCP: agent mcp disable plugin-c3-c3")
+	}
 	// Detect once whether this host can render channel push notifications. A
 	// flagless launch (typically a --fork-session background job) silently drops
 	// them, so the broker must hold such a session's inbound in the durable queue

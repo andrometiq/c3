@@ -1,6 +1,6 @@
 # Writing C3 CLI Adapters
 
-A C3 adapter is the bridge between the broker and a specific CLI's MCP-server expectations. The built-in adapters are `c3-claude-adapter` (Claude Code), `c3-codex-adapter` (Codex), `c3-grok-adapter` (Grok Build), `c3-desktop-adapter` (Claude Desktop, poll-only — see [`DESKTOP.md`](DESKTOP.md)), and `c3-agy-adapter` (Antigravity, poll-only). If you want to integrate C3 with a CLI we don't yet support — Cursor, Aider, plain shell, your own thing — write an adapter.
+A C3 adapter is the bridge between the broker and a specific CLI's MCP-server expectations. The built-in adapters are `c3-claude-adapter` (Claude Code), `c3-codex-adapter` (Codex), `c3-grok-adapter` (Grok Build), `c3-desktop-adapter` (Claude Desktop, poll-only — see [`DESKTOP.md`](DESKTOP.md)), `c3-agy-adapter` (Antigravity, poll-only), and `c3-cursor-adapter` (Cursor Agent CLI, poll-only). If you want to integrate C3 with a CLI we don't yet support — Aider, plain shell, your own thing — write an adapter.
 
 Adapters are not channels. Channels move bytes between users and the broker over the network (Telegram, web, voice). Adapters move messages between the broker and a single CLI process over MCP stdio. The two never see each other directly — both talk to the broker.
 
@@ -169,7 +169,7 @@ The broker rejects only *malformed JSON*. It does not reject an incomplete ident
 
 **`cannot_render_channels` is the one field a naive adapter gets wrong with data-loss consequences.** Absent or `false` means *"my host can render unsolicited channel pushes."* Set it to `true` only when you are confident your host **cannot** display a push. When true, the broker never marks that session's inbound as delivered: durable human messages fall through to the queue plus a held-notice (recoverable via `fetch_queue`, which is a tool *result* and therefore always renders), while the session keeps its claim for outbound.
 
-If your CLI has no unsolicited-notification path at all — the exact case this document tells you to expect — and you leave this field absent, the broker reads your host as renderable, pushes to it, acks, and the user loses every message. The two poll-only built-ins (`c3-desktop-adapter`, `c3-agy-adapter`) set it `true` unconditionally.
+If your CLI has no unsolicited-notification path at all — the exact case this document tells you to expect — and you leave this field absent, the broker reads your host as renderable, pushes to it, acks, and the user loses every message. The poll-only built-ins (`c3-desktop-adapter`, `c3-agy-adapter`, `c3-cursor-adapter`) set it `true` unconditionally.
 
 **`hello_ack`** (broker → adapter):
 
@@ -571,7 +571,7 @@ The broker emits a normalised message; converting it to what the host can ingest
 
 **Grok Build** has no channel-notification dialect. Live inject **requires leader mode** (`[cli] use_leader = true`). The Grok adapter registers as a client on the leader socket and issues ACP `session/prompt` against the TUI session id (see [`GROK-INJECT.md`](GROK-INJECT.md)). Without a leader socket, inbound stays in the durable queue for `fetch_queue`.
 
-**Claude Desktop** has no way for an MCP server to push into a chat at all, so `c3-desktop-adapter` is **pull-only**: inbound never surfaces on its own — it stays in the durable queue and the user drains it by asking Claude to call `fetch_queue`. See [`DESKTOP.md`](DESKTOP.md). **Antigravity** (`c3-agy-adapter`) is pull-only for the same reason.
+**Claude Desktop** has no way for an MCP server to push into a chat at all, so `c3-desktop-adapter` is **pull-only**: inbound never surfaces on its own — it stays in the durable queue and the user drains it by asking Claude to call `fetch_queue`. See [`DESKTOP.md`](DESKTOP.md). **Antigravity** (`c3-agy-adapter`) and **Cursor Agent CLI** (`c3-cursor-adapter`) are pull-only for the same class of reason: the host has no channel push that starts a turn (and Cursor additionally has no idle-wake API into the stock interactive TUI).
 
 Held messages — anything that arrived while no session was attached — are **not** buffered in the adapter. They live in the broker's durable per-route queue and the agent drains them with `fetch_queue`.
 
@@ -600,7 +600,7 @@ A built-in adapter binary lives at `cmd/<cli>-adapter/main.go` and is installed 
 
 If your target CLI has a plugin marketplace, ship the adapter as a thin manifest referencing the binary. If it doesn't, document the manual MCP server registration steps in your adapter's `SETUP.md`.
 
-**Budget for real work.** The five built-in adapters are, whole-package and excluding tests: Claude Code ~3.0k LOC, Codex ~2.4k, Grok Build ~3.1k, Claude Desktop ~2.4k, Antigravity ~1.4k — each reimplementing the handshake, attach, tool forwarding, reconnect, delivery acknowledgement, and host-specific inbound translation. This is the hardest of C3's three extension seams.
+**Budget for real work.** The six built-in adapters are, whole-package and excluding tests: Claude Code ~3.0k LOC, Codex ~2.4k, Grok Build ~3.1k, Claude Desktop ~2.4k, Antigravity ~1.4k, Cursor ~1.7k — each reimplementing the handshake, attach, tool forwarding, reconnect, delivery acknowledgement, and host-specific inbound translation. This is the hardest of C3's three extension seams.
 
 ## Adding a new adapter — checklist
 

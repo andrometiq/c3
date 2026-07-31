@@ -68,7 +68,7 @@ func CheckOnly(ctx context.Context, current string, client *http.Client) (*Resul
 // (Installed=false, error=nil) when the current build is dev, when the latest
 // release is not strictly newer, or when the latest is a prerelease/draft. On a
 // real update it downloads the platform tarball + SHA256SUMS, verifies the
-// checksum BEFORE touching anything, validates all nine shipped binaries plus
+// checksum BEFORE touching anything, validates all ten shipped binaries plus
 // the STT bundle, then replaces the eight core binaries in place. The optional cmd/codex launcher is
 // replaced only when the existing destination is positively identified as C3's
 // launcher; an absent or unrelated `codex` is never created or overwritten.

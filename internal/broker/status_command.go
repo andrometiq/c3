@@ -203,6 +203,8 @@ func surfaceLabel(cli string) string {
 		return "Grok"
 	case "agy":
 		return "Antigravity"
+	case "cursor":
+		return "Cursor"
 	case "", "c3-broker-cli":
 		return "a session"
 	default:

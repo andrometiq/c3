@@ -1494,6 +1494,7 @@ var defaultInstallPackages = []string{
 	"./cmd/c3-codex-adapter",
 	"./cmd/c3-grok-adapter",
 	"./cmd/c3-agy-adapter",
+	"./cmd/c3-cursor-adapter",
 	"./cmd/c3-desktop-adapter",
 	"./cmd/claude-shim",
 	"./cmd/migrate-legacy",

@@ -74,7 +74,7 @@ See *Degraded mode* in [`docs/USAGE.md`](docs/USAGE.md).
 
 ## Adapters
 
-An adapter is a small MCP server that connects one host CLI to the broker. Five ship:
+An adapter is a small MCP server that connects one host CLI to the broker. Six ship:
 
 | Adapter | Host | Inbound delivery | Tools | Notes |
 |---|---|---|---|---|
@@ -83,11 +83,12 @@ An adapter is a small MCP server that connects one host CLI to the broker. Five 
 | `c3-desktop-adapter` | Claude Desktop | pull only | 13 | Adds `observe` and `open_inbox`, plus an inbox panel. You ask Claude to check; it calls `fetch_queue`. |
 | `c3-grok-adapter` | Grok Build | live push, needs leader mode | 11 | Requires `[cli] use_leader = true` in Grok's config. Without it, pull only. |
 | `c3-agy-adapter` | Antigravity CLI | pull only | 11 | The host has no async push. Newest and least travelled; no dedicated doc yet. |
+| `c3-cursor-adapter` | Cursor Agent CLI | pull only | 11 | Stock interactive TUI. No idle-wake / channel push on Cursor — use `fetch_queue`. Install: `c3-broker install-cursor`. |
 
 Claude Code is the adapter the others are measured against — everything else trades something
 away, and the Inbound column is where you'll feel it. Install with `c3-broker
-install-claude-shim`, `install-codex-shim`, `install-desktop`, `install-grok`, or
-`install-agy`. Details in [`docs/ADAPTERS.md`](docs/ADAPTERS.md),
+install-claude-shim`, `install-codex-shim`, `install-desktop`, `install-grok`,
+`install-agy`, or `install-cursor`. Details in [`docs/ADAPTERS.md`](docs/ADAPTERS.md),
 [`docs/DESKTOP.md`](docs/DESKTOP.md), and [`docs/GROK-INJECT.md`](docs/GROK-INJECT.md).
 
 ## Channels
@@ -183,7 +184,7 @@ The playbook asks which host you're installing for and sets up the matching path
 a Telegram bot token and send two short pairing codes; setup discovers your user id and the
 group's chat id without an id hunt. Codex integration is a deliberate opt-in step, because
 C3's launcher is *also* named `codex` and takes the real command's place on `PATH`. Grok and
-Antigravity are set up after the base install with `c3-broker install-grok` / `install-agy`.
+Antigravity and Cursor are set up after the base install with `c3-broker install-grok` / `install-agy` / `install-cursor`.
 
 See [`INSTALL.md`](INSTALL.md) for the agent-driven playbook and
 [`docs/INSTALL.md`](docs/INSTALL.md) for the human walkthrough.

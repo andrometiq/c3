@@ -138,6 +138,12 @@ func main() {
 				os.Exit(exitConfig)
 			}
 			return
+		case "install-cursor":
+			if err := runInstallCursor(os.Args[2:]); err != nil {
+				fmt.Fprintf(os.Stderr, "c3-broker install-cursor: %v\n", err)
+				os.Exit(exitConfig)
+			}
+			return
 		case "install-desktop":
 			if err := runInstallDesktop(os.Args[2:]); err != nil {
 				fmt.Fprintf(os.Stderr, "c3-broker install-desktop: %v\n", err)
@@ -209,6 +215,12 @@ Usage:
                         Configure Grok Build for C3: enable leader mode,
                         pin mcp_servers.c3 → c3-grok-adapter, print plugin
                         install steps. Live Telegram inject requires leader.
+  c3-broker install-cursor
+                        Register the C3 adapter with Cursor Agent CLI: merge
+                        mcpServers.c3 → c3-cursor-adapter into ~/.cursor/mcp.json.
+                        Poll-only — Cursor has no idle-wake / channel push; use
+                        fetch_queue for inbound. Do not use c3-claude-adapter
+                        under Cursor (black-hole risk).
   c3-broker install-desktop [--config PATH]
                         Register the C3 adapter with Claude Desktop: merge an
                         mcpServers.c3 entry into claude_desktop_config.json at
