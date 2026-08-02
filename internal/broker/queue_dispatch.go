@@ -144,61 +144,11 @@ func (b *Broker) handleFetchQueue(conn *ipc.Conn, stub *Stub, raw []byte) {
 			route.Channel, route.ChatID, len(resp.Messages), resp.Remaining, err, lost)
 		return
 	}
-	// Destructive pull succeeded and reached the session: tell the human in the
-	// topic how many items the agent just drained. Peek (Ack=false) is silent —
-	// it consumes nothing. Zero-return pulls are silent too (no feedback spam
-	// when the agent polls an empty queue).
-	if req.Ack && resp.Err == "" && len(resp.Messages) > 0 {
-		n := len(resp.Messages)
-		remaining := resp.Remaining
-		cli := stub.CLI
-		go b.sendFetchQueueAck(*route, cli, n, remaining)
-	}
-}
-
-// sendFetchQueueAck posts a short, deterministic notice to the route after a
-// successful destructive fetch_queue. Async so a slow Telegram send never
-// delays the MCP tool result. Errors are logged only.
-func (b *Broker) sendFetchQueueAck(key RouteKey, cli string, fetched, remaining int) {
-	if b == nil {
-		return
-	}
-	ch, err := b.Channel(key.Channel)
-	if err != nil {
-		log.Printf("fetch-ack: channel %s lookup failed: %v", key.Channel, err)
-		return
-	}
-	var topicID *int64
-	if key.HasTopic {
-		t := key.TopicID
-		topicID = &t
-	}
-	who := cli
-	if who == "" {
-		who = "agent"
-	}
-	text := fetchQueueAckText(who, fetched, remaining)
-	if _, err := ch.SendReply(c3types.ReplyArgs{
-		Channel: key.Channel,
-		ChatID:  key.ChatID,
-		TopicID: topicID,
-		Text:    text,
-	}); err != nil {
-		log.Printf("fetch-ack: send failed for %s: %v", routeKeyStr(key), err)
-		return
-	}
-	log.Printf("fetch-ack: sent for %s cli=%s fetched=%d remaining=%d", routeKeyStr(key), who, fetched, remaining)
-}
-
-func fetchQueueAckText(cli string, fetched, remaining int) string {
-	item := "item"
-	if fetched != 1 {
-		item = "items"
-	}
-	if remaining > 0 {
-		return fmt.Sprintf("📥 Fetched **%d** queued %s (`%s`) — **%d** still held.", fetched, item, cli, remaining)
-	}
-	return fmt.Sprintf("📥 Fetched **%d** queued %s (`%s`).", fetched, item, cli)
+	// A successful destructive pull is SILENT to the topic. The plumbing does not
+	// talk to the human: when the agent has drained the held messages it responds
+	// with real content, and that response is the only confirmation the human
+	// needs. A broker-minted "Fetched N queued item" receipt is noise on every
+	// live path and was removed (it had fired for every CLI, not just poll-only).
 }
 
 // handleRetranscribe re-runs the STT provider chain on a cached voice attachment
