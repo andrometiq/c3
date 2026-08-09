@@ -127,6 +127,14 @@ type Broker struct {
 	updateMu        sync.RWMutex
 	updateAvailable bool
 	latestVersion   string
+
+	// sttRetryMu guards sttRetries — voice notes whose STT FETCH failed on a
+	// transient network condition, parked to be re-attempted when the Telegram
+	// fetch health recovers (P0-2). Bounded (maxSTTRetries, drop-oldest), deduped by
+	// (route, message_id, file_id), attempt-capped (maxSTTRetryAttempts). See
+	// stt_retry.go.
+	sttRetryMu sync.Mutex
+	sttRetries []sttRetryEntry
 }
 
 const defaultWorkerIdle = 60 * time.Second

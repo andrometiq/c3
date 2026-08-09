@@ -33,6 +33,10 @@ const (
 	JobDrainPeek
 	JobDrainAppend
 	JobDrainRemove
+	// JobRetrySTT re-runs STT for a voice note whose fetch failed transiently, after
+	// the Telegram fetch health recovered (P0-2). Runs on the route's worker so the
+	// blocking re-run + late delivery stay single-owner.
+	JobRetrySTT
 )
 
 // Job is one unit of work for a route worker. Exactly one of the payload
@@ -48,6 +52,15 @@ type Job struct {
 	DrainPeek   *DrainPeekJob
 	DrainAppend *DrainAppendJob
 	DrainRemove *DrainRemoveJob
+	RetrySTT    *RetrySTTJob
+}
+
+// RetrySTTJob re-runs STT for a parked voice note (P0-2) after network recovery.
+// Attempts carries the prior attempt count so the handler can re-park up to the cap.
+type RetrySTTJob struct {
+	MessageID int64
+	FileID    string
+	Attempts  int
 }
 
 // BacklogJob asks the worker to read the route's queued total AND a compact
@@ -497,6 +510,8 @@ func (w *RouteWorker) run(ctx context.Context) {
 				w.handleDrainAppend(job.DrainAppend)
 			case JobDrainRemove:
 				w.handleDrainRemove(job.DrainRemove)
+			case JobRetrySTT:
+				w.handleRetrySTT(ctx, job.RetrySTT)
 			case JobRelease:
 				flushDeb()
 				return
@@ -513,6 +528,8 @@ type voiceOutcome struct {
 	marker     string // agent-surface text when the audio never arrived at all
 	notice     string // human-facing notice, "" when there is nothing to say
 	raw        string // the plugin's raw return, for sttFailureReason
+	retryable  bool   // the FETCH failed on a transient network condition — park for
+	//                   auto-retry on network recovery (P0-2)
 }
 
 // observeTelegramOrder advances the per-route Telegram message watermark and
@@ -555,10 +572,10 @@ func (w *RouteWorker) voiceOutcome(ctx context.Context, in *c3types.Inbound, att
 	// chain. The ask is the same getFile the chain opens with, so a refusal here
 	// is a refusal there — and reporting it costs one bodyless call instead of
 	// two HTTP 400s under a message that names the wrong subsystem.
-	if marker, notice, refuse := w.broker.voiceFetchRefusal(in.Channel, att); refuse {
+	if marker, notice, refuse, retryable := w.broker.voiceFetchRefusal(in.Channel, att); refuse {
 		log.Printf("stt SKIPPED chan=%s chat=%d topic=%s msg=%d file_id=%s: the bot server will not serve this file (%d bytes stated) — handler not run: %s",
 			w.key.Channel, w.key.ChatID, TopicKeyStr(w.key), in.MessageID, att.FileID, att.Size, marker)
-		return voiceOutcome{marker: marker, notice: notice}
+		return voiceOutcome{marker: marker, notice: notice, retryable: retryable}
 	}
 	// Per-call deadline so a hung download can't block the worker goroutine (and
 	// the JobFetch/JobConsume jobs queued behind it). cancel() runs immediately
@@ -582,9 +599,10 @@ func (w *RouteWorker) voiceOutcome(ctx context.Context, in *c3types.Inbound, att
 		log.Printf("stt FETCH FAILED chan=%s chat=%d topic=%s msg=%d file_id=%s: %s — reporting the server's own error, not a transcription failure",
 			w.key.Channel, w.key.ChatID, TopicKeyStr(w.key), in.MessageID, att.FileID, detail)
 		return voiceOutcome{
-			marker: voiceFetchFailedAgentText(cause),
-			notice: voiceFetchFailedNotice(cause),
-			raw:    raw,
+			marker:    voiceFetchFailedAgentText(cause),
+			notice:    voiceFetchFailedNotice(cause),
+			raw:       raw,
+			retryable: isNetworkTransient(detail),
 		}
 	}
 	if raw != "" && !isSTTFailureMarker(raw) {
@@ -705,6 +723,13 @@ func (w *RouteWorker) flushInbounds(ctx context.Context, batch []*c3types.Inboun
 				// anything failed.
 				if o.notice != "" && !slices.Contains(notices, o.notice) {
 					notices = append(notices, o.notice)
+				}
+				// P0-2: a transient-network FETCH failure is parked for auto-retry when
+				// the Telegram fetch health recovers — the note failed only because the
+				// network wasn't up yet, so re-transcribe + deliver it late instead of
+				// leaving the human a permanent-looking failure notice.
+				if o.retryable && w.broker != nil {
+					w.broker.parkSTTRetry(w.key, in.MessageID, att.FileID)
 				}
 			}
 			failNotice := strings.Join(notices, "\n")
@@ -2123,7 +2148,7 @@ func (w *RouteWorker) handleRefreshText(ctx context.Context, job *RefreshTextJob
 			job.ResultCh <- RefreshResult{Refreshed: false}
 			return
 		}
-		w.deliverTranscriptAsNewLine(ctx, qrk, job)
+		w.deliverTranscriptAsNewLine(ctx, qrk, job.MessageID, job.FileID, job.Transcript)
 		job.ResultCh <- RefreshResult{AppendedNew: true}
 		return
 	}
@@ -2154,7 +2179,7 @@ func (w *RouteWorker) handleRefreshText(ctx context.Context, job *RefreshTextJob
 // path — not flushInbounds — so it never re-runs STT and never touches the offset
 // seam / markPersisted (there is no source Telegram update to advance). Runs on the
 // route's single-owner worker (called from handleRefreshText).
-func (w *RouteWorker) deliverTranscriptAsNewLine(ctx context.Context, qrk queue.RouteKey, job *RefreshTextJob) {
+func (w *RouteWorker) deliverTranscriptAsNewLine(ctx context.Context, qrk queue.RouteKey, messageID int64, fileID, transcript string) {
 	if w.broker == nil || w.broker.Queue == nil {
 		return
 	}
@@ -2168,19 +2193,19 @@ func (w *RouteWorker) deliverTranscriptAsNewLine(ctx context.Context, qrk queue.
 	// carries the transcript, and file-level recovery stays available via the file_id
 	// named here (download_attachment / retranscribe are cache-first).
 	text := fmt.Sprintf("[Re-transcription of an earlier voice note — message %d, file_id %s]\n%s%s",
-		job.MessageID, job.FileID, w.sttPrefix(w.key.Channel), job.Transcript)
+		messageID, fileID, w.sttPrefix(w.key.Channel), transcript)
 	in := &c3types.Inbound{
 		Channel:   w.key.Channel,
 		ChatID:    w.key.ChatID,
 		TopicID:   topicID,
-		MessageID: job.MessageID,
+		MessageID: messageID,
 		Text:      text,
 		Timestamp: time.Now(),
 	}
 	recordID, err := w.broker.Queue.AppendTracked(qrk, in)
 	if err != nil {
-		log.Printf("retranscribe late-deliver APPEND FAIL chan=%s chat=%d topic=%s msg=%d: %v — transcript returned to caller only",
-			w.key.Channel, w.key.ChatID, TopicKeyStr(w.key), job.MessageID, err)
+		log.Printf("late-transcript-deliver APPEND FAIL chan=%s chat=%d topic=%s msg=%d: %v — transcript not stored",
+			w.key.Channel, w.key.ChatID, TopicKeyStr(w.key), messageID, err)
 		return
 	}
 	// Record the id so forwardOrFallbackCovering's no-claim "append-if-absent" branch
@@ -2190,11 +2215,64 @@ func (w *RouteWorker) deliverTranscriptAsNewLine(ctx context.Context, qrk queue.
 	if w.dedup != nil {
 		w.dedup.record(in.MessageID)
 	}
-	log.Printf("retranscribe late-deliver chan=%s chat=%d topic=%s msg=%d: appended fresh transcript line (not queued in place; delivered/held)",
-		w.key.Channel, w.key.ChatID, TopicKeyStr(w.key), job.MessageID)
+	log.Printf("late-transcript-deliver chan=%s chat=%d topic=%s msg=%d: appended fresh transcript line (delivered/held)",
+		w.key.Channel, w.key.ChatID, TopicKeyStr(w.key), messageID)
 	// Deliver the one appended line: push to a live holder, else hold for fetch_queue.
 	// forwardOrFallbackCovering never calls markPersisted, so no offset/seam is touched.
 	w.forwardOrFallbackCovering(ctx, in, 1, []string{recordID}, true)
+}
+
+// handleRetrySTT re-runs STT for a voice note parked after a network-transient
+// fetch failure, once the Telegram fetch health recovered (P0-2). On success it
+// delivers the transcript through the P0-1 late-delivery path (a fresh durable
+// line). It does NOT re-park on a preflight refusal (the network is back, so a
+// refusal now is permanent — expired/too-big/gone) or on a provider failure
+// (download worked, transcription didn't — re-running would loop); it re-parks
+// only on a STILL-transient handler fetch failure (a flap mid-retry), attempt-capped.
+func (w *RouteWorker) handleRetrySTT(ctx context.Context, job *RetrySTTJob) {
+	defer recoverGoroutine("worker.handleRetrySTT")
+	if job == nil || w.broker == nil || w.broker.Plugins == nil {
+		return
+	}
+	// Preflight (network is back) — also yields the size so the STT budget scales.
+	refusal, size := w.broker.attachmentFetchRefusal(w.key.Channel, job.FileID)
+	if refusal != "" {
+		log.Printf("stt-retry chan=%s msg=%d file_id=%s: server will not serve the file on retry (likely expired/gone) — giving up: %s",
+			w.key.Channel, job.MessageID, job.FileID, refusal)
+		return
+	}
+	var topicID *int64
+	if w.key.HasTopic {
+		t := w.key.TopicID
+		topicID = &t
+	}
+	sttCtx, cancel := context.WithTimeout(ctx, sttFlushTimeout)
+	transcript := w.broker.Plugins.FireOnVoiceReceived(sttCtx, c3types.VoicePayload{
+		Channel:   w.key.Channel,
+		ChatID:    w.key.ChatID,
+		TopicID:   topicID,
+		MessageID: job.MessageID,
+		FileID:    job.FileID,
+		Size:      size,
+	})
+	cancel()
+	if detail, ok := sttFetchFailure(transcript); ok {
+		if isNetworkTransient(detail) {
+			w.broker.reparkSTTRetry(sttRetryEntry{route: w.key, messageID: job.MessageID, fileID: job.FileID, attempts: job.Attempts})
+		} else {
+			log.Printf("stt-retry chan=%s msg=%d file_id=%s: fetch failed non-transiently — giving up: %s",
+				w.key.Channel, job.MessageID, job.FileID, detail)
+		}
+		return
+	}
+	if transcript == "" || isSTTFailureMarker(transcript) {
+		log.Printf("stt-retry chan=%s msg=%d file_id=%s: download recovered but transcription still failed — not re-parking (network is not the problem)",
+			w.key.Channel, job.MessageID, job.FileID)
+		return
+	}
+	log.Printf("stt-retry chan=%s msg=%d file_id=%s: transcribed after network recovery (%d chars) — delivering late",
+		w.key.Channel, job.MessageID, job.FileID, len(transcript))
+	w.deliverTranscriptAsNewLine(ctx, queueRouteKey(w.key), job.MessageID, job.FileID, transcript)
 }
 
 // queuedVoiceRecord returns the exact pending organic tracked line that owns

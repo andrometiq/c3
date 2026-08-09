@@ -142,6 +142,11 @@ func (h *BrokerHost) NotifyHealth(ev c3types.HealthEvent) {
 	} else {
 		log.Printf("HEALTH chan=%s state=UP (recovered, was down %s) — inbound restored",
 			ev.Channel, ev.DownFor.Round(time.Second))
+		// P0-2: connectivity is back — re-attempt any STT transcriptions parked after
+		// a network-transient fetch failure, delivering late successes via the P0-1
+		// path. onChannelRecovered offloads the blocking re-runs to the route workers,
+		// so this notify goroutine is never blocked.
+		h.broker.onChannelRecovered(ev.Channel)
 	}
 
 	// (e) status file the Claude Code status line reads.

@@ -56,20 +56,23 @@ type attachmentSizer interface {
 //     chain opens with this same fetch, so it would fail identically and report
 //     a generic "transcription failed" over the top of a real error. The real
 //     error is passed through instead.
-func (b *Broker) voiceFetchRefusal(chanName string, att c3types.Attachment) (agentText, notice string, refuse bool) {
+func (b *Broker) voiceFetchRefusal(chanName string, att c3types.Attachment) (agentText, notice string, refuse, retryable bool) {
 	ch, err := b.Channel(chanName)
 	if err != nil {
-		return "", "", false
+		return "", "", false, false
 	}
 	sizer, ok := ch.(attachmentSizer)
 	if !ok || att.FileID == "" {
-		return "", "", false // nothing to ask, or nobody to ask
+		return "", "", false, false // nothing to ask, or nobody to ask
 	}
 	if _, perr := sizer.AttachmentSize(att.FileID); perr != nil {
 		agent, human := fetchFailureTexts(perr, att.Size)
-		return agent, human, true
+		// Retryable ONLY for a transient network condition — never a too-big / bad-file
+		// refusal, which retrying can never fix (P0-2, fail-closed classification).
+		retry := !errors.Is(perr, channel.ErrAttachmentTooLarge) && isNetworkTransient(perr.Error())
+		return agent, human, true, retry
 	}
-	return "", "", false
+	return "", "", false, false
 }
 
 // sttFetchFailedPrefix mirrors stt.FetchFailedPrefix. It is duplicated rather
