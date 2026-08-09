@@ -767,45 +767,6 @@ func (s *Store) EvictOverCap(rk RouteKey) (int, error) {
 	return drop, nil
 }
 
-// RefreshText rewrites, in place, the Text of the still-pending queued line whose
-// Inbound.MessageID == messageID. Used by retranscribe to replace a stored STT-
-// failure placeholder with a corrected transcript so a later fetch_queue returns
-// the fixed text. Only lines AT/AFTER the cursor (not yet consumed) are eligible —
-// an already-consumed or never-queued message_id is a clean no-op. Returns whether
-// a line was refreshed.
-//
-// It reuses the same cap-safe atomic rewrite path as EvictOverCap (temp file →
-// fsync → rename → dir-fsync), so the on-disk update is crash-safe. Like that
-// path, rewrite() strips corrupt placeholder lines, so the cursor is remapped into
-// the corrupt-free coordinate space to stay aligned with the rewritten file.
-func (s *Store) RefreshText(rk RouteKey, messageID int64, newText string) (bool, error) {
-	if messageID == 0 {
-		return false, nil // unidentifiable; never refresh
-	}
-	return s.refreshText(rk, newText, func(in storedInbound) bool {
-		return in.MessageID == messageID
-	})
-}
-
-// RefreshRecordText rewrites only the pending organic line with recordID.
-// Empty (legacy/untracked) identities and drained-in copies are clean no-ops:
-// retranscribe must never validate one line and mutate another same-MessageID
-// occurrence.
-func (s *Store) RefreshRecordText(rk RouteKey, recordID, newText string) (bool, error) {
-	if recordID == "" {
-		return false, nil
-	}
-	return s.refreshText(rk, newText, func(in storedInbound) bool {
-		return in.RecordID == recordID
-	})
-}
-
-func (s *Store) refreshText(rk RouteKey, newText string, match func(storedInbound) bool) (bool, error) {
-	return s.rewritePending(rk, match, func(in *storedInbound) {
-		in.Text = newText
-	})
-}
-
 // ResolveVoiceText atomically records one attachment's terminal text and removes
 // its file ID from the row's private pending set. A duplicate resolve, a legacy
 // row, or a row already consumed/evicted is a clean no-op; callers can then use
@@ -841,9 +802,9 @@ func (s *Store) ResolveVoiceText(rk RouteKey, recordID, fileID, newText string) 
 	return resolved, allDone, err
 }
 
-// rewritePending is the one crash-safe pending-row mutation composite shared by
-// text refresh and voice resolution: readLines, cursor projection, quarantine,
-// cursor-first remap, atomic JSONL rewrite, then status refresh.
+// rewritePending is the crash-safe voice-row mutation composite: readLines,
+// cursor projection, quarantine, cursor-first remap, atomic JSONL rewrite, then
+// status refresh.
 func (s *Store) rewritePending(rk RouteKey, match func(storedInbound) bool, mutate func(*storedInbound)) (bool, error) {
 	lines, cursor, err := s.readLines(rk)
 	if err != nil || len(lines) == 0 {
@@ -920,7 +881,7 @@ func (s *Store) rewritePending(rk RouteKey, match func(storedInbound) bool, muta
 // slice, so a crash-retry re-issue converges on the surviving intersection
 // (idempotent).
 //
-// It reuses the proven composite (same internals as EvictOverCap/RefreshText):
+// It reuses the proven composite (same internals as EvictOverCap/ResolveVoiceText):
 // readLines + cursor projection → walk pending counting per-id occurrences and
 // partition selected vs kept → snapshotDropped the removed lines to .trash/
 // (recoverable for TrashTTL, INV-4) BEFORE the atomic rewrite (tmp → fsync →
@@ -1488,7 +1449,7 @@ func (s *Store) sweepTrashCaps(now time.Time, ttl time.Duration, maxBytes int64,
 }
 
 // rewrite atomically replaces the jsonl with the given lines (the cap valve
-// EvictOverCap, the STT-fix RefreshText, and the drain primitive RemoveIDs).
+// EvictOverCap, ResolveVoiceText, and the drain primitive RemoveIDs).
 func (s *Store) rewrite(rk RouteKey, lines []storedInbound) error {
 	if s.rewriteTestHook != nil {
 		if err := s.rewriteTestHook(); err != nil {
@@ -1539,7 +1500,7 @@ func (s *Store) rewrite(rk RouteKey, lines []storedInbound) error {
 
 // refreshIndex recomputes the cheap status counters for one route (Pending +
 // MIN/MAX pending ages). Every mutation path funnels through here (Append,
-// Consume, EvictOverCap, RefreshText, RemoveIDs, RecoverOnStartup) and this is
+// Consume, EvictOverCap, ResolveVoiceText, RemoveIDs, RecoverOnStartup) and this is
 // the ONLY writer of the index, so a full MIN/MAX recompute here keeps NewestUnix
 // correct everywhere with no extra rescan — the pendingStats scan replaces the
 // Pending scan this already did.

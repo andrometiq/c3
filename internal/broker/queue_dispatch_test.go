@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"net"
+	"os"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -12,6 +14,18 @@ import (
 	"github.com/Andrometiq/c3/internal/ipc"
 	"github.com/Andrometiq/c3/internal/queue"
 )
+
+type cachedProbeChannel struct {
+	*probeChannel
+	path string
+}
+
+func (c *cachedProbeChannel) CachedVoicePath(fileID string) string {
+	if fileID == "cached-voice" {
+		return c.path
+	}
+	return ""
+}
 
 func TestHandleFetchQueue_ConsumesOldest(t *testing.T) {
 	t.Setenv("C3_QUEUE_DIR", t.TempDir())
@@ -115,6 +129,110 @@ func TestHandleRetranscribe_ReRunsSTT(t *testing.T) {
 	resp := readRetranscribeResp(t, agentSide)
 	if resp.Text != "fresh transcript" {
 		t.Fatalf("retranscribe text = %q, want 'fresh transcript'", resp.Text)
+	}
+}
+
+func TestHandleRetranscribe_DownHealthCachedSucceedsOffline(t *testing.T) {
+	t.Setenv("C3_QUEUE_DIR", t.TempDir())
+	cachePath := t.TempDir() + "/cached-voice.oga"
+	if err := os.WriteFile(cachePath, []byte("cached audio"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ch := &cachedProbeChannel{probeChannel: &probeChannel{fakeChannel: &fakeChannel{}}, path: cachePath}
+	b := brokerWithGenericChannel(t, mfWithTelegram(), ch)
+	defer b.Shutdown()
+	b.setLastHealth(c3types.HealthEvent{Channel: "telegram", State: c3types.HealthStateDown, Since: time.Now()})
+	var calls atomic.Int64
+	b.Plugins.OnVoiceReceived(func(context.Context, c3types.VoicePayload) (string, error) {
+		calls.Add(1)
+		return "offline transcript", nil
+	})
+	stub := &Stub{CLI: "claude"}
+	route := MakeRouteKey("telegram", -100, ptrI64(914))
+	stub.SetRoute(&route)
+	agentSide, brokerSide := newConnPair(t)
+	raw, _ := json.Marshal(ipc.RetranscribeReq{Op: ipc.OpRetranscribe, ID: "cached-down", FileID: "cached-voice"})
+	go b.handleRetranscribe(brokerSide, stub, raw)
+	resp := readRetranscribeResp(t, agentSide)
+	if resp.Err != "" || resp.Text != "offline transcript" {
+		t.Fatalf("cached retranscribe while DOWN = %+v", resp)
+	}
+	if calls.Load() != 1 || ch.calls.Load() != 0 {
+		t.Fatalf("cached DOWN path calls: STT=%d network probes=%d; want 1,0", calls.Load(), ch.calls.Load())
+	}
+}
+
+func TestHandleRetranscribe_DownHealthUncachedFailsFastAndParks(t *testing.T) {
+	t.Setenv("C3_QUEUE_DIR", t.TempDir())
+	ch := &probeChannel{fakeChannel: &fakeChannel{}, size: 100}
+	b := brokerWithProbe(t, ch)
+	defer b.Shutdown()
+	b.setLastHealth(c3types.HealthEvent{Channel: "telegram", State: c3types.HealthStateDown, Since: time.Now()})
+	var calls atomic.Int64
+	b.Plugins.OnVoiceReceived(func(context.Context, c3types.VoicePayload) (string, error) {
+		calls.Add(1)
+		return "must not run", nil
+	})
+	stub := &Stub{CLI: "claude"}
+	route := MakeRouteKey("telegram", -100, ptrI64(914))
+	stub.SetRoute(&route)
+	agentSide, brokerSide := newConnPair(t)
+	raw, _ := json.Marshal(ipc.RetranscribeReq{Op: ipc.OpRetranscribe, ID: "uncached-down", FileID: "uncached-voice", MessageID: 44})
+	started := time.Now()
+	go b.handleRetranscribe(brokerSide, stub, raw)
+	resp := readRetranscribeResp(t, agentSide)
+	if elapsed := time.Since(started); elapsed > 500*time.Millisecond {
+		t.Fatalf("uncached DOWN retranscribe blocked the IPC read loop for %s", elapsed)
+	}
+	if !strings.Contains(resp.Err, "DOWN") || !strings.Contains(resp.Err, "automatic retry continues") {
+		t.Fatalf("uncached DOWN response = %+v", resp)
+	}
+	if calls.Load() != 0 || ch.calls.Load() != 0 {
+		t.Fatalf("uncached DOWN path burned work: STT=%d probes=%d", calls.Load(), ch.calls.Load())
+	}
+	key := voiceScheduleKey{route: route, messageID: 44, fileID: "uncached-voice"}
+	b.Voice.mu.Lock()
+	entry := b.Voice.entries[key]
+	parked := entry != nil && entry.state == voiceWaiting && !entry.firstFailure.IsZero() && len(entry.hooks) == 0
+	b.Voice.mu.Unlock()
+	if !parked {
+		t.Fatal("uncached manual entry did not remain parked for automatic recovery")
+	}
+}
+
+func TestHandleRetranscribe_WithoutRouteOrMessageIDIsTranscriptOnly(t *testing.T) {
+	t.Setenv("C3_QUEUE_DIR", t.TempDir())
+	b := brokerWithChannel(t, mfWithTelegram(), &fakeChannel{})
+	defer b.Shutdown()
+	b.Plugins.OnVoiceReceived(func(context.Context, c3types.VoicePayload) (string, error) {
+		return "transcript only", nil
+	})
+
+	cases := []struct {
+		name string
+		stub *Stub
+		req  ipc.RetranscribeReq
+	}{
+		{name: "no route", stub: &Stub{CLI: "claude"}, req: ipc.RetranscribeReq{Op: ipc.OpRetranscribe, ID: "no-route", FileID: "voice-a", MessageID: 77}},
+		{name: "no message id", stub: func() *Stub {
+			s := &Stub{CLI: "claude"}
+			route := MakeRouteKey("telegram", -100, ptrI64(914))
+			s.SetRoute(&route)
+			return s
+		}(), req: ipc.RetranscribeReq{Op: ipc.OpRetranscribe, ID: "no-message", FileID: "voice-b"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			agentSide, brokerSide := newConnPair(t)
+			raw, _ := json.Marshal(tc.req)
+			go b.handleRetranscribe(brokerSide, tc.stub, raw)
+			if resp := readRetranscribeResp(t, agentSide); resp.Err != "" || resp.Text != "transcript only" {
+				t.Fatalf("transcript-only response = %+v", resp)
+			}
+		})
+	}
+	if all := b.Queue.StatusAll(); len(all) != 0 {
+		t.Fatalf("transcript-only retranscribe wrote queue routes: %+v", all)
 	}
 }
 

@@ -41,7 +41,7 @@ There is no `recover` inside the plugin host; no hook is individually guarded. W
 
 - **`OnInbound` panicking on the merged-message path** is caught by `flushInbounds`' guard. The broker and route worker survive. The affected non-voice rows are already durable but are not pushed; `fetch_queue` can still recover them.
 - **`OnInbound` panicking on the event path** is caught by `flushEvent`'s guard. The event is dropped; broker and worker survive.
-- **`OnVoiceReceived` panicking** is caught at the scheduler-runner boundary, so it does not close a `retranscribe` caller's IPC connection or terminate the broker. The pending queue row remains the source of truth and is recovered by the startup scan after a restart; a synchronous caller eventually reaches its own bounded timeout.
+- **`OnVoiceReceived` panicking** is recovered inside the scheduler runner's loop. The same entry returns to waiting with backoff, both fixed runners remain alive, and the dispatcher is supervised the same way; the pending queue row remains the source of truth. A joined `retranscribe` caller receives the eventual shared result or reaches its own bounded timeout.
 - **A goroutine you spawn yourself is outside every one of those guards.** An unrecovered panic in any goroutine terminates the whole broker process, and does so quietly — a goroutine panic never reaches the log path that broker failures normally use (`internal/broker/recover.go:8-16`). If you offload work, put `defer func() { if r := recover(); r != nil { host.Logf(...) } }()` at the top of your goroutine.
 
 ## Skeleton of an in-tree plugin
@@ -179,7 +179,7 @@ There is no mock host shipped with the module. Write a small `fakeHost` implemen
 
 Two pieces ship together:
 
-- **Go shim** at `internal/plugin/builtins/stt/` — compiled into the broker, subscribes to `OnVoiceReceived`, reads `plugins.stt.{enabled, handler_path, timeout_seconds, python, audio_retention}` from `mappings.json`, and subprocesses a Python handler per voice attempt. The broker-owned scheduler also reads `plugins.stt.voice_retry_expiry` (default `24h`; a Go duration string or number of seconds).
+- **Go shim** at `internal/plugin/builtins/stt/` — compiled into the broker, subscribes to `OnVoiceReceived`, reads `plugins.stt.{enabled, handler_path, timeout_seconds, python, audio_retention}` from `mappings.json`, and subprocesses a Python handler per voice attempt. The broker-owned scheduler also reads `plugins.stt.voice_retry_expiry` (default `24h`; a Go duration string or number of seconds); SIGHUP config reloads apply it to parked entries without a restart.
 - **Python pipeline** at `plugins/c3/stt/` — `stt-handler.py` plus `stt-pkg/`, which holds the chained provider runner (`stt-pkg/stt.py`) and four bundled providers (`gemini-3-flash-openrouter`, `soniox-stt-async-v5`, `elevenlabs-scribe-v2`, `sarvam-saaras-v3`). The default chain tries those four in that order, skipping any provider whose key is unavailable; `C3_STT_CHAIN` overrides the order. `stt-pkg/vocabulary.txt` biases recognition toward domain terms. API keys are read from the provider modules' own env/file lookups.
 
 ### The handler contract
@@ -211,11 +211,11 @@ one of `handler_missing`, `token_unavailable`, `timeout`, `killed`, `error`,
 network failures for automatic retry; permanent failures durably resolve to an
 agent-facing recovery message.
 
-The scheduler replaces an ordinary STT marker with an agent-facing recovery message
-that names the `file_id`, `download_attachment`, `retranscribe`, and broker log.
-It appends that message to any caption/rich text instead of clobbering the
-sender's words. A preflight fetch refusal uses the server's cause; a permanent
-handler fetch failure takes the ordinary recovery path. Two ordinary reason
+The scheduler replaces an ordinary provider-stage STT marker with an agent-facing
+recovery message that names the `file_id`, `download_attachment`, `retranscribe`,
+and broker log. It appends that message to any caption/rich text instead of
+clobbering the sender's words. A preflight or handler fetch refusal uses the
+server's cause and never claims unfetched audio was saved. Two ordinary reason
 values come from the scheduler rather than the shim: `no_transcript` when no
 `OnVoiceReceived` subscriber returned anything, and `stt_failed` for an
 unparseable failure return.
@@ -223,11 +223,13 @@ unparseable failure return.
 Voice intake is persist-first: the route worker stores a row carrying an honest
 pending placeholder and advances the source offset before any network call. The
 two-runner scheduler resolves that row after STT. Known-DOWN channel health gates
-attempts without burning them; transient download failures retry with bounded
-backoff, and a broker restart reconstructs pending work from the queue. Manual
-`retranscribe` joins the same single-flight lease. If a pending row was consumed
-while STT ran, the result is an additive transcript-update row rather than a
-rewrite of consumed history.
+only work that still needs a fetch; cached audio continues offline. An uncached
+manual `retranscribe` during DOWN returns the outage immediately while its entry
+stays parked for automatic recovery. Transient download failures retry with
+bounded backoff, and a broker restart reconstructs pending work from the queue.
+Manual `retranscribe` joins the same single-flight lease. If a pending row was
+consumed while STT ran, the result is an additive transcript-update row rather
+than a rewrite of consumed history.
 
 Note the chain consequence: because the marker is a **non-empty string returned with a nil error**, it wins `FireOnVoiceReceived` and any `OnVoiceReceived` callback registered after STT will not run on that message. If you are writing a second voice plugin, register it *before* STT in `builtinPlugins`.
 

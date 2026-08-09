@@ -52,16 +52,12 @@ type Job struct {
 }
 
 type ResolveVoiceJob struct {
-	Key            voiceScheduleKey
-	RecordID       string
-	Inbound        c3types.Inbound
-	FileID         string
-	SegmentText    string
-	Success        bool
-	EchoTranscript string
-	FailNotice     string
-	Echo           voiceEchoReservation
-	FindPending    bool
+	Key         voiceScheduleKey
+	Targets     []voiceResolveTarget
+	Inbound     c3types.Inbound
+	FileID      string
+	SegmentText string
+	Success     bool
 }
 
 // BacklogJob asks the worker to read the route's queued total AND a compact
@@ -281,6 +277,10 @@ type RouteWorker struct {
 	// its own `mine`. Initialized PRE-CLOSED in newRouteWorker so the first echo's
 	// `<-prev` proceeds immediately (a nil channel would block forever).
 	prevEchoDone chan struct{}
+
+	// voiceResolveTestHook is nil in production. Tests inject a panic at a
+	// named post-mutation stage to pin the durable-before-push idempotency seam.
+	voiceResolveTestHook func(string)
 }
 
 type coveredPushRecord struct {
@@ -566,18 +566,13 @@ func (w *RouteWorker) flushInbounds(ctx context.Context, batch []*c3types.Inboun
 		// Observe every ordinary message at flush time, before voice work can
 		// complete out of order. The existing watermark is only a presentation
 		// label; it never suppresses recoverable late content.
-		afterMessageID, late := w.observeTelegramOrder(in)
+		w.observeTelegramOrder(in)
 		voices := voiceAttachments(in)
 		if in.IsEvent() || len(voices) == 0 {
 			deliveryBatch = append(deliveryBatch, in)
 			continue
 		}
 		var notices []string
-		if late {
-			orderNotice := lateVoiceOrderNotice(in.MessageID, afterMessageID)
-			in.Text = appendVoiceMarker(in.Text, orderNotice)
-			notices = append(notices, orderNotice)
-		}
 		plan := voicePlan{}
 		for _, att := range voices {
 			if att.FileID == "" {
@@ -595,13 +590,13 @@ func (w *RouteWorker) flushInbounds(ctx context.Context, batch []*c3types.Inboun
 			plan.pending = append(plan.pending, att.FileID)
 		}
 		plan.initialNotice = strings.Join(notices, "\n")
+		voicePlans[in] = plan
 		if len(plan.pending) == 0 {
 			// Only malformed voice attachments: their terminal failure text is
 			// already complete, so they follow ordinary delivery immediately.
 			deliveryBatch = append(deliveryBatch, in)
 			continue
 		}
-		voicePlans[in] = plan
 	}
 
 	// Durable storage: persist EACH message immediately. Voice rows carry honest
@@ -653,7 +648,8 @@ func (w *RouteWorker) flushInbounds(ctx context.Context, batch []*c3types.Inboun
 				w.markPersisted(in)
 				continue
 			}
-			plan, isPendingVoice := voicePlans[in]
+			plan, hasVoicePlan := voicePlans[in]
+			isPendingVoice := hasVoicePlan && len(plan.pending) > 0
 			recordID, err := w.broker.Queue.AppendTracked(qrk, in, plan.pending...)
 			if err != nil {
 				log.Printf("queue append FAIL chan=%s chat=%d topic=%s msg=%d: %v — offset will NOT advance; Telegram redelivers — %s",
@@ -695,6 +691,10 @@ func (w *RouteWorker) flushInbounds(ctx context.Context, batch []*c3types.Inboun
 				}
 				continue
 			}
+			if hasVoicePlan && plan.initialNotice != "" {
+				echo := w.reserveVoiceReadback()
+				w.enqueueVoiceReadback(ctx, in, "", plan.initialNotice, echo)
+			}
 			deliveryAppended++
 			deliveryIDs = append(deliveryIDs, recordID)
 		}
@@ -717,11 +717,16 @@ func (w *RouteWorker) flushInbounds(ctx context.Context, batch []*c3types.Inboun
 		for _, in := range batch {
 			w.markPersisted(in)
 			if plan, ok := voicePlans[in]; ok {
-				echo := w.reserveVoiceReadback()
-				if !w.broker.Voice.ScheduleAuto(w.key, "", *in, plan.voices, plan.initialNotice, echo) {
-					close(echo.mine)
-					log.Printf("voice scheduler: degraded admission stopped chan=%s chat=%d topic=%s msg=%d — no durable row exists",
-						w.key.Channel, w.key.ChatID, TopicKeyStr(w.key), in.MessageID)
+				if len(plan.pending) > 0 {
+					echo := w.reserveVoiceReadback()
+					if !w.broker.Voice.ScheduleAuto(w.key, "", *in, plan.voices, plan.initialNotice, echo) {
+						close(echo.mine)
+						log.Printf("voice scheduler: degraded admission stopped chan=%s chat=%d topic=%s msg=%d — no durable row exists",
+							w.key.Channel, w.key.ChatID, TopicKeyStr(w.key), in.MessageID)
+					}
+				} else if plan.initialNotice != "" {
+					echo := w.reserveVoiceReadback()
+					w.enqueueVoiceReadback(ctx, in, "", plan.initialNotice, echo)
 				}
 			}
 		}
@@ -1964,29 +1969,61 @@ func (w *RouteWorker) handleResolveVoice(ctx context.Context, job *ResolveVoiceJ
 		return
 	}
 	scheduler := w.broker.Voice
-	finished := false
 	defer scheduler.resolveJobDone()
-	defer recoverGoroutineThen("worker.handleResolveVoice", func() {
-		if !finished {
-			scheduler.retryResolve(job.Key)
+	defer recoverGoroutineThen("worker.handleResolveVoice", func() { scheduler.retryResolve(job.Key) })
+
+	retry := false
+	for _, target := range job.Targets {
+		if w.handleResolveVoiceTarget(ctx, scheduler, job, target) {
+			retry = true
+		}
+	}
+	if retry {
+		scheduler.retryResolve(job.Key)
+		return
+	}
+	scheduler.completeResolve(job.Key)
+}
+
+// handleResolveVoiceTarget owns one target row's idempotency boundary. Once the
+// durable mutation lands it marks that target applied before any queue re-read,
+// echo, or push. A panic after that point may lose the best-effort live push,
+// but the ordinary resolved backlog remains and this mutation is never replayed
+// as a second revision.
+func (w *RouteWorker) handleResolveVoiceTarget(ctx context.Context, scheduler *VoiceScheduler, job *ResolveVoiceJob, target voiceResolveTarget) (retry bool) {
+	durableApplied := false
+	defer recoverGoroutineThen("worker.handleResolveVoice.target", func() {
+		retry = !durableApplied
+		if durableApplied {
+			// The durable row is already recoverable through ordinary backlog, so
+			// replaying this target would duplicate it. A panic can still skip the
+			// best-effort push/readback; release the group's FIFO reservation rather
+			// than wedging every later voice echo behind work we will not replay.
+			target.group.closeEcho()
 		}
 	})
 
+	if target.transcriptOnly {
+		scheduler.markResolveApplied(job.Key, target.recordID)
+		durableApplied = true
+		return false
+	}
 	if w.broker.Queue == nil {
 		// Degraded mode has no durable row to resolve. Preserve the established
-		// loud best-effort philosophy: push the terminal update with Covered=0,
-		// and make no claim that it can be recovered later.
+		// loud best-effort philosophy without pretending a retry can make the
+		// already-attempted result durable.
 		in := voiceRevisionInbound(job.Inbound, job.Key.messageID, job.SegmentText)
-		w.enqueueVoiceReadback(ctx, in, job.EchoTranscript, job.FailNotice, job.Echo)
-		w.forwardOrFallbackCovering(ctx, in, 0, nil, true)
-		scheduler.completeResolve(job.Key)
-		finished = true
-		return
+		scheduler.markResolveApplied(job.Key, target.recordID)
+		durableApplied = true
+		w.finishVoiceGroup(ctx, in, target.group)
+		w.forwardOrFallbackCovering(ctx, w.voiceResolvePresentation(in), 0, nil, true)
+		w.runVoiceResolveTestHook("after_push")
+		return false
 	}
 
 	qrk := queueRouteKey(w.key)
-	recordID := job.RecordID
-	if recordID == "" && job.FindPending {
+	recordID := target.recordID
+	if recordID == "" && target.findPending {
 		if pending, ok := w.queuedVoiceRecord(qrk, job.Key.messageID, job.FileID); ok {
 			recordID = pending.RecordID
 		}
@@ -2000,26 +2037,28 @@ func (w *RouteWorker) handleResolveVoice(ctx context.Context, job *ResolveVoiceJ
 	if err != nil {
 		log.Printf("voice resolve FAIL chan=%s chat=%d topic=%s msg=%d file_id=%s record=%s: %v — rescheduling the same durable resolve",
 			w.key.Channel, w.key.ChatID, TopicKeyStr(w.key), job.Key.messageID, job.FileID, recordID, err)
-		scheduler.retryResolve(job.Key)
-		return
+		return true
 	}
 	if resolved {
+		scheduler.markResolveApplied(job.Key, target.recordID)
+		durableApplied = true
+		w.runVoiceResolveTestHook("after_durable")
 		if allDone {
 			final, ok := w.queuedRecord(qrk, recordID)
 			if !ok {
 				log.Printf("voice resolve chan=%s chat=%d topic=%s msg=%d record=%s: row resolved but could not be re-read for live push; final durable backlog remains",
 					w.key.Channel, w.key.ChatID, TopicKeyStr(w.key), job.Key.messageID, recordID)
+				target.group.closeEcho()
 			} else {
 				if w.dedup != nil {
 					w.dedup.record(final.Inbound.MessageID)
 				}
-				w.enqueueVoiceReadback(ctx, &final.Inbound, job.EchoTranscript, job.FailNotice, job.Echo)
-				w.forwardOrFallbackCovering(ctx, &final.Inbound, 1, []string{recordID}, true)
+				w.finishVoiceGroup(ctx, &final.Inbound, target.group)
+				w.forwardOrFallbackCovering(ctx, w.voiceResolvePresentation(&final.Inbound), 1, []string{recordID}, true)
+				w.runVoiceResolveTestHook("after_push")
 			}
 		}
-		scheduler.completeResolve(job.Key)
-		finished = true
-		return
+		return false
 	}
 
 	// fetch_queue consumed the honest placeholder while STT was in flight, or
@@ -2031,17 +2070,43 @@ func (w *RouteWorker) handleResolveVoice(ctx context.Context, job *ResolveVoiceJ
 	if err != nil {
 		log.Printf("voice revision APPEND FAIL chan=%s chat=%d topic=%s msg=%d file_id=%s: %v — rescheduling without losing the terminal result",
 			w.key.Channel, w.key.ChatID, TopicKeyStr(w.key), job.Key.messageID, job.FileID, err)
-		scheduler.retryResolve(job.Key)
-		return
+		return true
 	}
+	scheduler.markResolveApplied(job.Key, target.recordID)
+	durableApplied = true
+	w.runVoiceResolveTestHook("after_durable")
 	if w.dedup != nil {
 		w.dedup.record(revision.MessageID)
 	}
 	w.evictIfOverCap(qrk)
-	w.enqueueVoiceReadback(ctx, revision, job.EchoTranscript, job.FailNotice, job.Echo)
-	w.forwardOrFallbackCovering(ctx, revision, 1, []string{revisionID}, true)
-	scheduler.completeResolve(job.Key)
-	finished = true
+	w.finishVoiceGroup(ctx, revision, target.group)
+	w.forwardOrFallbackCovering(ctx, w.voiceResolvePresentation(revision), 1, []string{revisionID}, true)
+	w.runVoiceResolveTestHook("after_push")
+	return false
+}
+
+func (w *RouteWorker) finishVoiceGroup(ctx context.Context, in *c3types.Inbound, group *voiceGroup) {
+	if group == nil {
+		return
+	}
+	group.echoOnce.Do(func() {
+		w.enqueueVoiceReadback(ctx, in, group.echoTranscript(), group.failNotice(), group.echo)
+	})
+}
+
+func (w *RouteWorker) voiceResolvePresentation(in *c3types.Inbound) *c3types.Inbound {
+	if in == nil || in.Channel != "telegram" || in.Edited || in.MessageID <= 0 || w.highestTelegramMessageID <= in.MessageID {
+		return in
+	}
+	cp := *in
+	cp.Text = lateVoiceOrderNotice(in.MessageID, w.highestTelegramMessageID) + "\n" + in.Text
+	return &cp
+}
+
+func (w *RouteWorker) runVoiceResolveTestHook(stage string) {
+	if w.voiceResolveTestHook != nil {
+		w.voiceResolveTestHook(stage)
+	}
 }
 
 func (w *RouteWorker) queuedRecord(qrk queue.RouteKey, recordID string) (queue.TrackedInbound, bool) {

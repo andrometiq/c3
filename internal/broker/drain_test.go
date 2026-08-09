@@ -173,6 +173,28 @@ func TestDrain_AllToUnattachedTarget_NoticeToTargetTopic(t *testing.T) {
 	}
 }
 
+func TestDrain_PendingVoiceCopyNamesSourceLandingRoute(t *testing.T) {
+	b, _ := drainTestBroker(t)
+	pending := drainSrcMsg(4, "caption\n"+voicePendingText("voice-drain"))
+	pending.Attachments = []c3types.Attachment{{Kind: "voice", FileID: "voice-drain"}}
+	if _, err := b.Queue.AppendTracked(queueRouteKey(drainSrc()), pending, "voice-drain"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.Drain(drainSpec()); err != nil {
+		t.Fatalf("Drain: %v", err)
+	}
+	rows, err := b.Queue.PeekTracked(queueRouteKey(drainDst()), -1)
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("drained pending voice rows=%+v err=%v", rows, err)
+	}
+	if !strings.Contains(rows[0].Inbound.Text, "transcript will land on the source route «genie»") {
+		t.Fatalf("drained copy still implies its placeholder will resolve in place: %q", rows[0].Inbound.Text)
+	}
+	if len(rows[0].VoicePending) != 0 {
+		t.Fatalf("frozen drained copy retained live voice ownership: %+v", rows[0].VoicePending)
+	}
+}
+
 // TestDrain_RewritesRoutingAndStampsProvenance: a moved record carries the
 // TARGET routing fields (graft 2 — record-keyed paths like the held-notice are
 // built from the record, worker.go forwardOrFallback), the canonical NUMERIC

@@ -2,6 +2,7 @@ package broker
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -12,6 +13,144 @@ import (
 	"github.com/Andrometiq/c3/internal/mappings"
 	"github.com/Andrometiq/c3/internal/queue"
 )
+
+func TestVoiceWorkerMultiVoiceCompletesOnceInEitherOrder(t *testing.T) {
+	tests := []struct {
+		name           string
+		fetchErr       map[string]error
+		wantTranscript []string
+		wantAgent      []string
+		wantNotice     []string
+	}{
+		{name: "two transcripts", wantTranscript: []string{"words V1", "words V2"}},
+		{name: "transcript and refusal", fetchErr: map[string]error{"V2": tooBigErr()}, wantTranscript: []string{"words V1"}, wantAgent: []string{"[voice too big:"}, wantNotice: []string{"over the bot server's size limit"}},
+		{name: "both refused", fetchErr: map[string]error{
+			"V1": tooBigErr(),
+			"V2": errors.New("telegram: GetFile: Bad Request: file reference expired"),
+		}, wantAgent: []string{"[voice too big:", "[voice download failed:"}, wantNotice: []string{"over the bot server's size limit", "file reference expired"}},
+	}
+	orders := [][]string{{"V1", "V2"}, {"V2", "V1"}}
+	for _, tc := range tests {
+		for _, order := range orders {
+			orderName := order[0] + "-then-" + order[1]
+			t.Run(tc.name+"/"+orderName, func(t *testing.T) {
+				g := newGateChannel(100, nil)
+				started := map[string]chan struct{}{"V1": make(chan struct{}), "V2": make(chan struct{})}
+				release := map[string]chan struct{}{"V1": make(chan struct{}), "V2": make(chan struct{})}
+				g.answer = func(fileID string) (int64, error) {
+					close(started[fileID])
+					<-release[fileID]
+					return 100, tc.fetchErr[fileID]
+				}
+				b := gateBroker(t, g)
+				defer b.Shutdown()
+				setFastVoiceDebounce(b)
+				b.Plugins.OnVoiceReceived(func(_ context.Context, p c3types.VoicePayload) (string, error) {
+					return "words " + p.FileID, nil
+				})
+				route := MakeRouteKey("telegram", -100, nil)
+				_, pushes := liveHolderFrames(t, b, route)
+				in := c3types.Inbound{
+					Channel: "telegram", ChatID: -100, MessageID: 8901,
+					Attachments: []c3types.Attachment{{Kind: "voice", FileID: "V1"}, {Kind: "voice", FileID: "V2"}},
+				}
+				if !b.Workers.Submit(route, Job{Kind: JobInbound, Inbound: &in}) {
+					t.Fatal("multi-voice submit rejected")
+				}
+				<-started["V1"]
+				<-started["V2"]
+				b.Workers.mu.Lock()
+				worker := b.Workers.workers[route]
+				var echoDone <-chan struct{}
+				if worker != nil {
+					echoDone = worker.prevEchoDone
+				}
+				b.Workers.mu.Unlock()
+				if echoDone == nil {
+					t.Fatal("voice row did not reserve its echo-chain link")
+				}
+				for i, fileID := range order {
+					close(release[fileID])
+					if i == len(order)-1 {
+						continue
+					}
+					key := voiceScheduleKey{route: route, messageID: in.MessageID, fileID: fileID}
+					waitForVoiceCondition(t, fileID+" terminal completion", func() bool {
+						state, _, ok := schedulerEntrySnapshot(b.Voice, key)
+						return ok && (state == voiceResolveReady || state == voiceResolveSubmitted)
+					})
+				}
+				push := waitInboundPush(t, pushes)
+				for _, want := range append(append([]string{}, tc.wantTranscript...), tc.wantAgent...) {
+					if !strings.Contains(push.Inbound.Text, want) {
+						t.Fatalf("one grouped push is missing %q: %q", want, push.Inbound.Text)
+					}
+				}
+				select {
+				case extra := <-pushes:
+					t.Fatalf("multi-voice row woke the agent more than once: %+v", extra)
+				case <-time.After(100 * time.Millisecond):
+				}
+				if len(tc.wantTranscript) > 0 {
+					rbs := g.waitReadbacks(t, 1)
+					if len(rbs) != 1 {
+						t.Fatalf("joined transcript readback count=%d, want 1", len(rbs))
+					}
+					for _, want := range tc.wantTranscript {
+						if !strings.Contains(rbs[0].Transcript, want) {
+							t.Fatalf("joined readback missing %q: %q", want, rbs[0].Transcript)
+						}
+					}
+				} else if got := len(g.readbackSnapshot()); got != 0 {
+					t.Fatalf("refusal-only result sent %d transcript readback(s), want 0", got)
+				}
+				if len(tc.wantNotice) > 0 {
+					g.waitReplyContaining(t, tc.wantNotice[len(tc.wantNotice)-1])
+					replies := g.sendRepliesSnapshot()
+					if len(replies) != 1 {
+						t.Fatalf("joined refusal notice count=%d, want 1: %+v", len(replies), replies)
+					}
+					for _, want := range tc.wantNotice {
+						if !strings.Contains(replies[0].Text, want) {
+							t.Fatalf("joined refusal notice missing %q: %q", want, replies[0].Text)
+						}
+					}
+				} else if got := len(g.sendRepliesSnapshot()); got != 0 {
+					t.Fatalf("transcript-only result sent %d refusal notice(s), want 0", got)
+				}
+				select {
+				case <-echoDone:
+				case <-time.After(2 * time.Second):
+					t.Fatal("grouped terminal path leaked its echo-chain reservation")
+				}
+			})
+		}
+	}
+}
+
+func TestVoiceWorkerEmptyFileIDReachesAgentAndHuman(t *testing.T) {
+	g := newGateChannel(100, nil)
+	b := gateBroker(t, g)
+	defer b.Shutdown()
+	setFastVoiceDebounce(b)
+	route := MakeRouteKey("telegram", -100, nil)
+	_, pushes := liveHolderFrames(t, b, route)
+	in := c3types.Inbound{
+		Channel: "telegram", ChatID: -100, MessageID: 8990,
+		Attachments: []c3types.Attachment{{Kind: "voice", FileID: ""}},
+	}
+	if !b.Workers.Submit(route, Job{Kind: JobInbound, Inbound: &in}) {
+		t.Fatal("malformed voice submit rejected")
+	}
+	push := waitInboundPush(t, pushes)
+	if !strings.Contains(push.Inbound.Text, "missing_file_id") {
+		t.Fatalf("agent did not receive malformed voice failure: %q", push.Inbound.Text)
+	}
+	g.waitReplyContaining(t, "Couldn't transcribe")
+	if got := len(g.sendRepliesSnapshot()); got != 1 {
+		t.Fatalf("malformed voice human notice count=%d, want 1", got)
+	}
+}
 
 func setFastVoiceDebounce(b *Broker) {
 	b.SetMappings(&mappings.MappingsFile{
@@ -247,5 +386,129 @@ func TestVoiceWorkerFetchMidSTTAppendsOneBoundedRevision(t *testing.T) {
 	case extra := <-pushes:
 		t.Fatalf("fetch-mid-STT produced a duplicate push: %+v", extra)
 	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+func TestVoiceWorkerEditWhilePendingResolvesBothRows(t *testing.T) {
+	g := newGateChannel(100, nil)
+	b := gateBroker(t, g)
+	defer b.Shutdown()
+	setFastVoiceDebounce(b)
+	route := MakeRouteKey("telegram", -100, nil)
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	var attempts atomic.Int64
+	b.Plugins.OnVoiceReceived(func(context.Context, c3types.VoicePayload) (string, error) {
+		attempts.Add(1)
+		once.Do(func() { close(started) })
+		<-release
+		return "shared edit transcript", nil
+	})
+	_, original, _ := schedulerVoice(8701, "voice-edit")
+	edited := original
+	edited.Edited = true
+	edited.Text = "corrected caption"
+	if !b.Workers.Submit(route, Job{Kind: JobInbound, Inbound: &original}) {
+		t.Fatal("original submit rejected")
+	}
+	<-started
+	if !b.Workers.Submit(route, Job{Kind: JobInbound, Inbound: &edited}) {
+		t.Fatal("edit submit rejected")
+	}
+	waitForVoiceCondition(t, "both edit rows to join the pending lease", func() bool {
+		return len(b.Queue.PendingVoiceRows(queueRouteKey(route))) == 2
+	})
+	close(release)
+	waitForVoiceCondition(t, "both edit rows to resolve", func() bool {
+		rows, err := b.Queue.PeekTracked(queueRouteKey(route), -1)
+		if err != nil || len(rows) != 2 {
+			return false
+		}
+		for _, row := range rows {
+			if len(row.VoicePending) != 0 || !strings.Contains(row.Inbound.Text, "shared edit transcript") {
+				return false
+			}
+		}
+		return true
+	})
+	if got := attempts.Load(); got != 1 {
+		t.Fatalf("edit collision made %d provider attempts; want one shared lease", got)
+	}
+}
+
+func TestVoiceResolvePanicAfterDurableMutationDoesNotDuplicateRevisionOrPush(t *testing.T) {
+	for _, tc := range []struct {
+		stage      string
+		wantPushes int
+	}{
+		{stage: "after_durable", wantPushes: 0},
+		{stage: "after_push", wantPushes: 1},
+	} {
+		t.Run(tc.stage, func(t *testing.T) {
+			t.Setenv("C3_QUEUE_DIR", t.TempDir())
+			b := brokerWithChannel(t, mfWithTelegram(), &fakeChannel{})
+			defer b.Shutdown()
+			route := MakeRouteKey("telegram", -100, ptrI64(914))
+			_, pushes := liveHolderFrames(t, b, route)
+			w := newRouteWorker(context.Background(), route, time.Hour, b)
+			defer w.Stop()
+			echoHead := make(chan struct{})
+			close(echoHead)
+			group := &voiceGroup{
+				order: []string{"voice-panic-push"}, finished: map[voiceScheduleKey]bool{},
+				transcripts: map[string]string{"voice-panic-push": "one transcript"},
+				echo:        voiceEchoReservation{prev: echoHead, mine: make(chan struct{})},
+			}
+			key := voiceScheduleKey{route: route, messageID: 8801, fileID: "voice-panic-push"}
+			target := voiceResolveTarget{recordID: "", group: group}
+			b.Voice.mu.Lock()
+			b.Voice.entries[key] = &voiceEntry{
+				key: key, inbound: c3types.Inbound{Channel: "telegram", ChatID: -100, TopicID: ptrI64(914), MessageID: 8801},
+				attachment: c3types.Attachment{Kind: "voice", FileID: key.fileID}, state: voiceResolveSubmitted,
+				targets: map[string]voiceResolveTarget{"": target}, applied: map[string]bool{},
+				resolve: voiceResolve{success: true, transcript: "one transcript"},
+			}
+			b.Voice.wg.Add(1)
+			b.Voice.mu.Unlock()
+			var panicked atomic.Bool
+			w.voiceResolveTestHook = func(stage string) {
+				if stage == tc.stage && panicked.CompareAndSwap(false, true) {
+					panic("injected after durable voice mutation")
+				}
+			}
+			job := &ResolveVoiceJob{
+				Key: key, Targets: []voiceResolveTarget{target},
+				Inbound: c3types.Inbound{Channel: "telegram", ChatID: -100, TopicID: ptrI64(914), MessageID: 8801},
+				FileID:  key.fileID, SegmentText: "[Transcribed voice]: one transcript", Success: true,
+			}
+			w.handleResolveVoice(context.Background(), job)
+			if tc.wantPushes == 1 {
+				push := waitInboundPush(t, pushes)
+				if !strings.Contains(push.Inbound.Text, "one transcript") {
+					t.Fatalf("first push lost transcript: %+v", push)
+				}
+			}
+			rows, err := b.Queue.PeekTracked(queueRouteKey(route), -1)
+			if err != nil || len(rows) != 1 || !strings.Contains(rows[0].Inbound.Text, "one transcript") {
+				t.Fatalf("panic resolve rows=%+v err=%v", rows, err)
+			}
+			select {
+			case extra := <-pushes:
+				t.Fatalf("durably-applied panic produced an extra push: %+v", extra)
+			case <-time.After(100 * time.Millisecond):
+			}
+			select {
+			case <-group.echo.mine:
+			case <-time.After(2 * time.Second):
+				t.Fatal("durably-applied panic leaked its echo reservation")
+			}
+			b.Voice.mu.Lock()
+			_, stillScheduled := b.Voice.entries[key]
+			b.Voice.mu.Unlock()
+			if stillScheduled {
+				t.Fatal("durably-applied panic resolve was re-parked")
+			}
+		})
 	}
 }

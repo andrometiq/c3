@@ -168,38 +168,6 @@ func TestEvictOverCap_AllCorruptQuarantinesBeforeRetire(t *testing.T) {
 	}
 }
 
-// TestRefreshText_QuarantinesCorruptLine covers the quarantine hook on the
-// retranscribe path. RefreshText previously never touched .trash/ at all, so this
-// is the call site most easily left out of the fix.
-func TestRefreshText_QuarantinesCorruptLine(t *testing.T) {
-	s := newStore(t)
-	rk := RouteKey{Channel: "telegram", ChatID: -100}
-	if err := s.Append(rk, msg(1, "one")); err != nil {
-		t.Fatal(err)
-	}
-	if err := appendRawLine(t, QueueDir(), rk, "{REFRESH-TORN-BYTES"); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.Append(rk, msg(2, "stt failed")); err != nil {
-		t.Fatal(err)
-	}
-	logbuf := captureLog(t)
-
-	ok, err := s.RefreshText(rk, 2, "fixed transcript")
-	if err != nil {
-		t.Fatalf("RefreshText: %v", err)
-	}
-	if !ok {
-		t.Fatal("RefreshText should hit the pending msg 2")
-	}
-	if !strings.Contains(corruptTrash(t), "{REFRESH-TORN-BYTES") {
-		t.Fatalf("refresh rewrite destroyed the corrupt line with no .trash copy; trash = %v", lsTrash(t))
-	}
-	if !strings.Contains(logbuf.String(), "unparseable") {
-		t.Fatalf("refresh rewrite destroyed the corrupt line silently; log = %q", logbuf.String())
-	}
-}
-
 // TestTrashStamp_CorruptFilename pins that GC ages a quarantine file by its
 // FILENAME stamp. Without the ".corrupt.jsonl" case, trashStamp falls through to
 // the ".jsonl" arm, tries to ParseInt("corrupt"), fails, and the caller silently
@@ -248,7 +216,7 @@ func TestConsume_LogsSteppedOverCorruptLine(t *testing.T) {
 // is NOT part of the degradation, so the destruction must still be logged and the
 // rewrite must still succeed. Without the retentionDisabled branch, quarantine
 // would try to write into a directory that does not exist and fail the whole
-// RefreshText.
+// voice resolve.
 func TestQuarantineCorrupt_RetentionDisabledStillLogs(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("C3_QUEUE_DIR", dir)
@@ -264,7 +232,8 @@ func TestQuarantineCorrupt_RetentionDisabledStillLogs(t *testing.T) {
 		t.Fatal("retention should be disabled when .trash/ can't be created")
 	}
 	rk := RouteKey{Channel: "telegram", ChatID: -100}
-	if err := s.Append(rk, msg(1, "stt failed")); err != nil {
+	recordID, err := s.AppendTracked(rk, msg(1, "stt pending"), "voice-1")
+	if err != nil {
 		t.Fatal(err)
 	}
 	if err := appendRawLine(t, dir, rk, "{NO-TRASH-BYTES"); err != nil {
@@ -272,12 +241,12 @@ func TestQuarantineCorrupt_RetentionDisabledStillLogs(t *testing.T) {
 	}
 	logbuf := captureLog(t)
 
-	ok, err := s.RefreshText(rk, 1, "fixed transcript")
+	ok, allDone, err := s.ResolveVoiceText(rk, recordID, "voice-1", "fixed transcript")
 	if err != nil {
-		t.Fatalf("RefreshText with retention disabled must still succeed: %v", err)
+		t.Fatalf("ResolveVoiceText with retention disabled must still succeed: %v", err)
 	}
-	if !ok {
-		t.Fatal("RefreshText should hit the pending msg 1")
+	if !ok || !allDone {
+		t.Fatal("ResolveVoiceText should finish the pending msg 1")
 	}
 	if !strings.Contains(logbuf.String(), "DESTROYING 1 unparseable line(s)") {
 		t.Fatalf("retention-disabled destruction was silent; log = %q", logbuf.String())

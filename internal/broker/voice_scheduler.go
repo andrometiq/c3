@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/Andrometiq/c3/internal/c3types"
+	"github.com/Andrometiq/c3/internal/mappings"
 )
 
 const (
@@ -22,7 +23,14 @@ const (
 	voiceRetryCap           = 5 * time.Minute
 	voiceRetrySweep         = 2 * time.Minute
 	voiceResolveRetryDelay  = time.Second
+	voiceDispatchBackoff    = 50 * time.Millisecond
 	defaultVoiceRetryExpiry = 24 * time.Hour
+	maxVoiceResultHooks     = 32
+)
+
+var (
+	errVoiceSchedulerStopping = errors.New("voice scheduler is stopping")
+	errVoiceResultHookLimit   = errors.New("too many callers are already waiting for this voice transcription")
 )
 
 type voiceScheduleKey struct {
@@ -42,16 +50,16 @@ const (
 
 type voiceEntry struct {
 	key          voiceScheduleKey
-	recordID     string
 	inbound      c3types.Inbound
 	attachment   c3types.Attachment
 	nextAttempt  time.Time
 	firstFailure time.Time
 	backoff      time.Duration
 	manual       bool
-	findPending  bool
 	state        voiceEntryState
-	group        *voiceGroup
+	groups       []*voiceGroup
+	targets      map[string]voiceResolveTarget
+	applied      map[string]bool
 	resolve      voiceResolve
 	hooks        []chan<- voiceScheduleResult
 }
@@ -59,9 +67,11 @@ type voiceEntry struct {
 type voiceGroup struct {
 	order       []string
 	remaining   int
+	finished    map[voiceScheduleKey]bool
 	transcripts map[string]string
 	notices     []string
 	echo        voiceEchoReservation
+	echoOnce    sync.Once
 }
 
 // voiceEchoReservation fixes readback order at durable-append time. STT jobs
@@ -73,13 +83,22 @@ type voiceEchoReservation struct {
 }
 
 type voiceResolve struct {
-	segmentText    string
-	success        bool
-	transcript     string
-	detail         string
-	echoTranscript string
-	failNotice     string
-	echo           voiceEchoReservation
+	segmentText string
+	success     bool
+	transcript  string
+	notice      string
+	detail      string
+}
+
+// voiceResolveTarget is one durable row (or the empty-ID degraded/manual
+// revision path) that shares this key's terminal audio outcome. One key may own
+// several targets when Telegram delivers an edit while the original row is
+// still pending.
+type voiceResolveTarget struct {
+	recordID       string
+	group          *voiceGroup
+	findPending    bool
+	transcriptOnly bool
 }
 
 type voiceScheduleResult struct {
@@ -89,7 +108,6 @@ type voiceScheduleResult struct {
 
 type voiceAttempt struct {
 	key        voiceScheduleKey
-	recordID   string
 	inbound    c3types.Inbound
 	attachment c3types.Attachment
 }
@@ -206,10 +224,17 @@ func newVoiceScheduler(b *Broker, clock voiceSchedulerClock) *VoiceScheduler {
 }
 
 func configuredVoiceRetryExpiry(b *Broker) time.Duration {
-	if b == nil || b.Mappings() == nil || b.Mappings().Plugins == nil {
+	if b == nil {
 		return defaultVoiceRetryExpiry
 	}
-	raw, ok := b.Mappings().Plugins["stt"]["voice_retry_expiry"]
+	return voiceRetryExpiryFromMappings(b.Mappings())
+}
+
+func voiceRetryExpiryFromMappings(mf *mappings.MappingsFile) time.Duration {
+	if mf == nil || mf.Plugins == nil {
+		return defaultVoiceRetryExpiry
+	}
+	raw, ok := mf.Plugins["stt"]["voice_retry_expiry"]
 	if !ok {
 		return defaultVoiceRetryExpiry
 	}
@@ -234,6 +259,16 @@ func configuredVoiceRetryExpiry(b *Broker) time.Duration {
 	return d
 }
 
+func (s *VoiceScheduler) setRetryExpiry(expiry time.Duration) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.retryExpiry = expiry
+	s.mu.Unlock()
+	s.Wake()
+}
+
 func (b *Broker) channelHealthDown(channel string) bool {
 	b.healthMu.RLock()
 	defer b.healthMu.RUnlock()
@@ -251,67 +286,145 @@ func cloneVoiceInbound(in c3types.Inbound) c3types.Inbound {
 }
 
 func (s *VoiceScheduler) ScheduleAuto(route RouteKey, recordID string, in c3types.Inbound, voices []c3types.Attachment, initialNotice string, echo voiceEchoReservation) bool {
-	return s.schedule(route, recordID, in, voices, initialNotice, echo, false, nil)
+	return s.schedule(route, recordID, in, voices, initialNotice, echo, false, false, nil) == nil
 }
 
-func (s *VoiceScheduler) ScheduleManual(route RouteKey, recordID string, in c3types.Inbound, att c3types.Attachment, hook chan<- voiceScheduleResult) bool {
-	return s.schedule(route, recordID, in, []c3types.Attachment{att}, "", voiceEchoReservation{}, true, hook)
+func (s *VoiceScheduler) ScheduleManual(route RouteKey, recordID string, in c3types.Inbound, att c3types.Attachment, transcriptOnly bool, hook chan<- voiceScheduleResult) error {
+	return s.schedule(route, recordID, in, []c3types.Attachment{att}, "", voiceEchoReservation{}, true, transcriptOnly, hook)
 }
 
-func (s *VoiceScheduler) schedule(route RouteKey, recordID string, in c3types.Inbound, voices []c3types.Attachment, initialNotice string, echo voiceEchoReservation, manual bool, hook chan<- voiceScheduleResult) bool {
+func (s *VoiceScheduler) schedule(route RouteKey, recordID string, in c3types.Inbound, voices []c3types.Attachment, initialNotice string, echo voiceEchoReservation, manual, transcriptOnly bool, hook chan<- voiceScheduleResult) error {
 	now := s.clock.Now()
+	manualDeferred := manual && s.healthDown(route.Channel) && !s.broker.voiceCachedLocally(route.Channel, firstVoiceFileID(voices))
 	s.mu.Lock()
 	if !s.accepting {
 		s.mu.Unlock()
-		return false
+		return errVoiceSchedulerStopping
 	}
-	group := &voiceGroup{transcripts: make(map[string]string), echo: echo}
+	if hook != nil {
+		for _, att := range voices {
+			key := voiceScheduleKey{route: route, messageID: in.MessageID, fileID: att.FileID}
+			if existing := s.entries[key]; existing != nil && len(existing.hooks) >= maxVoiceResultHooks {
+				s.mu.Unlock()
+				return errVoiceResultHookLimit
+			}
+		}
+	}
+	group := &voiceGroup{
+		transcripts: make(map[string]string), finished: make(map[voiceScheduleKey]bool), echo: echo,
+	}
 	if initialNotice != "" {
 		group.notices = append(group.notices, initialNotice)
 	}
 	added := false
+	seen := make(map[voiceScheduleKey]bool, len(voices))
 	for _, att := range voices {
 		if att.Kind != "voice" || att.FileID == "" {
 			continue
 		}
 		key := voiceScheduleKey{route: route, messageID: in.MessageID, fileID: att.FileID}
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
 		if existing := s.entries[key]; existing != nil {
-			if hook != nil {
+			if hook != nil && !manualDeferred {
 				existing.hooks = append(existing.hooks, hook)
 			}
-			if manual && existing.state == voiceWaiting {
+			if manual && !manualDeferred && existing.state == voiceWaiting {
 				existing.manual = true
 				existing.nextAttempt = now
 			}
-			if manual && existing.recordID == "" {
-				existing.findPending = true
+			if manualDeferred && existing.firstFailure.IsZero() {
+				existing.firstFailure = now
+			}
+			if !manual {
+				s.addTargetLocked(existing, recordID, group, false, false)
 			}
 			added = true
 			continue
 		}
 		entry := &voiceEntry{
-			key: key, recordID: recordID, inbound: cloneVoiceInbound(in), attachment: att,
-			nextAttempt: now, backoff: s.retryBase, manual: manual, findPending: manual, state: voiceWaiting,
+			key: key, inbound: cloneVoiceInbound(in), attachment: att,
+			nextAttempt: now, backoff: s.retryBase, manual: manual && !manualDeferred, state: voiceWaiting,
+			targets: make(map[string]voiceResolveTarget), applied: make(map[string]bool),
 		}
-		if hook != nil {
+		if manualDeferred {
+			entry.firstFailure = now
+		}
+		if hook != nil && !manualDeferred {
 			entry.hooks = append(entry.hooks, hook)
 		}
 		s.entries[key] = entry
-		group.order = append(group.order, att.FileID)
-		group.remaining++
+		s.addTargetLocked(entry, recordID, group, manual && !transcriptOnly, transcriptOnly)
 		added = true
 	}
-	for _, fileID := range group.order {
-		key := voiceScheduleKey{route: route, messageID: in.MessageID, fileID: fileID}
-		if entry := s.entries[key]; entry != nil && entry.group == nil {
-			entry.group = group
-		}
-	}
+	groupUnused := group.remaining == 0
 	s.mu.Unlock()
 	if added {
 		s.Wake()
 	}
-	return added
+	if groupUnused {
+		group.closeEcho()
+	}
+	if !added {
+		return errors.New("voice scheduler received no keyed voice attachment")
+	}
+	if manualDeferred {
+		return fmt.Errorf("fetch health for %s is DOWN and audio is not cached; automatic retry continues", route.Channel)
+	}
+	return nil
+}
+
+func firstVoiceFileID(voices []c3types.Attachment) string {
+	for _, att := range voices {
+		if att.Kind == "voice" {
+			return att.FileID
+		}
+	}
+	return ""
+}
+
+func (s *VoiceScheduler) addTargetLocked(entry *voiceEntry, recordID string, group *voiceGroup, findPending, transcriptOnly bool) {
+	if entry == nil || group == nil {
+		return
+	}
+	if _, exists := entry.targets[recordID]; exists {
+		return
+	}
+	// A manual call can create the lease before startup recovery has attached
+	// the pending row's private identity. When recovery supplies that identity,
+	// promote the lookup-on-worker target instead of adding a second target that
+	// would resolve the row once and then append a duplicate revision.
+	if recordID != "" {
+		if pending, exists := entry.targets[""]; exists && pending.findPending {
+			delete(entry.targets, "")
+			pending.recordID = recordID
+			pending.findPending = false
+			entry.targets[recordID] = pending
+			return
+		}
+	}
+	entry.targets[recordID] = voiceResolveTarget{
+		recordID: recordID, group: group, findPending: findPending, transcriptOnly: transcriptOnly,
+	}
+	entry.groups = append(entry.groups, group)
+	group.order = append(group.order, entry.key.fileID)
+	group.remaining++
+	if entry.state == voiceResolveReady || entry.state == voiceResolveSubmitted {
+		s.finishGroupMemberLocked(entry, group)
+	}
+}
+
+func (g *voiceGroup) closeEcho() {
+	if g == nil {
+		return
+	}
+	g.echoOnce.Do(func() {
+		if g.echo.mine != nil {
+			close(g.echo.mine)
+		}
+	})
 }
 
 // RecoverPending uses the store-wide startup scan once channels and plugins are
@@ -363,17 +476,11 @@ func (s *VoiceScheduler) Wake() {
 
 func (s *VoiceScheduler) dispatch() {
 	defer s.wg.Done()
-	defer recoverGoroutine("voiceScheduler.dispatch")
 	timer := s.clock.NewTimer(s.sweepEvery)
 	defer timer.Stop()
 	nextSweep := s.clock.Now().Add(s.sweepEvery)
 	for {
-		now := s.clock.Now()
-		if !now.Before(nextSweep) {
-			nextSweep = now.Add(s.sweepEvery)
-		}
-		s.dispatchDue(now)
-		delay := s.nextDelay(now, nextSweep)
+		delay := s.dispatchCycle(&nextSweep)
 		timer.Reset(delay)
 		select {
 		case <-s.ctx.Done():
@@ -384,22 +491,31 @@ func (s *VoiceScheduler) dispatch() {
 	}
 }
 
-func (s *VoiceScheduler) dispatchDue(now time.Time) {
+func (s *VoiceScheduler) dispatchCycle(nextSweep *time.Time) (delay time.Duration) {
+	delay = voiceDispatchBackoff
+	defer recoverGoroutineThen("voiceScheduler.dispatch", func() { s.Wake() })
+	now := s.clock.Now()
+	if !now.Before(*nextSweep) {
+		*nextSweep = now.Add(s.sweepEvery)
+	}
+	for _, key := range s.dispatchDue(now) {
+		s.submitResolve(key)
+	}
+	return s.nextDelay(now, *nextSweep)
+}
+
+func (s *VoiceScheduler) dispatchDue(now time.Time) []voiceScheduleKey {
 	var resolves []voiceScheduleKey
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	if !s.accepting {
-		s.mu.Unlock()
-		return
+		return nil
 	}
 	for key, entry := range s.entries {
 		if entry.state == voiceWaiting && !entry.firstFailure.IsZero() && !now.Before(entry.firstFailure.Add(s.retryExpiry)) {
-			out := voiceAttemptResult{
-				segmentText: sttFailureText(entry.attachment, "retry_expired", s.broker.voiceCachedPath(entry.key.route.Channel, entry.key.fileID)),
-				notice:      sttFailureNotice, detail: "voice transcription retry expired",
-			}
-			s.finishTerminalLocked(entry, out)
+			s.finishTerminalLocked(entry, s.retryExpiredOutcome(entry))
 		}
-		if entry.state == voiceResolveReady && !now.Before(entry.nextAttempt) {
+		if entry.state == voiceResolveReady && s.groupsCompleteLocked(entry) && !now.Before(entry.nextAttempt) {
 			resolves = append(resolves, key)
 		}
 	}
@@ -407,7 +523,13 @@ func (s *VoiceScheduler) dispatchDue(now time.Time) {
 
 	var due []*voiceEntry
 	for _, entry := range s.entries {
-		if entry.state != voiceWaiting || now.Before(entry.nextAttempt) || s.healthDown(entry.key.route.Channel) {
+		if entry.state != voiceWaiting || now.Before(entry.nextAttempt) {
+			continue
+		}
+		if s.healthDown(entry.key.route.Channel) && !s.broker.voiceCachedLocally(entry.key.route.Channel, entry.key.fileID) {
+			if entry.firstFailure.IsZero() {
+				entry.firstFailure = now
+			}
 			continue
 		}
 		due = append(due, entry)
@@ -421,23 +543,23 @@ func (s *VoiceScheduler) dispatchDue(now time.Time) {
 		}
 		return voiceKeyLess(due[i].key, due[j].key)
 	})
-	for _, entry := range due {
+dispatchLoop:
+	for i, entry := range due {
 		select {
 		case s.work <- entry.key:
 			entry.state = voiceRunning
 			entry.manual = false
 		default:
-			s.mu.Unlock()
-			for _, key := range resolves {
-				s.submitResolve(key)
+			// A full bounded work queue is expected after outage recovery. Move
+			// every still-due entry to one fixed near-term boundary so nextDelay
+			// cannot turn the dispatcher into a ~1kHz mutex spin loop.
+			for _, waiting := range due[i:] {
+				waiting.nextAttempt = now.Add(voiceDispatchBackoff)
 			}
-			return
+			break dispatchLoop
 		}
 	}
-	s.mu.Unlock()
-	for _, key := range resolves {
-		s.submitResolve(key)
-	}
+	return resolves
 }
 
 func voiceKeyLess(a, b voiceScheduleKey) bool {
@@ -459,9 +581,28 @@ func voiceKeyLess(a, b voiceScheduleKey) bool {
 	return a.fileID < b.fileID
 }
 
+func (s *VoiceScheduler) groupsCompleteLocked(entry *voiceEntry) bool {
+	if entry == nil || len(entry.groups) == 0 {
+		return true
+	}
+	for _, group := range entry.groups {
+		if group.remaining != 0 {
+			return false
+		}
+	}
+	return true
+}
+
+func (s *VoiceScheduler) retryExpiredOutcome(entry *voiceEntry) voiceAttemptResult {
+	detail := "voice transcription retry expired before the audio could be fetched"
+	agent, notice := fetchFailureTexts(errors.New(detail), entry.attachment.Size)
+	return voiceAttemptResult{segmentText: agent, notice: notice, detail: detail}
+}
+
 func (s *VoiceScheduler) nextDelay(now, nextSweep time.Time) time.Duration {
 	next := nextSweep
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	for _, entry := range s.entries {
 		var candidate time.Time
 		switch entry.state {
@@ -469,17 +610,19 @@ func (s *VoiceScheduler) nextDelay(now, nextSweep time.Time) time.Duration {
 			if !entry.firstFailure.IsZero() {
 				candidate = entry.firstFailure.Add(s.retryExpiry)
 			}
-			if !s.healthDown(entry.key.route.Channel) && (candidate.IsZero() || entry.nextAttempt.Before(candidate)) {
+			gated := s.healthDown(entry.key.route.Channel) && !s.broker.voiceCachedLocally(entry.key.route.Channel, entry.key.fileID)
+			if !gated && (candidate.IsZero() || entry.nextAttempt.Before(candidate)) {
 				candidate = entry.nextAttempt
 			}
 		case voiceResolveReady:
-			candidate = entry.nextAttempt
+			if s.groupsCompleteLocked(entry) {
+				candidate = entry.nextAttempt
+			}
 		}
 		if !candidate.IsZero() && candidate.Before(next) {
 			next = candidate
 		}
 	}
-	s.mu.Unlock()
 	d := next.Sub(now)
 	if d <= 0 {
 		return time.Millisecond
@@ -489,23 +632,52 @@ func (s *VoiceScheduler) nextDelay(now, nextSweep time.Time) time.Duration {
 
 func (s *VoiceScheduler) run() {
 	defer s.wg.Done()
-	defer recoverGoroutine("voiceScheduler.runner")
 	for {
 		select {
 		case <-s.ctx.Done():
 			return
 		case key := <-s.work:
-			attempt, ok := s.attemptSnapshot(key)
-			if !ok {
-				continue
-			}
-			out := s.runAttempt(s.ctx, attempt)
-			if s.ctx.Err() != nil {
-				return
-			}
-			s.finishAttempt(key, out)
+			s.runOne(key)
 		}
 	}
+}
+
+func (s *VoiceScheduler) runOne(key voiceScheduleKey) {
+	defer recoverGoroutineThen("voiceScheduler.runner", func() { s.abortAttempt(key) })
+	attempt, ok := s.attemptSnapshot(key)
+	if !ok {
+		return
+	}
+	out := s.runAttempt(s.ctx, attempt)
+	if s.ctx.Err() != nil {
+		return
+	}
+	s.finishAttempt(key, out)
+}
+
+func (s *VoiceScheduler) abortAttempt(key voiceScheduleKey) {
+	now := s.clock.Now()
+	s.mu.Lock()
+	entry := s.entries[key]
+	if entry != nil && entry.state == voiceRunning {
+		if entry.firstFailure.IsZero() {
+			entry.firstFailure = now
+		}
+		delay := s.jitter(entry.backoff)
+		if delay <= 0 {
+			delay = voiceDispatchBackoff
+		}
+		entry.nextAttempt = now.Add(delay)
+		entry.backoff *= 2
+		if entry.backoff > s.retryCap {
+			entry.backoff = s.retryCap
+		}
+		entry.state = voiceWaiting
+		log.Printf("voice scheduler: recovered aborted attempt chan=%s chat=%d topic=%s msg=%d file_id=%s; retry_in=%s",
+			key.route.Channel, key.route.ChatID, TopicKeyStr(key.route), key.messageID, key.fileID, delay.Round(time.Second))
+	}
+	s.mu.Unlock()
+	s.Wake()
 }
 
 func (s *VoiceScheduler) attemptSnapshot(key voiceScheduleKey) (voiceAttempt, bool) {
@@ -518,11 +690,14 @@ func (s *VoiceScheduler) attemptSnapshot(key voiceScheduleKey) (voiceAttempt, bo
 	// A DOWN edge can land after dispatch queued this key but before a runner
 	// snapshots it. Re-check at the actual attempt boundary so known-down health
 	// never burns a provider/fetch attempt from the bounded runner queue.
-	if s.healthDown(entry.key.route.Channel) {
+	if s.healthDown(entry.key.route.Channel) && !s.broker.voiceCachedLocally(entry.key.route.Channel, entry.key.fileID) {
+		if entry.firstFailure.IsZero() {
+			entry.firstFailure = s.clock.Now()
+		}
 		entry.state = voiceWaiting
 		return voiceAttempt{}, false
 	}
-	return voiceAttempt{key: key, recordID: entry.recordID, inbound: cloneVoiceInbound(entry.inbound), attachment: entry.attachment}, true
+	return voiceAttempt{key: key, inbound: cloneVoiceInbound(entry.inbound), attachment: entry.attachment}, true
 }
 
 func (s *VoiceScheduler) finishAttempt(key voiceScheduleKey, out voiceAttemptResult) {
@@ -538,10 +713,7 @@ func (s *VoiceScheduler) finishAttempt(key voiceScheduleKey, out voiceAttemptRes
 			entry.firstFailure = now
 		}
 		if !now.Before(entry.firstFailure.Add(s.retryExpiry)) {
-			out = voiceAttemptResult{
-				segmentText: sttFailureText(entry.attachment, "retry_expired", s.broker.voiceCachedPath(entry.key.route.Channel, entry.key.fileID)),
-				notice:      sttFailureNotice, detail: "voice transcription retry expired",
-			}
+			out = s.retryExpiredOutcome(entry)
 			s.finishTerminalLocked(entry, out)
 		} else {
 			delay := s.jitter(entry.backoff)
@@ -565,32 +737,29 @@ func (s *VoiceScheduler) finishAttempt(key voiceScheduleKey, out voiceAttemptRes
 
 func (s *VoiceScheduler) finishTerminalLocked(entry *voiceEntry, out voiceAttemptResult) {
 	entry.resolve = voiceResolve{
-		segmentText: out.segmentText, success: out.success, transcript: out.transcript, detail: out.detail,
+		segmentText: out.segmentText, success: out.success, transcript: out.transcript, notice: out.notice, detail: out.detail,
 	}
-	if group := entry.group; group != nil {
-		if out.transcript != "" {
-			group.transcripts[entry.key.fileID] = out.transcript
-		}
-		if out.notice != "" && !containsString(group.notices, out.notice) {
-			group.notices = append(group.notices, out.notice)
-		}
-		if group.remaining > 0 {
-			group.remaining--
-		}
-		if group.remaining == 0 {
-			var transcript string
-			for _, fileID := range group.order {
-				if text := group.transcripts[fileID]; text != "" {
-					transcript = appendVoiceMarker(transcript, text)
-				}
-			}
-			entry.resolve.echoTranscript = transcript
-			entry.resolve.failNotice = strings.Join(group.notices, "\n")
-			entry.resolve.echo = group.echo
-		}
+	for _, group := range entry.groups {
+		s.finishGroupMemberLocked(entry, group)
 	}
 	entry.state = voiceResolveReady
 	entry.nextAttempt = s.clock.Now()
+}
+
+func (s *VoiceScheduler) finishGroupMemberLocked(entry *voiceEntry, group *voiceGroup) {
+	if entry == nil || group == nil || group.finished[entry.key] {
+		return
+	}
+	group.finished[entry.key] = true
+	if entry.resolve.transcript != "" {
+		group.transcripts[entry.key.fileID] = entry.resolve.transcript
+	}
+	if notice := entry.resolve.notice; notice != "" && !containsString(group.notices, notice) {
+		group.notices = append(group.notices, notice)
+	}
+	if group.remaining > 0 {
+		group.remaining--
+	}
 }
 
 func containsString(values []string, want string) bool {
@@ -602,18 +771,48 @@ func containsString(values []string, want string) bool {
 	return false
 }
 
+func (g *voiceGroup) echoTranscript() string {
+	if g == nil {
+		return ""
+	}
+	var transcript string
+	for _, fileID := range g.order {
+		if text := g.transcripts[fileID]; text != "" {
+			transcript = appendVoiceMarker(transcript, text)
+		}
+	}
+	return transcript
+}
+
+func (g *voiceGroup) failNotice() string {
+	if g == nil {
+		return ""
+	}
+	return strings.Join(g.notices, "\n")
+}
+
 func (s *VoiceScheduler) submitResolve(key voiceScheduleKey) {
 	s.mu.Lock()
 	entry := s.entries[key]
-	if !s.accepting || entry == nil || entry.state != voiceResolveReady || s.clock.Now().Before(entry.nextAttempt) {
+	if !s.accepting || entry == nil || entry.state != voiceResolveReady || !s.groupsCompleteLocked(entry) || s.clock.Now().Before(entry.nextAttempt) {
 		s.mu.Unlock()
 		return
 	}
+	targets := make([]voiceResolveTarget, 0, len(entry.targets))
+	for targetID, target := range entry.targets {
+		if !entry.applied[targetID] {
+			targets = append(targets, target)
+		}
+	}
+	sort.Slice(targets, func(i, j int) bool { return targets[i].recordID < targets[j].recordID })
+	if len(targets) == 0 {
+		s.mu.Unlock()
+		s.completeResolve(key)
+		return
+	}
 	job := &ResolveVoiceJob{
-		Key: key, RecordID: entry.recordID, Inbound: cloneVoiceInbound(entry.inbound),
+		Key: key, Targets: targets, Inbound: cloneVoiceInbound(entry.inbound),
 		FileID: key.fileID, SegmentText: entry.resolve.segmentText, Success: entry.resolve.success,
-		EchoTranscript: entry.resolve.echoTranscript, FailNotice: entry.resolve.failNotice,
-		Echo: entry.resolve.echo, FindPending: entry.findPending,
 	}
 	entry.state = voiceResolveSubmitted
 	s.wg.Add(1)
@@ -632,13 +831,42 @@ func (s *VoiceScheduler) submitResolve(key voiceScheduleKey) {
 }
 
 func (s *VoiceScheduler) retryResolve(key voiceScheduleKey) {
+	complete := false
 	s.mu.Lock()
 	if current := s.entries[key]; s.accepting && current != nil {
-		current.state = voiceResolveReady
-		current.nextAttempt = s.clock.Now().Add(s.resolveDelay)
+		if s.allTargetsAppliedLocked(current) {
+			complete = true
+		} else {
+			current.state = voiceResolveReady
+			current.nextAttempt = s.clock.Now().Add(s.resolveDelay)
+		}
 	}
 	s.mu.Unlock()
+	if complete {
+		s.completeResolve(key)
+		return
+	}
 	s.Wake()
+}
+
+func (s *VoiceScheduler) markResolveApplied(key voiceScheduleKey, targetID string) {
+	s.mu.Lock()
+	if current := s.entries[key]; current != nil {
+		current.applied[targetID] = true
+	}
+	s.mu.Unlock()
+}
+
+func (s *VoiceScheduler) allTargetsAppliedLocked(entry *voiceEntry) bool {
+	if entry == nil || len(entry.targets) == 0 {
+		return true
+	}
+	for targetID := range entry.targets {
+		if !entry.applied[targetID] {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *VoiceScheduler) completeResolve(key voiceScheduleKey) {
@@ -646,6 +874,13 @@ func (s *VoiceScheduler) completeResolve(key voiceScheduleKey) {
 	var result voiceScheduleResult
 	s.mu.Lock()
 	if entry := s.entries[key]; entry != nil {
+		if !s.allTargetsAppliedLocked(entry) {
+			entry.state = voiceResolveReady
+			entry.nextAttempt = s.clock.Now()
+			s.mu.Unlock()
+			s.Wake()
+			return
+		}
 		hooks = append(hooks, entry.hooks...)
 		if entry.resolve.success {
 			result.Transcript = entry.resolve.transcript
@@ -677,18 +912,55 @@ func (s *VoiceScheduler) resolveJobDropped(job *ResolveVoiceJob) {
 }
 
 func (s *VoiceScheduler) Stop() {
+	s.StopWithin(defaultShutdownGrace)
+}
+
+func (s *VoiceScheduler) StopWithin(timeout time.Duration) bool {
 	if s == nil {
-		return
+		return true
 	}
 	s.stopOnce.Do(func() {
+		var groups []*voiceGroup
+		var hooks []chan<- voiceScheduleResult
+		seenGroups := make(map[*voiceGroup]bool)
 		s.mu.Lock()
 		s.accepting = false
+		for _, entry := range s.entries {
+			hooks = append(hooks, entry.hooks...)
+			entry.hooks = nil
+			for _, group := range entry.groups {
+				if group != nil && !seenGroups[group] {
+					seenGroups[group] = true
+					groups = append(groups, group)
+				}
+			}
+		}
 		s.mu.Unlock()
+		for _, group := range groups {
+			group.closeEcho()
+		}
+		for _, hook := range hooks {
+			select {
+			case hook <- voiceScheduleResult{Err: errVoiceSchedulerStopping}:
+			default:
+			}
+		}
 		s.cancel()
-		s.wg.Wait()
-		close(s.stopped)
+		go func() {
+			s.wg.Wait()
+			close(s.stopped)
+		}()
 	})
-	<-s.stopped
+	if timeout <= 0 {
+		timeout = defaultShutdownGrace
+	}
+	select {
+	case <-s.stopped:
+		return true
+	case <-time.After(timeout):
+		log.Printf("voice scheduler: ABANDONING shutdown join after %s; stuck plugin/worker work will exit with the process and durable pending rows recover on restart", timeout)
+		return false
+	}
 }
 
 func (s *VoiceScheduler) transcribe(ctx context.Context, attempt voiceAttempt) voiceAttemptResult {
@@ -724,8 +996,9 @@ func (s *VoiceScheduler) transcribe(ctx context.Context, attempt voiceAttempt) v
 		if isNetworkTransient(detail) {
 			return voiceAttemptResult{transient: true, detail: detail}
 		}
+		agent, notice := fetchFailureTexts(errors.New(detail), att.Size)
 		return voiceAttemptResult{
-			segmentText: sttFailureText(att, detail, cachedPath), notice: sttFailureNotice, detail: detail,
+			segmentText: agent, notice: notice, detail: detail,
 		}
 	}
 	if raw == "" || isSTTFailureMarker(raw) {

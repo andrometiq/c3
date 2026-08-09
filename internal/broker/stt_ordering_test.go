@@ -116,23 +116,41 @@ func waitSTTOrderingEvents(t *testing.T, ch *sttOrderingChannel, replyTo int64) 
 
 func TestSTTOrdering_LateVoiceAgentSurfaceNamesOvertakenMessage(t *testing.T) {
 	b, w, ch := newSTTOrderingFixture(t)
-	late := flushOrderingMarkerAndVoice(w, 7010, 7007)
+	setFastVoiceDebounce(b)
+	_, pushes := liveHolderFrames(t, b, w.key)
+	topicID := int64(3048)
+	marker := &c3types.Inbound{Channel: "telegram", ChatID: -100, TopicID: &topicID, MessageID: 7010, Text: "end of multi-part message"}
+	if !b.Workers.Submit(w.key, Job{Kind: JobInbound, Inbound: marker}) {
+		t.Fatal("marker submit rejected")
+	}
+	_ = waitInboundPush(t, pushes)
+	late := &c3types.Inbound{
+		Channel: "telegram", ChatID: -100, TopicID: &topicID, MessageID: 7007,
+		Attachments: []c3types.Attachment{{Kind: "voice", FileID: "late-voice"}},
+	}
+	if !b.Workers.Submit(w.key, Job{Kind: JobInbound, Inbound: late}) {
+		t.Fatal("voice submit rejected")
+	}
+	push := waitInboundPush(t, pushes)
 	waitSTTOrderingEvents(t, ch, 7007)
-	text := waitForVoiceQueueText(t, b, w.key, late.MessageID, func(text string) bool {
+	durableText := waitForVoiceQueueText(t, b, w.key, late.MessageID, func(text string) bool {
 		return strings.Contains(text, "late spoken part")
 	})
 
 	notice := lateVoiceOrderNotice(7007, 7010)
-	noticeAt := strings.Index(text, notice)
-	transcriptAt := strings.Index(text, "[Transcribed voice]: late spoken part")
+	noticeAt := strings.Index(push.Inbound.Text, notice)
+	transcriptAt := strings.Index(push.Inbound.Text, "[Transcribed voice]: late spoken part")
 	if noticeAt < 0 {
-		t.Fatalf("slow-STT ordering defect: agent surface %q does not say message_id=7007 was spoken before already-delivered message_id=7010", text)
+		t.Fatalf("slow-STT ordering defect: pushed agent surface %q does not say message_id=7007 was spoken before already-delivered message_id=7010", push.Inbound.Text)
 	}
 	if transcriptAt < 0 {
-		t.Fatalf("slow-STT loss defect: late message_id=7007 warning exists but its transcript was dropped: %q", text)
+		t.Fatalf("slow-STT loss defect: late message_id=7007 warning exists but its transcript was dropped: %q", push.Inbound.Text)
 	}
 	if noticeAt > transcriptAt {
-		t.Fatalf("slow-STT ordering defect: agent sees the late transcript before its ordering warning: %q", text)
+		t.Fatalf("slow-STT ordering defect: agent sees the late transcript before its ordering warning: %q", push.Inbound.Text)
+	}
+	if strings.Contains(durableText, notice) {
+		t.Fatalf("late-order presentation label leaked into durable history: %q", durableText)
 	}
 
 	pending, _ := b.Queue.Pending(queueRouteKey(w.key))
@@ -141,16 +159,61 @@ func TestSTTOrdering_LateVoiceAgentSurfaceNamesOvertakenMessage(t *testing.T) {
 	}
 }
 
-func TestSTTOrdering_LateVoiceReadbackWarnsBeforeVerbatimTranscript(t *testing.T) {
+func TestSTTOrdering_NewerMessageDuringSTTLabelsOnlyResolvedPush(t *testing.T) {
+	t.Setenv("C3_QUEUE_DIR", t.TempDir())
+	ch := &sttOrderingChannel{fakeChannel: &fakeChannel{}}
+	b := brokerWithGenericChannel(t, &mappings.MappingsFile{SchemaVersion: 1}, ch)
+	defer b.Shutdown()
+	setFastVoiceDebounce(b)
+	started := make(chan struct{})
+	release := make(chan struct{})
+	b.Plugins.OnVoiceReceived(func(context.Context, c3types.VoicePayload) (string, error) {
+		close(started)
+		<-release
+		return "slow spoken part", nil
+	})
+	route := RouteKey{Channel: "telegram", ChatID: -100, HasTopic: true, TopicID: 3048}
+	_, pushes := liveHolderFrames(t, b, route)
+	topicID := int64(3048)
+	voice := &c3types.Inbound{
+		Channel: "telegram", ChatID: -100, TopicID: &topicID, MessageID: 7007,
+		Attachments: []c3types.Attachment{{Kind: "voice", FileID: "slow-voice"}},
+	}
+	if !b.Workers.Submit(route, Job{Kind: JobInbound, Inbound: voice}) {
+		t.Fatal("voice submit rejected")
+	}
+	<-started
+	newer := &c3types.Inbound{Channel: "telegram", ChatID: -100, TopicID: &topicID, MessageID: 7010, Text: "newer ordinary message"}
+	if !b.Workers.Submit(route, Job{Kind: JobInbound, Inbound: newer}) {
+		t.Fatal("newer submit rejected")
+	}
+	if push := waitInboundPush(t, pushes); push.Inbound.MessageID != newer.MessageID {
+		t.Fatalf("newer ordinary push = %+v", push)
+	}
+	close(release)
+	voicePush := waitInboundPush(t, pushes)
+	notice := lateVoiceOrderNotice(7007, 7010)
+	if !strings.HasPrefix(voicePush.Inbound.Text, notice+"\n") {
+		t.Fatalf("resolved push did not prepend late-order notice: %q", voicePush.Inbound.Text)
+	}
+	durable := waitForVoiceQueueText(t, b, route, voice.MessageID, func(text string) bool {
+		return strings.Contains(text, "slow spoken part")
+	})
+	if strings.Contains(durable, notice) {
+		t.Fatalf("late-order presentation notice polluted durable row: %q", durable)
+	}
+}
+
+func TestSTTOrdering_LateVoiceReadbackStaysVerbatim(t *testing.T) {
 	_, w, ch := newSTTOrderingFixture(t)
 	flushOrderingMarkerAndVoice(w, 7010, 7007)
 	events := waitSTTOrderingEvents(t, ch, 7007)
 
 	notice := lateVoiceOrderNotice(7007, 7010)
-	noticeAt, readbackAt := -1, -1
+	readbackAt := -1
 	for i, event := range events {
-		if event.kind == "notice" && strings.Contains(event.text, notice) {
-			noticeAt = i
+		if strings.Contains(event.text, notice) {
+			t.Fatalf("presentation-only ordering label leaked onto the human surface: events=%+v", events)
 		}
 		if event.kind == "readback" {
 			readbackAt = i
@@ -159,11 +222,8 @@ func TestSTTOrdering_LateVoiceReadbackWarnsBeforeVerbatimTranscript(t *testing.T
 			}
 		}
 	}
-	if noticeAt < 0 {
-		t.Fatalf("slow-STT ordering defect: human readback for message_id=7007 has no warning that it follows newer message_id=7010; events=%+v", events)
-	}
-	if readbackAt < 0 || noticeAt > readbackAt {
-		t.Fatalf("slow-STT ordering defect: human sees the late transcript before its ordering warning; events=%+v", events)
+	if readbackAt < 0 {
+		t.Fatalf("slow-STT readback disappeared: events=%+v", events)
 	}
 }
 

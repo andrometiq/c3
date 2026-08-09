@@ -160,6 +160,7 @@ func (b *Broker) handleRetranscribe(conn *ipc.Conn, stub *Stub, raw []byte) {
 		return
 	}
 	route := stub.CurrentRoute()
+	transcriptOnly := route == nil || req.MessageID == 0
 	chanName := "telegram"
 	var chatID int64
 	var topicID *int64
@@ -186,8 +187,13 @@ func (b *Broker) handleRetranscribe(conn *ipc.Conn, stub *Stub, raw []byte) {
 	}
 	hook := make(chan voiceScheduleResult, 1)
 	resp := ipc.RetranscribeResp{Op: ipc.OpRetranscribeResult, ID: req.ID}
-	if b.Voice == nil || !b.Voice.ScheduleManual(manualRoute, "", in, att, hook) {
+	if b.Voice == nil {
 		resp.Err = "retranscribe: voice scheduler is stopping"
+		_ = conn.WriteJSON(resp)
+		return
+	}
+	if err := b.Voice.ScheduleManual(manualRoute, "", in, att, transcriptOnly, hook); err != nil {
+		resp.Err = "retranscribe: " + err.Error()
 		_ = conn.WriteJSON(resp)
 		return
 	}

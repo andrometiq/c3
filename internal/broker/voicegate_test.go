@@ -503,10 +503,9 @@ func TestSTTFailureText_NamesItsOwnAttachment(t *testing.T) {
 
 // ── Codex review 2, finding 1 — the handler's own fetch failure ───────────────
 //
-// The scheduler's permanent-failure contract deliberately uses the standard
-// recoverable failure text, but it must retain the handler's concrete cause so
-// the agent and operator are not left with an opaque provider failure.
-func TestFlushInbounds_HandlerFetchFailure_UsesTerminalRecoveryTextWithCause(t *testing.T) {
+// A permanent handler fetch refusal is not a provider failure: no audio was
+// fetched, so neither surface may promise a saved/recoverable file.
+func TestFlushInbounds_HandlerFetchFailure_UsesFetchRefusalTextWithCause(t *testing.T) {
 	g := newGateChannel(1000, nil) // preflight SUCCEEDS; the handler's fetch is what fails
 	b := gateBroker(t, g)
 	defer b.Shutdown()
@@ -520,13 +519,13 @@ func TestFlushInbounds_HandlerFetchFailure_UsesTerminalRecoveryTextWithCause(t *
 	if !strings.Contains(in.Text, "Bad Request: file is too big") {
 		t.Fatalf("the handler's fetch failure lost the server's actual error on the way up; got %q", in.Text)
 	}
-	if !strings.Contains(in.Text, "saved and recoverable") {
-		t.Fatalf("permanent handler failures must use the frozen recovery contract; got %q", in.Text)
+	if !strings.Contains(in.Text, voiceFetchFailedOpening) {
+		t.Fatalf("permanent handler fetch failures must use the download-failure contract; got %q", in.Text)
 	}
-	if !strings.Contains(in.Text, `file_id="F-BIG"`) {
-		t.Fatalf("recovery text does not identify the affected attachment; got %q", in.Text)
+	if strings.Contains(in.Text, "saved and recoverable") {
+		t.Fatalf("permanent handler fetch failure falsely promises saved/recoverable audio; got %q", in.Text)
 	}
-	g.waitReplyContaining(t, sttFailureNotice)
+	g.waitReplyContaining(t, "Bad Request: file is too big")
 }
 
 // A single message can transcribe one voice and have another refused. The human

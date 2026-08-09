@@ -18,8 +18,7 @@ func tsMsg(id int64, text string, ts time.Time) *c3types.Inbound {
 	return &c3types.Inbound{Channel: "telegram", ChatID: -100, MessageID: id, Text: text, Timestamp: ts}
 }
 
-// drainedMsg builds a drained-in line (DrainedFrom set) for the B7 RefreshText
-// skip test.
+// drainedMsg builds a drained-in line (DrainedFrom set) for provenance tests.
 func drainedMsg(id int64, text, from string) *c3types.Inbound {
 	return &c3types.Inbound{Channel: "telegram", ChatID: -100, MessageID: id, Text: text, DrainedFrom: from, Timestamp: time.Now()}
 }
@@ -286,15 +285,6 @@ func TestAppendTracked_RecordIdentitySurvivesEveryRewrite(t *testing.T) {
 		rewrite func(*testing.T, *Store, RouteKey)
 	}{
 		{
-			name: "RefreshText",
-			rewrite: func(t *testing.T, s *Store, rk RouteKey) {
-				t.Helper()
-				if ok, err := s.RefreshText(rk, 7, "first-refreshed"); err != nil || !ok {
-					t.Fatalf("RefreshText = %v, %v", ok, err)
-				}
-			},
-		},
-		{
 			name: "RemoveIDs",
 			prepare: func(t *testing.T, s *Store, rk RouteKey) {
 				t.Helper()
@@ -443,43 +433,6 @@ func TestTrackedDrainProvenanceIsPrivateAndSurvivesPeek(t *testing.T) {
 	}
 }
 
-func TestRefreshRecordText_MutatesOnlyExactTrackedOrganicLine(t *testing.T) {
-	s := newStore(t)
-	rk := RouteKey{Channel: "telegram", ChatID: -100}
-	if _, err := s.AppendDrainedTracked(rk, drainedMsg(5, "drained", "telegram__-200__42"), "source"); err != nil {
-		t.Fatal(err)
-	}
-	firstID, err := s.AppendTracked(rk, msg(5, "first organic"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	secondID, err := s.AppendTracked(rk, msg(5, "second organic"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if firstID == secondID {
-		t.Fatal("test setup produced duplicate record IDs")
-	}
-
-	ok, err := s.RefreshRecordText(rk, secondID, "second refreshed")
-	if err != nil || !ok {
-		t.Fatalf("RefreshRecordText = %v, %v", ok, err)
-	}
-	got, err := s.Peek(rk, -1)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(got) != 3 ||
-		got[0].Text != "drained" ||
-		got[1].Text != "first organic" ||
-		got[2].Text != "second refreshed" {
-		t.Fatalf("exact refresh touched the wrong same-MessageID line: %+v", got)
-	}
-	if ok, err := s.RefreshRecordText(rk, "", "must not land"); err != nil || ok {
-		t.Fatalf("empty legacy identity must be a no-op, got %v, %v", ok, err)
-	}
-}
-
 func writeCorruptCursorFixture(t *testing.T, s *Store, rk RouteKey, records ...storedInbound) {
 	t.Helper()
 	data := []byte("{not-json}\n")
@@ -500,28 +453,6 @@ func writeCorruptCursorFixture(t *testing.T, s *Store, rk RouteKey, records ...s
 		t.Fatal(err)
 	}
 	s.refreshIndex(rk)
-}
-
-func TestRefreshRecordText_RewriteFailureLeavesEveryPendingRecordVisible(t *testing.T) {
-	s := newStore(t)
-	rk := RouteKey{Channel: "telegram", ChatID: -100}
-	writeCorruptCursorFixture(t, s, rk,
-		storedInbound{Inbound: *msg(1, "consumed"), RecordID: "record-1"},
-		storedInbound{Inbound: *msg(2, "pending"), RecordID: "record-2"},
-	)
-	injected := errors.New("crash before JSONL rewrite")
-	s.rewriteTestHook = func() error { return injected }
-	if _, err := s.RefreshRecordText(rk, "record-2", "refreshed"); !errors.Is(err, injected) {
-		t.Fatalf("RefreshRecordText error = %v, want injected rewrite failure", err)
-	}
-
-	reopened, err := NewStore(QueueDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := peekIDs(t, reopened, rk); !reflect.DeepEqual(got, []int64{1, 2}) {
-		t.Fatalf("crash state pending IDs = %v, want replay-safe [1 2]", got)
-	}
 }
 
 func TestRemoveRecordIDs_RewriteFailureLeavesUnremovedPendingVisible(t *testing.T) {
@@ -704,37 +635,5 @@ func TestRemoveIDs_MinMaxAgesRecompute(t *testing.T) {
 	}
 	if st.NewestUnix != t1h.Unix() {
 		t.Fatalf("NewestUnix after remove = %d, want %d (t1h)", st.NewestUnix, t1h.Unix())
-	}
-}
-
-// TestRefreshText_SkipsDrainedInLine: RefreshText (organic STT refresh, matched by
-// per-chat MessageID) must SKIP a drained-in line that collides on MessageID and
-// refresh the organic one instead (B7). The drained line is placed FIRST so that,
-// absent the guard, it would be the one matched.
-func TestRefreshText_SkipsDrainedInLine(t *testing.T) {
-	s := newStore(t)
-	rk := RouteKey{Channel: "telegram", ChatID: -100}
-	_ = s.Append(rk, drainedMsg(5, "frozen", "telegram__-100__42")) // moved-in, same id 5
-	_ = s.Append(rk, msg(5, "organic-old"))                         // organic, same id 5
-
-	ok, err := s.RefreshText(rk, 5, "new-transcript")
-	if err != nil {
-		t.Fatalf("RefreshText: %v", err)
-	}
-	if !ok {
-		t.Fatal("RefreshText should hit the organic id-5 line")
-	}
-	got, err := s.Peek(rk, -1)
-	if err != nil {
-		t.Fatalf("Peek: %v", err)
-	}
-	if len(got) != 2 {
-		t.Fatalf("pending = %d, want 2", len(got))
-	}
-	if got[0].DrainedFrom == "" || got[0].Text != "frozen" {
-		t.Fatalf("drained line = %+v, want text unchanged 'frozen'", got[0])
-	}
-	if got[1].DrainedFrom != "" || got[1].Text != "new-transcript" {
-		t.Fatalf("organic line = %+v, want refreshed 'new-transcript'", got[1])
 	}
 }

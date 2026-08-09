@@ -47,6 +47,28 @@ func TestBroker_SetMappings_AtomicSwap(t *testing.T) {
 	}
 }
 
+func TestBroker_SetMappings_ReloadsVoiceRetryExpiry(t *testing.T) {
+	t.Setenv("C3_QUEUE_DIR", t.TempDir())
+	b := New(&mappings.MappingsFile{
+		SchemaVersion: 1,
+		Plugins:       map[string]map[string]any{"stt": {"voice_retry_expiry": "12h"}},
+	})
+	defer b.Shutdown()
+	if got := b.Voice.retryExpiry; got != 12*time.Hour {
+		t.Fatalf("initial voice retry expiry = %s, want 12h", got)
+	}
+	b.SetMappings(&mappings.MappingsFile{
+		SchemaVersion: 1,
+		Plugins:       map[string]map[string]any{"stt": {"voice_retry_expiry": "45m"}},
+	})
+	b.Voice.mu.Lock()
+	got := b.Voice.retryExpiry
+	b.Voice.mu.Unlock()
+	if got != 45*time.Minute {
+		t.Fatalf("reloaded voice retry expiry = %s, want 45m", got)
+	}
+}
+
 // TestBroker_Mappings_ConcurrentAccess_NoRace is the regression test for
 // the 2026-05-15 BLOCKER: Broker.Mappings was a public field mutated by
 // per-connection goroutines via UpsertTopic/UpsertMapping while other

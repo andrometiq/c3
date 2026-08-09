@@ -4,7 +4,6 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -505,105 +504,6 @@ func TestStore_SingleOwnerSerializedConsumeIsExactlyOnce(t *testing.T) {
 	}
 }
 
-// TestRefreshText_UpdatesPendingLineInPlace asserts RefreshText rewrites exactly
-// the still-pending line whose MessageID matches, leaving the others untouched,
-// and that a later Peek returns the refreshed Text.
-func TestRefreshText_UpdatesPendingLineInPlace(t *testing.T) {
-	s := newStore(t)
-	rk := RouteKey{Channel: "telegram", ChatID: -100}
-	for i := int64(1); i <= 3; i++ {
-		if err := s.Append(rk, msg(i, "old-"+strconv.FormatInt(i, 10))); err != nil {
-			t.Fatalf("append %d: %v", i, err)
-		}
-	}
-	ok, err := s.RefreshText(rk, 2, "fixed transcript")
-	if err != nil {
-		t.Fatalf("RefreshText: %v", err)
-	}
-	if !ok {
-		t.Fatal("RefreshText should report a hit for a pending message_id")
-	}
-	got, err := s.Peek(rk, 3)
-	if err != nil {
-		t.Fatalf("Peek: %v", err)
-	}
-	if len(got) != 3 {
-		t.Fatalf("peek len = %d, want 3", len(got))
-	}
-	for _, in := range got {
-		switch in.MessageID {
-		case 2:
-			if in.Text != "fixed transcript" {
-				t.Fatalf("msg 2 text = %q, want refreshed", in.Text)
-			}
-		default:
-			if in.Text != "old-"+strconv.FormatInt(in.MessageID, 10) {
-				t.Fatalf("msg %d text = %q, want untouched", in.MessageID, in.Text)
-			}
-		}
-	}
-	// Pending count is unchanged by an in-place refresh.
-	if n, _ := s.Pending(rk); n != 3 {
-		t.Fatalf("pending after refresh = %d, want 3", n)
-	}
-}
-
-// TestRefreshText_NoOpWhenNotQueued asserts RefreshText returns (false, nil) and
-// rewrites nothing when the message_id is absent (never queued) or already
-// consumed (behind the cursor).
-func TestRefreshText_NoOpWhenNotQueued(t *testing.T) {
-	s := newStore(t)
-	rk := RouteKey{Channel: "telegram", ChatID: -100}
-	for i := int64(1); i <= 3; i++ {
-		if err := s.Append(rk, msg(i, "old-"+strconv.FormatInt(i, 10))); err != nil {
-			t.Fatalf("append %d: %v", i, err)
-		}
-	}
-
-	// Absent message_id: no-op.
-	ok, err := s.RefreshText(rk, 999, "irrelevant")
-	if err != nil {
-		t.Fatalf("RefreshText(absent): %v", err)
-	}
-	if ok {
-		t.Fatal("RefreshText for an absent message_id must report no hit")
-	}
-
-	// Consume the first two; message_id 1 is now behind the cursor.
-	if _, err := s.Consume(rk, 2); err != nil {
-		t.Fatalf("Consume: %v", err)
-	}
-	ok, err = s.RefreshText(rk, 1, "too late")
-	if err != nil {
-		t.Fatalf("RefreshText(consumed): %v", err)
-	}
-	if ok {
-		t.Fatal("RefreshText for an already-consumed message_id must report no hit")
-	}
-	// The still-pending line (msg 3) keeps its original text.
-	got, err := s.Peek(rk, 3)
-	if err != nil {
-		t.Fatalf("Peek: %v", err)
-	}
-	if len(got) != 1 || got[0].MessageID != 3 || got[0].Text != "old-3" {
-		t.Fatalf("after no-op refresh, head = %+v, want msg 3 unchanged", got)
-	}
-}
-
-// TestRefreshText_MissingFileNoOp asserts RefreshText on a route with no queue
-// file is a clean (false, nil) no-op.
-func TestRefreshText_MissingFileNoOp(t *testing.T) {
-	s := newStore(t)
-	rk := RouteKey{Channel: "telegram", ChatID: -777}
-	ok, err := s.RefreshText(rk, 5, "x")
-	if err != nil {
-		t.Fatalf("RefreshText(missing): %v", err)
-	}
-	if ok {
-		t.Fatal("RefreshText on an empty/missing queue must report no hit")
-	}
-}
-
 func appendRawLine(t *testing.T, dir string, rk RouteKey, raw string) error {
 	t.Helper()
 	f, err := os.OpenFile(filepath.Join(dir, rk.File()+".jsonl"), os.O_APPEND|os.O_WRONLY, 0600)
@@ -613,72 +513,4 @@ func appendRawLine(t *testing.T, dir string, rk RouteKey, raw string) error {
 	defer f.Close()
 	_, err = f.WriteString(raw + "\n")
 	return err
-}
-
-// Item E (RefreshText cursor-remap branch): a corrupt line that sits BEFORE the
-// cursor (already consumed past) is stripped by RefreshText's rewrite, so the
-// cursor must be remapped into the corrupt-free coordinate space (store.go
-// ~330-369). After consuming past the corrupt line, refreshing a still-pending
-// line must update exactly that line, keep the other pending line(s) intact, and
-// leave Pending correct (no off-by-one from the dropped corrupt line).
-func TestRefreshText_CursorRemapAfterCorruptBeforeCursor(t *testing.T) {
-	s := newStore(t)
-	rk := RouteKey{Channel: "telegram", ChatID: -100}
-	// Layout: [msg1] [corrupt] [msg2] [msg3]. msg1 is appended first so the file
-	// exists before appendRawLine writes the corrupt placeholder.
-	if err := s.Append(rk, msg(1, "old-1")); err != nil {
-		t.Fatalf("append 1: %v", err)
-	}
-	if err := appendRawLine(t, QueueDir(), rk, "{corrupt"); err != nil {
-		t.Fatal(err)
-	}
-	for i := int64(2); i <= 3; i++ {
-		if err := s.Append(rk, msg(i, "old-"+strconv.FormatInt(i, 10))); err != nil {
-			t.Fatalf("append %d: %v", i, err)
-		}
-	}
-
-	// Consume 2 REAL messages: msg1 then (stepping over the corrupt line) msg2.
-	// The cursor now sits PAST the corrupt line — corrupt is behind it, msg3 is the
-	// sole still-pending line.
-	got, err := s.Consume(rk, 2)
-	if err != nil {
-		t.Fatalf("Consume: %v", err)
-	}
-	if len(got) != 2 || got[0].MessageID != 1 || got[1].MessageID != 2 {
-		t.Fatalf("consume = %+v, want msg1,msg2", got)
-	}
-	if n, _ := s.Pending(rk); n != 1 {
-		t.Fatalf("pending after consume = %d, want 1 (msg3)", n)
-	}
-
-	// Refresh the still-pending msg3. rewrite() drops the corrupt line that sat
-	// BEFORE the cursor, so the cursor must be remapped into the corrupt-free space
-	// (the store.go ~330-369 branch); a desync here would mis-serve or skip msg3.
-	ok, err := s.RefreshText(rk, 3, "fixed transcript")
-	if err != nil {
-		t.Fatalf("RefreshText: %v", err)
-	}
-	if !ok {
-		t.Fatal("RefreshText should hit the still-pending msg3")
-	}
-
-	// msg3 stays the sole pending line, refreshed, served exactly once — proving the
-	// remapped cursor stays aligned with the rewritten file.
-	if n, _ := s.Pending(rk); n != 1 {
-		t.Fatalf("pending after refresh = %d, want 1", n)
-	}
-	drained, err := s.Consume(rk, -1)
-	if err != nil {
-		t.Fatalf("drain: %v", err)
-	}
-	if len(drained) != 1 || drained[0].MessageID != 3 {
-		t.Fatalf("drain after refresh = %+v, want msg3 exactly once", drained)
-	}
-	if drained[0].Text != "fixed transcript" {
-		t.Fatalf("msg3 text = %q, want refreshed 'fixed transcript'", drained[0].Text)
-	}
-	if n, _ := s.Pending(rk); n != 0 {
-		t.Fatalf("pending after drain = %d, want 0", n)
-	}
 }

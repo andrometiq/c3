@@ -2,7 +2,11 @@ package broker
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"os"
 	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -108,6 +112,9 @@ func schedulerCompletingSubmit(s *VoiceScheduler, jobs chan<- *ResolveVoiceJob) 
 		if jobs != nil {
 			jobs <- job
 		}
+		for _, target := range job.Targets {
+			s.markResolveApplied(job.Key, target.recordID)
+		}
 		s.completeResolve(job.Key)
 		s.resolveJobDone()
 		return true
@@ -182,9 +189,73 @@ func TestVoiceSchedulerHealthGateBackoffAndDueRetry(t *testing.T) {
 	})
 }
 
+func TestVoiceSchedulerHealthGateAllowsCachedAuto(t *testing.T) {
+	b, scheduler, _ := schedulerHarness(t)
+	cachePath := t.TempDir() + "/cached-auto.oga"
+	if err := os.WriteFile(cachePath, []byte("cached audio"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ch := &cachedProbeChannel{probeChannel: &probeChannel{fakeChannel: &fakeChannel{}}, path: cachePath}
+	b.chMu.Lock()
+	b.channels["telegram"] = &channelRegistration{Channel: ch}
+	b.chMu.Unlock()
+	scheduler.healthDown = func(string) bool { return true }
+	var attempts atomic.Int64
+	scheduler.runAttempt = func(context.Context, voiceAttempt) voiceAttemptResult {
+		attempts.Add(1)
+		return voiceAttemptResult{success: true, transcript: "offline", segmentText: "[Transcribed voice]: offline"}
+	}
+	scheduler.submit = schedulerCompletingSubmit(scheduler, nil)
+	route, in, att := schedulerVoice(11, "cached-voice")
+	key := voiceScheduleKey{route: route, messageID: in.MessageID, fileID: att.FileID}
+	if !scheduler.ScheduleAuto(route, "cached-auto", in, []c3types.Attachment{att}, "", voiceEchoReservation{}) {
+		t.Fatal("cached auto schedule rejected")
+	}
+	waitForVoiceCondition(t, "cached auto attempt during DOWN", func() bool {
+		_, _, ok := schedulerEntrySnapshot(scheduler, key)
+		return attempts.Load() == 1 && !ok
+	})
+}
+
+func TestVoiceSchedulerHealthDeferredEntryExpires(t *testing.T) {
+	_, scheduler, clock := schedulerHarness(t)
+	scheduler.setRetryExpiry(time.Minute)
+	scheduler.healthDown = func(string) bool { return true }
+	var attempts atomic.Int64
+	scheduler.runAttempt = func(context.Context, voiceAttempt) voiceAttemptResult {
+		attempts.Add(1)
+		return voiceAttemptResult{success: true}
+	}
+	jobs := make(chan *ResolveVoiceJob, 1)
+	scheduler.submit = schedulerCompletingSubmit(scheduler, jobs)
+	route, in, att := schedulerVoice(12, "health-expiry")
+	key := voiceScheduleKey{route: route, messageID: in.MessageID, fileID: att.FileID}
+	if !scheduler.ScheduleAuto(route, "health-expiry", in, []c3types.Attachment{att}, "", voiceEchoReservation{}) {
+		t.Fatal("schedule rejected")
+	}
+	waitForVoiceCondition(t, "health deferral to anchor expiry", func() bool {
+		scheduler.mu.Lock()
+		defer scheduler.mu.Unlock()
+		entry := scheduler.entries[key]
+		return entry != nil && !entry.firstFailure.IsZero()
+	})
+	clock.Advance(time.Minute)
+	select {
+	case job := <-jobs:
+		if job.Success || !strings.Contains(job.SegmentText, "retry expired") {
+			t.Fatalf("health-deferred expiry resolve = %+v", job)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("health-deferred entry did not expire")
+	}
+	if got := attempts.Load(); got != 0 {
+		t.Fatalf("health-deferred expiry burned %d provider attempts", got)
+	}
+}
+
 func TestVoiceSchedulerExpiryResolvesExactlyOnce(t *testing.T) {
 	_, scheduler, clock := schedulerHarness(t)
-	scheduler.retryExpiry = 90 * time.Second
+	scheduler.setRetryExpiry(90 * time.Second)
 	scheduler.jitter = func(d time.Duration) time.Duration { return d }
 	var attempts atomic.Int64
 	scheduler.runAttempt = func(context.Context, voiceAttempt) voiceAttemptResult {
@@ -208,7 +279,7 @@ func TestVoiceSchedulerExpiryResolvesExactlyOnce(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("expiry did not submit a terminal resolve")
 	}
-	if job.FailNotice != sttFailureNotice || job.Success {
+	if len(job.Targets) != 1 || !strings.Contains(job.Targets[0].group.failNotice(), "retry expired") || job.Success {
 		t.Fatalf("expiry resolve=%+v; want one terminal failure and human notice", job)
 	}
 	if job.SegmentText == "" {
@@ -238,6 +309,9 @@ func TestVoiceSchedulerResolveSubmitFailureDoesNotRerunSTT(t *testing.T) {
 	scheduler.submit = func(_ RouteKey, wrapped Job) bool {
 		if submits.Add(1) == 1 {
 			return false
+		}
+		for _, target := range wrapped.ResolveVoice.Targets {
+			scheduler.markResolveApplied(wrapped.ResolveVoice.Key, target.recordID)
 		}
 		scheduler.completeResolve(wrapped.ResolveVoice.Key)
 		scheduler.resolveJobDone()
@@ -288,7 +362,7 @@ func TestVoiceSchedulerManualJoinsInflightAuto(t *testing.T) {
 		t.Fatal("auto attempt did not start")
 	}
 	hook := make(chan voiceScheduleResult, 1)
-	if !scheduler.ScheduleManual(route, "record-singleflight", in, att, hook) {
+	if err := scheduler.ScheduleManual(route, "record-singleflight", in, att, false, hook); err != nil {
 		t.Fatal("manual schedule did not join the existing lease")
 	}
 	close(release)
@@ -341,6 +415,158 @@ func TestVoiceSchedulerUsesFixedTwoRunnerBound(t *testing.T) {
 	}
 	close(release)
 	waitForVoiceCondition(t, "all bounded attempts", func() bool { return calls.Load() == 10 })
+}
+
+func TestVoiceSchedulerRunnerPanicRetriesEntryAndKeepsBothRunners(t *testing.T) {
+	b, scheduler, clock := schedulerHarness(t)
+	scheduler.jitter = func(d time.Duration) time.Duration { return d }
+	var callbackCalls atomic.Int64
+	b.Plugins.OnVoiceReceived(func(context.Context, c3types.VoicePayload) (string, error) {
+		if callbackCalls.Add(1) == 1 {
+			panic("injected voice callback panic")
+		}
+		return "survived panic", nil
+	})
+	scheduler.submit = schedulerCompletingSubmit(scheduler, nil)
+	route, in, att := schedulerVoice(401, "voice-panic")
+	key := voiceScheduleKey{route: route, messageID: in.MessageID, fileID: att.FileID}
+	if !scheduler.ScheduleAuto(route, "record-panic", in, []c3types.Attachment{att}, "", voiceEchoReservation{}) {
+		t.Fatal("schedule rejected")
+	}
+	waitForVoiceCondition(t, "panicked attempt to return to waiting", func() bool {
+		state, due, ok := schedulerEntrySnapshot(scheduler, key)
+		return ok && state == voiceWaiting && due.Equal(clock.Now().Add(voiceRetryBase))
+	})
+	clock.Advance(voiceRetryBase)
+	waitForVoiceCondition(t, "panicked entry to retry and resolve", func() bool {
+		_, _, ok := schedulerEntrySnapshot(scheduler, key)
+		return callbackCalls.Load() == 2 && !ok
+	})
+
+	release := make(chan struct{})
+	var active atomic.Int64
+	scheduler.runAttempt = func(context.Context, voiceAttempt) voiceAttemptResult {
+		active.Add(1)
+		<-release
+		active.Add(-1)
+		return voiceAttemptResult{success: true, transcript: "ok", segmentText: "[Transcribed voice]: ok"}
+	}
+	for i := int64(0); i < 2; i++ {
+		r, next, voice := schedulerVoice(500+i, fmt.Sprintf("post-panic-%d", i))
+		if !scheduler.ScheduleAuto(r, fmt.Sprintf("record-%d", i), next, []c3types.Attachment{voice}, "", voiceEchoReservation{}) {
+			t.Fatal("post-panic schedule rejected")
+		}
+	}
+	waitForVoiceCondition(t, "both supervised runners after panic", func() bool { return active.Load() == sttRetryConcurrency })
+	close(release)
+}
+
+func TestVoiceSchedulerDispatcherPanicRecoversInLoop(t *testing.T) {
+	_, scheduler, _ := schedulerHarness(t)
+	var checks atomic.Int64
+	scheduler.healthDown = func(string) bool {
+		if checks.Add(1) == 1 {
+			panic("injected dispatcher health panic")
+		}
+		return false
+	}
+	var attempts atomic.Int64
+	scheduler.runAttempt = func(context.Context, voiceAttempt) voiceAttemptResult {
+		attempts.Add(1)
+		return voiceAttemptResult{success: true, transcript: "ok", segmentText: "[Transcribed voice]: ok"}
+	}
+	scheduler.submit = schedulerCompletingSubmit(scheduler, nil)
+	route, in, att := schedulerVoice(402, "dispatcher-panic")
+	key := voiceScheduleKey{route: route, messageID: in.MessageID, fileID: att.FileID}
+	if !scheduler.ScheduleAuto(route, "record", in, []c3types.Attachment{att}, "", voiceEchoReservation{}) {
+		t.Fatal("schedule rejected")
+	}
+	waitForVoiceCondition(t, "dispatcher to continue after panic", func() bool {
+		_, _, ok := schedulerEntrySnapshot(scheduler, key)
+		return attempts.Load() == 1 && !ok
+	})
+}
+
+func TestVoiceSchedulerFullWorkQueueUsesFixedBackoff(t *testing.T) {
+	_, scheduler, clock := schedulerHarness(t)
+	release := make(chan struct{})
+	scheduler.runAttempt = func(context.Context, voiceAttempt) voiceAttemptResult {
+		<-release
+		return voiceAttemptResult{success: true, transcript: "ok", segmentText: "[Transcribed voice]: ok"}
+	}
+	scheduler.submit = schedulerCompletingSubmit(scheduler, nil)
+	for i := int64(0); i < voiceWorkQueueSize+sttRetryConcurrency+8; i++ {
+		route, in, att := schedulerVoice(600+i, fmt.Sprintf("backlog-%d", i))
+		if !scheduler.ScheduleAuto(route, fmt.Sprintf("record-%d", i), in, []c3types.Attachment{att}, "", voiceEchoReservation{}) {
+			t.Fatal("schedule rejected")
+		}
+	}
+	waitForVoiceCondition(t, "overflow entries to receive dispatcher backoff", func() bool {
+		scheduler.mu.Lock()
+		defer scheduler.mu.Unlock()
+		for _, entry := range scheduler.entries {
+			if entry.state == voiceWaiting && !entry.nextAttempt.Before(clock.Now().Add(voiceDispatchBackoff)) {
+				return true
+			}
+		}
+		return false
+	})
+	if delay := scheduler.nextDelay(clock.Now(), clock.Now().Add(time.Hour)); delay < voiceDispatchBackoff {
+		t.Fatalf("full work queue left a dispatcher spin delay of %s; want >= %s", delay, voiceDispatchBackoff)
+	}
+	close(release)
+}
+
+func TestVoiceSchedulerManualHookCapRejectsBeyondBound(t *testing.T) {
+	_, scheduler, _ := schedulerHarness(t)
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	scheduler.runAttempt = func(context.Context, voiceAttempt) voiceAttemptResult {
+		once.Do(func() { close(started) })
+		<-release
+		return voiceAttemptResult{success: true, transcript: "ok", segmentText: "[Transcribed voice]: ok"}
+	}
+	scheduler.submit = schedulerCompletingSubmit(scheduler, nil)
+	route, in, att := schedulerVoice(700, "hook-cap")
+	if !scheduler.ScheduleAuto(route, "record", in, []c3types.Attachment{att}, "", voiceEchoReservation{}) {
+		t.Fatal("auto schedule rejected")
+	}
+	<-started
+	for i := 0; i < maxVoiceResultHooks; i++ {
+		if err := scheduler.ScheduleManual(route, "record", in, att, false, make(chan voiceScheduleResult, 1)); err != nil {
+			t.Fatalf("hook %d rejected before cap: %v", i, err)
+		}
+	}
+	if err := scheduler.ScheduleManual(route, "record", in, att, false, make(chan voiceScheduleResult, 1)); !errors.Is(err, errVoiceResultHookLimit) {
+		t.Fatalf("hook beyond cap error = %v, want %v", err, errVoiceResultHookLimit)
+	}
+	close(release)
+}
+
+func TestVoiceSchedulerStopBoundsJoinForIgnoringPlugin(t *testing.T) {
+	_, scheduler, _ := schedulerHarness(t)
+	started := make(chan struct{})
+	release := make(chan struct{})
+	scheduler.runAttempt = func(context.Context, voiceAttempt) voiceAttemptResult {
+		close(started)
+		<-release // deliberately ignores scheduler cancellation
+		return voiceAttemptResult{success: true}
+	}
+	route, in, att := schedulerVoice(800, "shutdown-bound")
+	if !scheduler.ScheduleAuto(route, "record", in, []c3types.Attachment{att}, "", voiceEchoReservation{}) {
+		t.Fatal("schedule rejected")
+	}
+	<-started
+	if scheduler.StopWithin(25 * time.Millisecond) {
+		t.Fatal("StopWithin unexpectedly joined a cancellation-ignoring plugin")
+	}
+	close(release)
+	select {
+	case <-scheduler.stopped:
+	case <-time.After(2 * time.Second):
+		t.Fatal("scheduler did not finish after the ignoring plugin was released")
+	}
 }
 
 func TestBrokerShutdownJoinsVoiceBeforeStoppingWorkers(t *testing.T) {

@@ -329,11 +329,9 @@ func (b *Broker) Channels() []string {
 	return out
 }
 
-// defaultShutdownGrace bounds Broker.Shutdown's worker-pool drain. Workers are
-// ctx-cancelled first (no new outbound dispatch; in-flight channel calls unwind),
-// but a worker stuck in a call that doesn't observe ctx cancel — an outbound send
-// bounded only by its own ~20s HTTP timeout, or a voice-readback echo — must not
-// wedge the whole exit. After this budget it is abandoned; the durable queue
+// defaultShutdownGrace bounds Broker.Shutdown's scheduler and worker-pool joins.
+// A voice provider, outbound send, or readback that ignores cancellation must
+// not wedge process exit. After this budget it is abandoned; the durable queue
 // makes that loss-free, and main's watchdog is the outer backstop.
 const defaultShutdownGrace = 8 * time.Second
 
@@ -344,12 +342,17 @@ func (b *Broker) Shutdown() {
 	b.ShutdownWithin(defaultShutdownGrace)
 }
 
-// ShutdownWithin stops all subsystems in the order required for clean shutdown,
-// bounding the worker-pool drain to grace (grace<=0 waits indefinitely):
+// ShutdownWithin stops all subsystems in the order required for clean shutdown.
+// Positive grace bounds both joins. For compatibility the worker pool still
+// treats grace<=0 as an indefinite join, while the scheduler normalizes it to
+// defaultShutdownGrace so a cancellation-ignoring voice provider can never make
+// Voice.Stop unbounded:
 //
 //  1. Stop voice-scheduler admission, cancel and join its fixed goroutines and
-//     accepted resolve jobs. After this returns nothing can call a route worker,
-//     channel API, or STT plugin from the scheduler.
+//     accepted resolve jobs. If one ignores cancellation, abandon the join after
+//     grace with a loud log; durable pending rows recover on restart. After a
+//     clean join nothing can call a route worker, channel API, or STT plugin from
+//     the scheduler.
 //  2. Stop the worker pool so no new outbound tool-calls dispatch.
 //     StopWithin cancels the per-route worker contexts; any in-flight
 //     dispatchOutbound returns from its channel call (or drops out of the
@@ -368,7 +371,7 @@ func (b *Broker) Shutdown() {
 // hangs on stale request opts timeouts. Addresses code-review-
 // 2026-05-15 MAJOR #5 (daemon.md §1.3 drain order).
 func (b *Broker) ShutdownWithin(grace time.Duration) {
-	b.Voice.Stop()
+	b.Voice.StopWithin(grace)
 	if !b.Workers.StopWithin(grace) {
 		log.Printf("broker: worker pool did not drain within %s — proceeding with shutdown (leaked workers exit with the process; durable queue keeps this loss-free)", grace)
 	}
@@ -426,8 +429,11 @@ func (b *Broker) lastHealthSnapshot() map[string]c3types.HealthEvent {
 //     a full broker restart.
 func (b *Broker) SetMappings(mf *mappings.MappingsFile) {
 	b.mutationMu.Lock()
-	defer b.mutationMu.Unlock()
 	b.mappings.Store(mf)
+	b.mutationMu.Unlock()
+	if b.Voice != nil {
+		b.Voice.setRetryExpiry(voiceRetryExpiryFromMappings(mf))
+	}
 }
 
 // SetPersistedCallback registers the durable-persist notifier (the telegram

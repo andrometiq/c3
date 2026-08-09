@@ -359,6 +359,9 @@ func (b *Broker) Drain(spec DrainSpec) (DrainResult, error) {
 	moved := make([]DrainAppendMessage, len(captured))
 	for i := range captured {
 		m := captured[i]
+		if len(pendingTracked[lo-1+i].VoicePending) > 0 {
+			m.Text = appendVoiceMarker(m.Text, fmt.Sprintf("[voice transcription is still in progress; this drained copy stays frozen and the transcript will land on the source route «%s»]", res.SourceName))
+		}
 		banner := drainBanner(res.SourceName, &m)
 		m.DrainedFrom = srcKey
 		m.Channel = spec.Target.Channel
