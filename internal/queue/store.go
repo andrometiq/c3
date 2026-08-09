@@ -69,16 +69,19 @@ type Store struct {
 }
 
 // storedInbound is the queue's private on-disk envelope. Embedding keeps every
-// frozen Inbound key at the top level. Both _c3_* keys are additive, ignored by
+// frozen Inbound key at the top level. The _c3_* keys are additive, ignored by
 // old readers, and never appear on the public IPC Inbound:
 //
 //   - RecordID is this queue line's immutable identity.
 //   - SourceRecordID is the immutable identity of the source line copied by a
 //     drain. It lets a retry distinguish later edits that reuse MessageID.
+//   - VoicePending is the only authority for which voice attachments still need
+//     enrichment. Agent-visible placeholder text is deliberately not state.
 type storedInbound struct {
 	c3types.Inbound
-	RecordID       string `json:"_c3_queue_id,omitempty"`
-	SourceRecordID string `json:"_c3_drained_record_id,omitempty"`
+	RecordID       string   `json:"_c3_queue_id,omitempty"`
+	SourceRecordID string   `json:"_c3_drained_record_id,omitempty"`
+	VoicePending   []string `json:"_c3_voice_pending,omitempty"`
 }
 
 // TrackedInbound exposes queue-private identity only to broker internals. The
@@ -88,6 +91,7 @@ type TrackedInbound struct {
 	Inbound        c3types.Inbound
 	RecordID       string
 	SourceRecordID string
+	VoicePending   []string
 }
 
 // NewStore creates the queue dir (0700) and returns a Store. Call
@@ -125,8 +129,8 @@ func (s *Store) Append(rk RouteKey, in *c3types.Inbound) error {
 // AppendTracked is Append plus the durable identity of the exact line written.
 // The identity survives queue rewrites and lets a live-delivery ack remove that
 // line even when another pending edit has the same channel MessageID.
-func (s *Store) AppendTracked(rk RouteKey, in *c3types.Inbound) (string, error) {
-	return s.appendTracked(rk, in, "")
+func (s *Store) AppendTracked(rk RouteKey, in *c3types.Inbound, voicePending ...string) (string, error) {
+	return s.appendTracked(rk, in, "", voicePending)
 }
 
 // AppendDrainedTracked appends a drain copy and privately records the immutable
@@ -134,10 +138,10 @@ func (s *Store) AppendTracked(rk RouteKey, in *c3types.Inbound) (string, error) 
 // legacy untracked source: retries then fail toward another copy, never toward
 // mistaking an unrelated same-MessageID line for the landed record.
 func (s *Store) AppendDrainedTracked(rk RouteKey, in *c3types.Inbound, sourceRecordID string) (string, error) {
-	return s.appendTracked(rk, in, sourceRecordID)
+	return s.appendTracked(rk, in, sourceRecordID, nil)
 }
 
-func (s *Store) appendTracked(rk RouteKey, in *c3types.Inbound, sourceRecordID string) (string, error) {
+func (s *Store) appendTracked(rk RouteKey, in *c3types.Inbound, sourceRecordID string, voicePending []string) (string, error) {
 	// Stamp the record format version on the way to disk. Append is the ONLY
 	// place a record enters the queue, so it is the only place that has to do
 	// this — rewrite() and snapshotDropped() re-serialize records that were
@@ -161,6 +165,7 @@ func (s *Store) appendTracked(rk RouteKey, in *c3types.Inbound, sourceRecordID s
 			Inbound:        cp,
 			RecordID:       rand.Text(),
 			SourceRecordID: sourceRecordID,
+			VoicePending:   append([]string(nil), voicePending...),
 		}
 	}
 	data, err := json.Marshal(rec)
@@ -461,7 +466,41 @@ func pendingTrackedFrom(lines []storedInbound, cursor int) []TrackedInbound {
 			Inbound:        in.Inbound,
 			RecordID:       in.RecordID,
 			SourceRecordID: in.SourceRecordID,
+			VoicePending:   append([]string(nil), in.VoicePending...),
 		})
+	}
+	return out
+}
+
+// PendingVoiceRows returns the still-pending records whose private voice state
+// says at least one attachment has not reached a terminal outcome. Text is never
+// inspected: a user can legitimately send content that resembles a C3 voice
+// placeholder, while legacy rows have no VoicePending field and are already final.
+func (s *Store) PendingVoiceRows(rk RouteKey) []TrackedInbound {
+	lines, cursor, err := s.readLines(rk)
+	if err != nil {
+		log.Printf("queue: %s: cannot scan pending voice rows: %v", rk.File(), err)
+		return nil
+	}
+	tracked := pendingTrackedFrom(lines, cursor)
+	out := make([]TrackedInbound, 0)
+	for _, in := range tracked {
+		if len(in.VoicePending) > 0 {
+			out = append(out, in)
+		}
+	}
+	return out
+}
+
+// PendingVoiceRowsAll scans every indexed pending route once. It is intended for
+// broker startup, after RecoverOnStartup has rebuilt the status index and before
+// route workers can mutate queue files.
+func (s *Store) PendingVoiceRowsAll() map[RouteKey][]TrackedInbound {
+	out := make(map[RouteKey][]TrackedInbound)
+	for rk := range s.StatusAll() {
+		if rows := s.PendingVoiceRows(rk); len(rows) > 0 {
+			out[rk] = rows
+		}
 	}
 	return out
 }
@@ -762,6 +801,50 @@ func (s *Store) RefreshRecordText(rk RouteKey, recordID, newText string) (bool, 
 }
 
 func (s *Store) refreshText(rk RouteKey, newText string, match func(storedInbound) bool) (bool, error) {
+	return s.rewritePending(rk, match, func(in *storedInbound) {
+		in.Text = newText
+	})
+}
+
+// ResolveVoiceText atomically records one attachment's terminal text and removes
+// its file ID from the row's private pending set. A duplicate resolve, a legacy
+// row, or a row already consumed/evicted is a clean no-op; callers can then use
+// the revision-line path without ever inferring state from agent-visible text.
+func (s *Store) ResolveVoiceText(rk RouteKey, recordID, fileID, newText string) (resolved, allDone bool, err error) {
+	if recordID == "" || fileID == "" {
+		return false, false, nil
+	}
+	resolved, err = s.rewritePending(rk, func(in storedInbound) bool {
+		if in.RecordID != recordID || in.DrainedFrom != "" {
+			return false
+		}
+		for _, pending := range in.VoicePending {
+			if pending == fileID {
+				return true
+			}
+		}
+		return false
+	}, func(in *storedInbound) {
+		in.Text = newText
+		pending := in.VoicePending[:0]
+		for _, id := range in.VoicePending {
+			if id != fileID {
+				pending = append(pending, id)
+			}
+		}
+		in.VoicePending = pending
+		allDone = len(in.VoicePending) == 0
+	})
+	if err != nil {
+		return false, false, err
+	}
+	return resolved, allDone, err
+}
+
+// rewritePending is the one crash-safe pending-row mutation composite shared by
+// text refresh and voice resolution: readLines, cursor projection, quarantine,
+// cursor-first remap, atomic JSONL rewrite, then status refresh.
+func (s *Store) rewritePending(rk RouteKey, match func(storedInbound) bool, mutate func(*storedInbound)) (bool, error) {
 	lines, cursor, err := s.readLines(rk)
 	if err != nil || len(lines) == 0 {
 		return false, err
@@ -791,7 +874,7 @@ func (s *Store) refreshText(rk RouteKey, newText string, match func(storedInboun
 			continue
 		}
 		if match(real[idx]) {
-			real[idx].Text = newText
+			mutate(&real[idx])
 			found = true
 			break
 		}
