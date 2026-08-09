@@ -175,10 +175,15 @@ type RefreshTextJob struct {
 	ResultCh   chan<- RefreshResult
 }
 
-// RefreshResult carries whether a queued line was refreshed back to the handler.
+// RefreshResult carries how a retranscribe transcript was applied. Refreshed = the
+// still-queued line was rewritten in place. AppendedNew = the message was no longer
+// queued (delivered live), so the transcript was delivered as a FRESH durable line
+// instead of being dropped (P0-1) — the fix for a timed-out caller losing a late
+// retranscribe success.
 type RefreshResult struct {
-	Refreshed bool
-	Err       error
+	Refreshed   bool
+	AppendedNew bool
+	Err         error
 }
 
 // OutboundJob is a queued tool-call dispatched to a channel.
@@ -2069,7 +2074,7 @@ func (w *RouteWorker) takeCoveredByPush(pushID int64, token string) []string {
 // queued organic voice record (retranscribe in-place refresh, spec Component 5).
 // Runs on the route's single-owner worker so selection and rewrite cannot race
 // another file operation for this route. A miss is a clean no-op.
-func (w *RouteWorker) handleRefreshText(_ context.Context, job *RefreshTextJob) {
+func (w *RouteWorker) handleRefreshText(ctx context.Context, job *RefreshTextJob) {
 	if job == nil || job.ResultCh == nil {
 		return
 	}
@@ -2100,11 +2105,26 @@ func (w *RouteWorker) handleRefreshText(_ context.Context, job *RefreshTextJob) 
 	// Checked here rather than in the store: the store has no idea what C3
 	// authored, and this runs on the route's single owner so the read cannot race
 	// its own rewrite.
-	rec, found := w.queuedVoiceRecord(qrk, job.MessageID, job.FileID)
+	rec, found, anyForMsg := w.queuedVoiceRecord(qrk, job.MessageID, job.FileID)
 	if !found {
-		// Nothing tracked and organic under that id owns this voice. Legacy
-		// untracked and drained records deliberately fail toward no mutation.
-		job.ResultCh <- RefreshResult{Refreshed: false}
+		// No organic voice line owns this file_id for an in-place refresh. Two very
+		// different situations reach here:
+		//   1. The message is not queued AT ALL (anyForMsg=false) — it was delivered
+		//      live and consumed. This is the P0-1 loss: a long retranscribe outlives
+		//      the caller's tool wait, and the successful transcript went nowhere
+		//      (2026-08-08 msg 9014: ok=true refreshed=false, 10,868 chars lost). So
+		//      deliver it as a FRESH durable line tagged with the original message_id
+		//      — pushed if a session is attached, else held for fetch_queue.
+		//   2. A line for this message_id IS still queued (anyForMsg=true) but is a
+		//      drained/legacy/non-owning record the refresh deliberately skips. It is
+		//      already recoverable via fetch_queue, so appending would only add a
+		//      spurious duplicate — leave it (the old no-mutation behavior).
+		if anyForMsg {
+			job.ResultCh <- RefreshResult{Refreshed: false}
+			return
+		}
+		w.deliverTranscriptAsNewLine(ctx, qrk, job)
+		job.ResultCh <- RefreshResult{AppendedNew: true}
 		return
 	}
 	newText, ok := replaceC3VoiceSegment(rec.Inbound.Text, w.sttPrefix(w.key.Channel), job.Transcript)
@@ -2126,23 +2146,80 @@ func (w *RouteWorker) handleRefreshText(_ context.Context, job *RefreshTextJob) 
 	job.ResultCh <- RefreshResult{Refreshed: refreshed}
 }
 
+// deliverTranscriptAsNewLine appends a retranscribe transcript as a FRESH durable
+// queue line (tagged with the original message_id) and delivers it — pushed to a
+// live holder, else held for fetch_queue. Used when the original message is no
+// longer queued (delivered live), so an in-place refresh has no target and a
+// timed-out caller would otherwise lose the transcript (P0-1). It is a DEDICATED
+// path — not flushInbounds — so it never re-runs STT and never touches the offset
+// seam / markPersisted (there is no source Telegram update to advance). Runs on the
+// route's single-owner worker (called from handleRefreshText).
+func (w *RouteWorker) deliverTranscriptAsNewLine(ctx context.Context, qrk queue.RouteKey, job *RefreshTextJob) {
+	if w.broker == nil || w.broker.Queue == nil {
+		return
+	}
+	var topicID *int64
+	if w.key.HasTopic {
+		t := w.key.TopicID
+		topicID = &t
+	}
+	// Marked clearly as a late re-transcription so the agent reads it as a correction
+	// of an earlier note, not a fresh inbound. No voice attachment: the line already
+	// carries the transcript, and file-level recovery stays available via the file_id
+	// named here (download_attachment / retranscribe are cache-first).
+	text := fmt.Sprintf("[Re-transcription of an earlier voice note — message %d, file_id %s]\n%s%s",
+		job.MessageID, job.FileID, w.sttPrefix(w.key.Channel), job.Transcript)
+	in := &c3types.Inbound{
+		Channel:   w.key.Channel,
+		ChatID:    w.key.ChatID,
+		TopicID:   topicID,
+		MessageID: job.MessageID,
+		Text:      text,
+		Timestamp: time.Now(),
+	}
+	recordID, err := w.broker.Queue.AppendTracked(qrk, in)
+	if err != nil {
+		log.Printf("retranscribe late-deliver APPEND FAIL chan=%s chat=%d topic=%s msg=%d: %v — transcript returned to caller only",
+			w.key.Channel, w.key.ChatID, TopicKeyStr(w.key), job.MessageID, err)
+		return
+	}
+	// Record the id so forwardOrFallbackCovering's no-claim "append-if-absent" branch
+	// does NOT append this line a SECOND time (it appends when the id is unseen — and
+	// a fresh worker would not have seen the original's delivery). We appended it
+	// above; the held path must only notify, not re-store.
+	if w.dedup != nil {
+		w.dedup.record(in.MessageID)
+	}
+	log.Printf("retranscribe late-deliver chan=%s chat=%d topic=%s msg=%d: appended fresh transcript line (not queued in place; delivered/held)",
+		w.key.Channel, w.key.ChatID, TopicKeyStr(w.key), job.MessageID)
+	// Deliver the one appended line: push to a live holder, else hold for fetch_queue.
+	// forwardOrFallbackCovering never calls markPersisted, so no offset/seam is touched.
+	w.forwardOrFallbackCovering(ctx, in, 1, []string{recordID}, true)
+}
+
 // queuedVoiceRecord returns the exact pending organic tracked line that owns
 // fileID. Same-MessageID edits are searched independently; drained-in and
 // legacy untracked lines are never eligible for an organic retranscribe write.
-func (w *RouteWorker) queuedVoiceRecord(qrk queue.RouteKey, messageID int64, fileID string) (queue.TrackedInbound, bool) {
+// anyForMsg reports whether ANY pending line carries messageID (drained, legacy,
+// or non-owning included) — so the caller can tell "not queued at all" (deliver the
+// transcript late, P0-1) apart from "queued but not refreshable in place" (already
+// recoverable; leave it). On a read error it reports found=false, anyForMsg=false,
+// which routes to late-delivery (duplicate-over-loss, this project's fail direction).
+func (w *RouteWorker) queuedVoiceRecord(qrk queue.RouteKey, messageID int64, fileID string) (rec queue.TrackedInbound, found, anyForMsg bool) {
 	lines, err := w.broker.Queue.PeekTracked(qrk, -1)
 	if err != nil {
-		return queue.TrackedInbound{}, false
+		return queue.TrackedInbound{}, false, false
 	}
-	for _, rec := range lines {
-		if rec.RecordID != "" &&
-			rec.Inbound.DrainedFrom == "" &&
-			rec.Inbound.MessageID == messageID &&
-			recordOwnsVoice(rec.Inbound, fileID) {
-			return rec, true
+	for _, r := range lines {
+		if r.Inbound.MessageID != messageID {
+			continue
+		}
+		anyForMsg = true
+		if r.RecordID != "" && r.Inbound.DrainedFrom == "" && recordOwnsVoice(r.Inbound, fileID) {
+			return r, true, true
 		}
 	}
-	return queue.TrackedInbound{}, false
+	return queue.TrackedInbound{}, false, anyForMsg
 }
 
 // recordOwnsVoice reports whether rec is the message this refresh is about:

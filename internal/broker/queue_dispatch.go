@@ -243,7 +243,7 @@ func (b *Broker) handleRetranscribe(conn *ipc.Conn, stub *Stub, raw []byte) {
 	// rewrite never touches the route's files off the worker goroutine. Best-effort:
 	// a refresh miss/failure does not change the returned transcript (the agent
 	// already has it), so we log on error but still return Text.
-	refreshed := false
+	refreshed, appendedNew := false, false
 	if req.MessageID != 0 && route != nil && b.Workers != nil && b.Queue != nil {
 		resultCh := make(chan RefreshResult, 1)
 		job := Job{Kind: JobRefreshText, Refresh: &RefreshTextJob{
@@ -258,18 +258,22 @@ func (b *Broker) handleRetranscribe(conn *ipc.Conn, stub *Stub, raw []byte) {
 				if res.Err != nil {
 					log.Printf("retranscribe refresh chan=%s file_id=%s msg=%d: refresh error: %v", chanName, req.FileID, req.MessageID, res.Err)
 				}
-				refreshed = res.Refreshed
+				refreshed, appendedNew = res.Refreshed, res.AppendedNew
 			case <-time.After(workerJobTimeout):
-				// A3: the STT result was already delivered above; the in-place refresh
-				// is best-effort. A stalled refresh worker must not wedge the read loop —
-				// log (mirroring the refresh-failure log) and fall through to return Text.
-				log.Printf("retranscribe refresh chan=%s file_id=%s msg=%d: worker did not respond within %s — skipping in-place refresh", chanName, req.FileID, req.MessageID, workerJobTimeout)
+				// A3: the STT result was already delivered above; the in-place refresh /
+				// late-deliver is best-effort AND it completes on the worker goroutine
+				// regardless of this wait (the durable Append is not abandoned). A
+				// stalled worker must not wedge the read loop — log and return Text.
+				log.Printf("retranscribe refresh chan=%s file_id=%s msg=%d: worker did not respond within %s — refresh/late-deliver still completes on the worker", chanName, req.FileID, req.MessageID, workerJobTimeout)
 			}
 		} else {
 			log.Printf("retranscribe refresh chan=%s file_id=%s msg=%d: worker queue full or stopped", chanName, req.FileID, req.MessageID)
 		}
 	}
-	log.Printf("retranscribe chan=%s file_id=%s msg=%d ok=true refreshed=%v", chanName, req.FileID, req.MessageID, refreshed)
+	// appendedNew=true ⇒ the message was no longer queued (delivered live), so the
+	// transcript was delivered as a fresh durable line — it is NOT lost even if this
+	// caller already timed out (the P0-1 fix).
+	log.Printf("retranscribe chan=%s file_id=%s msg=%d ok=true refreshed=%v appended_new=%v", chanName, req.FileID, req.MessageID, refreshed, appendedNew)
 	_ = conn.WriteJSON(resp)
 }
 
