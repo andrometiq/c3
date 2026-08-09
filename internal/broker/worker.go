@@ -23,7 +23,6 @@ const (
 	JobRelease
 	JobFetch
 	JobConsume
-	JobRefreshText
 	JobBacklog
 	// The three drain steps (drain.go): peek+freeze on the source, copy on the
 	// target, remove on the source — each on the OWNING worker so the store's
@@ -45,7 +44,6 @@ type Job struct {
 	Outbound     *OutboundJob
 	Fetch        *FetchJob
 	Consume      *ConsumeJob
-	Refresh      *RefreshTextJob
 	Backlog      *BacklogJob
 	DrainPeek    *DrainPeekJob
 	DrainAppend  *DrainAppendJob
@@ -63,6 +61,7 @@ type ResolveVoiceJob struct {
 	EchoTranscript string
 	FailNotice     string
 	Echo           voiceEchoReservation
+	FindPending    bool
 }
 
 // BacklogJob asks the worker to read the route's queued total AND a compact
@@ -171,34 +170,6 @@ type ConsumeJob struct {
 	MessageID int64
 	Token     string
 	Count     int
-}
-
-// RefreshTextJob asks the worker to refresh, in place, the exact still-queued
-// organic voice record identified by MessageID + FileID. The worker resolves
-// that record to its durable queue-private ID before rewriting, so a collision
-// can never validate one line and mutate another.
-type RefreshTextJob struct {
-	MessageID int64
-	// FileID identifies WHICH voice attachment this refresh is for. Without it
-	// the job proved only that some message had that id, so a record could be
-	// rewritten on the strength of an unrelated voice's file_id (C3 review 4, R3).
-	FileID string
-	// Transcript is the raw new transcript. The worker composes the stored form
-	// itself, so what it writes back is in the same authored shape it recognizes
-	// — which is what makes a second refresh possible.
-	Transcript string
-	ResultCh   chan<- RefreshResult
-}
-
-// RefreshResult carries how a retranscribe transcript was applied. Refreshed = the
-// still-queued line was rewritten in place. AppendedNew = the message was no longer
-// queued (delivered live), so the transcript was delivered as a FRESH durable line
-// instead of being dropped (P0-1) — the fix for a timed-out caller losing a late
-// retranscribe success.
-type RefreshResult struct {
-	Refreshed   bool
-	AppendedNew bool
-	Err         error
 }
 
 // OutboundJob is a queued tool-call dispatched to a channel.
@@ -506,8 +477,6 @@ func (w *RouteWorker) run(ctx context.Context) {
 				w.handleFetch(ctx, job.Fetch)
 			case JobConsume:
 				w.handleConsume(ctx, job.Consume)
-			case JobRefreshText:
-				w.handleRefreshText(ctx, job.Refresh)
 			case JobBacklog:
 				w.handleBacklog(ctx, job.Backlog)
 			case JobDrainPeek:
@@ -1271,7 +1240,11 @@ func (w *RouteWorker) forwardOrFallbackCovering(_ context.Context, in *c3types.I
 	// This keeps the running count below accurate for the message the user just
 	// sent. Events are never queued.
 	if w.broker.Queue != nil {
-		if w.dedup == nil || !w.dedup.alreadySeen(in.MessageID) {
+		// A caller that supplies at least one exact record identity has already
+		// persisted this delivery. That proof also works for MessageID=0, which
+		// the replay deduper intentionally cannot identify.
+		alreadyPersisted := idsKnown && len(coveredIDs) > 0
+		if !alreadyPersisted && (w.dedup == nil || !w.dedup.alreadySeen(in.MessageID)) {
 			if err := w.broker.Queue.Append(queueRouteKey(w.key), in); err == nil {
 				if w.dedup != nil {
 					w.dedup.record(in.MessageID)
@@ -1982,65 +1955,6 @@ func (w *RouteWorker) takeCoveredByPush(pushID int64, token string) []string {
 	return ids
 }
 
-// handleRefreshText rewrites, in place, the stored Text of the exact still-
-// queued organic voice record (retranscribe in-place refresh, spec Component 5).
-// Runs on the route's single-owner worker so selection and rewrite cannot race
-// another file operation for this route. A miss is a clean no-op.
-func (w *RouteWorker) handleRefreshText(_ context.Context, job *RefreshTextJob) {
-	if job == nil || job.ResultCh == nil {
-		return
-	}
-	defer recoverGoroutineThen("worker.handleRefreshText", func() {
-		select {
-		case job.ResultCh <- RefreshResult{Err: fmt.Errorf("internal panic in refresh_text")}:
-		default:
-		}
-	})
-	if w.broker == nil || w.broker.Queue == nil {
-		job.ResultCh <- RefreshResult{Err: errOutboundNotImpl}
-		return
-	}
-	qrk := queueRouteKey(w.key)
-	// Store.RefreshText replaces the ENTIRE stored text, and that field is shared:
-	// a caption, a rich message's block markers, and every other attachment's
-	// outcome live in it too. So the refresh must prove two things before it
-	// writes, and then write as little as possible.
-	//
-	//  1. OWNERSHIP by file identity, not by how the text happens to read. A
-	//     textual prefix is not provenance — a user's own caption can open with
-	//     the transcript prefix, and matching on it let retranscribe overwrite
-	//     the user's words (C3 review 4, R3a). The record must actually carry the
-	//     voice attachment this refresh is for (R3b).
-	//  2. SEGMENT targeting. C3 appends its outcome, so its write is the trailing
-	//     segment; everything before it belongs to someone else and is preserved.
-	//
-	// Checked here rather than in the store: the store has no idea what C3
-	// authored, and this runs on the route's single owner so the read cannot race
-	// its own rewrite.
-	rec, found := w.queuedVoiceRecord(qrk, job.MessageID, job.FileID)
-	if !found {
-		job.ResultCh <- RefreshResult{Refreshed: false}
-		return
-	}
-	newText, ok := replaceC3VoiceSegment(rec.Inbound.Text, w.sttPrefix(w.key.Channel), job.Transcript)
-	if !ok {
-		log.Printf("retranscribe refresh chan=%s chat=%d topic=%s msg=%d file_id=%s: SKIPPED — the stored text contains no segment C3 wrote for this voice, so there is nothing to replace without overwriting someone else's words. The transcript is still returned to the agent.",
-			w.key.Channel, w.key.ChatID, TopicKeyStr(w.key), job.MessageID, job.FileID)
-		job.ResultCh <- RefreshResult{Refreshed: false}
-		return
-	}
-	refreshed, err := w.broker.Queue.RefreshRecordText(qrk, rec.RecordID, newText)
-	if err != nil {
-		log.Printf("retranscribe refresh FAIL chan=%s chat=%d topic=%s msg=%d: %v",
-			w.key.Channel, w.key.ChatID, TopicKeyStr(w.key), job.MessageID, err)
-		job.ResultCh <- RefreshResult{Err: err}
-		return
-	}
-	log.Printf("retranscribe refresh chan=%s chat=%d topic=%s msg=%d refreshed=%v",
-		w.key.Channel, w.key.ChatID, TopicKeyStr(w.key), job.MessageID, refreshed)
-	job.ResultCh <- RefreshResult{Refreshed: refreshed}
-}
-
 // handleResolveVoice is the one terminal landing path for every voice source.
 // It runs on the route worker so the store's single-owner rule remains intact.
 // The scheduler never waits on a result channel: a failed mutation simply makes
@@ -2071,30 +1985,36 @@ func (w *RouteWorker) handleResolveVoice(ctx context.Context, job *ResolveVoiceJ
 	}
 
 	qrk := queueRouteKey(w.key)
-	current, found := w.queuedRecord(qrk, job.RecordID)
+	recordID := job.RecordID
+	if recordID == "" && job.FindPending {
+		if pending, ok := w.queuedVoiceRecord(qrk, job.Key.messageID, job.FileID); ok {
+			recordID = pending.RecordID
+		}
+	}
+	current, found := w.queuedRecord(qrk, recordID)
 	newText := job.SegmentText
 	if found {
 		newText = replacePendingVoiceSegment(current.Inbound.Text, job.FileID, job.SegmentText)
 	}
-	resolved, allDone, err := w.broker.Queue.ResolveVoiceText(qrk, job.RecordID, job.FileID, newText)
+	resolved, allDone, err := w.broker.Queue.ResolveVoiceText(qrk, recordID, job.FileID, newText)
 	if err != nil {
 		log.Printf("voice resolve FAIL chan=%s chat=%d topic=%s msg=%d file_id=%s record=%s: %v — rescheduling the same durable resolve",
-			w.key.Channel, w.key.ChatID, TopicKeyStr(w.key), job.Key.messageID, job.FileID, job.RecordID, err)
+			w.key.Channel, w.key.ChatID, TopicKeyStr(w.key), job.Key.messageID, job.FileID, recordID, err)
 		scheduler.retryResolve(job.Key)
 		return
 	}
 	if resolved {
 		if allDone {
-			final, ok := w.queuedRecord(qrk, job.RecordID)
+			final, ok := w.queuedRecord(qrk, recordID)
 			if !ok {
 				log.Printf("voice resolve chan=%s chat=%d topic=%s msg=%d record=%s: row resolved but could not be re-read for live push; final durable backlog remains",
-					w.key.Channel, w.key.ChatID, TopicKeyStr(w.key), job.Key.messageID, job.RecordID)
+					w.key.Channel, w.key.ChatID, TopicKeyStr(w.key), job.Key.messageID, recordID)
 			} else {
 				if w.dedup != nil {
 					w.dedup.record(final.Inbound.MessageID)
 				}
 				w.enqueueVoiceReadback(ctx, &final.Inbound, job.EchoTranscript, job.FailNotice, job.Echo)
-				w.forwardOrFallbackCovering(ctx, &final.Inbound, 1, []string{job.RecordID}, true)
+				w.forwardOrFallbackCovering(ctx, &final.Inbound, 1, []string{recordID}, true)
 			}
 		}
 		scheduler.completeResolve(job.Key)
@@ -2107,7 +2027,7 @@ func (w *RouteWorker) handleResolveVoice(ctx context.Context, job *ResolveVoiceJ
 	// row so it has the same retention, delivery-token, ack, and held semantics
 	// as every other inbound.
 	revision := voiceRevisionInbound(job.Inbound, job.Key.messageID, job.SegmentText)
-	recordID, err := w.broker.Queue.AppendTracked(qrk, revision)
+	revisionID, err := w.broker.Queue.AppendTracked(qrk, revision)
 	if err != nil {
 		log.Printf("voice revision APPEND FAIL chan=%s chat=%d topic=%s msg=%d file_id=%s: %v — rescheduling without losing the terminal result",
 			w.key.Channel, w.key.ChatID, TopicKeyStr(w.key), job.Key.messageID, job.FileID, err)
@@ -2119,7 +2039,7 @@ func (w *RouteWorker) handleResolveVoice(ctx context.Context, job *ResolveVoiceJ
 	}
 	w.evictIfOverCap(qrk)
 	w.enqueueVoiceReadback(ctx, revision, job.EchoTranscript, job.FailNotice, job.Echo)
-	w.forwardOrFallbackCovering(ctx, revision, 1, []string{recordID}, true)
+	w.forwardOrFallbackCovering(ctx, revision, 1, []string{revisionID}, true)
 	scheduler.completeResolve(job.Key)
 	finished = true
 }
@@ -2162,8 +2082,9 @@ func voiceRevisionInbound(source c3types.Inbound, messageID int64, segment strin
 }
 
 // queuedVoiceRecord returns the exact pending organic tracked line that owns
-// fileID. Same-MessageID edits are searched independently; drained-in and
-// legacy untracked lines are never eligible for an organic retranscribe write.
+// fileID. VoicePending is the sole state carrier; text and attachment count are
+// deliberately irrelevant. Same-MessageID edits are searched independently,
+// while drained-in and legacy/final rows are never enrichment targets.
 func (w *RouteWorker) queuedVoiceRecord(qrk queue.RouteKey, messageID int64, fileID string) (rec queue.TrackedInbound, found bool) {
 	lines, err := w.broker.Queue.PeekTracked(qrk, -1)
 	if err != nil {
@@ -2173,86 +2094,11 @@ func (w *RouteWorker) queuedVoiceRecord(qrk queue.RouteKey, messageID int64, fil
 		if r.Inbound.MessageID != messageID {
 			continue
 		}
-		if r.RecordID != "" && r.Inbound.DrainedFrom == "" && recordOwnsVoice(r.Inbound, fileID) {
+		if r.RecordID != "" && r.Inbound.DrainedFrom == "" && containsString(r.VoicePending, fileID) {
 			return r, true
 		}
 	}
 	return queue.TrackedInbound{}, false
-}
-
-// recordOwnsVoice reports whether rec is the message this refresh is about:
-// it carries the named file_id AS A VOICE attachment, and exactly one voice
-// attachment in total.
-//
-// The identity check is what a textual prefix could never provide. The
-// single-voice requirement is what makes the segment below unambiguous — C3
-// appends one outcome per voice in attachment order, so with two voices the
-// trailing segment cannot be attributed to either from the text alone.
-func recordOwnsVoice(rec c3types.Inbound, fileID string) bool {
-	if fileID == "" {
-		return false
-	}
-	voices, matched := 0, false
-	for _, a := range rec.Attachments {
-		if a.Kind != "voice" {
-			continue
-		}
-		voices++
-		if a.FileID == fileID {
-			matched = true
-		}
-	}
-	return voices == 1 && matched
-}
-
-// c3VoiceOpenings is the complete set of things C3 writes to open its own
-// segment about a voice attachment: a transcript, an STT failure, and the two
-// fetch-refusal markers.
-func c3VoiceOpenings(sttPrefix string) []string {
-	return []string{sttPrefix, sttFailureOpening, voiceTooBigOpening, voiceFetchFailedOpening}
-}
-
-// replaceC3VoiceSegment rewrites ONLY the trailing segment C3 authored, leaving
-// everything before it untouched, and writes the replacement in the SAME
-// authored shape so the next refresh can find it again.
-//
-// C3 appends its outcome (appendVoiceMarker joins with a newline), so its write
-// runs from the LAST authored opening that begins a line through to the end.
-// Anchoring on a line start matters: a transcript can contain anything, and an
-// opening that appears mid-sentence is the speaker's words, not a segment.
-//
-// Writing back WITH the prefix is what makes refresh repeatable. Storing the
-// raw transcript left nothing to recognize, so a second retranscribe could never
-// refresh again and the first refreshed text was stuck in the queue forever
-// (C3 review 4, R3c).
-//
-// Residual: if C3's own transcript CONTAINS a line that begins with one of these
-// openings — the speaker said "[Transcribed voice]:" and STT laid it on its own
-// line — the split lands inside C3's previous segment and only its tail is
-// replaced. The blast radius is that suffix of C3's own earlier write; text that
-// arrived with the message is never touched.
-func replaceC3VoiceSegment(text, sttPrefix, transcript string) (string, bool) {
-	best := -1
-	for _, opening := range c3VoiceOpenings(sttPrefix) {
-		if opening == "" {
-			continue
-		}
-		for i := 0; ; {
-			j := strings.Index(text[i:], opening)
-			if j < 0 {
-				break
-			}
-			at := i + j
-			if (at == 0 || text[at-1] == '\n') && at > best {
-				best = at
-			}
-			i = at + 1
-		}
-	}
-	if best < 0 {
-		return "", false
-	}
-	return text[:best] + sttPrefix + transcript, true
 }
 
 // deliveredDedup is a bounded FIFO set of recently-delivered MessageIDs for this
@@ -2598,8 +2444,8 @@ func (w *RouteWorker) drainOnShutdown() []*c3types.Inbound {
 	for {
 		select {
 		case job := <-w.queue:
-			// ResultCh-bearing jobs (JobFetch / JobOutbound / JobRefreshText /
-			// JobBacklog / the three JobDrain* steps) get an errWorkerStopped reply so
+			// ResultCh-bearing jobs (JobFetch / JobOutbound / JobBacklog / the
+			// three JobDrain* steps) get an errWorkerStopped reply so
 			// a blocked caller is never stranded. This is what lets the drain's
 			// Steps B/C block INDEFINITELY on their result channels (drain.go, B1):
 			// a stopped worker reliably answers instead of wedging the drain goroutine
@@ -2626,13 +2472,6 @@ func (w *RouteWorker) drainOnShutdown() []*c3types.Inbound {
 				if job.Outbound != nil && job.Outbound.ResultCh != nil {
 					select {
 					case job.Outbound.ResultCh <- OutboundResult{Err: errWorkerStopped}:
-					default:
-					}
-				}
-			case JobRefreshText:
-				if job.Refresh != nil && job.Refresh.ResultCh != nil {
-					select {
-					case job.Refresh.ResultCh <- RefreshResult{Err: errWorkerStopped}:
 					default:
 					}
 				}

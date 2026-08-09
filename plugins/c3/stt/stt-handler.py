@@ -35,6 +35,7 @@ import time
 import urllib.request
 import importlib.util
 import logging
+import secrets
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
@@ -201,17 +202,19 @@ def download_file(token, file_id, dest_path, tg_fn=None):
         # then os.replace (atomic on the same filesystem), so dest_path only ever
         # appears once it is whole. Match on the final "-<file_id>.oga" name, never
         # the ".part" temp, so a partial is never picked up.
-        tmp_path = dest_path + '.part'
+        # Each invocation owns a nonce-named sibling. A fixed `<final>.part`
+        # lets concurrent auto/manual attempts overwrite or delete one another's
+        # in-flight bytes; ownership must be encoded in the filename itself.
+        tmp_path = f'{dest_path}.{os.getpid()}-{secrets.token_hex(8)}.part'
         try:
             with open(tmp_path, 'wb') as f:
                 f.write(r.read())
             os.replace(tmp_path, dest_path)
-        except BaseException:
+        finally:
             try:
                 os.remove(tmp_path)
             except OSError:
                 pass
-            raise
 
 # ── STT ───────────────────────────────────────────────────────────────────────
 
@@ -287,18 +290,19 @@ def prune_inbox(keep_n):
     mappings.json:plugins.stt.audio_retention; default 500). A negative keep_n
     disables pruning (keep everything). Non-fatal — recovery never depends on this
     cache (download_attachment / retranscribe re-fetch from Telegram by file_id)."""
-    # F10b: sweep stale ".oga.part" temp files a SIGKILL'd atomic download left behind
-    # (the Go shim's SIGKILL bypasses download_file's own except-cleanup). Only remove
-    # ones old enough to be definitely dead — never an in-flight concurrent download.
+    # F10b: sweep stale nonce-owned "*.part" files a SIGKILL'd atomic download
+    # left behind (the Go shim's SIGKILL bypasses download_file's finally). The
+    # threshold is over twice the 750s outer deadline, so an active attempt can
+    # never be mistaken for an orphan.
     # Runs regardless of keep_n (even "keep all" should not accumulate dead temps).
     try:
         now = time.time()
         for f in os.listdir(INBOX_DIR):
-            if not f.endswith('.oga.part'):
+            if not f.endswith('.part'):
                 continue
             p = os.path.join(INBOX_DIR, f)
             try:
-                if now - os.path.getmtime(p) > 600:  # 10 min ≫ any download timeout
+                if now - os.path.getmtime(p) > 1800:
                     os.remove(p)
             except OSError:
                 continue

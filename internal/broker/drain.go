@@ -353,7 +353,7 @@ func (b *Broker) Drain(spec DrainSpec) (DrainResult, error) {
 	// fields, worker.go forwardOrFallback, so a stale route would mis-post to
 	// the source topic). MessageID/Sender/Timestamp/Attachments are preserved
 	// verbatim (R14 — a drained voice note stays re-downloadable). Text is
-	// frozen as captured at Step A by design (B4): a late source RefreshText
+	// frozen as captured at Step A by design (B4): a late source voice resolve
 	// between A and C reaches only .trash, the documented cost of the ⚠-warned
 	// attached-source path.
 	moved := make([]DrainAppendMessage, len(captured))

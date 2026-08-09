@@ -1,9 +1,7 @@
 package broker
 
 import (
-	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log"
 	"time"
@@ -12,19 +10,16 @@ import (
 	"github.com/Andrometiq/c3/internal/ipc"
 )
 
-// retranscribeTimeout bounds the synchronous STT chain run on the IPC read
-// goroutine in handleRetranscribe, so a slow/hung provider cannot wedge that
-// adapter's single-threaded read loop indefinitely. It sits ABOVE the STT
-// builtin's now SIZE-SCALED subprocess budget (capped at sttMaxTimeoutSeconds =
-// 720s; see stt.sttTimeoutForSize) so a healthy long voice note completes on the
-// builtin's own ctx deadline, while a provider that hangs BEFORE its own deadline
-// applies (e.g. a stuck network download) is still cut off in bounded time. It is
-// a var (not a const) only so a test can shorten it; production never reassigns it.
+// retranscribeTimeout bounds how long the synchronous MCP handler waits on its
+// VoiceScheduler result hook. Timing out or losing the caller never cancels the
+// enrichment lease: its one durable resolve still lands and delivers. It remains
+// above the scheduler/STT outer deadline so a healthy long note returns directly.
+// It is a var only so tests can shorten the caller wait.
 var retranscribeTimeout = 750 * time.Second
 
 // workerJobTimeout bounds every blocking worker round-trip the broker performs
-// on an IPC read goroutine (fetch_queue, tool_call, the retranscribe in-place
-// refresh, the attach backlog-summary peek). Phase 1 made an EXITED worker reply
+// on an IPC read goroutine (fetch_queue, tool_call, the attach backlog-summary
+// peek). Phase 1 made an EXITED worker reply
 // errWorkerStopped fast, so the common failure already unblocks <-resultCh; this
 // is the defense-in-depth backstop for a worker that genuinely STALLS without
 // exiting (a hung handler / stuck send) — then nothing is ever sent on resultCh
@@ -150,16 +145,10 @@ func (b *Broker) handleFetchQueue(conn *ipc.Conn, stub *Stub, raw []byte) {
 	// live path and was removed (it had fired for every CLI, not just poll-only).
 }
 
-// handleRetranscribe re-runs the STT provider chain on a cached voice attachment
-// by file_id and returns the fresh transcript. Downloads via the channel are
-// handled inside the STT plugin chain (it owns DownloadAttachment).
-//
-// In-place refresh (spec Component 5): when message_id is given AND that message
-// is still queued for the claimed route, the fresh transcript replaces the stored
-// Text in place (a cap-safe rewrite routed through the route's single-owner
-// worker), so a later fetch_queue returns the corrected transcript rather than the
-// old STT-failure placeholder. A message_id that isn't queued (never seen /
-// already consumed) is a clean no-op — the transcript is still returned.
+// handleRetranscribe joins or creates the same scheduler lease as automatic
+// enrichment. Its wire contract stays synchronous, but caller timeout/death is
+// irrelevant to the durable resolve: the hook is only a view of work owned by
+// VoiceScheduler, never ownership of that work.
 func (b *Broker) handleRetranscribe(conn *ipc.Conn, stub *Stub, raw []byte) {
 	var req ipc.RetranscribeReq
 	if err := json.Unmarshal(raw, &req); err != nil {
@@ -186,103 +175,41 @@ func (b *Broker) handleRetranscribe(conn *ipc.Conn, stub *Stub, raw []byte) {
 		_ = conn.WriteJSON(ipc.RetranscribeResp{Op: ipc.OpRetranscribeResult, ID: req.ID, Err: "no STT plugin registered"})
 		return
 	}
-	// Ask the bot server first, same rule as the live path (voicegate.go,
-	// 2026-07-27 incident Ask #1). Without it an unfetchable file re-runs the
-	// whole chain and comes back as "STT provider still failing (no
-	// transcript)", which sends the agent hunting for a provider outage that
-	// isn't there: the server simply will not serve the file.
-	// If the audio is already cached locally, skip the network preflight entirely: the
-	// handler is cache-first (F11), so retranscribe reuses the bytes with no
-	// re-download and works even during an outage. Otherwise probe the server (its
-	// refusal is authoritative, and its size scales the STT budget).
-	var attSize int64
-	if !b.voiceCachedLocally(chanName, req.FileID) {
-		refusal, sz, _ := b.attachmentFetchRefusal(chanName, req.FileID)
-		if refusal != "" {
-			log.Printf("retranscribe chan=%s file_id=%s msg=%d ok=false: the bot server will not serve this file — %s", chanName, req.FileID, req.MessageID, refusal)
-			_ = conn.WriteJSON(ipc.RetranscribeResp{Op: ipc.OpRetranscribeResult, ID: req.ID, Err: "retranscribe: " + refusal})
-			return
-		}
-		attSize = sz
+	manualRoute := MakeRouteKey(chanName, chatID, topicID)
+	if route != nil {
+		manualRoute = *route
 	}
-	// Bound the STT chain (network download + provider call) so a slow/hung
-	// provider cannot block this adapter's single-threaded IPC read loop forever.
-	// FireOnVoiceReceived honors ctx (the STT builtin wires its subprocess to a
-	// ctx-derived deadline), so a timeout here unblocks the read loop even if a
-	// provider ignores its own budget. The cap sits just above the STT
-	// subprocess default (300s) so a healthy long voice note still completes,
-	// while a truly stuck call still returns an error in bounded time.
-	ctx, cancel := context.WithTimeout(context.Background(), retranscribeTimeout)
-	defer cancel()
-	transcript := b.Plugins.FireOnVoiceReceived(ctx, c3types.VoicePayload{
-		Channel:   chanName,
-		ChatID:    chatID,
-		TopicID:   topicID,
-		MessageID: req.MessageID,
-		FileID:    req.FileID,
-		// Size from the preflight getFile probe above, so the STT budget scales for a
-		// large re-transcription the same way the live path does (P1-3). 0 ⇒ base.
-		Size: attSize,
-	})
+	att := c3types.Attachment{Kind: "voice", FileID: req.FileID}
+	in := c3types.Inbound{
+		Channel: chanName, ChatID: chatID, TopicID: topicID, MessageID: req.MessageID,
+		Attachments: []c3types.Attachment{att}, Timestamp: time.Now(),
+	}
+	hook := make(chan voiceScheduleResult, 1)
 	resp := ipc.RetranscribeResp{Op: ipc.OpRetranscribeResult, ID: req.ID}
-	// A marker is a FAILURE, not a transcript. Every non-empty return used to be
-	// treated as success: the control marker was handed to the agent as Text AND
-	// written into the queued message, so a fetch refusal could overwrite a
-	// stored message with "[STT FETCH FAILED: …]" (Codex review 3, finding 4).
-	// The handler does its own getFile, so its fetch can fail here exactly as it
-	// can on the live path — and it is reported the same way, in the server's own
-	// words rather than as a provider outage.
-	if detail, ok := sttFetchFailure(transcript); ok {
-		resp.Err = "retranscribe: " + voiceFetchFailedAgentText(errors.New(detail))
-		log.Printf("retranscribe chan=%s file_id=%s msg=%d ok=false: the fetch failed, not the provider — %s", chanName, req.FileID, req.MessageID, detail)
+	if b.Voice == nil || !b.Voice.ScheduleManual(manualRoute, "", in, att, hook) {
+		resp.Err = "retranscribe: voice scheduler is stopping"
 		_ = conn.WriteJSON(resp)
 		return
 	}
-	if transcript == "" || isSTTFailureMarker(transcript) {
-		resp.Err = "retranscribe: STT provider still failing (no transcript)"
-		log.Printf("retranscribe chan=%s file_id=%s msg=%d ok=false", chanName, req.FileID, req.MessageID)
-		_ = conn.WriteJSON(resp)
-		return
-	}
-	resp.Text = transcript
 
-	// In-place refresh of the still-queued line for this message_id (spec
-	// Component 5). Routed through the route's single-owner worker so the cap-safe
-	// rewrite never touches the route's files off the worker goroutine. Best-effort:
-	// a refresh miss/failure does not change the returned transcript (the agent
-	// already has it), so we log on error but still return Text.
-	refreshed, appendedNew := false, false
-	if req.MessageID != 0 && route != nil && b.Workers != nil && b.Queue != nil {
-		resultCh := make(chan RefreshResult, 1)
-		job := Job{Kind: JobRefreshText, Refresh: &RefreshTextJob{
-			MessageID:  req.MessageID,
-			FileID:     req.FileID,
-			Transcript: transcript,
-			ResultCh:   resultCh,
-		}}
-		if b.Workers.Submit(*route, job) {
-			select {
-			case res := <-resultCh:
-				if res.Err != nil {
-					log.Printf("retranscribe refresh chan=%s file_id=%s msg=%d: refresh error: %v", chanName, req.FileID, req.MessageID, res.Err)
-				}
-				refreshed, appendedNew = res.Refreshed, res.AppendedNew
-			case <-time.After(workerJobTimeout):
-				// A3: the STT result was already delivered above; the in-place refresh /
-				// late-deliver is best-effort AND it completes on the worker goroutine
-				// regardless of this wait (the durable Append is not abandoned). A
-				// stalled worker must not wedge the read loop — log and return Text.
-				log.Printf("retranscribe refresh chan=%s file_id=%s msg=%d: worker did not respond within %s — refresh/late-deliver still completes on the worker", chanName, req.FileID, req.MessageID, workerJobTimeout)
-			}
+	timer := time.NewTimer(retranscribeTimeout)
+	defer timer.Stop()
+	select {
+	case result := <-hook:
+		if result.Err != nil {
+			resp.Err = "retranscribe: " + result.Err.Error()
+			log.Printf("retranscribe chan=%s file_id=%s msg=%d ok=false: %v", chanName, req.FileID, req.MessageID, result.Err)
 		} else {
-			log.Printf("retranscribe refresh chan=%s file_id=%s msg=%d: worker queue full or stopped", chanName, req.FileID, req.MessageID)
+			resp.Text = result.Transcript
+			log.Printf("retranscribe chan=%s file_id=%s msg=%d ok=true", chanName, req.FileID, req.MessageID)
 		}
+	case <-timer.C:
+		resp.Err = fmt.Sprintf("retranscribe: timed out after %s waiting for transcription; durable enrichment continues", retranscribeTimeout)
+		log.Printf("retranscribe chan=%s file_id=%s msg=%d: caller wait expired after %s — durable enrichment continues", chanName, req.FileID, req.MessageID, retranscribeTimeout)
 	}
-	// appendedNew=true ⇒ the message was no longer queued (delivered live), so the
-	// transcript was delivered as a fresh durable line — it is NOT lost even if this
-	// caller already timed out (the P0-1 fix).
-	log.Printf("retranscribe chan=%s file_id=%s msg=%d ok=true refreshed=%v appended_new=%v", chanName, req.FileID, req.MessageID, refreshed, appendedNew)
-	_ = conn.WriteJSON(resp)
+	if err := conn.WriteJSON(resp); err != nil {
+		log.Printf("retranscribe chan=%s file_id=%s msg=%d: response not sent: %v — durable enrichment is unaffected", chanName, req.FileID, req.MessageID, err)
+	}
 }
 
 // handleInboundDelivered consumes the queued message(s) covered by a live push

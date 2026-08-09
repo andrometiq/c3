@@ -41,7 +41,7 @@ Beyond `attach` / `detach` / `topics`, the adapters expose a set of message and 
 | `stop_poll`          |   ✓    |   ✓   |  ✓   | Force-close a bot-sent poll and return its final aggregate tally.             |
 | `download_attachment`|   ✓    |   ✓   |  ✓   | Download an inbound attachment by `file_id` to the local cache.               |
 | `fetch_queue`        |   ✓    |   ✓   |  ✓   | Drain held inbound from the durable queue (`limit` / `"all"`; `ack` peek vs consume). |
-| `retranscribe`       |   ✓    |   ✓   |  ✓   | Re-run the STT chain on saved audio by `file_id`; refresh a queued transcript in place. |
+| `retranscribe`       |   ✓    |   ✓   |  ✓   | Re-run saved audio through the durable STT scheduler; resolve a pending row or append a transcript-update row. |
 | `ask`                |   ✓    |   —   |  —   | Blocking human question (single/multi-select + Skip) via an inline keyboard.  |
 | `codex_forward`      |   —    |   ✓   |  —   | Env-gated debug tool: forward a payload into the Codex app-server (diagnostics). |
 

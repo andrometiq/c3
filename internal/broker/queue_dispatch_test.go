@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net"
+	"strings"
 	"testing"
 	"time"
 
@@ -117,10 +118,9 @@ func TestHandleRetranscribe_ReRunsSTT(t *testing.T) {
 	}
 }
 
-// message_id with NO matching queued message is a clean queue no-op: it must not
-// error and must still return the fresh transcript. (The in-place refresh only
-// fires when the message is still queued; here nothing is queued.)
-func TestHandleRetranscribe_AbsentMessageIDStillReturnsTranscript(t *testing.T) {
+// With no pending owner, manual retranscribe returns synchronously and lands the
+// same result as an ordinary durable revision line.
+func TestHandleRetranscribe_AbsentMessageIDReturnsAndAppendsRevision(t *testing.T) {
 	t.Setenv("C3_QUEUE_DIR", t.TempDir())
 	b := brokerWithChannel(t, mfWithTelegram(), &fakeChannel{})
 	defer b.Shutdown()
@@ -138,15 +138,59 @@ func TestHandleRetranscribe_AbsentMessageIDStillReturnsTranscript(t *testing.T) 
 		t.Fatalf("retranscribe with absent message_id should not error; got %q", resp.Err)
 	}
 	if resp.Text != "fresh transcript" {
-		t.Fatalf("retranscribe text = %q, want 'fresh transcript' (absent message_id is a queue no-op)", resp.Text)
+		t.Fatalf("retranscribe text = %q, want 'fresh transcript'", resp.Text)
+	}
+	rows, err := b.Queue.Peek(queue.RouteKey{Channel: "telegram", ChatID: -100, TopicID: ptrI64(914)}, -1)
+	if err != nil || len(rows) != 1 || !strings.Contains(rows[0].Text, "[transcript update for voice message 999]") {
+		t.Fatalf("manual revision rows=%+v err=%v", rows, err)
 	}
 }
 
-// Per spec Component 5: when message_id is given AND that message is still queued
-// for the route, retranscribe refreshes its stored Text in place so a subsequent
-// fetch_queue returns the corrected transcript (not the old STT-failure
-// placeholder).
-func TestHandleRetranscribe_RefreshesQueuedMessageInPlace(t *testing.T) {
+func TestHandleRetranscribe_ResolvesPendingOwnerInPlace(t *testing.T) {
+	t.Setenv("C3_QUEUE_DIR", t.TempDir())
+	b := brokerWithChannel(t, mfWithTelegram(), &fakeChannel{})
+	defer b.Shutdown()
+	b.Plugins.OnVoiceReceived(func(_ context.Context, _ c3types.VoicePayload) (string, error) {
+		return "manual transcript", nil
+	})
+
+	tid := int64(914)
+	key := MakeRouteKey("telegram", -100, &tid)
+	qrk := queue.RouteKey{Channel: "telegram", ChatID: -100, TopicID: &tid}
+	pending := &c3types.Inbound{
+		Channel: "telegram", ChatID: -100, TopicID: &tid, MessageID: 5,
+		Text:        "caption\n" + voicePendingText("vf"),
+		Attachments: []c3types.Attachment{{Kind: "voice", FileID: "vf"}},
+		Timestamp:   time.Now(),
+	}
+	recordID, err := b.Queue.AppendTracked(qrk, pending, "vf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	stub := claimedHolder(t, b, key)
+	stub.SetRoute(&key)
+	agentSide, brokerSide := newConnPair(t)
+	raw, _ := json.Marshal(ipc.RetranscribeReq{Op: ipc.OpRetranscribe, ID: "pending", FileID: "vf", MessageID: 5})
+	go b.handleRetranscribe(brokerSide, stub, raw)
+	if resp := readRetranscribeResp(t, agentSide); resp.Err != "" || resp.Text != "manual transcript" {
+		t.Fatalf("retranscribe response=%+v", resp)
+	}
+
+	rows, err := b.Queue.PeekTracked(qrk, -1)
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("resolved rows=%+v err=%v", rows, err)
+	}
+	if rows[0].RecordID != recordID || len(rows[0].VoicePending) != 0 {
+		t.Fatalf("pending owner was replaced/appended instead of resolved in place: %+v", rows[0])
+	}
+	if rows[0].Inbound.Text != "caption\n[Transcribed voice]: manual transcript" {
+		t.Fatalf("resolved text=%q", rows[0].Inbound.Text)
+	}
+}
+
+// Legacy final rows have nil VoicePending and are never re-enriched. Manual
+// retranscribe preserves them and appends an explicit revision instead.
+func TestHandleRetranscribe_LegacyFinalRowAppendsRevisionWithoutMutation(t *testing.T) {
 	t.Setenv("C3_QUEUE_DIR", t.TempDir())
 	b := brokerWithChannel(t, mfWithTelegram(), &fakeChannel{})
 	defer b.Shutdown()
@@ -157,13 +201,10 @@ func TestHandleRetranscribe_RefreshesQueuedMessageInPlace(t *testing.T) {
 	tid := int64(914)
 	key := MakeRouteKey("telegram", -100, &tid)
 	qrk := queue.RouteKey{Channel: "telegram", ChatID: -100, TopicID: &tid}
-	// A queued voice message whose stored Text is an STT-failure placeholder.
-	// The shape is the REAL one: a voice attachment, and text C3 wrote by itself
-	// (sttFailureOpening). The in-place refresh replaces the whole stored text,
-	// so it is allowed only for exactly this shape — see wholeTextIsC3sVoiceWrite.
+	const original = "legacy final voice text"
 	_ = b.Queue.Append(qrk, &c3types.Inbound{
 		Channel: "telegram", ChatID: -100, TopicID: &tid, MessageID: 5,
-		Text:        sttFailureOpening + " no_transcript] the audio is saved and recoverable …",
+		Text:        original,
 		Attachments: []c3types.Attachment{{Kind: "voice", FileID: "vf"}},
 		Timestamp:   time.Now(),
 	})
@@ -184,30 +225,18 @@ func TestHandleRetranscribe_RefreshesQueuedMessageInPlace(t *testing.T) {
 		t.Fatalf("retranscribe text = %q, want 'fresh transcript'", resp.Text)
 	}
 
-	// A subsequent fetch_queue (peek) must return the refreshed text for msg 5,
-	// and the untouched text for msg 6.
+	// A subsequent fetch_queue sees both original rows plus one revision.
 	fraw, _ := json.Marshal(ipc.FetchQueueReq{Op: ipc.OpFetchQueue, ID: "4", All: true, Ack: false})
 	go b.handleFetchQueue(brokerSide, stub, fraw)
 	fresp := readFetchResp(t, agentSide)
-	if len(fresp.Messages) != 2 {
-		t.Fatalf("fetch_queue returned %d messages, want 2", len(fresp.Messages))
+	if len(fresp.Messages) != 3 {
+		t.Fatalf("fetch_queue returned %d messages, want 3", len(fresp.Messages))
 	}
-	for _, m := range fresp.Messages {
-		switch m.MessageID {
-		case 5:
-			// Stored in the SAME authored shape C3 recognizes (prefix included),
-			// which is what lets a LATER retranscribe find and replace it again.
-			// Storing the bare transcript made refresh a one-shot.
-			if m.Text != "[Transcribed voice]: fresh transcript" {
-				t.Fatalf("queued msg 5 text = %q, want the refreshed transcript in C3's authored shape", m.Text)
-			}
-		case 6:
-			if m.Text != "other" {
-				t.Fatalf("queued msg 6 text = %q, want untouched 'other'", m.Text)
-			}
-		default:
-			t.Fatalf("unexpected queued message id %d", m.MessageID)
-		}
+	if fresp.Messages[0].Text != original || fresp.Messages[1].Text != "other" {
+		t.Fatalf("manual retranscribe mutated legacy rows: %+v", fresp.Messages)
+	}
+	if got := fresp.Messages[2].Text; !strings.HasPrefix(got, "[transcript update for voice message 5]\n") || !strings.Contains(got, "fresh transcript") {
+		t.Fatalf("manual revision text=%q", got)
 	}
 }
 
@@ -256,18 +285,15 @@ func TestHandleRetranscribe_DrainedVoiceCollisionDoesNotRewriteOrganicMessage(t 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got) != 2 || got[0].Text != drainedText || got[1].Text != organicText {
+	if len(got) != 3 || got[0].Text != drainedText || got[1].Text != organicText ||
+		!strings.Contains(got[2].Text, "fresh transcript") {
 		t.Fatalf("collision refresh rewrote a different queue record: %+v", got)
 	}
 }
 
-// Item B (retranscribe timeout): a slow/hung STT provider must NOT block the IPC
-// read goroutine forever. handleRetranscribe bounds FireOnVoiceReceived with
-// retranscribeTimeout; an OnVoiceReceived callback that respects ctx (returns ""
-// once the bounded ctx fires) lets the handler return a "still failing" error
-// within the cap rather than wedging. We shorten retranscribeTimeout so the test
-// is fast, and assert the handler returns well inside a generous outer deadline.
-func TestHandleRetranscribe_BoundsHungProvider(t *testing.T) {
+// A slow provider must not wedge the IPC read loop. The caller wait expires,
+// while the scheduler-owned attempt continues independently until its own bound.
+func TestHandleRetranscribe_BoundsCallerWaitWithoutCancelingLease(t *testing.T) {
 	t.Setenv("C3_QUEUE_DIR", t.TempDir())
 	b := brokerWithChannel(t, mfWithTelegram(), &fakeChannel{})
 	defer b.Shutdown()
@@ -276,16 +302,14 @@ func TestHandleRetranscribe_BoundsHungProvider(t *testing.T) {
 	retranscribeTimeout = 50 * time.Millisecond
 	defer func() { retranscribeTimeout = prev }()
 
-	// A provider that hangs until the (bounded) ctx is cancelled, then returns no
-	// transcript — exactly how a respectful-but-stuck provider behaves under a
-	// deadline.
+	// A provider that remains in flight beyond the shortened caller wait.
 	started := make(chan struct{}, 1)
 	b.Plugins.OnVoiceReceived(func(ctx context.Context, _ c3types.VoicePayload) (string, error) {
 		select {
 		case started <- struct{}{}:
 		default:
 		}
-		<-ctx.Done() // block until handleRetranscribe's timeout fires
+		<-ctx.Done() // scheduler cancellation/deadline, not caller-wait cancellation
 		return "", ctx.Err()
 	})
 	stub := &Stub{CLI: "claude"}
@@ -308,10 +332,8 @@ func TestHandleRetranscribe_BoundsHungProvider(t *testing.T) {
 
 	select {
 	case resp := <-respCh:
-		// The bounded ctx fired, the provider returned "", and the handler reported
-		// the still-failing error rather than blocking indefinitely.
 		if resp.Err == "" {
-			t.Fatalf("expected a 'still failing' error after the bounded timeout; got Text=%q", resp.Text)
+			t.Fatalf("expected a caller-wait timeout; got Text=%q", resp.Text)
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("handleRetranscribe did not return after the bounded timeout — a hung provider can wedge the IPC read loop")

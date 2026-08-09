@@ -171,10 +171,7 @@ func (b *Broker) voiceCachedPath(chanName, fileID string) string {
 	return cp.CachedVoicePath(fileID)
 }
 
-// The openings C3 uses when it authors a voice message's whole agent-surface
-// text. They are named once, here, so wholeTextIsC3sVoiceWrite recognizes
-// exactly what the writers below produce — if a writer's wording changes, its
-// opening travels with it.
+// Stable openings for the agent-facing terminal voice outcomes.
 const (
 	sttFailureOpening       = "⚠️ [voice transcription failed:"
 	voiceTooBigOpening      = "[voice too big:"

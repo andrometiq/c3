@@ -23,8 +23,8 @@ If what you want is a new transcription engine, you almost certainly want the ST
 
 | Hook | Status in v0.1.0 | Semantics |
 |---|---|---|
-| `OnInbound` | **Live** | Called for every channel-emitted inbound after debounce/dedup and after STT substitution, before routing. Fired from `worker.go:674` (merged message batch) and `worker.go:839` (events). Return a replacement `*Inbound` to mutate, or `drop=true` to short-circuit the chain and discard the message. |
-| `OnVoiceReceived` | **Live** | Called only for inbounds carrying a voice attachment. Fired from `worker.go:514` (normal flush) and `queue_dispatch.go:142` (the `retranscribe` tool). First callback to return a **non-empty string with a nil error** wins and becomes the inbound's text; a callback that errors or returns `""` is skipped and the next one runs. |
+| `OnInbound` | **Live** | Called for debounce-merged non-voice inbounds and channel events before routing. Resolved voice rows use the durable voice-delivery path and do not re-enter this transform chain. Return a replacement `*Inbound` to mutate, or `drop=true` to short-circuit the chain and discard the message. |
+| `OnVoiceReceived` | **Live** | Called by the bounded voice scheduler for automatic voice enrichment and manual `retranscribe`. First callback to return a **non-empty string with a nil error** wins; a callback that errors or returns `""` is skipped and the next one runs. |
 | `RegisterTools` | **Registers, does not dispatch** | The registry accepts your tool and stores it. Nothing in the broker reads that map, and tool dispatch is a fixed switch. See [Tools](#tools-registered-but-not-dispatched-in-v010). |
 | `OnOutbound` | **Declared, not yet invoked** | The signature and the chain runner (`FireOnOutbound`) exist and are correct, but no broker code path calls them. Outbound messages go straight from `dispatchReply` to the channel. Subscribing succeeds and the callback never runs. |
 | `OnAttach` | **Declared, not yet invoked** | Same: `FireOnAttach` exists, the attach path does not call it. Subscribing succeeds and the callback never runs. |
@@ -33,15 +33,15 @@ If what you want is a new transcription engine, you almost certainly want the ST
 
 **Ordering is registration order, not `priority`.** `FireOnInbound` and `FireOnVoiceReceived` iterate their callback slices in subscription order, which is the order of the `builtinPlugins` slice in `cmd/c3-broker/main.go`. The host never reads the `priority` config key. STT runs first because it is first in that slice.
 
-**Hooks are synchronous and serial.** Your callback blocks the message until it returns. Keep hot-path work under ~100 ms. If you need to offload, read the next section first — the panic rules change once you spawn a goroutine.
+**Each hook chain is synchronous and serial.** An `OnInbound` callback blocks its route worker until it returns. `OnVoiceReceived` runs off-worker, with at most two scheduler attempts executing concurrently across all routes. If you need to offload your own work, read the next section first — the panic rules change once you spawn a goroutine.
 
 ### Panic behaviour
 
 There is no `recover` inside the plugin host; no hook is individually guarded. What catches a panic depends on which path fired it, and the blast radius is larger than your plugin in every case.
 
-- **`OnInbound` or `OnVoiceReceived` panicking on the message-flush path** (`worker.go:514`, `worker.go:674`) is caught by `flushInbounds`' own guard (`worker.go:483`). The broker and the route worker survive. The message does not: the durable append and `markPersisted` have already run by that point (`worker.go:622`–`665`), but `forwardOrFallbackCovering` (`worker.go:684`) has not. So the batch is persisted, the channel's offset has advanced, and nothing is ever pushed to the CLI. It remains in the durable queue and is recoverable only by draining with `fetch_queue`. The user sees silence.
-- **`OnInbound` panicking on the event path** (`worker.go:839`) is caught by `flushEvent`'s guard (`worker.go:807`). The event is dropped; broker and worker survive.
-- **`OnVoiceReceived` panicking during `retranscribe`** (`queue_dispatch.go:142`) has no local guard. The panic unwinds to `HandleConn`'s guard (`handler.go:27`), which returns from `HandleConn` and runs its deferred `MarkDisconnected` + `Stubs.Unregister`. **The calling adapter's IPC connection is closed.** No `retranscribe_result` frame is ever written, so the caller's tool call blocks until its own timeout. The route claim survives if the adapter process is still alive.
+- **`OnInbound` panicking on the merged-message path** is caught by `flushInbounds`' guard. The broker and route worker survive. The affected non-voice rows are already durable but are not pushed; `fetch_queue` can still recover them.
+- **`OnInbound` panicking on the event path** is caught by `flushEvent`'s guard. The event is dropped; broker and worker survive.
+- **`OnVoiceReceived` panicking** is caught at the scheduler-runner boundary, so it does not close a `retranscribe` caller's IPC connection or terminate the broker. The pending queue row remains the source of truth and is recovered by the startup scan after a restart; a synchronous caller eventually reaches its own bounded timeout.
 - **A goroutine you spawn yourself is outside every one of those guards.** An unrecovered panic in any goroutine terminates the whole broker process, and does so quietly — a goroutine panic never reaches the log path that broker failures normally use (`internal/broker/recover.go:8-16`). If you offload work, put `defer func() { if r := recover(); r != nil { host.Logf(...) } }()` at the top of your goroutine.
 
 ## Skeleton of an in-tree plugin
@@ -179,7 +179,7 @@ There is no mock host shipped with the module. Write a small `fakeHost` implemen
 
 Two pieces ship together:
 
-- **Go shim** at `internal/plugin/builtins/stt/` — compiled into the broker, subscribes to `OnVoiceReceived`, reads `plugins.stt.{enabled, handler_path, timeout_seconds, python, audio_retention}` from `mappings.json`, and subprocesses a Python handler per voice message.
+- **Go shim** at `internal/plugin/builtins/stt/` — compiled into the broker, subscribes to `OnVoiceReceived`, reads `plugins.stt.{enabled, handler_path, timeout_seconds, python, audio_retention}` from `mappings.json`, and subprocesses a Python handler per voice attempt. The broker-owned scheduler also reads `plugins.stt.voice_retry_expiry` (default `24h`; a Go duration string or number of seconds).
 - **Python pipeline** at `plugins/c3/stt/` — `stt-handler.py` plus `stt-pkg/`, which holds the chained provider runner (`stt-pkg/stt.py`) and four bundled providers (`gemini-3-flash-openrouter`, `soniox-stt-async-v5`, `elevenlabs-scribe-v2`, `sarvam-saaras-v3`). The default chain tries those four in that order, skipping any provider whose key is unavailable; `C3_STT_CHAIN` overrides the order. `stt-pkg/vocabulary.txt` biases recognition toward domain terms. API keys are read from the provider modules' own env/file lookups.
 
 ### The handler contract
@@ -207,17 +207,27 @@ Failures are never silent. A transcription-stage failure returns, *as the
 transcript*, `[STT FAILED: <reason> — see <broker log path>]`, with `<reason>`
 one of `handler_missing`, `token_unavailable`, `timeout`, `killed`, `error`,
 `empty`. If the handler cannot fetch the audio, it instead returns
-`[STT FETCH FAILED: <server cause>]`; the broker reports that cause and does not
-claim the audio was saved.
+`[STT FETCH FAILED: <server cause>]`. The scheduler parks fail-closed transient
+network failures for automatic retry; permanent failures durably resolve to an
+agent-facing recovery message.
 
-The worker replaces an ordinary STT marker with an agent-facing recovery message
+The scheduler replaces an ordinary STT marker with an agent-facing recovery message
 that names the `file_id`, `download_attachment`, `retranscribe`, and broker log.
 It appends that message to any caption/rich text instead of clobbering the
-sender's words. A fetch-failure marker is also appended, but uses the server's
-cause and makes no saved/recoverable promise. Two ordinary reason values come
-from the worker rather than the shim: `no_transcript` when no
+sender's words. A preflight fetch refusal uses the server's cause; a permanent
+handler fetch failure takes the ordinary recovery path. Two ordinary reason
+values come from the scheduler rather than the shim: `no_transcript` when no
 `OnVoiceReceived` subscriber returned anything, and `stt_failed` for an
 unparseable failure return.
+
+Voice intake is persist-first: the route worker stores a row carrying an honest
+pending placeholder and advances the source offset before any network call. The
+two-runner scheduler resolves that row after STT. Known-DOWN channel health gates
+attempts without burning them; transient download failures retry with bounded
+backoff, and a broker restart reconstructs pending work from the queue. Manual
+`retranscribe` joins the same single-flight lease. If a pending row was consumed
+while STT ran, the result is an additive transcript-update row rather than a
+rewrite of consumed history.
 
 Note the chain consequence: because the marker is a **non-empty string returned with a nil error**, it wins `FireOnVoiceReceived` and any `OnVoiceReceived` callback registered after STT will not run on that message. If you are writing a second voice plugin, register it *before* STT in `builtinPlugins`.
 

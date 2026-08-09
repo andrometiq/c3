@@ -15,6 +15,7 @@ import os
 import shutil
 import sys
 import tempfile
+import threading
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -69,6 +70,62 @@ class TestDownloadFileOkFalse(unittest.TestCase):
             pass
         except KeyError:
             self.fail("download_file raised the pre-fix cryptic KeyError('result')")
+
+    def test_concurrent_downloads_own_distinct_temp_files(self):
+        """Concurrent auto/manual attempts may share a final cache path, but
+        neither may overwrite or clean up the other's in-flight temp file."""
+        from unittest import mock
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self):
+                return b"OggS-concurrent"
+
+        def fake_tg(_token, _method, **_params):
+            return {"ok": True, "result": {"file_path": "voice/file.oga"}}
+
+        with tempfile.TemporaryDirectory(prefix="c3-stt-download-") as tmp:
+            final = os.path.join(tmp, "123-FID.oga")
+            original_replace = os.replace
+            replace_barrier = threading.Barrier(2)
+            sources = []
+            sources_lock = threading.Lock()
+
+            def synchronized_replace(src, dst):
+                with sources_lock:
+                    sources.append(src)
+                replace_barrier.wait(timeout=2)
+                original_replace(src, dst)
+
+            failures = []
+
+            def run_download():
+                try:
+                    self.handler.download_file("tok", "FID", final, tg_fn=fake_tg)
+                except BaseException as exc:
+                    failures.append(exc)
+
+            with mock.patch.object(self.handler.urllib.request, "urlopen", return_value=Response()), \
+                 mock.patch.object(self.handler.os, "replace", side_effect=synchronized_replace):
+                threads = [threading.Thread(target=run_download) for _ in range(2)]
+                for thread in threads:
+                    thread.start()
+                for thread in threads:
+                    thread.join(timeout=3)
+
+            self.assertEqual(failures, [])
+            self.assertEqual(len(sources), 2)
+            self.assertEqual(len(set(sources)), 2, "each attempt must own a unique temp")
+            for source in sources:
+                self.assertTrue(source.startswith(final + "."))
+                self.assertTrue(source.endswith(".part"))
+                self.assertFalse(os.path.exists(source), "attempt must clean only its own temp")
+            self.assertTrue(os.path.exists(final))
 
 
 class TestRunSttFailureReturnsNone(unittest.TestCase):
@@ -200,6 +257,23 @@ class TestPruneInbox(unittest.TestCase):
         self.assertTrue(os.path.exists(keep), "newest .oga kept")
         self.assertFalse(os.path.exists(old), "older .oga pruned")
         self.assertTrue(os.path.exists(other), "non-.oga files are never pruned")
+
+    def test_prunes_only_part_files_older_than_outer_deadline_margin(self):
+        from unittest import mock
+        now = self.handler.time.time()
+        stale = os.path.join(self.tmp, "voice.1-deadbeef.part")
+        fresh = os.path.join(self.tmp, "voice.2-live.part")
+        for path in (stale, fresh):
+            with open(path, "wb") as f:
+                f.write(b"partial")
+        os.utime(stale, (now - 1801, now - 1801))
+        os.utime(fresh, (now - 1800, now - 1800))
+
+        with mock.patch.object(self.handler.time, "time", return_value=now):
+            self.handler.prune_inbox(-1)
+
+        self.assertFalse(os.path.exists(stale), "orphan older than 1800s should be swept")
+        self.assertTrue(os.path.exists(fresh), "boundary-age in-flight temp must be kept")
 
     def test_main_success_flow_keeps_oga_under_default_retention(self):
         """End-to-end-ish: a full main() download+transcribe+print flow now KEEPS

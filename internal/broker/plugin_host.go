@@ -133,8 +133,9 @@ func (h *PluginHost) Done() <-chan struct{} {
 
 // FireOnVoiceReceived runs registered OnVoiceReceived callbacks in registration
 // order. Returns the first non-empty transcript, or "" if no plugin had one.
-// The broker passes voice payloads here BEFORE the OnInbound chain so plugin
-// inbound transforms see the post-STT text per spec §4.5.1.
+// The bounded voice scheduler calls this off the route worker. Resolved voice
+// rows take the scheduler's durable delivery path; they do not re-enter the
+// ordinary OnInbound transform chain.
 func (h *PluginHost) FireOnVoiceReceived(ctx context.Context, p c3types.VoicePayload) string {
 	h.mu.RLock()
 	cbs := append([]func(context.Context, c3types.VoicePayload) (string, error){}, h.onVoice...)

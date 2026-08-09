@@ -49,6 +49,7 @@ type voiceEntry struct {
 	firstFailure time.Time
 	backoff      time.Duration
 	manual       bool
+	findPending  bool
 	state        voiceEntryState
 	group        *voiceGroup
 	resolve      voiceResolve
@@ -282,12 +283,15 @@ func (s *VoiceScheduler) schedule(route RouteKey, recordID string, in c3types.In
 				existing.manual = true
 				existing.nextAttempt = now
 			}
+			if manual && existing.recordID == "" {
+				existing.findPending = true
+			}
 			added = true
 			continue
 		}
 		entry := &voiceEntry{
 			key: key, recordID: recordID, inbound: cloneVoiceInbound(in), attachment: att,
-			nextAttempt: now, backoff: s.retryBase, manual: manual, state: voiceWaiting,
+			nextAttempt: now, backoff: s.retryBase, manual: manual, findPending: manual, state: voiceWaiting,
 		}
 		if hook != nil {
 			entry.hooks = append(entry.hooks, hook)
@@ -609,7 +613,7 @@ func (s *VoiceScheduler) submitResolve(key voiceScheduleKey) {
 		Key: key, RecordID: entry.recordID, Inbound: cloneVoiceInbound(entry.inbound),
 		FileID: key.fileID, SegmentText: entry.resolve.segmentText, Success: entry.resolve.success,
 		EchoTranscript: entry.resolve.echoTranscript, FailNotice: entry.resolve.failNotice,
-		Echo: entry.resolve.echo,
+		Echo: entry.resolve.echo, FindPending: entry.findPending,
 	}
 	entry.state = voiceResolveSubmitted
 	s.wg.Add(1)

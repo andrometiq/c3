@@ -30,6 +30,12 @@ Claude Code receives a native `<channel>` turn whose content is:
 [Transcribed voice]: Run the tests, fix the flaky one, and tell me what changed.
 ```
 
+C3 writes the voice note to its durable queue before transcription starts. STT
+runs in a bounded background scheduler, so a provider outage cannot hold the
+Telegram offset or block other messages on that topic. A pending placeholder is
+visible through `fetch_queue`; when transcription finishes, C3 resolves that row
+and delivers it once. Transient download failures retry automatically.
+
 When a tool call needs approval, the topic shows the literal command and a real inline
 keyboard:
 
@@ -146,8 +152,9 @@ It works fine with a single session. The architecture starts to matter once you 
   go to a durable on-disk queue for later readback instead of being lost.
 - **Rich two-way Telegram** — markdown, quote-replies, attachments, edits, reactions, polls,
   and inline buttons.
-- **Voice notes** — the bundled STT chain turns phone audio into `[Transcribed voice]: …`;
-  the original attachment stays available for re-transcription.
+- **Voice notes** — C3 persists an honest pending row first, then the bundled STT
+  chain turns phone audio into `[Transcribed voice]: …` off the route worker; the
+  original attachment stays available for re-transcription.
 - **Remote permission decisions** — Claude Code can relay its permission prompt as an
   Allow/Deny keyboard. Only a DM-paired operator's tap becomes a verdict, and command
   previews render literally rather than as markdown.
