@@ -599,15 +599,16 @@ const sttFailureNotice = "⚠️ Couldn't transcribe that voice note — see log
 
 // sttFlushTimeout bounds each per-inbound voice STT call made by flushInbounds.
 // Without it the call inherits only the run-loop ctx (cancelled solely on broker
-// shutdown / w.cancel()) plus the STT builtin's own ~300s subprocess budget — so
-// a download that hangs BEFORE that budget applies blocks the worker goroutine,
-// and any JobFetch/JobConsume queued behind it, for up to ~5 min. It mirrors
-// retranscribeTimeout's value (330s, just above the STT builtin's 300s
-// subprocess deadline) so a healthy long voice note still completes, but a hung
-// download is cut off in bounded time; a timed-out call returns "" and falls
-// through to the self-documenting sttFailureText placeholder. It is a var (not a
-// const) only so a test can shorten it; production never reassigns it.
-var sttFlushTimeout = 330 * time.Second
+// shutdown / w.cancel()) plus the STT builtin's own subprocess budget — so a
+// download that hangs BEFORE that budget applies blocks the worker goroutine, and
+// any JobFetch/JobConsume queued behind it, until it fires. It must sit ABOVE the
+// STT builtin's now SIZE-SCALED subprocess deadline (capped at sttMaxTimeoutSeconds
+// = 720s; see stt.sttTimeoutForSize) so the builtin's own ctx deadline always fires
+// first on a healthy long note, while a truly hung download is still cut off in
+// bounded time (a timed-out call returns "" → self-documenting sttFailureText). It
+// mirrors retranscribeTimeout. It is a var (not a const) only so a test can shorten
+// it; production never reassigns it.
+var sttFlushTimeout = 750 * time.Second
 
 // flushInbounds runs the plugin pipeline + forwards a debounce-collapsed
 // batch as a single ipc.OpInbound.

@@ -67,6 +67,52 @@ type Config struct {
 // downloads + a long-audio transcription cycle without surprising the user.
 const defaultTimeoutSeconds = 300
 
+// STT budget scaling (P1-3, 2026-08-08 cascade). A fixed 300s budget with the
+// download charged against it starved long voice notes: an 18 MB / 15-min note
+// spent ~100s downloading over a recovering network, leaving too little for two
+// provider attempts, and the retry was SIGKILLed mid-flight. The subprocess budget
+// now scales with the stated audio size.
+//
+// Deadline hierarchy that MUST hold (or the tree is killed mid-provider):
+//
+//	Python subprocess.run budget  <  Go SIGKILL (sttTimeoutForSize)  <  broker
+//	outer ctx (worker.sttFlushTimeout / queue_dispatch.retranscribeTimeout).
+//
+// The Go SIGKILL is this function's value (the plugin's own ctx deadline); the
+// broker's outer timeouts sit ABOVE sttMaxTimeoutSeconds so the plugin deadline
+// always fires first. The Python handler reads the same value via
+// C3_STT_DEADLINE_SECONDS and budgets its provider subprocess UNDER it (minus the
+// download already spent, minus a margin) — see stt-handler.py.
+const (
+	// sttMaxTimeoutSeconds caps the scaled budget (a ~15-min note needs download +
+	// two full engine attempts, ~600s; the cap bounds a pathological file).
+	sttMaxTimeoutSeconds = 720
+	// sttPerMiBSeconds is added to the base budget per MiB of stated audio size.
+	sttPerMiBSeconds = 18
+)
+
+// sttTimeoutForSize scales the STT subprocess budget: base + sttPerMiBSeconds per
+// MiB of stated size, capped at sttMaxTimeoutSeconds (never below base). A 0/unknown
+// size yields the base, preserving the previous fixed behavior.
+func sttTimeoutForSize(base int, sizeBytes int64) time.Duration {
+	secs := base
+	if sizeBytes > 0 {
+		secs += int(sizeBytes>>20) * sttPerMiBSeconds
+	}
+	limit := sttMaxTimeoutSeconds
+	if base > limit {
+		limit = base // never shrink a deliberately-large configured base
+	}
+	if secs > limit {
+		secs = limit
+	}
+	return time.Duration(secs) * time.Second
+}
+
+// sttDeadlineEnvVar carries the Go SIGKILL budget (seconds) to the Python handler
+// so it budgets its provider subprocess UNDER the real deadline, not a hardcoded one.
+const sttDeadlineEnvVar = "C3_STT_DEADLINE_SECONDS"
+
 // defaultAudioRetention is how many recent .oga voice files the handler keeps in
 // its inbox when plugins.stt.audio_retention is unset (0). Recent audio stays
 // available for retranscribe/testing; older files are pruned after each
@@ -330,7 +376,7 @@ func runHandler(ctx context.Context, host plugin.Host, cfg Config, token, apiBas
 		args = append(args, "")
 	}
 
-	timeout := time.Duration(cfg.Timeout) * time.Second
+	timeout := sttTimeoutForSize(cfg.Timeout, p.Size)
 	tctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
@@ -348,7 +394,7 @@ func runHandler(ctx context.Context, host plugin.Host, cfg Config, token, apiBas
 	// One fresh secret per invocation. Go >=1.25's rand.Read either fills it or
 	// terminates the process; the handler never receives an empty nonce.
 	nonce := newFetchNonce()
-	cmd.Env = handlerEnv(apiBaseURL, apiBaseAnswered, nonce, cfg.AudioRetention)
+	cmd.Env = handlerEnv(apiBaseURL, apiBaseAnswered, nonce, cfg.AudioRetention, int(timeout.Seconds()))
 
 	// I-7: kill the whole process group on the ctx deadline, not just the direct
 	// child. Setpgid makes stt-handler.py the leader of its OWN process group, so
@@ -494,7 +540,7 @@ func readTelegramConn(host plugin.Host) (token, apiBaseURL string, answered bool
 //
 // When the channel could NOT answer, the environment is inherited untouched —
 // that is the pre-existing behavior for a transport with no live accessor.
-func handlerEnv(base string, answered bool, nonce string, retention int) []string {
+func handlerEnv(base string, answered bool, nonce string, retention int, deadlineSecs int) []string {
 	env := os.Environ()
 	// A base is installed whenever we HAVE one — whether the live channel gave
 	// it or readTelegramConn resolved it from env/mappings. Gating the install on
@@ -520,7 +566,8 @@ func handlerEnv(base string, answered bool, nonce string, retention int) []strin
 	}
 	return append(env,
 		fetchNonceEnvVar+"="+nonce,
-		"STT_AUDIO_RETENTION="+strconv.Itoa(retention))
+		"STT_AUDIO_RETENTION="+strconv.Itoa(retention),
+		sttDeadlineEnvVar+"="+strconv.Itoa(deadlineSecs))
 }
 
 // apiURLEnvVar is the variable stt-handler.py reads its Bot-API base from.

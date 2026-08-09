@@ -14,14 +14,13 @@ import (
 
 // retranscribeTimeout bounds the synchronous STT chain run on the IPC read
 // goroutine in handleRetranscribe, so a slow/hung provider cannot wedge that
-// adapter's single-threaded read loop indefinitely. It sits just ABOVE the STT
-// builtin's own subprocess budget (defaultTimeoutSeconds = 300s) so a healthy
-// long voice note that legitimately runs near 300s still completes (the inner,
-// ctx-derived 300s deadline fires first and returns a real "still failing"
-// error), while a provider that hangs BEFORE its own deadline applies (e.g. a
-// stuck network download) is still cut off in bounded time. It is a var (not a
-// const) only so a test can shorten it; production never reassigns it.
-var retranscribeTimeout = 330 * time.Second
+// adapter's single-threaded read loop indefinitely. It sits ABOVE the STT
+// builtin's now SIZE-SCALED subprocess budget (capped at sttMaxTimeoutSeconds =
+// 720s; see stt.sttTimeoutForSize) so a healthy long voice note completes on the
+// builtin's own ctx deadline, while a provider that hangs BEFORE its own deadline
+// applies (e.g. a stuck network download) is still cut off in bounded time. It is
+// a var (not a const) only so a test can shorten it; production never reassigns it.
+var retranscribeTimeout = 750 * time.Second
 
 // workerJobTimeout bounds every blocking worker round-trip the broker performs
 // on an IPC read goroutine (fetch_queue, tool_call, the retranscribe in-place
@@ -192,7 +191,8 @@ func (b *Broker) handleRetranscribe(conn *ipc.Conn, stub *Stub, raw []byte) {
 	// whole chain and comes back as "STT provider still failing (no
 	// transcript)", which sends the agent hunting for a provider outage that
 	// isn't there: the server simply will not serve the file.
-	if refusal := b.attachmentFetchRefusal(chanName, req.FileID); refusal != "" {
+	refusal, attSize := b.attachmentFetchRefusal(chanName, req.FileID)
+	if refusal != "" {
 		log.Printf("retranscribe chan=%s file_id=%s msg=%d ok=false: the bot server will not serve this file — %s", chanName, req.FileID, req.MessageID, refusal)
 		_ = conn.WriteJSON(ipc.RetranscribeResp{Op: ipc.OpRetranscribeResult, ID: req.ID, Err: "retranscribe: " + refusal})
 		return
@@ -212,6 +212,9 @@ func (b *Broker) handleRetranscribe(conn *ipc.Conn, stub *Stub, raw []byte) {
 		TopicID:   topicID,
 		MessageID: req.MessageID,
 		FileID:    req.FileID,
+		// Size from the preflight getFile probe above, so the STT budget scales for a
+		// large re-transcription the same way the live path does (P1-3). 0 ⇒ base.
+		Size: attSize,
 	})
 	resp := ipc.RetranscribeResp{Op: ipc.OpRetranscribeResult, ID: req.ID}
 	// A marker is a FAILURE, not a transcript. Every non-empty return used to be

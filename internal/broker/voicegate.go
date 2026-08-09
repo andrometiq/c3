@@ -124,20 +124,24 @@ func fetchFailureTexts(cause error, statedSize int64) (agentText, notice string)
 // attachmentFetchRefusal is the file_id-only entry point (retranscribe carries
 // no inbound), returning the agent-facing text for a file the server will not
 // hand over, or "" when it will. Same rule, same single source of truth.
-func (b *Broker) attachmentFetchRefusal(chanName, fileID string) string {
+// It also returns the server-stated size on success (0 on refusal / unknown), so
+// the caller can size-scale the STT budget from the SAME getFile probe rather than
+// issuing a second one (P1-3).
+func (b *Broker) attachmentFetchRefusal(chanName, fileID string) (refusal string, size int64) {
 	ch, err := b.Channel(chanName)
 	if err != nil {
-		return ""
+		return "", 0
 	}
 	sizer, ok := ch.(attachmentSizer)
 	if !ok || fileID == "" {
-		return ""
+		return "", 0
 	}
-	if _, perr := sizer.AttachmentSize(fileID); perr != nil {
+	sz, perr := sizer.AttachmentSize(fileID)
+	if perr != nil {
 		agent, _ := fetchFailureTexts(perr, 0)
-		return agent
+		return agent, 0
 	}
-	return ""
+	return "", sz
 }
 
 // The openings C3 uses when it authors a voice message's whole agent-surface

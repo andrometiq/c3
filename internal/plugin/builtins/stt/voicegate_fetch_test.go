@@ -173,7 +173,7 @@ func report(nonce, cause string) string {
 func TestHandlerEnv_AuthoritativeEmptyAnswerRemovesTheInheritedOverride(t *testing.T) {
 	t.Setenv(apiURLEnvVar, "https://proxy-a.example")
 
-	env := handlerEnv("", true, testNonce, 500)
+	env := handlerEnv("", true, testNonce, 500, 300)
 
 	for _, kv := range env {
 		if strings.HasPrefix(kv, apiURLEnvVar+"=") {
@@ -186,7 +186,7 @@ func TestHandlerEnv_AuthoritativeEmptyAnswerRemovesTheInheritedOverride(t *testi
 func TestHandlerEnv_AuthoritativeAnswerReplacesTheInheritedOverride(t *testing.T) {
 	t.Setenv(apiURLEnvVar, "https://proxy-a.example")
 
-	env := handlerEnv("https://proxy-b.example", true, testNonce, 500)
+	env := handlerEnv("https://proxy-b.example", true, testNonce, 500, 300)
 
 	var seen []string
 	for _, kv := range env {
@@ -204,7 +204,7 @@ func TestHandlerEnv_AuthoritativeAnswerReplacesTheInheritedOverride(t *testing.T
 func TestHandlerEnv_NoAnswerInheritsTheEnvironment(t *testing.T) {
 	t.Setenv(apiURLEnvVar, "https://proxy-a.example")
 
-	env := handlerEnv("", false, testNonce, 500)
+	env := handlerEnv("", false, testNonce, 500, 300)
 
 	found := false
 	for _, kv := range env {
@@ -417,7 +417,7 @@ func TestFetchFailureDetail_NoNonceAcceptsNothing(t *testing.T) {
 func TestHandlerEnv_NoAnswerStillInstallsTheConfiguredBase(t *testing.T) {
 	os.Unsetenv(apiURLEnvVar)
 
-	env := handlerEnv("https://proxy.example", false, testNonce, 500)
+	env := handlerEnv("https://proxy.example", false, testNonce, 500, 300)
 
 	var seen []string
 	for _, kv := range env {
@@ -433,7 +433,7 @@ func TestHandlerEnv_NoAnswerStillInstallsTheConfiguredBase(t *testing.T) {
 // The nonce must actually reach the handler, or every report it sends is
 // unauthenticated and discarded.
 func TestHandlerEnv_CarriesTheNonce(t *testing.T) {
-	env := handlerEnv("", false, testNonce, 500)
+	env := handlerEnv("", false, testNonce, 500, 300)
 
 	found := false
 	for _, kv := range env {

@@ -417,6 +417,17 @@ func (c *Channel) DownloadAttachment(fileID string) (string, error) {
 	if c.bot == nil {
 		return "", errors.New("telegram: channel not started")
 	}
+	// Cache-first: a voice note the STT handler already downloaded lives in its
+	// inbox as "<millis>-<file_id>.oga". Serving it skips a re-fetch that, over a
+	// degraded network, cannot fit the worker's 30s deadline — the exact failure
+	// where the bytes were already on disk (2026-08-08 incident, P1-4). It must
+	// come BEFORE GetFile: getFile itself needs the network, so the file_unique_id
+	// cache below is unreachable when the network is flaky; the inbox is the only
+	// cache reachable then. The handler writes atomically, so a present file is
+	// complete.
+	if p := inboxCachedVoicePath(fileID); p != "" {
+		return p, nil
+	}
 	f, err := c.bot.GetFile(fileID, &gotgbot.GetFileOpts{
 		RequestOpts: c.requestOptsFor("getFile"),
 	})
@@ -482,6 +493,42 @@ func (c *Channel) DownloadAttachment(fileID string) (string, error) {
 		return "", fmt.Errorf("telegram: copy to %s: %w", localPath, err)
 	}
 	return localPath, nil
+}
+
+// inboxCachedVoicePath returns the path to a voice note the STT handler already
+// downloaded into its inbox ("<millis>-<file_id>.oga"), or "" if none is present.
+// The inbox dir mirrors the handler's STT_INBOX_DIR / default (stt.go keeps the
+// same default). Best-effort: any error (dir missing/unreadable) yields "" and the
+// caller falls back to the network. The full "-<file_id>.oga" suffix is matched
+// (a file_id can itself contain '-'), and the file must be non-empty; the handler
+// writes atomically, so a present, non-empty file is complete.
+func inboxCachedVoicePath(fileID string) string {
+	if fileID == "" {
+		return ""
+	}
+	dir := os.Getenv("STT_INBOX_DIR")
+	if dir == "" {
+		home, err := os.UserHomeDir()
+		if err != nil || home == "" {
+			return ""
+		}
+		dir = filepath.Join(home, ".claude", "channels", "telegram", "inbox")
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return ""
+	}
+	suffix := "-" + fileID + ".oga"
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), suffix) {
+			continue
+		}
+		p := filepath.Join(dir, e.Name())
+		if fi, err := os.Stat(p); err == nil && !fi.IsDir() && fi.Size() > 0 {
+			return p
+		}
+	}
+	return ""
 }
 
 // fileDownloadURL builds the /file/bot<token>/<path> download URL against the

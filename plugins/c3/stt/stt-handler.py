@@ -195,8 +195,23 @@ def download_file(token, file_id, dest_path, tg_fn=None):
     req = urllib.request.Request(url)
     with urllib.request.urlopen(req, timeout=30) as r:
         os.makedirs(os.path.dirname(dest_path), exist_ok=True)
-        with open(dest_path, 'wb') as f:
-            f.write(r.read())
+        # Atomic write: the STT budget can SIGKILL this process mid-download, and a
+        # truncated .oga left at dest_path would be served as complete by the
+        # broker's cache-first download_attachment (P1-4). Write to a temp sibling,
+        # then os.replace (atomic on the same filesystem), so dest_path only ever
+        # appears once it is whole. Match on the final "-<file_id>.oga" name, never
+        # the ".part" temp, so a partial is never picked up.
+        tmp_path = dest_path + '.part'
+        try:
+            with open(tmp_path, 'wb') as f:
+                f.write(r.read())
+            os.replace(tmp_path, dest_path)
+        except BaseException:
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+            raise
 
 # ── STT ───────────────────────────────────────────────────────────────────────
 
@@ -355,13 +370,16 @@ def main():
         # Load API keys
         keys = load_env(ENV_FILE)
 
-        # Budget the transcription so download + transcribe stays under the
-        # broker's 300s SIGKILL: 270s total minus the time the download already
-        # consumed, floored at 60s so a slow download doesn't leave an unusably
-        # tiny window.
+        # Budget the transcription against the broker's ACTUAL SIGKILL deadline
+        # (C3_STT_DEADLINE_SECONDS, size-scaled by the Go shim), not a hardcoded
+        # 270. Subtract the download already spent and a margin so subprocess.run
+        # returns before the Go SIGKILL fires (P1-3, 2026-08-08 cascade). Floored at
+        # 60s so a slow download doesn't leave an unusably tiny window. Falls back to
+        # 300 when the var is absent (an older shim).
         dl_elapsed = time.time() - dl_start
-        stt_timeout = max(60, 270 - int(dl_elapsed))
-        logging.info(f'Download took {dl_elapsed:.1f}s; STT subprocess budget={stt_timeout}s')
+        deadline = int(os.environ.get('C3_STT_DEADLINE_SECONDS', '300'))
+        stt_timeout = max(60, deadline - int(dl_elapsed) - 30)
+        logging.info(f'Download took {dl_elapsed:.1f}s; deadline={deadline}s; STT subprocess budget={stt_timeout}s')
 
         # Transcribe
         transcript = run_stt(audio_path, keys, timeout=stt_timeout)
