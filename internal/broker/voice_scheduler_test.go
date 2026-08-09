@@ -490,6 +490,7 @@ func TestVoiceSchedulerDispatcherPanicRecoversInLoop(t *testing.T) {
 func TestVoiceSchedulerFullWorkQueueUsesFixedBackoff(t *testing.T) {
 	_, scheduler, clock := schedulerHarness(t)
 	release := make(chan struct{})
+	defer close(release)
 	scheduler.runAttempt = func(context.Context, voiceAttempt) voiceAttemptResult {
 		<-release
 		return voiceAttemptResult{success: true, transcript: "ok", segmentText: "[Transcribed voice]: ok"}
@@ -504,17 +505,21 @@ func TestVoiceSchedulerFullWorkQueueUsesFixedBackoff(t *testing.T) {
 	waitForVoiceCondition(t, "overflow entries to receive dispatcher backoff", func() bool {
 		scheduler.mu.Lock()
 		defer scheduler.mu.Unlock()
+		sawBackoff := false
 		for _, entry := range scheduler.entries {
-			if entry.state == voiceWaiting && !entry.nextAttempt.Before(clock.Now().Add(voiceDispatchBackoff)) {
-				return true
+			if entry.state != voiceWaiting {
+				continue
 			}
+			if entry.nextAttempt.Before(clock.Now().Add(voiceDispatchBackoff)) {
+				return false
+			}
+			sawBackoff = true
 		}
-		return false
+		return sawBackoff
 	})
 	if delay := scheduler.nextDelay(clock.Now(), clock.Now().Add(time.Hour)); delay < voiceDispatchBackoff {
 		t.Fatalf("full work queue left a dispatcher spin delay of %s; want >= %s", delay, voiceDispatchBackoff)
 	}
-	close(release)
 }
 
 func TestVoiceSchedulerManualHookCapRejectsBeyondBound(t *testing.T) {

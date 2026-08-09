@@ -512,3 +512,68 @@ func TestVoiceResolvePanicAfterDurableMutationDoesNotDuplicateRevisionOrPush(t *
 		})
 	}
 }
+
+func TestVoiceResolveRereadMissClosesEchoWithoutPush(t *testing.T) {
+	t.Setenv("C3_QUEUE_DIR", t.TempDir())
+	b := brokerWithChannel(t, mfWithTelegram(), &fakeChannel{})
+	defer b.Shutdown()
+	route := MakeRouteKey("telegram", -100, ptrI64(914))
+	_, pushes := liveHolderFrames(t, b, route)
+	w := newRouteWorker(context.Background(), route, time.Hour, b)
+	defer w.Stop()
+	in := c3types.Inbound{
+		Channel: "telegram", ChatID: -100, TopicID: ptrI64(914), MessageID: 8802,
+		Text:        voicePendingText("voice-reread-miss"),
+		Attachments: []c3types.Attachment{{Kind: "voice", FileID: "voice-reread-miss"}},
+	}
+	recordID, err := b.Queue.AppendTracked(queueRouteKey(route), &in, "voice-reread-miss")
+	if err != nil {
+		t.Fatal(err)
+	}
+	echoHead := make(chan struct{})
+	close(echoHead)
+	group := &voiceGroup{
+		order: []string{"voice-reread-miss"}, finished: map[voiceScheduleKey]bool{},
+		transcripts: map[string]string{"voice-reread-miss": "one transcript"},
+		echo:        voiceEchoReservation{prev: echoHead, mine: make(chan struct{})},
+	}
+	key := voiceScheduleKey{route: route, messageID: in.MessageID, fileID: "voice-reread-miss"}
+	target := voiceResolveTarget{recordID: recordID, group: group}
+	b.Voice.mu.Lock()
+	b.Voice.entries[key] = &voiceEntry{
+		key: key, inbound: in, attachment: in.Attachments[0], state: voiceResolveSubmitted,
+		targets: map[string]voiceResolveTarget{recordID: target}, applied: map[string]bool{},
+		resolve: voiceResolve{success: true, transcript: "one transcript"},
+	}
+	b.Voice.wg.Add(1)
+	b.Voice.mu.Unlock()
+	var consumeErr error
+	w.voiceResolveTestHook = func(stage string) {
+		if stage == "after_durable" {
+			_, consumeErr = b.Queue.Consume(queueRouteKey(route), -1)
+		}
+	}
+	w.handleResolveVoice(context.Background(), &ResolveVoiceJob{
+		Key: key, Targets: []voiceResolveTarget{target}, Inbound: in,
+		FileID: key.fileID, SegmentText: "[Transcribed voice]: one transcript", Success: true,
+	})
+	if consumeErr != nil {
+		t.Fatalf("consume between resolve and re-read: %v", consumeErr)
+	}
+	select {
+	case <-group.echo.mine:
+	case <-time.After(2 * time.Second):
+		t.Fatal("resolved-row re-read miss leaked its echo reservation")
+	}
+	select {
+	case push := <-pushes:
+		t.Fatalf("resolved-row re-read miss pushed an unverified payload: %+v", push)
+	case <-time.After(100 * time.Millisecond):
+	}
+	b.Voice.mu.Lock()
+	_, stillScheduled := b.Voice.entries[key]
+	b.Voice.mu.Unlock()
+	if stillScheduled {
+		t.Fatal("durably-applied re-read miss was rescheduled")
+	}
+}
