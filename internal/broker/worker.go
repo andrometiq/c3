@@ -688,7 +688,7 @@ func (w *RouteWorker) flushInbounds(ctx context.Context, batch []*c3types.Inboun
 					// entirely — the agent was told nothing at all (Codex review
 					// 3, finding 2). appendVoiceMarker keeps the caption AND says
 					// what happened, which is what "don't clobber" always meant.
-					in.Text = appendVoiceMarker(in.Text, sttFailureText(att, sttFailureReason(o.raw)))
+					in.Text = appendVoiceMarker(in.Text, sttFailureText(att, sttFailureReason(o.raw), w.cachedVoicePath(in.Channel, att.FileID)))
 				}
 				if o.transcript != "" {
 					echoTranscript = appendVoiceMarker(echoTranscript, o.transcript)
@@ -890,14 +890,38 @@ func (w *RouteWorker) flushInbounds(ctx context.Context, batch []*c3types.Inboun
 // It names the attachment it is ABOUT, not Attachments[0]: a rich message can
 // put a photo first and the voice second, and quoting the photo's file_id would
 // send the agent to download the wrong thing (Codex review 2, finding 2).
-func sttFailureText(att c3types.Attachment, reason string) string {
+func sttFailureText(att c3types.Attachment, reason, cachedPath string) string {
 	fileID, mime, dur := att.FileID, att.MIME, ""
 	if mime == "" {
 		mime = "audio"
 	}
 	dur = "duration unknown"
-	return fmt.Sprintf(sttFailureOpening+" %s] The audio is saved and recoverable — the user does not need to resend. Call download_attachment with file_id=%q (%s, %s) to retrieve it, or retranscribe with the same file_id to re-run transcription. Try retranscribe ONCE; if it still fails, ask the sender to resend or type it out — do not retry repeatedly. Provider traceback: %s",
-		reason, fileID, mime, dur, LogPath())
+	// P2-5: when the audio was downloaded before STT failed, name the cached file so
+	// recovery is a no-brainer — download_attachment and retranscribe are both
+	// cache-first now (P1-4), so they reuse it instantly with no re-download.
+	cached := ""
+	if cachedPath != "" {
+		cached = fmt.Sprintf(" The audio is cached locally at %s — download_attachment and retranscribe reuse it instantly (no re-download).", cachedPath)
+	}
+	return fmt.Sprintf(sttFailureOpening+" %s] The audio is saved and recoverable — the user does not need to resend.%s Call download_attachment with file_id=%q (%s, %s) to retrieve it, or retranscribe with the same file_id to re-run transcription. Try retranscribe ONCE; if it still fails, ask the sender to resend or type it out — do not retry repeatedly. Provider traceback: %s",
+		reason, cached, fileID, mime, dur, LogPath())
+}
+
+// cachedVoicePath asks the channel whether att's audio is already downloaded into
+// the local inbox, so a post-download STT failure can name the cached file (P2-5).
+// "" when the channel has no cache accessor or the file is not present.
+func (w *RouteWorker) cachedVoicePath(chanName, fileID string) string {
+	if w.broker == nil || fileID == "" {
+		return ""
+	}
+	ch, err := w.broker.Channel(chanName)
+	if err != nil {
+		return ""
+	}
+	if cp, ok := ch.(interface{ CachedVoicePath(string) string }); ok {
+		return cp.CachedVoicePath(fileID)
+	}
+	return ""
 }
 
 // sttFailureReason extracts the failure reason to surface in sttFailureText. An

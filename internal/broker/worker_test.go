@@ -68,6 +68,26 @@ func TestWorker_SubmitAfterStopReturnsFalse(t *testing.T) {
 	}
 }
 
+// P2-5: when the audio was downloaded before STT failed, the recovery text names
+// the cached path (recovery is a no-brainer); with no cached path the text is the
+// same actionable guidance, minus the caching clause.
+func TestSttFailureText_NamesCachedPathWhenPresent(t *testing.T) {
+	att := c3types.Attachment{FileID: "F1", MIME: "audio/ogg", Kind: "voice"}
+	with := sttFailureText(att, "timeout", "/inbox/123-F1.oga")
+	if !strings.Contains(with, "/inbox/123-F1.oga") || !strings.Contains(with, "cached locally") {
+		t.Fatalf("cached path not named: %q", with)
+	}
+	without := sttFailureText(att, "timeout", "")
+	if strings.Contains(without, "cached locally") {
+		t.Fatalf("no-cache text must not mention caching: %q", without)
+	}
+	for _, want := range []string{"download_attachment", "retranscribe", "F1"} {
+		if !strings.Contains(without, want) {
+			t.Fatalf("recovery guidance missing %q: %q", want, without)
+		}
+	}
+}
+
 // Regression for the 2026-08-07 msg-8881 5-minute blackout: a worker that exits
 // with an un-started JobInbound still in its queue must NOT drop it silently. The
 // drain recovers it via the persist-FAILED callback (offset held, poll-side dedup

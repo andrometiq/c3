@@ -495,6 +495,16 @@ func (c *Channel) DownloadAttachment(fileID string) (string, error) {
 	return localPath, nil
 }
 
+// CachedVoicePath reports the local path of a voice note already downloaded into
+// the STT inbox, or "" if none is present. Exposed for the broker's failure-notice
+// enrichment (P2-5): when STT fails AFTER a successful download, the notice can name
+// the cached file so recovery (download_attachment / retranscribe, both cache-first)
+// is a no-brainer. Best-effort and authoritative — it only reports a file that
+// actually exists.
+func (c *Channel) CachedVoicePath(fileID string) string {
+	return inboxCachedVoicePath(fileID)
+}
+
 // inboxCachedVoicePath returns the path to a voice note the STT handler already
 // downloaded into its inbox ("<millis>-<file_id>.oga"), or "" if none is present.
 // The inbox dir mirrors the handler's STT_INBOX_DIR / default (stt.go keeps the
