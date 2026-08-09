@@ -3,10 +3,8 @@ package broker
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log"
-	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -33,43 +31,38 @@ const (
 	JobDrainPeek
 	JobDrainAppend
 	JobDrainRemove
-	// JobDeliverTranscript appends + delivers a late STT transcript on the route's
-	// single-owner worker. The network-recovery retry (P0-2) runs the blocking STT
-	// OFF the worker in a bounded pool and hands only this fast delivery back to the
-	// route, so a retry never blocks the route for the full STT window.
-	JobDeliverTranscript
+	// JobResolveVoice is the one durable terminal step for live, retry, restart,
+	// and manual voice enrichment. STT stays off-worker; queue mutation and
+	// delivery remain on the route's existing single owner.
+	JobResolveVoice
 )
 
 // Job is one unit of work for a route worker. Exactly one of the payload
 // fields is set based on Kind.
 type Job struct {
-	Kind              JobKind
-	Inbound           *c3types.Inbound
-	Outbound          *OutboundJob
-	Fetch             *FetchJob
-	Consume           *ConsumeJob
-	Refresh           *RefreshTextJob
-	Backlog           *BacklogJob
-	DrainPeek         *DrainPeekJob
-	DrainAppend       *DrainAppendJob
-	DrainRemove       *DrainRemoveJob
-	DeliverTranscript *DeliverTranscriptJob
+	Kind         JobKind
+	Inbound      *c3types.Inbound
+	Outbound     *OutboundJob
+	Fetch        *FetchJob
+	Consume      *ConsumeJob
+	Refresh      *RefreshTextJob
+	Backlog      *BacklogJob
+	DrainPeek    *DrainPeekJob
+	DrainAppend  *DrainAppendJob
+	DrainRemove  *DrainRemoveJob
+	ResolveVoice *ResolveVoiceJob
 }
 
-// DeliverTranscriptJob hands a late STT transcript (from the P0-2 retry pool) to the
-// route's worker to append + deliver via the P0-1 late-delivery path. ResultCh lets
-// the pool know whether it landed durably, so a worker-drop re-parks rather than loses.
-type DeliverTranscriptJob struct {
-	MessageID  int64
-	FileID     string
-	Transcript string
-	ResultCh   chan<- DeliverTranscriptResult
-}
-
-// DeliverTranscriptResult reports whether the transcript was durably delivered.
-type DeliverTranscriptResult struct {
-	Delivered bool
-	Err       error
+type ResolveVoiceJob struct {
+	Key            voiceScheduleKey
+	RecordID       string
+	Inbound        c3types.Inbound
+	FileID         string
+	SegmentText    string
+	Success        bool
+	EchoTranscript string
+	FailNotice     string
+	Echo           voiceEchoReservation
 }
 
 // BacklogJob asks the worker to read the route's queued total AND a compact
@@ -523,26 +516,14 @@ func (w *RouteWorker) run(ctx context.Context) {
 				w.handleDrainAppend(job.DrainAppend)
 			case JobDrainRemove:
 				w.handleDrainRemove(job.DrainRemove)
-			case JobDeliverTranscript:
-				w.handleDeliverTranscript(ctx, job.DeliverTranscript)
+			case JobResolveVoice:
+				w.handleResolveVoice(ctx, job.ResolveVoice)
 			case JobRelease:
 				flushDeb()
 				return
 			}
 		}
 	}
-}
-
-// voiceOutcome is what one voice attachment produced. Exactly one of transcript
-// and marker is normally set; both empty means the STT chain ran and failed,
-// which the caller renders with sttFailureText.
-type voiceOutcome struct {
-	transcript string // a real transcript
-	marker     string // agent-surface text when the audio never arrived at all
-	notice     string // human-facing notice, "" when there is nothing to say
-	raw        string // the plugin's raw return, for sttFailureReason
-	retryable  bool   // the FETCH failed on a transient network condition — park for
-	//                   auto-retry on network recovery (P0-2)
 }
 
 // observeTelegramOrder advances the per-route Telegram message watermark and
@@ -570,82 +551,13 @@ func lateVoiceOrderNotice(messageID, afterMessageID int64) string {
 		messageID, afterMessageID)
 }
 
-// voiceOutcome fetches and transcribes ONE voice attachment.
-//
-// Two things can refuse the audio, and both must reach the same honest
-// surfaces. The bot server can refuse the preflight ask (voicegate.go), and the
-// STT handler — which performs its OWN getFile, so the preflight cannot speak
-// for it — can have its fetch fail afterwards. That second case used to collapse
-// into "[STT FAILED: error]" and then into the generic "transcription failed /
-// the audio is saved and recoverable" text, which is false on every clause when
-// nothing was ever downloaded (Codex review 2, finding 1). It now carries the
-// server's own words into the same refusal surfaces the preflight uses.
-func (w *RouteWorker) voiceOutcome(ctx context.Context, in *c3types.Inbound, att c3types.Attachment) voiceOutcome {
-	// Ask the bot server whether it will hand this file over, BEFORE the STT
-	// chain. The ask is the same getFile the chain opens with, so a refusal here
-	// is a refusal there — and reporting it costs one bodyless call instead of
-	// two HTTP 400s under a message that names the wrong subsystem.
-	marker, notice, refuse, retryable, probedSize := w.broker.voiceFetchRefusal(in.Channel, att)
-	if refuse {
-		log.Printf("stt SKIPPED chan=%s chat=%d topic=%s msg=%d file_id=%s: the bot server will not serve this file (%d bytes stated) — handler not run: %s",
-			w.key.Channel, w.key.ChatID, TopicKeyStr(w.key), in.MessageID, att.FileID, att.Size, marker)
-		return voiceOutcome{marker: marker, notice: notice, retryable: retryable}
-	}
-	// Telegram's Voice.file_size is optional: when the inbound omitted it, use the
-	// size the preflight probe just fetched so a large live note still scales its STT
-	// budget (F8). att.Size wins when present (no extra trust in the probe than needed).
-	effSize := att.Size
-	if effSize == 0 {
-		effSize = probedSize
-	}
-	// Per-call deadline so a hung download can't block the worker goroutine (and
-	// the JobFetch/JobConsume jobs queued behind it). cancel() runs immediately
-	// (not deferred) because this runs in a per-attachment loop — a deferred
-	// cancel would leak every iteration's timer until flushInbounds returns. A ""
-	// result (incl. on timeout) flows to the sttFailureText placeholder path.
-	sttCtx, cancel := context.WithTimeout(ctx, sttFlushTimeout)
-	raw := w.broker.Plugins.FireOnVoiceReceived(sttCtx, c3types.VoicePayload{
-		Channel:   in.Channel,
-		ChatID:    in.ChatID,
-		TopicID:   in.TopicID,
-		MessageID: in.MessageID,
-		FileID:    att.FileID,
-		MIME:      att.MIME,
-		Size:      effSize,
-	})
-	cancel()
-
-	if detail, ok := sttFetchFailure(raw); ok {
-		cause := errors.New(detail)
-		log.Printf("stt FETCH FAILED chan=%s chat=%d topic=%s msg=%d file_id=%s: %s — reporting the server's own error, not a transcription failure",
-			w.key.Channel, w.key.ChatID, TopicKeyStr(w.key), in.MessageID, att.FileID, detail)
-		return voiceOutcome{
-			marker:    voiceFetchFailedAgentText(cause),
-			notice:    voiceFetchFailedNotice(cause),
-			raw:       raw,
-			retryable: isNetworkTransient(detail),
-		}
-	}
-	if raw != "" && !isSTTFailureMarker(raw) {
-		return voiceOutcome{transcript: raw, raw: raw}
-	}
-	// An ordinary STT failure carries a notice too. It used to rely on
-	// echoReadback's fallback, which only fired when NOTHING transcribed — so a
-	// message where one voice failed and another succeeded sent the human a
-	// readback and no word about the failure (Codex review 3, finding 2).
-	return voiceOutcome{raw: raw, notice: sttFailureNotice}
-}
-
 // sttFailureNotice is the human-facing line for a voice note that was fetched
 // but not transcribed. Unlike a fetch refusal there is nothing specific to
 // report — the provider's traceback is a log concern, not a chat one.
 const sttFailureNotice = "⚠️ Couldn't transcribe that voice note — see logs / try again."
 
-// sttFlushTimeout bounds each per-inbound voice STT call made by flushInbounds.
-// Without it the call inherits only the run-loop ctx (cancelled solely on broker
-// shutdown / w.cancel()) plus the STT builtin's own subprocess budget — so a
-// download that hangs BEFORE that budget applies blocks the worker goroutine, and
-// any JobFetch/JobConsume queued behind it, until it fires. It must sit ABOVE the
+// sttFlushTimeout bounds each voice attempt made by the scheduler. STT no longer
+// blocks the route worker, but the outer deadline still must sit ABOVE the
 // STT builtin's now SIZE-SCALED subprocess deadline (capped at sttMaxTimeoutSeconds
 // = 720s; see stt.sttTimeoutForSize) so the builtin's own ctx deadline always fires
 // first on a healthy long note, while a truly hung download is still cut off in
@@ -658,9 +570,8 @@ var sttFlushTimeout = 750 * time.Second
 // batch as a single ipc.OpInbound.
 //
 // Merge rules (spec §7.3):
-//   - Text: each inbound's text joined with "\n", in arrival order. Voice
-//     STT (OnVoiceReceived) runs per-inbound BEFORE merge so transcripts
-//     land in the right order.
+//   - Text: each final, non-voice inbound's text joined with "\n", in arrival
+//     order. Pending voice rows are excluded and pushed by their own resolve.
 //   - MessageID: latest in the batch (canonical id for the merged block).
 //   - Timestamp: earliest (when the burst started).
 //   - Sender: from the latest message (most recent author wins; bursts
@@ -675,145 +586,58 @@ func (w *RouteWorker) flushInbounds(ctx context.Context, batch []*c3types.Inboun
 		return
 	}
 
-	// Per-inbound STT substitution.
-	if w.broker.Plugins != nil {
-		for _, in := range batch {
-			// Observe EVERY ordinary message, including text-only batch markers,
-			// before deciding whether a later voice is old content surfacing out
-			// of order.
-			afterMessageID, late := w.observeTelegramOrder(in)
-			// CB-1 defense-in-depth: never run voice/STT over a synthesized
-			// event. The run loop already diverts events to flushEvent, so a
-			// batch here is all ordinary messages — this guard makes that
-			// invariant explicit and survives any future caller change.
-			voices := voiceAttachments(in)
-			if in.IsEvent() || len(voices) == 0 {
+	type voicePlan struct {
+		voices        []c3types.Attachment
+		pending       []string
+		initialNotice string
+	}
+	voicePlans := make(map[*c3types.Inbound]voicePlan)
+	deliveryBatch := make([]*c3types.Inbound, 0, len(batch))
+	for _, in := range batch {
+		// Observe every ordinary message at flush time, before voice work can
+		// complete out of order. The existing watermark is only a presentation
+		// label; it never suppresses recoverable late content.
+		afterMessageID, late := w.observeTelegramOrder(in)
+		voices := voiceAttachments(in)
+		if in.IsEvent() || len(voices) == 0 {
+			deliveryBatch = append(deliveryBatch, in)
+			continue
+		}
+		var notices []string
+		if late {
+			orderNotice := lateVoiceOrderNotice(in.MessageID, afterMessageID)
+			in.Text = appendVoiceMarker(in.Text, orderNotice)
+			notices = append(notices, orderNotice)
+		}
+		plan := voicePlan{}
+		for _, att := range voices {
+			if att.FileID == "" {
+				// A scheduler lease cannot be keyed without a file ID. Fail visibly
+				// at this trust boundary instead of creating a row that can never
+				// leave VoicePending.
+				in.Text = appendVoiceMarker(in.Text, sttFailureText(att, "missing_file_id", ""))
+				if !containsString(notices, sttFailureNotice) {
+					notices = append(notices, sttFailureNotice)
+				}
 				continue
 			}
-			var notices []string
-			if late {
-				// The label precedes C3's transcript/failure segment on the agent
-				// surface. It also becomes a human notice immediately before the
-				// verbatim readback, so neither reader can mistake spoken order.
-				orderNotice := lateVoiceOrderNotice(in.MessageID, afterMessageID)
-				in.Text = appendVoiceMarker(in.Text, orderNotice)
-				notices = append(notices, orderNotice)
-			}
-			// EVERY voice attachment is handled, at whatever position it sits.
-			// The FIRST one keeps the long-standing single-voice semantics (a
-			// transcript becomes the agent surface); each additional one APPENDS
-			// its own transcript or marker, so a rich message carrying two voice
-			// blocks surfaces both instead of silently dropping the rest.
-			var echoTranscript string
-			for _, att := range voices {
-				o := w.voiceOutcome(ctx, in, att)
-				switch {
-				case o.marker != "":
-					// APPENDED, never conditional on the text being empty: the
-					// refusal is the one thing the agent must not miss, and a
-					// caption or a rich-voice "[voice_note]" marker would otherwise
-					// swallow it entirely. The sender's own words are kept.
-					in.Text = appendVoiceMarker(in.Text, o.marker)
-				case o.transcript != "":
-					// APPENDED for the same reason a refusal is: whatever text
-					// arrived with the message is the sender's, or the rich
-					// decoder's own block markers. Replacing it destroyed the
-					// "[photo]" half of a photo-then-voice rich message, and a
-					// plain voice note's caption before that.
-					in.Text = appendVoiceMarker(in.Text, w.sttPrefix(in.Channel)+o.transcript)
-				default:
-					// An ordinary STT failure, appended like everything else. It
-					// used to be written only when in.Text was empty, on the
-					// reasoning that a captioned note keeps its caption and the
-					// human notice carries the news. That does not compose: a rich
-					// message ALWAYS has block-marker text, so the condition never
-					// fired there, and a second voice that transcribed made the
-					// notice non-empty and masked the first one's failure
-					// entirely — the agent was told nothing at all (Codex review
-					// 3, finding 2). appendVoiceMarker keeps the caption AND says
-					// what happened, which is what "don't clobber" always meant.
-					in.Text = appendVoiceMarker(in.Text, sttFailureText(att, sttFailureReason(o.raw), w.cachedVoicePath(in.Channel, att.FileID)))
-				}
-				if o.transcript != "" {
-					echoTranscript = appendVoiceMarker(echoTranscript, o.transcript)
-				}
-				// EVERY failure contributes a notice, and DISTINCT causes are all
-				// kept: with several voice attachments, first-only silently drops
-				// the later server causes, and a success elsewhere in the message
-				// would otherwise leave the human with a readback and no hint that
-				// anything failed.
-				if o.notice != "" && !slices.Contains(notices, o.notice) {
-					notices = append(notices, o.notice)
-				}
-				// P0-2: a transient-network FETCH failure is parked for auto-retry when
-				// the Telegram fetch health recovers — the note failed only because the
-				// network wasn't up yet, so re-transcribe + deliver it late instead of
-				// leaving the human a permanent-looking failure notice.
-				if o.retryable && w.broker != nil {
-					w.broker.parkSTTRetry(w.key, in.MessageID, att.FileID)
-				}
-			}
-			failNotice := strings.Join(notices, "\n")
-			transcript := echoTranscript
-			// Voice-transcript readback echo (moved out of the Python STT handler).
-			// ADDITIVE + NON-FATAL: it is a SEND, so it must NEVER affect the
-			// agent-surface in.Text set above, inbound delivery, persistence, or
-			// loss-freedom. The echo RETRIES on transient outbound failure
-			// (readback.go), which can block for seconds (a 429 burst → up to ~6s per
-			// note). Running it inline on this route worker's serial goroutine would
-			// stall persistence + delivery of THIS and later notes — breaking the
-			// invariant above. So dispatch it off the critical path.
-			//
-			// Ordering (spec Phase 3 — the maintainer: "processed one by one"): a bare `go`
-			// would let a SECOND note's fast echo overtake a FIRST note whose send is
-			// backing off, posting the courtesy echoes out of arrival order. Instead
-			// we CHAIN them: each echo waits on the previous echo's done-channel
-			// before sending, so within one topic they post strictly FIFO. Ordering
-			// carries ACROSS batches because prevEchoDone is a worker field. The chain
-			// link is read+written ONLY here on the serial run goroutine, so the swap
-			// is race-free; each spawned goroutine only reads its captured `prev` and
-			// closes its own `mine`. The worker's inbound persistence/delivery path
-			// still never blocks on echo retries — run only does a non-blocking
-			// pointer swap + `go`, exactly as before.
-			//
-			// It reads a shallow COPY of the inbound so it can't race the persistence
-			// loop's later use of `in` (and so a recycled `in` can't corrupt the
-			// in-flight echo). ctx is the run-loop context (worker.go run/flushInbounds
-			// params); on shutdown w.cancel() cancels it, each parked echo aborts fast
-			// via the select and STILL closes `mine`, so the chain drains without
-			// deadlock and no echo goroutine leaks.
-			//
-			// Cross-worker gap (spec CRITIQUE FOLD #6 — benign, documented not fixed):
-			// prevEchoDone orders echoes only within one worker's lifetime. A worker
-			// idle-evicts after defaultWorkerIdle (60s, broker.go) when no jobs arrive;
-			// a detached echo's max backoff is ~6s (readback.go: 3 attempts, ≤3s cap
-			// each), so a pending echo always finishes long before eviction and a
-			// respawned worker's fresh chain never races a still-running prior echo —
-			// the gap is unreachable in practice.
-			prev := w.prevEchoDone
-			mine := make(chan struct{})
-			w.prevEchoDone = mine
-			inCopy := *in
-			go func(in *c3types.Inbound, transcript, failNotice string, prev, mine chan struct{}) {
-				// Deferred LIFO: close(mine) is registered FIRST so it runs LAST —
-				// the chain always advances even if the readback path panics.
-				// recoverGoroutine is registered SECOND so it runs FIRST, recovering
-				// a panic (which in any goroutine would otherwise crash the whole
-				// broker) before close(mine) unblocks the next echo.
-				defer close(mine)
-				defer recoverGoroutine("echoReadback")
-				select {
-				case <-prev: // wait for the previous echo to finish → FIFO
-				case <-ctx.Done():
-					return // shutdown: drop; close(mine) unblocks the next
-				}
-				w.echoReadback(in, transcript, failNotice) // ctx-aware retry aborts fast on shutdown
-			}(&inCopy, transcript, failNotice, prev, mine)
+			in.Text = appendVoiceMarker(in.Text, voicePendingText(att.FileID))
+			plan.voices = append(plan.voices, att)
+			plan.pending = append(plan.pending, att.FileID)
 		}
+		plan.initialNotice = strings.Join(notices, "\n")
+		if len(plan.pending) == 0 {
+			// Only malformed voice attachments: their terminal failure text is
+			// already complete, so they follow ordinary delivery immediately.
+			deliveryBatch = append(deliveryBatch, in)
+			continue
+		}
+		voicePlans[in] = plan
 	}
 
-	// Durable storage: persist EACH message (one queue line) AFTER STT
-	// substitution so the stored line already carries the transcript. Storage is
+	// Durable storage: persist EACH message immediately. Voice rows carry honest
+	// placeholders plus private per-file pending state; no network operation has
+	// run yet. Storage is
 	// per-message; the merge below is a delivery-presentation concern only and
 	// does not merge stored lines. Append failure = persist failure: do NOT mark
 	// the update_id done (markPersisted is only called on success), so the
@@ -823,12 +647,12 @@ func (w *RouteWorker) flushInbounds(ctx context.Context, batch []*c3types.Inboun
 	// Append failure does not count. The live push's Covered must equal this count
 	// so the Claude delivered-ack Consumes exactly the lines this push added — not
 	// len(batch), which would over-consume and eat later backlog (I5).
-	appended := 0
-	// appendedIDs are the queue-private durable identities of the lines this
+	deliveryAppended := 0
+	// deliveryIDs are the queue-private durable identities of the non-voice lines this
 	// batch actually persisted, in append order — the exact set the live push
 	// below covers. Channel MessageIDs are not sufficient because an edit reuses
 	// one while creating a distinct durable line.
-	var appendedIDs []string
+	var deliveryIDs []string
 	if w.broker != nil && w.broker.Queue != nil {
 		qrk := queueRouteKey(w.key)
 		for _, in := range batch {
@@ -860,7 +684,8 @@ func (w *RouteWorker) flushInbounds(ctx context.Context, batch []*c3types.Inboun
 				w.markPersisted(in)
 				continue
 			}
-			recordID, err := w.broker.Queue.AppendTracked(qrk, in)
+			plan, isPendingVoice := voicePlans[in]
+			recordID, err := w.broker.Queue.AppendTracked(qrk, in, plan.pending...)
 			if err != nil {
 				log.Printf("queue append FAIL chan=%s chat=%d topic=%s msg=%d: %v — offset will NOT advance; Telegram redelivers — %s",
 					w.key.Channel, w.key.ChatID, TopicKeyStr(w.key), in.MessageID, err, fallbackSummary(in))
@@ -883,15 +708,26 @@ func (w *RouteWorker) flushInbounds(ctx context.Context, batch []*c3types.Inboun
 				w.notePersistFailure(in)
 				continue
 			}
+			// The source offset becomes eligible immediately after the durable
+			// append, before any scheduler admission or network work.
+			w.markPersisted(in)
 			// Record as seen ONLY after a successful Append (C2): this is the point
 			// at which a future redelivery is a true duplicate worth suppressing.
 			if w.dedup != nil {
 				w.dedup.record(in.MessageID)
 			}
-			appended++
-			appendedIDs = append(appendedIDs, recordID)
-			w.markPersisted(in)
 			w.evictIfOverCap(qrk)
+			if isPendingVoice {
+				echo := w.reserveVoiceReadback()
+				if !w.broker.Voice.ScheduleAuto(w.key, recordID, *in, plan.voices, plan.initialNotice, echo) {
+					close(echo.mine)
+					log.Printf("voice scheduler: admission stopped chan=%s chat=%d topic=%s msg=%d record=%s — durable pending row will recover on restart",
+						w.key.Channel, w.key.ChatID, TopicKeyStr(w.key), in.MessageID, recordID)
+				}
+				continue
+			}
+			deliveryAppended++
+			deliveryIDs = append(deliveryIDs, recordID)
 		}
 	} else if w.broker != nil {
 		// Item 3: durable queue disabled (init failed → "durable inbound hold
@@ -911,11 +747,24 @@ func (w *RouteWorker) flushInbounds(ctx context.Context, batch []*c3types.Inboun
 		// it — by heldDegradedText instead of the "nothing lost" reassurance.
 		for _, in := range batch {
 			w.markPersisted(in)
+			if plan, ok := voicePlans[in]; ok {
+				echo := w.reserveVoiceReadback()
+				if !w.broker.Voice.ScheduleAuto(w.key, "", *in, plan.voices, plan.initialNotice, echo) {
+					close(echo.mine)
+					log.Printf("voice scheduler: degraded admission stopped chan=%s chat=%d topic=%s msg=%d — no durable row exists",
+						w.key.Channel, w.key.ChatID, TopicKeyStr(w.key), in.MessageID)
+				}
+			}
 		}
 	}
 
-	// Merge (delivery presentation only).
-	merged := mergeBatch(batch)
+	// Pending voice rows are deliberate backlog until their own resolve job. A
+	// mixed batch still pushes its non-voice rows immediately, with coverage that
+	// names only those rows.
+	if len(deliveryBatch) == 0 {
+		return
+	}
+	merged := mergeBatch(deliveryBatch)
 
 	// OnInbound chain on the merged inbound.
 	if w.broker.Plugins != nil {
@@ -927,9 +776,43 @@ func (w *RouteWorker) flushInbounds(ctx context.Context, batch []*c3types.Inboun
 	}
 
 	// Covered = lines ACTUALLY appended by this push (I5), not len(batch). When no
-	// queue is wired (unit tests) appended stays 0 and covEffective normalizes to 1.
-	// appendedIDs names those same lines so the ack removes them by identity.
-	w.forwardOrFallbackCovering(ctx, merged, appended, appendedIDs, true)
+	// queue is wired (unit tests) deliveryAppended stays 0 and covEffective
+	// normalizes to 1. deliveryIDs names those same lines so the ack removes them
+	// by identity; pending voice rows are excluded from both.
+	w.forwardOrFallbackCovering(ctx, merged, deliveryAppended, deliveryIDs, true)
+}
+
+// enqueueVoiceReadback preserves the existing off-critical-path FIFO chain, but
+// its trigger is now the terminal enrichment resolve rather than inline STT.
+// Readback remains additive and non-fatal: it can never affect durable text,
+// delivery, or source-offset progress.
+func (w *RouteWorker) reserveVoiceReadback() voiceEchoReservation {
+	echo := voiceEchoReservation{prev: w.prevEchoDone, mine: make(chan struct{})}
+	w.prevEchoDone = echo.mine
+	return echo
+}
+
+func (w *RouteWorker) enqueueVoiceReadback(ctx context.Context, in *c3types.Inbound, transcript, failNotice string, echo voiceEchoReservation) {
+	if in == nil || (transcript == "" && failNotice == "") {
+		if echo.mine != nil {
+			close(echo.mine)
+		}
+		return
+	}
+	if echo.mine == nil {
+		echo = w.reserveVoiceReadback()
+	}
+	inCopy := *in
+	go func() {
+		defer close(echo.mine)
+		defer recoverGoroutine("echoReadback")
+		select {
+		case <-echo.prev:
+		case <-ctx.Done():
+			return
+		}
+		w.echoReadback(&inCopy, transcript, failNotice)
+	}()
 }
 
 // sttFailureText renders the agent-facing STT-failure recovery message. It is
@@ -956,23 +839,6 @@ func sttFailureText(att c3types.Attachment, reason, cachedPath string) string {
 	}
 	return fmt.Sprintf(sttFailureOpening+" %s] The audio is saved and recoverable — the user does not need to resend.%s Call download_attachment with file_id=%q (%s, %s) to retrieve it, or retranscribe with the same file_id to re-run transcription. Try retranscribe ONCE; if it still fails, ask the sender to resend or type it out — do not retry repeatedly. Provider traceback: %s",
 		reason, cached, fileID, mime, dur, LogPath())
-}
-
-// cachedVoicePath asks the channel whether att's audio is already downloaded into
-// the local inbox, so a post-download STT failure can name the cached file (P2-5).
-// "" when the channel has no cache accessor or the file is not present.
-func (w *RouteWorker) cachedVoicePath(chanName, fileID string) string {
-	if w.broker == nil || fileID == "" {
-		return ""
-	}
-	ch, err := w.broker.Channel(chanName)
-	if err != nil {
-		return ""
-	}
-	if cp, ok := ch.(interface{ CachedVoicePath(string) string }); ok {
-		return cp.CachedVoicePath(fileID)
-	}
-	return ""
 }
 
 // sttFailureReason extracts the failure reason to surface in sttFailureText. An
@@ -2120,7 +1986,7 @@ func (w *RouteWorker) takeCoveredByPush(pushID int64, token string) []string {
 // queued organic voice record (retranscribe in-place refresh, spec Component 5).
 // Runs on the route's single-owner worker so selection and rewrite cannot race
 // another file operation for this route. A miss is a clean no-op.
-func (w *RouteWorker) handleRefreshText(ctx context.Context, job *RefreshTextJob) {
+func (w *RouteWorker) handleRefreshText(_ context.Context, job *RefreshTextJob) {
 	if job == nil || job.ResultCh == nil {
 		return
 	}
@@ -2151,26 +2017,9 @@ func (w *RouteWorker) handleRefreshText(ctx context.Context, job *RefreshTextJob
 	// Checked here rather than in the store: the store has no idea what C3
 	// authored, and this runs on the route's single owner so the read cannot race
 	// its own rewrite.
-	rec, found, anyForMsg := w.queuedVoiceRecord(qrk, job.MessageID, job.FileID)
+	rec, found := w.queuedVoiceRecord(qrk, job.MessageID, job.FileID)
 	if !found {
-		// No organic voice line owns this file_id for an in-place refresh. Two very
-		// different situations reach here:
-		//   1. The message is not queued AT ALL (anyForMsg=false) — it was delivered
-		//      live and consumed. This is the P0-1 loss: a long retranscribe outlives
-		//      the caller's tool wait, and the successful transcript went nowhere
-		//      (2026-08-08 msg 9014: ok=true refreshed=false, 10,868 chars lost). So
-		//      deliver it as a FRESH durable line tagged with the original message_id
-		//      — pushed if a session is attached, else held for fetch_queue.
-		//   2. A line for this message_id IS still queued (anyForMsg=true) but is a
-		//      drained/legacy/non-owning record the refresh deliberately skips. It is
-		//      already recoverable via fetch_queue, so appending would only add a
-		//      spurious duplicate — leave it (the old no-mutation behavior).
-		if anyForMsg {
-			job.ResultCh <- RefreshResult{Refreshed: false}
-			return
-		}
-		appended := w.deliverTranscriptAsNewLine(ctx, qrk, job.MessageID, job.FileID, job.Transcript)
-		job.ResultCh <- RefreshResult{AppendedNew: appended}
+		job.ResultCh <- RefreshResult{Refreshed: false}
 		return
 	}
 	newText, ok := replaceC3VoiceSegment(rec.Inbound.Text, w.sttPrefix(w.key.Channel), job.Transcript)
@@ -2192,103 +2041,143 @@ func (w *RouteWorker) handleRefreshText(ctx context.Context, job *RefreshTextJob
 	job.ResultCh <- RefreshResult{Refreshed: refreshed}
 }
 
-// deliverTranscriptAsNewLine appends a retranscribe transcript as a FRESH durable
-// queue line (tagged with the original message_id) and delivers it — pushed to a
-// live holder, else held for fetch_queue. Used when the original message is no
-// longer queued (delivered live), so an in-place refresh has no target and a
-// timed-out caller would otherwise lose the transcript (P0-1). It is a DEDICATED
-// path — not flushInbounds — so it never re-runs STT and never touches the offset
-// seam / markPersisted (there is no source Telegram update to advance). Runs on the
-// route's single-owner worker (called from handleRefreshText).
-// Returns true only when the transcript was durably appended AND handed to
-// delivery; false on an append failure (so the caller does not falsely report the
-// message as recovered — F6).
-func (w *RouteWorker) deliverTranscriptAsNewLine(ctx context.Context, qrk queue.RouteKey, messageID int64, fileID, transcript string) bool {
-	if w.broker == nil || w.broker.Queue == nil {
-		return false
-	}
-	var topicID *int64
-	if w.key.HasTopic {
-		t := w.key.TopicID
-		topicID = &t
-	}
-	// Marked clearly as a late re-transcription so the agent reads it as a correction
-	// of an earlier note, not a fresh inbound. No voice attachment: the line already
-	// carries the transcript, and file-level recovery stays available via the file_id
-	// named here (download_attachment / retranscribe are cache-first).
-	text := fmt.Sprintf("[Re-transcription of an earlier voice note — message %d, file_id %s]\n%s%s",
-		messageID, fileID, w.sttPrefix(w.key.Channel), transcript)
-	in := &c3types.Inbound{
-		Channel:   w.key.Channel,
-		ChatID:    w.key.ChatID,
-		TopicID:   topicID,
-		MessageID: messageID,
-		Text:      text,
-		Timestamp: time.Now(),
-	}
-	recordID, err := w.broker.Queue.AppendTracked(qrk, in)
-	if err != nil {
-		log.Printf("late-transcript-deliver APPEND FAIL chan=%s chat=%d topic=%s msg=%d: %v — transcript not stored",
-			w.key.Channel, w.key.ChatID, TopicKeyStr(w.key), messageID, err)
-		return false
-	}
-	// Record the id so forwardOrFallbackCovering's no-claim "append-if-absent" branch
-	// does NOT append this line a SECOND time (it appends when the id is unseen — and
-	// a fresh worker would not have seen the original's delivery). We appended it
-	// above; the held path must only notify, not re-store.
-	if w.dedup != nil {
-		w.dedup.record(in.MessageID)
-	}
-	log.Printf("late-transcript-deliver chan=%s chat=%d topic=%s msg=%d: appended fresh transcript line (delivered/held)",
-		w.key.Channel, w.key.ChatID, TopicKeyStr(w.key), messageID)
-	// Deliver the one appended line: push to a live holder, else hold for fetch_queue.
-	// forwardOrFallbackCovering never calls markPersisted, so no offset/seam is touched.
-	w.forwardOrFallbackCovering(ctx, in, 1, []string{recordID}, true)
-	return true
-}
-
-// handleDeliverTranscript appends + delivers a late STT transcript (produced by the
-// P0-2 retry pool, off the worker) on the route's single-owner worker, and reports
-// whether it landed durably so the pool can re-park on a worker-drop rather than lose
-// it. The STT itself does NOT run here — only the fast append/deliver — so a retry
-// never blocks the route for the STT window (Codex review 1, F5).
-func (w *RouteWorker) handleDeliverTranscript(ctx context.Context, job *DeliverTranscriptJob) {
-	if job == nil || job.ResultCh == nil {
+// handleResolveVoice is the one terminal landing path for every voice source.
+// It runs on the route worker so the store's single-owner rule remains intact.
+// The scheduler never waits on a result channel: a failed mutation simply makes
+// the same idempotent resolve eligible for resubmission after a short delay.
+func (w *RouteWorker) handleResolveVoice(ctx context.Context, job *ResolveVoiceJob) {
+	if job == nil || w.broker == nil || w.broker.Voice == nil {
 		return
 	}
-	defer recoverGoroutineThen("worker.handleDeliverTranscript", func() {
-		select {
-		case job.ResultCh <- DeliverTranscriptResult{Err: fmt.Errorf("internal panic in deliver_transcript")}:
-		default:
+	scheduler := w.broker.Voice
+	finished := false
+	defer scheduler.resolveJobDone()
+	defer recoverGoroutineThen("worker.handleResolveVoice", func() {
+		if !finished {
+			scheduler.retryResolve(job.Key)
 		}
 	})
-	delivered := w.deliverTranscriptAsNewLine(ctx, queueRouteKey(w.key), job.MessageID, job.FileID, job.Transcript)
-	job.ResultCh <- DeliverTranscriptResult{Delivered: delivered}
+
+	if w.broker.Queue == nil {
+		// Degraded mode has no durable row to resolve. Preserve the established
+		// loud best-effort philosophy: push the terminal update with Covered=0,
+		// and make no claim that it can be recovered later.
+		in := voiceRevisionInbound(job.Inbound, job.Key.messageID, job.SegmentText)
+		w.enqueueVoiceReadback(ctx, in, job.EchoTranscript, job.FailNotice, job.Echo)
+		w.forwardOrFallbackCovering(ctx, in, 0, nil, true)
+		scheduler.completeResolve(job.Key)
+		finished = true
+		return
+	}
+
+	qrk := queueRouteKey(w.key)
+	current, found := w.queuedRecord(qrk, job.RecordID)
+	newText := job.SegmentText
+	if found {
+		newText = replacePendingVoiceSegment(current.Inbound.Text, job.FileID, job.SegmentText)
+	}
+	resolved, allDone, err := w.broker.Queue.ResolveVoiceText(qrk, job.RecordID, job.FileID, newText)
+	if err != nil {
+		log.Printf("voice resolve FAIL chan=%s chat=%d topic=%s msg=%d file_id=%s record=%s: %v — rescheduling the same durable resolve",
+			w.key.Channel, w.key.ChatID, TopicKeyStr(w.key), job.Key.messageID, job.FileID, job.RecordID, err)
+		scheduler.retryResolve(job.Key)
+		return
+	}
+	if resolved {
+		if allDone {
+			final, ok := w.queuedRecord(qrk, job.RecordID)
+			if !ok {
+				log.Printf("voice resolve chan=%s chat=%d topic=%s msg=%d record=%s: row resolved but could not be re-read for live push; final durable backlog remains",
+					w.key.Channel, w.key.ChatID, TopicKeyStr(w.key), job.Key.messageID, job.RecordID)
+			} else {
+				if w.dedup != nil {
+					w.dedup.record(final.Inbound.MessageID)
+				}
+				w.enqueueVoiceReadback(ctx, &final.Inbound, job.EchoTranscript, job.FailNotice, job.Echo)
+				w.forwardOrFallbackCovering(ctx, &final.Inbound, 1, []string{job.RecordID}, true)
+			}
+		}
+		scheduler.completeResolve(job.Key)
+		finished = true
+		return
+	}
+
+	// fetch_queue consumed the honest placeholder while STT was in flight, or
+	// retention evicted it. Land the terminal outcome as an ordinary revision
+	// row so it has the same retention, delivery-token, ack, and held semantics
+	// as every other inbound.
+	revision := voiceRevisionInbound(job.Inbound, job.Key.messageID, job.SegmentText)
+	recordID, err := w.broker.Queue.AppendTracked(qrk, revision)
+	if err != nil {
+		log.Printf("voice revision APPEND FAIL chan=%s chat=%d topic=%s msg=%d file_id=%s: %v — rescheduling without losing the terminal result",
+			w.key.Channel, w.key.ChatID, TopicKeyStr(w.key), job.Key.messageID, job.FileID, err)
+		scheduler.retryResolve(job.Key)
+		return
+	}
+	if w.dedup != nil {
+		w.dedup.record(revision.MessageID)
+	}
+	w.evictIfOverCap(qrk)
+	w.enqueueVoiceReadback(ctx, revision, job.EchoTranscript, job.FailNotice, job.Echo)
+	w.forwardOrFallbackCovering(ctx, revision, 1, []string{recordID}, true)
+	scheduler.completeResolve(job.Key)
+	finished = true
+}
+
+func (w *RouteWorker) queuedRecord(qrk queue.RouteKey, recordID string) (queue.TrackedInbound, bool) {
+	if recordID == "" {
+		return queue.TrackedInbound{}, false
+	}
+	lines, err := w.broker.Queue.PeekTracked(qrk, -1)
+	if err != nil {
+		log.Printf("voice resolve queue read FAIL chan=%s chat=%d topic=%s record=%s: %v",
+			w.key.Channel, w.key.ChatID, TopicKeyStr(w.key), recordID, err)
+		return queue.TrackedInbound{}, false
+	}
+	for _, line := range lines {
+		if line.RecordID == recordID {
+			return line, true
+		}
+	}
+	return queue.TrackedInbound{}, false
+}
+
+func replacePendingVoiceSegment(text, fileID, segment string) string {
+	placeholder := voicePendingText(fileID)
+	idx := strings.LastIndex(text, placeholder)
+	if idx < 0 {
+		log.Printf("voice resolve invariant: pending file_id=%s has no authored placeholder in row text; appending terminal segment", fileID)
+		return appendVoiceMarker(text, segment)
+	}
+	return text[:idx] + segment + text[idx+len(placeholder):]
+}
+
+func voiceRevisionInbound(source c3types.Inbound, messageID int64, segment string) *c3types.Inbound {
+	return &c3types.Inbound{
+		Channel: source.Channel, ChatID: source.ChatID, TopicID: source.TopicID,
+		MessageID: messageID, Sender: source.Sender,
+		Text:      fmt.Sprintf("[transcript update for voice message %d]\n%s", messageID, segment),
+		Timestamp: time.Now(), ConvKind: source.ConvKind,
+	}
 }
 
 // queuedVoiceRecord returns the exact pending organic tracked line that owns
 // fileID. Same-MessageID edits are searched independently; drained-in and
 // legacy untracked lines are never eligible for an organic retranscribe write.
-// anyForMsg reports whether ANY pending line carries messageID (drained, legacy,
-// or non-owning included) — so the caller can tell "not queued at all" (deliver the
-// transcript late, P0-1) apart from "queued but not refreshable in place" (already
-// recoverable; leave it). On a read error it reports found=false, anyForMsg=false,
-// which routes to late-delivery (duplicate-over-loss, this project's fail direction).
-func (w *RouteWorker) queuedVoiceRecord(qrk queue.RouteKey, messageID int64, fileID string) (rec queue.TrackedInbound, found, anyForMsg bool) {
+func (w *RouteWorker) queuedVoiceRecord(qrk queue.RouteKey, messageID int64, fileID string) (rec queue.TrackedInbound, found bool) {
 	lines, err := w.broker.Queue.PeekTracked(qrk, -1)
 	if err != nil {
-		return queue.TrackedInbound{}, false, false
+		return queue.TrackedInbound{}, false
 	}
 	for _, r := range lines {
 		if r.Inbound.MessageID != messageID {
 			continue
 		}
-		anyForMsg = true
 		if r.RecordID != "" && r.Inbound.DrainedFrom == "" && recordOwnsVoice(r.Inbound, fileID) {
-			return r, true, true
+			return r, true
 		}
 	}
-	return queue.TrackedInbound{}, false, anyForMsg
+	return queue.TrackedInbound{}, false
 }
 
 // recordOwnsVoice reports whether rec is the message this refresh is about:
@@ -2775,12 +2664,12 @@ func (w *RouteWorker) drainOnShutdown() []*c3types.Inbound {
 					default:
 					}
 				}
-			case JobDeliverTranscript:
-				if job.DeliverTranscript != nil && job.DeliverTranscript.ResultCh != nil {
-					select {
-					case job.DeliverTranscript.ResultCh <- DeliverTranscriptResult{Err: errWorkerStopped}:
-					default:
-					}
+			case JobResolveVoice:
+				// The scheduler counted every accepted resolve job in its own
+				// WaitGroup. If idle/shutdown wins before this job starts, release
+				// that count and make the same resolve eligible on a fresh worker.
+				if w.broker != nil && w.broker.Voice != nil {
+					w.broker.Voice.resolveJobDropped(job.ResolveVoice)
 				}
 			}
 		default:

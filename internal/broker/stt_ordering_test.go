@@ -118,18 +118,21 @@ func TestSTTOrdering_LateVoiceAgentSurfaceNamesOvertakenMessage(t *testing.T) {
 	b, w, ch := newSTTOrderingFixture(t)
 	late := flushOrderingMarkerAndVoice(w, 7010, 7007)
 	waitSTTOrderingEvents(t, ch, 7007)
+	text := waitForVoiceQueueText(t, b, w.key, late.MessageID, func(text string) bool {
+		return strings.Contains(text, "late spoken part")
+	})
 
 	notice := lateVoiceOrderNotice(7007, 7010)
-	noticeAt := strings.Index(late.Text, notice)
-	transcriptAt := strings.Index(late.Text, "[Transcribed voice]: late spoken part")
+	noticeAt := strings.Index(text, notice)
+	transcriptAt := strings.Index(text, "[Transcribed voice]: late spoken part")
 	if noticeAt < 0 {
-		t.Fatalf("slow-STT ordering defect: agent surface %q does not say message_id=7007 was spoken before already-delivered message_id=7010", late.Text)
+		t.Fatalf("slow-STT ordering defect: agent surface %q does not say message_id=7007 was spoken before already-delivered message_id=7010", text)
 	}
 	if transcriptAt < 0 {
-		t.Fatalf("slow-STT loss defect: late message_id=7007 warning exists but its transcript was dropped: %q", late.Text)
+		t.Fatalf("slow-STT loss defect: late message_id=7007 warning exists but its transcript was dropped: %q", text)
 	}
 	if noticeAt > transcriptAt {
-		t.Fatalf("slow-STT ordering defect: agent sees the late transcript before its ordering warning: %q", late.Text)
+		t.Fatalf("slow-STT ordering defect: agent sees the late transcript before its ordering warning: %q", text)
 	}
 
 	pending, _ := b.Queue.Pending(queueRouteKey(w.key))

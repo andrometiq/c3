@@ -70,6 +70,13 @@ type Broker struct {
 	// owner ⇒ no file locks). May be nil if queue init failed at New (durable
 	// hold disabled for the run, logged loudly) — callers must nil-check.
 	Queue *queue.Store
+	Voice *VoiceScheduler
+
+	// voiceRecoveryOnce runs the store-wide pending-voice scan after the first
+	// channel has registered, when both plugin callbacks and channel cache/fetch
+	// capabilities are available. C3 has one channel today; the scan itself is
+	// store-wide so future channel rows are not hidden.
+	voiceRecoveryOnce sync.Once
 
 	// drains is the per-SOURCE in-flight drain guard (drain.go, amendment A1/B8):
 	// a second Drain on a source that is already mid-drain rejects immediately
@@ -127,17 +134,6 @@ type Broker struct {
 	updateMu        sync.RWMutex
 	updateAvailable bool
 	latestVersion   string
-
-	// sttRetryMu guards sttRetries — voice notes whose STT FETCH failed on a
-	// transient network condition, parked to be re-attempted when the Telegram
-	// fetch health recovers (P0-2). Bounded (maxSTTRetries, drop-oldest), deduped by
-	// (route, message_id, file_id), attempt-capped (maxSTTRetryAttempts). See
-	// stt_retry.go.
-	sttRetryMu sync.Mutex
-	sttRetries []sttRetryEntry
-	// sttRetrySem bounds concurrent STT retries across all routes (P0-2); buffered to
-	// sttRetryConcurrency. Set in New.
-	sttRetrySem chan struct{}
 }
 
 const defaultWorkerIdle = 60 * time.Second
@@ -176,10 +172,7 @@ func New(mf *mappings.MappingsFile) *Broker {
 	}
 	b.Workers = NewWorkerPool(ctx, defaultWorkerIdle, b)
 	b.Plugins = newPluginHost(b)
-	// P0-2 network-recovery STT retries: bound concurrency + run a periodic,
-	// edge-independent sweeper (exits on ctx cancel from Shutdown).
-	b.sttRetrySem = make(chan struct{}, sttRetryConcurrency)
-	go b.sttRetrySweeper()
+	b.Voice = newVoiceScheduler(b, nil)
 	return b
 }
 
@@ -255,6 +248,7 @@ func (b *Broker) RegisterChannel(ch channel.Channel) error {
 	b.chMu.Lock()
 	b.channels[ch.Name()] = &channelRegistration{Channel: ch, Host: host}
 	b.chMu.Unlock()
+	b.voiceRecoveryOnce.Do(b.Voice.RecoverPending)
 	// Degraded mode is announced HERE, not in New(): New() has no channel to speak
 	// through and no session to speak to, so its loud log line is the only trace —
 	// and a log nobody tails is exactly how this stayed silent. This is the first
@@ -353,16 +347,19 @@ func (b *Broker) Shutdown() {
 // ShutdownWithin stops all subsystems in the order required for clean shutdown,
 // bounding the worker-pool drain to grace (grace<=0 waits indefinitely):
 //
-//  1. Stop the worker pool so no new outbound tool-calls dispatch.
+//  1. Stop voice-scheduler admission, cancel and join its fixed goroutines and
+//     accepted resolve jobs. After this returns nothing can call a route worker,
+//     channel API, or STT plugin from the scheduler.
+//  2. Stop the worker pool so no new outbound tool-calls dispatch.
 //     StopWithin cancels the per-route worker contexts; any in-flight
 //     dispatchOutbound returns from its channel call (or drops out of the
 //     queue) before the channel is torn down. A worker that can't cancel in
 //     time is abandoned after grace (loss-free — the durable queue redelivers).
-//  2. Stop each channel — by now the worker pool isn't issuing fresh
+//  3. Stop each channel — by now the worker pool isn't issuing fresh
 //     Telegram calls, so Channel.Stop() can drain whatever's already
 //     in flight (HTTP requests, polling goroutine) without racing new
 //     submissions.
-//  3. Cancel the broker context — propagates to any goroutine that
+//  4. Cancel the broker context — propagates to any goroutine that
 //     was holding a derived context (most are already stopped).
 //
 // The previous ordering (channels first, then workers) was the bug:
@@ -371,6 +368,7 @@ func (b *Broker) Shutdown() {
 // hangs on stale request opts timeouts. Addresses code-review-
 // 2026-05-15 MAJOR #5 (daemon.md §1.3 drain order).
 func (b *Broker) ShutdownWithin(grace time.Duration) {
+	b.Voice.Stop()
 	if !b.Workers.StopWithin(grace) {
 		log.Printf("broker: worker pool did not drain within %s — proceeding with shutdown (leaked workers exit with the process; durable queue keeps this loss-free)", grace)
 	}

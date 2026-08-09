@@ -87,9 +87,8 @@ const sttFetchFailedPrefix = "[STT FETCH FAILED: "
 // sttFetchFailure reports the handler's own fetch error when a transcript
 // stand-in carries one. The STT handler performs its own getFile — the broker's
 // preflight cannot speak for it (a failover advance or plain TOCTOU between the
-// two calls), so when the handler's fetch is the thing that failed, its cause
-// must reach the same honest surfaces the preflight refusal uses instead of
-// collapsing into "transcription failed / try again" (Codex review 2, finding 1).
+// two calls), so when the handler's fetch is the thing that failed, its concrete
+// cause must survive into the scheduler's terminal recovery text.
 func sttFetchFailure(transcript string) (string, bool) {
 	detail, ok := strings.CutPrefix(transcript, sttFetchFailedPrefix)
 	if !ok {
@@ -157,12 +156,19 @@ func (b *Broker) attachmentFetchRefusal(chanName, fileID string) (refusal string
 // its local cache (so retranscribe can skip the network preflight and the handler
 // can reuse the bytes — F11). Best-effort; false when the channel has no accessor.
 func (b *Broker) voiceCachedLocally(chanName, fileID string) bool {
+	return b.voiceCachedPath(chanName, fileID) != ""
+}
+
+func (b *Broker) voiceCachedPath(chanName, fileID string) string {
 	ch, err := b.Channel(chanName)
 	if err != nil {
-		return false
+		return ""
 	}
 	cp, ok := ch.(interface{ CachedVoicePath(string) string })
-	return ok && cp.CachedVoicePath(fileID) != ""
+	if !ok {
+		return ""
+	}
+	return cp.CachedVoicePath(fileID)
 }
 
 // The openings C3 uses when it authors a voice message's whole agent-surface

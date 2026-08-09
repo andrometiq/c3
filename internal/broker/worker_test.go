@@ -184,10 +184,13 @@ func TestFlushInbounds_VoiceWithoutSTTPluginGetsSelfDocumentingFailure(t *testin
 		Attachments: []c3types.Attachment{{Kind: "voice", FileID: "VFILE", MIME: "audio/ogg", Size: 1000}},
 	}
 	w.flushInbounds(context.Background(), []*c3types.Inbound{in})
+	text := waitForVoiceQueueText(t, b, w.key, in.MessageID, func(text string) bool {
+		return strings.Contains(text, "transcription failed")
+	})
 
 	for _, want := range []string{"transcription failed", "VFILE", "download_attachment", "retranscribe", "does not need to resend"} {
-		if !strings.Contains(in.Text, want) {
-			t.Errorf("STT failure text missing %q; got %q", want, in.Text)
+		if !strings.Contains(text, want) {
+			t.Errorf("STT failure text missing %q; got %q", want, text)
 		}
 	}
 }
@@ -207,6 +210,9 @@ func TestFlushInbounds_VoiceWithCaptionKeepsCaptionWhenSTTAbsent(t *testing.T) {
 		Attachments: []c3types.Attachment{{Kind: "voice", FileID: "v1"}},
 	}
 	w.flushInbounds(context.Background(), []*c3types.Inbound{in})
+	text := waitForVoiceQueueText(t, b, w.key, in.MessageID, func(text string) bool {
+		return strings.Contains(text, "transcription failed")
+	})
 
 	// The original rule here was "don't clobber user-deliberate text with the
 	// marker", and it was enforced by writing NO marker at all whenever text was
@@ -216,11 +222,11 @@ func TestFlushInbounds_VoiceWithCaptionKeepsCaptionWhenSTTAbsent(t *testing.T) {
 	// failure became invisible on both surfaces (Codex review 3, finding 2).
 	// Appending honors the rule as it was meant: the caption is untouched AND
 	// the agent is told what happened.
-	if !strings.HasPrefix(in.Text, "user-typed caption") {
-		t.Errorf("voice with caption but no STT plugin: in.Text=%q, want the caption preserved and first (don't clobber user-deliberate text)", in.Text)
+	if !strings.HasPrefix(text, "user-typed caption") {
+		t.Errorf("voice with caption but no STT plugin: text=%q, want the caption preserved and first (don't clobber user-deliberate text)", text)
 	}
-	if !strings.Contains(in.Text, "transcription failed") {
-		t.Errorf("voice with caption but no STT plugin: in.Text=%q, want the failure appended — a caption must not be able to hide that the voice never transcribed", in.Text)
+	if !strings.Contains(text, "transcription failed") {
+		t.Errorf("voice with caption but no STT plugin: text=%q, want the failure appended — a caption must not be able to hide that the voice never transcribed", text)
 	}
 }
 
@@ -242,9 +248,12 @@ func TestFlushInbounds_VoiceWithSTTPluginUsesTranscript(t *testing.T) {
 		Attachments: []c3types.Attachment{{Kind: "voice", FileID: "v1"}},
 	}
 	w.flushInbounds(context.Background(), []*c3types.Inbound{in})
+	text := waitForVoiceQueueText(t, b, w.key, in.MessageID, func(text string) bool {
+		return strings.Contains(text, "transcribed text")
+	})
 
-	if !strings.Contains(in.Text, "transcribed text") {
-		t.Errorf("voice with STT plugin: in.Text=%q, want transcript embedded", in.Text)
+	if !strings.Contains(text, "transcribed text") {
+		t.Errorf("voice with STT plugin: text=%q, want transcript embedded", text)
 	}
 }
 
@@ -296,9 +305,12 @@ func TestFlushInbounds_VoiceSTTTimeout_FallsBackToPlaceholder(t *testing.T) {
 		t.Fatal("flushInbounds did not return within 5s — STT call is not bounded by sttFlushTimeout")
 	}
 
+	text := waitForVoiceQueueText(t, b, w.key, in.MessageID, func(text string) bool {
+		return strings.Contains(text, "transcription failed")
+	})
 	for _, want := range []string{"transcription failed", "HUNGFILE", "download_attachment", "retranscribe", "does not need to resend"} {
-		if !strings.Contains(in.Text, want) {
-			t.Errorf("STT-timeout fallback text missing %q; got %q", want, in.Text)
+		if !strings.Contains(text, want) {
+			t.Errorf("STT-timeout fallback text missing %q; got %q", want, text)
 		}
 	}
 }
@@ -328,14 +340,17 @@ func TestFlushInbounds_VoiceSTTFailureMarkerBecomesRichText(t *testing.T) {
 		Attachments: []c3types.Attachment{{Kind: "voice", FileID: "MARKERFILE", MIME: "audio/ogg", Size: 1000}},
 	}
 	w.flushInbounds(context.Background(), []*c3types.Inbound{in})
+	text := waitForVoiceQueueText(t, b, w.key, in.MessageID, func(text string) bool {
+		return strings.Contains(text, "token_unavailable")
+	})
 
 	for _, want := range []string{"transcription failed", "MARKERFILE", "download_attachment", "retranscribe", "token_unavailable"} {
-		if !strings.Contains(in.Text, want) {
-			t.Errorf("marker→rich text missing %q; got %q", want, in.Text)
+		if !strings.Contains(text, want) {
+			t.Errorf("marker→rich text missing %q; got %q", want, text)
 		}
 	}
-	if strings.Contains(in.Text, "[STT FAILED:") {
-		t.Errorf("agent-facing text still contains the raw failure marker; got %q", in.Text)
+	if strings.Contains(text, "[STT FAILED:") {
+		t.Errorf("agent-facing text still contains the raw failure marker; got %q", text)
 	}
 }
 
@@ -958,6 +973,9 @@ func TestFlushInbounds_ReadbackOnSuccess(t *testing.T) {
 		Attachments: []c3types.Attachment{{Kind: "voice", FileID: "VF"}},
 	}
 	w.flushInbounds(context.Background(), []*c3types.Inbound{in})
+	text := waitForVoiceQueueText(t, b, w.key, in.MessageID, func(text string) bool {
+		return strings.Contains(text, "hello from the voice note")
+	})
 
 	rbs := rc.waitReadbacks(t, 1)
 	if len(rbs) != 1 {
@@ -970,8 +988,8 @@ func TestFlushInbounds_ReadbackOnSuccess(t *testing.T) {
 		rbs[0].TopicID == nil || *rbs[0].TopicID != 7 {
 		t.Errorf("readback routing wrong: %+v", rbs[0])
 	}
-	if !strings.Contains(in.Text, "hello from the voice note") {
-		t.Errorf("agent surface lost the transcript: in.Text=%q", in.Text)
+	if !strings.Contains(text, "hello from the voice note") {
+		t.Errorf("agent surface lost the transcript: text=%q", text)
 	}
 	for _, rp := range rc.sendRepliesSnapshot() {
 		if strings.Contains(rp.Text, "Couldn't transcribe") {
@@ -1004,6 +1022,9 @@ func TestFlushInbounds_ReadbackFailureNotice(t *testing.T) {
 		Attachments: []c3types.Attachment{{Kind: "voice", FileID: "VF"}},
 	}
 	w.flushInbounds(context.Background(), []*c3types.Inbound{in})
+	text := waitForVoiceQueueText(t, b, w.key, in.MessageID, func(text string) bool {
+		return strings.Contains(text, "transcription failed")
+	})
 
 	// The failure notice is sent from the detached echo goroutine now — wait
 	// for it, then assert (no readback on STT failure).
@@ -1026,12 +1047,12 @@ func TestFlushInbounds_ReadbackFailureNotice(t *testing.T) {
 	// The agent-surface text is now the RICH recovery message (the marker is
 	// routed through sttFailureText), carrying the parsed reason — NOT the raw
 	// "[STT FAILED:" marker, which named only the log, not the file_id/retranscribe.
-	if strings.Contains(in.Text, "[STT FAILED:") {
-		t.Errorf("agent-surface text should not carry the raw marker: in.Text=%q", in.Text)
+	if strings.Contains(text, "[STT FAILED:") {
+		t.Errorf("agent-surface text should not carry the raw marker: text=%q", text)
 	}
 	for _, want := range []string{"transcription failed", "timeout", "VF", "retranscribe"} {
-		if !strings.Contains(in.Text, want) {
-			t.Errorf("agent-surface rich text missing %q: in.Text=%q", want, in.Text)
+		if !strings.Contains(text, want) {
+			t.Errorf("agent-surface rich text missing %q: text=%q", want, text)
 		}
 	}
 }
@@ -1086,12 +1107,11 @@ func TestFlushInbounds_EchoOrderingChained(t *testing.T) {
 	}
 }
 
-// TestFlushInbounds_EchoChainCtxCancel: cancel the run-loop ctx while a SECOND
-// echo is parked waiting on the FIRST echo's chain link. The parked echo must
-// take the ctx.Done() branch and exit PROMPTLY (closing its own link) instead of
-// deadlocking behind the still-running first echo — and the first echo, once
-// unblocked, must also finish (no goroutine leak on shutdown).
-func TestFlushInbounds_EchoChainCtxCancel(t *testing.T) {
+// TestFlushInbounds_EchoChainWorkerShutdown: stop the route-worker pool while a
+// SECOND echo is parked waiting on the FIRST echo's chain link. Resolve now runs
+// on the pool's route worker, so its context — the production shutdown seam —
+// must abort the parked echo promptly and close its own link.
+func TestFlushInbounds_EchoChainWorkerShutdown(t *testing.T) {
 	t.Setenv("C3_QUEUE_DIR", t.TempDir())
 	b := New(&mappings.MappingsFile{SchemaVersion: 1})
 	defer b.Shutdown()
@@ -1116,7 +1136,6 @@ func TestFlushInbounds_EchoChainCtxCancel(t *testing.T) {
 	w := newRouteWorker(context.Background(), RouteKey{Channel: "telegram", ChatID: -100}, time.Hour, b)
 	defer w.Stop()
 
-	ctx, cancel := context.WithCancel(context.Background())
 	voice := []c3types.Attachment{{Kind: "voice", FileID: "VF"}}
 	in1 := &c3types.Inbound{Channel: "telegram", ChatID: -100, MessageID: 1, Attachments: voice}
 	in2 := &c3types.Inbound{Channel: "telegram", ChatID: -100, MessageID: 2, Attachments: voice}
@@ -1124,17 +1143,22 @@ func TestFlushInbounds_EchoChainCtxCancel(t *testing.T) {
 	// Echo #1: prev is the pre-closed head, so it runs immediately, enters its
 	// (blocked) send, and holds mine1 open. w.prevEchoDone is read only on this
 	// test goroutine (the same one that calls flushInbounds), so it's race-free.
-	w.flushInbounds(ctx, []*c3types.Inbound{in1})
+	w.flushInbounds(context.Background(), []*c3types.Inbound{in1})
 	mine1 := w.prevEchoDone
 	<-echo1Entered // echo1 now stuck in send; mine1 not yet closed
 
 	// Echo #2: prev = mine1 (open), so it PARKS on <-prev while also watching ctx.
-	w.flushInbounds(ctx, []*c3types.Inbound{in2})
+	w.flushInbounds(context.Background(), []*c3types.Inbound{in2})
 	mine2 := w.prevEchoDone
+	key2 := voiceScheduleKey{route: w.key, messageID: in2.MessageID, fileID: "VF"}
+	waitForVoiceCondition(t, "second resolve to enqueue its parked echo", func() bool {
+		_, _, ok := schedulerEntrySnapshot(b.Voice, key2)
+		return !ok
+	})
 
-	// Cancel mid-chain: echo2 is parked on <-prev. It MUST take ctx.Done() and
-	// exit promptly (close mine2) rather than wait for the blocked echo1.
-	cancel()
+	// Stop the worker pool mid-chain. Echo #2 uses the resolve worker's context,
+	// so shutdown must close mine2 without waiting for the blocked channel call.
+	b.Workers.Stop()
 	select {
 	case <-mine2:
 		// echo2 exited + closed its link → prompt, no deadlock.

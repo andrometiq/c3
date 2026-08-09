@@ -117,6 +117,9 @@ func flushVoice(t *testing.T, b *Broker, in *c3types.Inbound) {
 	w := newRouteWorker(context.Background(), RouteKey{Channel: "telegram", ChatID: -100}, time.Hour, b)
 	defer w.Stop()
 	w.flushInbounds(context.Background(), []*c3types.Inbound{in})
+	in.Text = waitForVoiceQueueText(t, b, w.key, in.MessageID, func(text string) bool {
+		return !strings.Contains(text, "transcription in progress")
+	})
 }
 
 // The headline behavior: the server refuses on size, STT never runs, the agent
@@ -500,12 +503,10 @@ func TestSTTFailureText_NamesItsOwnAttachment(t *testing.T) {
 
 // ── Codex review 2, finding 1 — the handler's own fetch failure ───────────────
 //
-// The STT handler performs its OWN getFile, so the broker's preflight cannot
-// speak for it (a failover advance between the two calls, or plain TOCTOU). When
-// that second fetch fails, its cause used to collapse to "[STT FAILED: error]"
-// and then to the generic transcription-failed text — the exact opacity the
-// ruling forbids.
-func TestFlushInbounds_HandlerFetchFailure_ReportsTheServersWordsNotAGenericFailure(t *testing.T) {
+// The scheduler's permanent-failure contract deliberately uses the standard
+// recoverable failure text, but it must retain the handler's concrete cause so
+// the agent and operator are not left with an opaque provider failure.
+func TestFlushInbounds_HandlerFetchFailure_UsesTerminalRecoveryTextWithCause(t *testing.T) {
 	g := newGateChannel(1000, nil) // preflight SUCCEEDS; the handler's fetch is what fails
 	b := gateBroker(t, g)
 	defer b.Shutdown()
@@ -519,18 +520,13 @@ func TestFlushInbounds_HandlerFetchFailure_ReportsTheServersWordsNotAGenericFail
 	if !strings.Contains(in.Text, "Bad Request: file is too big") {
 		t.Fatalf("the handler's fetch failure lost the server's actual error on the way up; got %q", in.Text)
 	}
-	if strings.Contains(in.Text, "saved and recoverable") {
-		t.Fatalf("a fetch that never delivered any bytes still claims the audio is saved and recoverable; got %q", in.Text)
+	if !strings.Contains(in.Text, "saved and recoverable") {
+		t.Fatalf("permanent handler failures must use the frozen recovery contract; got %q", in.Text)
 	}
-	if strings.Contains(in.Text, "[STT FAILED:") {
-		t.Fatalf("a fetch failure is still labelled a transcription failure, which names the wrong subsystem; got %q", in.Text)
+	if !strings.Contains(in.Text, `file_id="F-BIG"`) {
+		t.Fatalf("recovery text does not identify the affected attachment; got %q", in.Text)
 	}
-	g.waitReplyContaining(t, "Bad Request: file is too big")
-	for _, rp := range g.sendRepliesSnapshot() {
-		if strings.Contains(rp.Text, "try again") {
-			t.Fatalf("the human is told to try again for a fetch the server refused; got %q", rp.Text)
-		}
-	}
+	g.waitReplyContaining(t, sttFailureNotice)
 }
 
 // A single message can transcribe one voice and have another refused. The human
