@@ -68,6 +68,83 @@ func TestWorker_SubmitAfterStopReturnsFalse(t *testing.T) {
 	}
 }
 
+// Regression for the 2026-08-07 msg-8881 5-minute blackout: a worker that exits
+// with an un-started JobInbound still in its queue must NOT drop it silently. The
+// drain recovers it via the persist-FAILED callback (offset held, poll-side dedup
+// forgotten so Telegram's redelivery re-dispatches) — never via the persisted
+// callback, which would advance the offset and lose the message.
+func TestShutdown_DroppedInboundRecoversViaPersistFailed(t *testing.T) {
+	b := New(&mappings.MappingsFile{SchemaVersion: 1})
+	defer b.Shutdown()
+
+	var mu sync.Mutex
+	var failed, persisted []int64
+	b.SetPersistFailedCallback(func(in *c3types.Inbound) {
+		mu.Lock()
+		failed = append(failed, in.MessageID)
+		mu.Unlock()
+	})
+	b.SetPersistedCallback(func(in *c3types.Inbound) {
+		mu.Lock()
+		persisted = append(persisted, in.MessageID)
+		mu.Unlock()
+	})
+
+	w := newRouteWorker(context.Background(), RouteKey{Channel: "telegram", ChatID: -100}, time.Hour, b)
+	w.Stop() // run() exits; the (never-closed) buffered queue channel stays usable.
+
+	// Simulate an inbound that Emit enqueued (Submit returned true) but the worker
+	// exited before starting it — put it directly on the queue, then drain via the
+	// idempotent shutdown().
+	in := &c3types.Inbound{
+		Channel: "telegram", ChatID: -100, MessageID: 8881,
+		Attachments: []c3types.Attachment{{Kind: "voice", FileID: "v"}},
+	}
+	w.queue <- Job{Kind: JobInbound, Inbound: in}
+	w.shutdown()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(failed) != 1 || failed[0] != 8881 {
+		t.Fatalf("dropped inbound not recovered via persist-failed: got %v, want [8881]", failed)
+	}
+	if len(persisted) != 0 {
+		t.Fatalf("dropped inbound must NOT advance the offset: persisted callback fired for %v", persisted)
+	}
+}
+
+// A dropped EVENT inbound needs no persist-failed recovery — events are never
+// persisted (no seam; the offset was already marked done in dispatchUpdate).
+func TestShutdown_DroppedEventNotRecovered(t *testing.T) {
+	b := New(&mappings.MappingsFile{SchemaVersion: 1})
+	defer b.Shutdown()
+
+	var mu sync.Mutex
+	var failed []int64
+	b.SetPersistFailedCallback(func(in *c3types.Inbound) {
+		mu.Lock()
+		failed = append(failed, in.MessageID)
+		mu.Unlock()
+	})
+
+	w := newRouteWorker(context.Background(), RouteKey{Channel: "telegram", ChatID: -100}, time.Hour, b)
+	w.Stop()
+
+	event := &c3types.Inbound{
+		Channel: "telegram", ChatID: -100, MessageID: 2200,
+		Kind:  c3types.InboundPollResult,
+		Event: &c3types.InboundEvent{PollResult: &c3types.PollResult{PollID: "p", IsClosed: true}},
+	}
+	w.queue <- Job{Kind: JobInbound, Inbound: event}
+	w.shutdown()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(failed) != 0 {
+		t.Fatalf("dropped event must not trigger persist-failed recovery: got %v", failed)
+	}
+}
+
 // Regression test for 2026-05-14: when the STT handler script went missing,
 // the plugin silently disabled itself at startup and voice messages reached
 // the agent as a bare "(voice message)" with no indication anything was

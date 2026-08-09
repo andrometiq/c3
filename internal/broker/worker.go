@@ -428,6 +428,15 @@ func (w *RouteWorker) run(ctx context.Context) {
 		case <-debC:
 			resetIdle()
 			flushDeb()
+			// A flush can block this goroutine for a long time — several slow
+			// voice→STT calls run synchronously here — and outlast the idle window,
+			// leaving a stale idleTimer fire buffered. Reset AFTER the work so the
+			// next select does not race that stale fire against an inbound that
+			// arrived DURING the flush (which ~50% of the time idle-exited the worker
+			// with the inbound un-started: the msg-8881 trigger). shutdown() now
+			// recovers such a stranded inbound regardless; this just avoids the churn
+			// and makes idle measure time since work ENDED, not since it started.
+			resetIdle()
 		case <-w.typingC:
 			// Typing relay tick (P5). Runs in the worker's single goroutine —
 			// no new concurrency. Pulse the channel's typing action for this
@@ -2473,45 +2482,79 @@ func (w *RouteWorker) Submit(job Job) bool {
 	}
 }
 
-// shutdown makes "worker exiting" and "Submit accepting" mutually exclusive
-// (A1). It runs as a defer from run() on EVERY exit path. Under w.mu it (1) sets
-// w.stopped so any concurrent/subsequent Submit returns false instead of pushing
-// a job into the buffer of a worker whose run goroutine has already returned, and
-// (2) drains every job still queued, replying an error to each result-channel-
-// bearing job so a caller blocked on <-resultCh is never stranded (the original
-// fetch_queue/attach-backlog wedge). Submit also takes w.mu, so the set+drain is
-// atomic with respect to enqueue: after shutdown returns, the queue is empty and
-// no further job can be enqueued.
+// shutdown runs as a defer from run() on EVERY exit path. It drains the queue
+// under w.mu (drainOnShutdown) and then, OUTSIDE the lock, recovers any un-started
+// inbound the drain returned.
 //
-// Loss-freedom (W1 Watch-out #4): the drain MUST NOT mark any inbound update_id
-// done, consume any queue line, or advance any Telegram offset. It only replies
-// errors to ResultCh-bearing jobs. JobInbound / JobConsume carry no ResultCh and
-// are dropped silently — they re-deliver via the Telegram offset (JobInbound) or
-// remain durable backlog (JobConsume); only the real persisted path may ack.
-// Never fake-ack.
+// Loss-freedom (the 2026-08-07 msg-8881 blackout): an un-started JobInbound left in
+// the queue when the worker exits was staged in-flight by the poll loop — the
+// Telegram offset is HELD at its update and its poll-side dedup entry is RECORDED.
+// The drain used to drop it silently on the documented assumption that "Telegram
+// redelivers it via the held offset." That is false: the redelivery is dedup-skipped
+// (`re-poll skip … still awaiting durable persist`) because nothing forgot the dedup
+// entry, so the message stays invisible for the full 5-minute dedup TTL before it
+// self-heals by luck. (Trigger: a long synchronous STT flush outlasts the 60s idle
+// window, and when it returns the run loop's select races the stale idle-fire against
+// the queued inbound and ~50% of the time idle-exits with the inbound un-started.)
 //
-// Idempotent: the stopped flag set is guarded (Stop() may have set it already),
-// but the drain ALWAYS runs — a job can slip into the queue between Stop()'s set
-// and run()'s exit, and that job must still be drained.
+// markPersistFailed is the exact recovery the durable-Append FAILURE edge already
+// uses: it pops the msgToUpdate seam and forgets the poll-side dedup entry WITHOUT
+// advancing the offset, so the held-offset redelivery genuinely re-dispatches on the
+// next poll (~1s) to a fresh worker. Run OFF w.mu because the broker persist-failed
+// callback takes the channel + dedup locks, and coupling the worker lock to that
+// path is needless (the drain already made stopped-vs-Submit atomic).
 func (w *RouteWorker) shutdown() {
+	dropped := w.drainOnShutdown()
+	for _, in := range dropped {
+		w.markPersistFailed(in)
+	}
+}
+
+// drainOnShutdown makes "worker exiting" and "Submit accepting" mutually exclusive
+// (A1). Under w.mu it (1) sets w.stopped so any concurrent/subsequent Submit returns
+// false instead of pushing a job into the buffer of a worker whose run goroutine has
+// already returned, (2) drains every job still queued — replying errWorkerStopped to
+// each result-channel-bearing job so a caller blocked on <-resultCh is never stranded
+// (the original fetch_queue/attach-backlog wedge) — and (3) RETURNS the un-started
+// ordinary-message inbounds so shutdown() can recover them off-lock. Submit also takes
+// w.mu, so the set+drain is atomic with respect to enqueue: after this returns, the
+// queue is empty and no further job can be enqueued.
+//
+// Loss-freedom (W1 Watch-out #4): the drain MUST NOT mark any inbound update_id done,
+// consume any queue line, or advance any Telegram offset. It only replies errors to
+// ResultCh-bearing jobs and collects JobInbound for the caller's markPersistFailed
+// recovery (which holds the offset, never acks). JobConsume / JobRelease carry no
+// ResultCh and are dropped silently — they remain durable backlog / are release
+// signals. Events carry no persistence and are not collected. Never fake-ack.
+//
+// Idempotent: setting w.stopped when already set is a no-op, but the drain ALWAYS
+// runs — a job can slip into the queue between Stop()'s set and run()'s exit (or a
+// direct shutdown() call after Stop), and that job must still be drained.
+func (w *RouteWorker) drainOnShutdown() []*c3types.Inbound {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	if !w.stopped {
-		w.stopped = true
-	}
+	w.stopped = true
+	var dropped []*c3types.Inbound
 	for {
 		select {
 		case job := <-w.queue:
-			// Only ResultCh-bearing jobs (JobFetch / JobOutbound / JobRefreshText /
+			// ResultCh-bearing jobs (JobFetch / JobOutbound / JobRefreshText /
 			// JobBacklog / the three JobDrain* steps) get an errWorkerStopped reply so
 			// a blocked caller is never stranded. This is what lets the drain's
 			// Steps B/C block INDEFINITELY on their result channels (drain.go, B1):
-			// a stopped worker reliably answers instead of wedging the drain
-			// goroutine forever. JobInbound / JobConsume / JobRelease carry no
-			// ResultCh and have no case below — they drop silently (loss-free; see
-			// the doc comment above: they re-deliver via the Telegram offset or
-			// remain durable backlog). Never ack.
+			// a stopped worker reliably answers instead of wedging the drain goroutine
+			// forever. JobConsume / JobRelease carry no ResultCh and no case below —
+			// they drop silently (durable backlog / release signal). A JobInbound is
+			// COLLECTED (not dropped) so shutdown() recovers it — see that method.
 			switch job.Kind {
+			case JobInbound:
+				// An un-started inbound: recover ordinary messages via
+				// markPersistFailed (offset held, dedup forgotten, redelivery
+				// re-dispatches). Events are never persisted (no seam; offset already
+				// marked done in dispatchUpdate), so they need no recovery.
+				if job.Inbound != nil && !job.Inbound.IsEvent() {
+					dropped = append(dropped, job.Inbound)
+				}
 			case JobFetch:
 				if job.Fetch != nil && job.Fetch.ResultCh != nil {
 					select {
@@ -2563,7 +2606,7 @@ func (w *RouteWorker) shutdown() {
 				}
 			}
 		default:
-			return
+			return dropped
 		}
 	}
 }
