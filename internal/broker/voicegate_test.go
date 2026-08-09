@@ -355,7 +355,7 @@ func TestAttachmentFetchRefusal_ChannelWithoutProbe_NeverRefuses(t *testing.T) {
 	b := brokerWithChannel(t, mfWithTelegram(), &fakeChannel{})
 	defer b.Shutdown()
 
-	if got, _ := b.attachmentFetchRefusal("telegram", "F-BIG"); got != "" {
+	if got, _, _ := b.attachmentFetchRefusal("telegram", "F-BIG"); got != "" {
 		t.Fatalf("a channel that cannot be asked must not produce a refusal; got %q", got)
 	}
 }

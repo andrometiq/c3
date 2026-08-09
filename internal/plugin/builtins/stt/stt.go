@@ -92,19 +92,23 @@ const (
 )
 
 // sttTimeoutForSize scales the STT subprocess budget: base + sttPerMiBSeconds per
-// MiB of stated size, capped at sttMaxTimeoutSeconds (never below base). A 0/unknown
-// size yields the base, preserving the previous fixed behavior.
+// MiB of stated size, capped at sttMaxTimeoutSeconds. A 0/unknown size yields the
+// base. The cap is ABSOLUTE — even a configured base above it is clamped — because
+// the broker's outer ctx (worker.sttFlushTimeout / queue_dispatch.retranscribeTimeout
+// = 750s) must always sit ABOVE this value; a budget above the cap would let the
+// outer context SIGKILL the tree mid-provider, the exact failure this scaling exists
+// to prevent (Codex review 1, F7). A misconfigured base above the cap is warned at
+// Register.
 func sttTimeoutForSize(base int, sizeBytes int64) time.Duration {
 	secs := base
+	if secs <= 0 {
+		secs = defaultTimeoutSeconds
+	}
 	if sizeBytes > 0 {
 		secs += int(sizeBytes>>20) * sttPerMiBSeconds
 	}
-	limit := sttMaxTimeoutSeconds
-	if base > limit {
-		limit = base // never shrink a deliberately-large configured base
-	}
-	if secs > limit {
-		secs = limit
+	if secs > sttMaxTimeoutSeconds {
+		secs = sttMaxTimeoutSeconds
 	}
 	return time.Duration(secs) * time.Second
 }
@@ -183,6 +187,10 @@ func Register(host plugin.Host) error {
 	}
 	if cfg.Timeout <= 0 {
 		cfg.Timeout = defaultTimeoutSeconds
+	}
+	if cfg.Timeout > sttMaxTimeoutSeconds {
+		host.Logf("stt: configured timeout_seconds=%d exceeds the %ds cap — the broker's outer STT context sits just above the cap, so a larger budget would let it SIGKILL the tree mid-provider. Clamping to %ds per call.",
+			cfg.Timeout, sttMaxTimeoutSeconds, sttMaxTimeoutSeconds)
 	}
 	if cfg.AudioRetention == 0 {
 		cfg.AudioRetention = defaultAudioRetention

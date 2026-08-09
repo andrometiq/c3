@@ -287,6 +287,23 @@ def prune_inbox(keep_n):
     mappings.json:plugins.stt.audio_retention; default 500). A negative keep_n
     disables pruning (keep everything). Non-fatal — recovery never depends on this
     cache (download_attachment / retranscribe re-fetch from Telegram by file_id)."""
+    # F10b: sweep stale ".oga.part" temp files a SIGKILL'd atomic download left behind
+    # (the Go shim's SIGKILL bypasses download_file's own except-cleanup). Only remove
+    # ones old enough to be definitely dead — never an in-flight concurrent download.
+    # Runs regardless of keep_n (even "keep all" should not accumulate dead temps).
+    try:
+        now = time.time()
+        for f in os.listdir(INBOX_DIR):
+            if not f.endswith('.oga.part'):
+                continue
+            p = os.path.join(INBOX_DIR, f)
+            try:
+                if now - os.path.getmtime(p) > 600:  # 10 min ≫ any download timeout
+                    os.remove(p)
+            except OSError:
+                continue
+    except OSError:
+        pass
     if keep_n < 0:
         return
     try:
@@ -306,6 +323,30 @@ def prune_inbox(keep_n):
             os.remove(p)
         except OSError as e:
             logging.warning(f'prune_inbox: failed to remove {p}: {e}')
+
+
+def find_cached_audio(file_id):
+    """Return the path of an already-downloaded, COMPLETE '<millis>-<file_id>.oga'
+    in INBOX_DIR, or None. Exact match after the millis prefix (a file_id can itself
+    contain '-'), non-empty required. Lets retranscribe and a network-recovery retry
+    REUSE local audio instead of re-fetching — making the broker's cache-reuse notice
+    true and letting recovery work even while the network is still flaky (F11)."""
+    want = file_id + '.oga'
+    try:
+        entries = os.listdir(INBOX_DIR)
+    except OSError:
+        return None
+    for f in entries:
+        i = f.find('-')
+        if i <= 0 or not f[:i].isdigit() or f[i + 1:] != want:
+            continue
+        p = os.path.join(INBOX_DIR, f)
+        try:
+            if os.path.getsize(p) > 0:
+                return p
+        except OSError:
+            continue
+    return None
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -333,7 +374,17 @@ def main():
     audio_path = os.path.join(INBOX_DIR, f'{int(time.time()*1000)}-{file_id}.oga')
     logging.info(f'Processing voice msg_id={msg_id} file_id={file_id}')
     dl_start = time.time()
+    # Cache-first (F11): if this exact file_id is already on disk (retranscribe, or a
+    # network-recovery retry after the live attempt downloaded it), reuse it instead of
+    # re-fetching — so recovery works even while the network is still flaky, and the
+    # broker's "download_attachment/retranscribe reuse it instantly" notice is true.
+    cached = find_cached_audio(file_id)
+    if cached:
+        audio_path = cached
+        logging.info(f'Reusing cached audio {audio_path} (skipping download)')
     for attempt in range(1, 4):
+        if cached:
+            break  # already have the bytes — no fetch needed
         try:
             download_file(token, file_id, audio_path)
             fsize = os.path.getsize(audio_path)
@@ -371,14 +422,23 @@ def main():
         keys = load_env(ENV_FILE)
 
         # Budget the transcription against the broker's ACTUAL SIGKILL deadline
-        # (C3_STT_DEADLINE_SECONDS, size-scaled by the Go shim), not a hardcoded
-        # 270. Subtract the download already spent and a margin so subprocess.run
-        # returns before the Go SIGKILL fires (P1-3, 2026-08-08 cascade). Floored at
-        # 60s so a slow download doesn't leave an unusably tiny window. Falls back to
-        # 300 when the var is absent (an older shim).
+        # (C3_STT_DEADLINE_SECONDS, size-scaled by the Go shim), not a hardcoded 270.
+        # The subprocess budget MUST stay strictly below the Go SIGKILL: subtract the
+        # download already spent and a margin. Do NOT floor it back UP above the real
+        # remaining budget — that started a subprocess Go then killed mid-provider
+        # (P1-3 / Codex review 1, F7). If too little is left, fail gracefully now (empty
+        # stdout → [STT FAILED] → the broker notifies the human; a transient-network
+        # download that ate the budget is parked for retry on recovery, P0-2). Falls
+        # back to 300 when the var is absent (an older shim).
         dl_elapsed = time.time() - dl_start
         deadline = int(os.environ.get('C3_STT_DEADLINE_SECONDS', '300'))
-        stt_timeout = max(60, deadline - int(dl_elapsed) - 30)
+        MARGIN = 30
+        stt_timeout = deadline - int(dl_elapsed) - MARGIN
+        if stt_timeout < 30:
+            logging.error(f'Download took {dl_elapsed:.1f}s of a {deadline}s deadline; '
+                          f'only {stt_timeout + MARGIN}s of budget left — too little to '
+                          f'transcribe before the broker SIGKILL, failing gracefully')
+            sys.exit(1)
         logging.info(f'Download took {dl_elapsed:.1f}s; deadline={deadline}s; STT subprocess budget={stt_timeout}s')
 
         # Transcribe

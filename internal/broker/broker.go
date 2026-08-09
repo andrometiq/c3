@@ -135,6 +135,9 @@ type Broker struct {
 	// stt_retry.go.
 	sttRetryMu sync.Mutex
 	sttRetries []sttRetryEntry
+	// sttRetrySem bounds concurrent STT retries across all routes (P0-2); buffered to
+	// sttRetryConcurrency. Set in New.
+	sttRetrySem chan struct{}
 }
 
 const defaultWorkerIdle = 60 * time.Second
@@ -173,6 +176,10 @@ func New(mf *mappings.MappingsFile) *Broker {
 	}
 	b.Workers = NewWorkerPool(ctx, defaultWorkerIdle, b)
 	b.Plugins = newPluginHost(b)
+	// P0-2 network-recovery STT retries: bound concurrency + run a periodic,
+	// edge-independent sweeper (exits on ctx cancel from Shutdown).
+	b.sttRetrySem = make(chan struct{}, sttRetryConcurrency)
+	go b.sttRetrySweeper()
 	return b
 }
 

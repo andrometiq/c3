@@ -25,8 +25,10 @@ func TestSTTTimeoutForSize(t *testing.T) {
 			t.Errorf("%s: sttTimeoutForSize(%d, %d) = %v, want %v", tc.name, base, tc.size, got, tc.want)
 		}
 	}
-	// A deliberately-large configured base is never shrunk below itself.
-	if got := sttTimeoutForSize(sttMaxTimeoutSeconds+120, 0); got != time.Duration(sttMaxTimeoutSeconds+120)*time.Second {
-		t.Errorf("base above cap must be honored: got %v", got)
+	// A configured base above the cap is CLAMPED — the broker's outer STT context
+	// must always sit above the plugin budget, or it SIGKILLs the tree mid-provider
+	// (Codex review 1, F7).
+	if got := sttTimeoutForSize(sttMaxTimeoutSeconds+120, 0); got != sttMaxTimeoutSeconds*time.Second {
+		t.Errorf("base above cap must be clamped to the cap: got %v", got)
 	}
 }

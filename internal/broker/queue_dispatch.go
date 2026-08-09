@@ -191,11 +191,19 @@ func (b *Broker) handleRetranscribe(conn *ipc.Conn, stub *Stub, raw []byte) {
 	// whole chain and comes back as "STT provider still failing (no
 	// transcript)", which sends the agent hunting for a provider outage that
 	// isn't there: the server simply will not serve the file.
-	refusal, attSize := b.attachmentFetchRefusal(chanName, req.FileID)
-	if refusal != "" {
-		log.Printf("retranscribe chan=%s file_id=%s msg=%d ok=false: the bot server will not serve this file — %s", chanName, req.FileID, req.MessageID, refusal)
-		_ = conn.WriteJSON(ipc.RetranscribeResp{Op: ipc.OpRetranscribeResult, ID: req.ID, Err: "retranscribe: " + refusal})
-		return
+	// If the audio is already cached locally, skip the network preflight entirely: the
+	// handler is cache-first (F11), so retranscribe reuses the bytes with no
+	// re-download and works even during an outage. Otherwise probe the server (its
+	// refusal is authoritative, and its size scales the STT budget).
+	var attSize int64
+	if !b.voiceCachedLocally(chanName, req.FileID) {
+		refusal, sz, _ := b.attachmentFetchRefusal(chanName, req.FileID)
+		if refusal != "" {
+			log.Printf("retranscribe chan=%s file_id=%s msg=%d ok=false: the bot server will not serve this file — %s", chanName, req.FileID, req.MessageID, refusal)
+			_ = conn.WriteJSON(ipc.RetranscribeResp{Op: ipc.OpRetranscribeResult, ID: req.ID, Err: "retranscribe: " + refusal})
+			return
+		}
+		attSize = sz
 	}
 	// Bound the STT chain (network download + provider call) so a slow/hung
 	// provider cannot block this adapter's single-threaded IPC read loop forever.

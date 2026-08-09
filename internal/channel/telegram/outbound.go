@@ -528,17 +528,41 @@ func inboxCachedVoicePath(fileID string) string {
 	if err != nil {
 		return ""
 	}
-	suffix := "-" + fileID + ".oga"
+	// Exact match, NOT a suffix: the name is "<millis>-<file_id>.oga" and the millis
+	// prefix is digits only, so the FIRST '-' is the millis/file_id boundary and the
+	// rest must equal exactly "<file_id>.oga". A suffix check ("-<id>.oga") would let
+	// a different note whose own file_id ends in "-<id>" be served — wrong audio,
+	// since a file_id can itself contain '-' (base64url). (Codex review 1, F1.)
+	want := fileID + ".oga"
 	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), suffix) {
+		if e.IsDir() {
 			continue
 		}
-		p := filepath.Join(dir, e.Name())
+		name := e.Name()
+		dash := strings.IndexByte(name, '-')
+		if dash <= 0 || !isAllDigits(name[:dash]) || name[dash+1:] != want {
+			continue
+		}
+		p := filepath.Join(dir, name)
 		if fi, err := os.Stat(p); err == nil && !fi.IsDir() && fi.Size() > 0 {
 			return p
 		}
 	}
 	return ""
+}
+
+// isAllDigits reports whether s is non-empty and all ASCII digits (the inbox
+// filename's millis prefix). Keeps the cache match anchored to the real convention.
+func isAllDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // fileDownloadURL builds the /file/bot<token>/<path> download URL against the

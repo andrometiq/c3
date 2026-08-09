@@ -4,7 +4,6 @@ import (
 	"context"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/Andrometiq/c3/internal/c3types"
 	"github.com/Andrometiq/c3/internal/mappings"
@@ -21,6 +20,11 @@ func TestIsNetworkTransient(t *testing.T) {
 		"connection refused",
 		"connection reset by peer",
 		"no route to host",
+		"lookup api.telegram.org: Name or service not known",
+		"getaddrinfo: nodename nor servname provided, or not known",
+		"HTTP Error 503: Service Unavailable",
+		"HTTP Error 502: Bad Gateway",
+		"HTTP Error 504: Gateway Timeout",
 	}
 	for _, s := range transient {
 		if !isNetworkTransient(s) {
@@ -80,9 +84,10 @@ func TestOnChannelRecovered_DrainsOnlyThatChannel(t *testing.T) {
 	}
 }
 
-// P0-2 end-to-end: a retry that transcribes (network is back) delivers the result
-// as exactly one fresh durable line via the P0-1 late-delivery path.
-func TestHandleRetrySTT_SuccessDeliversLate(t *testing.T) {
+// P0-2 end-to-end: a retry that transcribes (network is back) runs STT in the pool
+// and hands delivery to the route worker, landing as exactly one fresh durable line
+// via the P0-1 late-delivery path.
+func TestRunSTTRetry_SuccessDeliversLate(t *testing.T) {
 	t.Setenv("C3_QUEUE_DIR", t.TempDir())
 	b := brokerWithChannel(t, mfWithTelegram(), &fakeChannel{})
 	defer b.Shutdown()
@@ -91,12 +96,12 @@ func TestHandleRetrySTT_SuccessDeliversLate(t *testing.T) {
 	})
 
 	tid := int64(914)
-	key := MakeRouteKey("telegram", -100, &tid)
 	qrk := queue.RouteKey{Channel: "telegram", ChatID: -100, TopicID: &tid}
-	w := newRouteWorker(context.Background(), key, time.Hour, b)
-	defer w.Stop()
+	route := MakeRouteKey("telegram", -100, &tid)
 
-	w.handleRetrySTT(context.Background(), &RetrySTTJob{MessageID: 777, FileID: "vf"})
+	// runSTTRetry runs STT in the pool, then submits the delivery to the route worker
+	// and waits for it — so once it returns the line is durably queued.
+	b.runSTTRetry(sttRetryEntry{route: route, messageID: 777, fileID: "vf"})
 
 	lines, err := b.Queue.PeekTracked(qrk, -1)
 	if err != nil {

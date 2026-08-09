@@ -41,6 +41,26 @@ func TestInboxCachedVoicePath(t *testing.T) {
 	if got := inboxCachedVoicePath("XID"); got != "" {
 		t.Fatalf("non-.oga suffix matched: %q", got)
 	}
+
+	// F1: a DIFFERENT note whose file_id ends in the requested id must NOT match —
+	// exact match after the millis, not a "-<id>.oga" suffix (file_id can contain '-').
+	if err := os.WriteFile(filepath.Join(inbox, "222-XYZ-abc.oga"), []byte("otheraudio"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := inboxCachedVoicePath("abc"); got != "" {
+		t.Fatalf("suffix collision served a different note's audio: %q", got)
+	}
+	// But the full file_id "XYZ-abc" still matches its own file.
+	if got := inboxCachedVoicePath("XYZ-abc"); got != filepath.Join(inbox, "222-XYZ-abc.oga") {
+		t.Fatalf("full file_id with '-' should match its own file, got %q", got)
+	}
+	// A non-millis (non-digit) prefix must NOT match the convention.
+	if err := os.WriteFile(filepath.Join(inbox, "notmillis-def.oga"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := inboxCachedVoicePath("def"); got != "" {
+		t.Fatalf("non-millis-prefixed file matched: %q", got)
+	}
 }
 
 // P1-4: a cache hit is served WITHOUT any getFile/network call — the exact
