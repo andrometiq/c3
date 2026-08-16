@@ -69,6 +69,8 @@ From there:
 - **Quote-replying** — long-press a CLI message, hit Reply, type. The CLI sees the inbound with `reply_to_message_id`, `reply_to_user`, and `reply_to_text` so it knows which prior message you're answering.
 - **Multi-message bursts** — multiple **text** messages in quick succession are collapsed by the debounce window (default 1500ms). Saves your CLI from getting confused by interleaved partial thoughts. Photo/file **albums** are not assembled as a unit in v1 — album siblings arrive as separate inbounds merged only by the debounce window; reliable album handling is a known gap (see [`ROADMAP.md`](../ROADMAP.md)).
 
+A live merged burst still wakes the CLI once, but now carries each source message's id, sender, text, forward provenance, and attachment pairing so captions and standalone text remain distinguishable. The durable queue is unchanged: `fetch_queue` returns those messages as the original discrete rows rather than the live presentation merge.
+
 ## Durable inbound queue & backlog
 
 While the durable queue is healthy, once C3 has *received* a Telegram message it is written to disk before anything else consumes it, and it stays there until a session takes it — even if no CLI is attached, or the broker was down when it later caught up. If the queue cannot start, C3 continues in the loud degraded mode described below instead of pretending this promise still holds.

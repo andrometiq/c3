@@ -68,6 +68,82 @@ func TestAttachmentCompact(t *testing.T) {
 	if got != "attachment=document file_id=DOC9" {
 		t.Errorf("AttachmentCompact = %q, want %q", got, "attachment=document file_id=DOC9")
 	}
+	got = AttachmentCompact(Attachment{Kind: "photo", FileID: "P1", SourceMessageID: 88})
+	if got != "attachment=photo file_id=P1 message_id=88" {
+		t.Errorf("AttachmentCompact with source = %q", got)
+	}
+}
+
+func TestRenderQueuedInbound_MergedPreservesSourcesAndPairing(t *testing.T) {
+	forwarded := &ForwardOrigin{Kind: "user", Name: "Forwarded Alice"}
+	in := &Inbound{
+		MessageID: 13,
+		Sender:    Sender{Username: "bob"},
+		Text:      "caption\nfollowup",
+		Merged: []MergedSource{
+			{MessageID: 11, Sender: Sender{Username: "alice"}, Text: "caption", ForwardOrigin: forwarded},
+			{MessageID: 12, Sender: Sender{Username: "bob"}},
+			{MessageID: 13, Sender: Sender{Username: "bob"}, Text: "followup"},
+		},
+		Attachments: []Attachment{
+			{Kind: "photo", FileID: "P11", SourceMessageID: 11},
+			{Kind: "document", FileID: "D12", SourceMessageID: 12},
+		},
+	}
+
+	want := "[msg 11 @alice fwd Forwarded Alice] caption\n" +
+		"[msg 13] followup\n" +
+		"from=@bob message_id=13 attachment=photo file_id=P11 message_id=11 " +
+		"attachment=document file_id=D12 message_id=12 merged=3"
+	if got := RenderQueuedInbound(in); got != want {
+		t.Fatalf("merged render:\n got: %q\nwant: %q", got, want)
+	}
+}
+
+func TestRenderQueuedInbound_DiscreteForwardProvenanceOnlyAddition(t *testing.T) {
+	in := &Inbound{
+		MessageID:     21,
+		Sender:        Sender{Username: "alice"},
+		Text:          "hello",
+		ForwardOrigin: &ForwardOrigin{Kind: "channel", Name: "News Desk"},
+	}
+	want := "hello\nfrom=@alice message_id=21 fwd:News Desk"
+	if got := RenderQueuedInbound(in); got != want {
+		t.Fatalf("discrete forwarded render = %q, want %q", got, want)
+	}
+}
+
+func TestRenderQueuedInbound_FormerlyMergedRowsStayDiscrete(t *testing.T) {
+	rows := []Inbound{
+		{MessageID: 31, Sender: Sender{Username: "alice"}, Text: "first", MediaGroupID: "album"},
+		{MessageID: 32, Sender: Sender{Username: "alice"}, Text: "second", ForwardOrigin: &ForwardOrigin{Kind: "user", Name: "Carol"}},
+	}
+	want := []string{
+		"first\nfrom=@alice message_id=31",
+		"second\nfrom=@alice message_id=32 fwd:Carol",
+	}
+	for i := range rows {
+		got := RenderQueuedInbound(&rows[i])
+		if got != want[i] {
+			t.Errorf("row %d render = %q, want %q", i, got, want[i])
+		}
+		if strings.Contains(got, "merged=") || strings.Contains(got, "[msg ") {
+			t.Errorf("row %d leaked merged presentation: %q", i, got)
+		}
+	}
+}
+
+func TestRenderInboundBody_MixedSenderPrefix(t *testing.T) {
+	in := &Inbound{
+		Sender: Sender{Username: "latest"},
+		Merged: []MergedSource{
+			{MessageID: 41, Sender: Sender{Username: "earlier"}, Text: "first"},
+			{MessageID: 42, Sender: Sender{Username: "latest"}, Text: "second"},
+		},
+	}
+	if got, want := RenderInboundBody(in), "[msg 41 @earlier] first\n[msg 42] second"; got != want {
+		t.Fatalf("mixed sender body = %q, want %q", got, want)
+	}
 }
 
 func TestInboundsHaveAttachment(t *testing.T) {

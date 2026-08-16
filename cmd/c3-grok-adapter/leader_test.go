@@ -215,6 +215,22 @@ func TestFormatInboundTurnText(t *testing.T) {
 	}
 }
 
+func TestFormatInboundTurnText_DelegatesMergedRender(t *testing.T) {
+	in := c3types.Inbound{
+		ChatID: -100, MessageID: 52, Sender: c3types.Sender{Username: "bob"},
+		Merged: []c3types.MergedSource{
+			{MessageID: 51, Sender: c3types.Sender{Username: "alice"}, Text: "first"},
+			{MessageID: 52, Sender: c3types.Sender{Username: "bob"}, Text: "second"},
+		},
+		Attachments: []c3types.Attachment{{Kind: "photo", FileID: "P51", SourceMessageID: 51}},
+	}
+	wantShared := c3types.RenderQueuedInbound(&in)
+	got := formatInboundTurnText(&in)
+	if !strings.HasPrefix(got, wantShared+"\n\n"+c3TrailerSentinel) {
+		t.Fatalf("Grok live render did not delegate to shared renderer:\n got: %q\nwant prefix: %q", got, wantShared)
+	}
+}
+
 func TestAncestorPIDs_IncludesSelf(t *testing.T) {
 	self := os.Getpid()
 	m := ancestorPIDs(self)

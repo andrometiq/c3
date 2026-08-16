@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -542,5 +543,122 @@ func TestChannelFrame_MultipleAttachmentsEmptyTextLabel(t *testing.T) {
 	}
 	if meta["attachment_file_id_3"] != "c" {
 		t.Errorf("attachment_file_id_3: want c, got %v", meta["attachment_file_id_3"])
+	}
+}
+
+func TestChannelFrame_MergedBurstGolden(t *testing.T) {
+	topicID := int64(914)
+	in := &c3types.Inbound{
+		Channel:   "telegram",
+		ChatID:    -100,
+		TopicID:   &topicID,
+		MessageID: 103,
+		Sender:    c3types.Sender{UserID: 2, Username: "bob"},
+		Text:      "caption\nfollowup",
+		Timestamp: time.Date(2026, 8, 16, 10, 11, 12, 0, time.UTC),
+		Merged: []c3types.MergedSource{
+			{MessageID: 101, Sender: c3types.Sender{UserID: 1, Username: "alice"}, Text: "caption"},
+			{MessageID: 102, Sender: c3types.Sender{UserID: 2, Username: "bob"}},
+			{MessageID: 103, Sender: c3types.Sender{UserID: 2, Username: "bob"}, Text: "followup", ForwardOrigin: &c3types.ForwardOrigin{Kind: "user", Name: "Carol"}},
+		},
+		Attachments: []c3types.Attachment{
+			{Kind: "photo", FileID: "photo-101", SourceMessageID: 101},
+			{Kind: "document", FileID: "document-102", SourceMessageID: 102},
+		},
+	}
+	want := map[string]any{
+		"content": "[msg 101 @alice] caption\n[msg 103 fwd Carol] followup",
+		"meta": map[string]any{
+			"chat_id":                 "-100",
+			"ts":                      "2026-08-16T10:11:12.000Z",
+			"message_id":              "103",
+			"merged_count":            "3",
+			"merged_message_ids":      "101,102,103",
+			"user":                    "bob",
+			"user_id":                 "2",
+			"message_thread_id":       "914",
+			"attachment_kind":         "photo",
+			"attachment_file_id":      "photo-101",
+			"attachment_message_id":   "101",
+			"attachment_count":        "2",
+			"attachment_kind_2":       "document",
+			"attachment_file_id_2":    "document-102",
+			"attachment_message_id_2": "102",
+		},
+	}
+	if got := buildClaudeChannelFrame(in); !reflect.DeepEqual(got, want) {
+		t.Fatalf("merged frame:\n got: %#v\nwant: %#v", got, want)
+	}
+}
+
+func TestChannelFrame_SingleMessageGoldenUnchanged(t *testing.T) {
+	topicID := int64(914)
+	in := &c3types.Inbound{
+		Channel:   "telegram",
+		ChatID:    -100,
+		TopicID:   &topicID,
+		MessageID: 201,
+		Sender:    c3types.Sender{UserID: 7, Username: "alice"},
+		Text:      "single",
+		Timestamp: time.Date(2026, 8, 16, 10, 11, 12, 0, time.UTC),
+		ReplyTo:   &c3types.ReplyContext{MessageID: 99, User: c3types.Sender{Username: "bob"}, Text: "prior"},
+		Attachments: []c3types.Attachment{
+			{Kind: "document", FileID: "document-201", Size: 42, MIME: "text/plain", Name: "note.txt"},
+		},
+	}
+	want := map[string]any{
+		"content": "single",
+		"meta": map[string]any{
+			"chat_id":             "-100",
+			"ts":                  "2026-08-16T10:11:12.000Z",
+			"message_id":          "201",
+			"user":                "alice",
+			"user_id":             "7",
+			"message_thread_id":   "914",
+			"reply_to_message_id": "99",
+			"reply_to_user":       "bob",
+			"reply_to_text":       "prior",
+			"attachment_kind":     "document",
+			"attachment_file_id":  "document-201",
+			"attachment_size":     "42",
+			"attachment_mime":     "text/plain",
+			"attachment_name":     "note.txt",
+		},
+	}
+	if got := buildClaudeChannelFrame(in); !reflect.DeepEqual(got, want) {
+		t.Fatalf("single frame changed:\n got: %#v\nwant: %#v", got, want)
+	}
+}
+
+func TestChannelFrame_DiscreteForwardedGolden(t *testing.T) {
+	in := &c3types.Inbound{
+		ChatID:        -100,
+		MessageID:     301,
+		Sender:        c3types.Sender{Username: "alice"},
+		Text:          "forwarded",
+		Timestamp:     time.Date(2026, 8, 16, 10, 11, 12, 0, time.UTC),
+		ForwardOrigin: &c3types.ForwardOrigin{Kind: "channel", Name: "News Desk"},
+	}
+	want := map[string]any{
+		"content": "forwarded",
+		"meta": map[string]any{
+			"chat_id":        "-100",
+			"ts":             "2026-08-16T10:11:12.000Z",
+			"message_id":     "301",
+			"user":           "alice",
+			"forwarded_from": "News Desk",
+		},
+	}
+	if got := buildClaudeChannelFrame(in); !reflect.DeepEqual(got, want) {
+		t.Fatalf("forwarded frame:\n got: %#v\nwant: %#v", got, want)
+	}
+
+	plain := *in
+	plain.ForwardOrigin = nil
+	plainFrame := buildClaudeChannelFrame(&plain)
+	forwardedFrame := buildClaudeChannelFrame(in)
+	delete(forwardedFrame["meta"].(map[string]any), "forwarded_from")
+	if !reflect.DeepEqual(forwardedFrame, plainFrame) {
+		t.Fatalf("forward provenance changed fields beyond forwarded_from:\n forwarded: %#v\nplain: %#v", forwardedFrame, plainFrame)
 	}
 }

@@ -262,16 +262,27 @@ func TestVoiceWorkerMixedBatchExcludesPendingVoiceFromPushAndAck(t *testing.T) {
 		<-releaseSTT
 		return "voice-final", nil
 	})
-	plain := c3types.Inbound{Channel: "telegram", ChatID: -100, MessageID: 8101, Text: "plain-now"}
+	plainFirst := c3types.Inbound{Channel: "telegram", ChatID: -100, MessageID: 8101, Text: "plain-one"}
 	_, voice, _ := schedulerVoice(8102, "voice-mixed")
-	if !b.Workers.Submit(route, Job{Kind: JobInbound, Inbound: &plain}) ||
-		!b.Workers.Submit(route, Job{Kind: JobInbound, Inbound: &voice}) {
+	plainSecond := c3types.Inbound{Channel: "telegram", ChatID: -100, MessageID: 8103, Text: "plain-two"}
+	if !b.Workers.Submit(route, Job{Kind: JobInbound, Inbound: &plainFirst}) ||
+		!b.Workers.Submit(route, Job{Kind: JobInbound, Inbound: &voice}) ||
+		!b.Workers.Submit(route, Job{Kind: JobInbound, Inbound: &plainSecond}) {
 		t.Fatal("mixed inbound submit rejected")
 	}
 
 	first := waitInboundPush(t, pushes)
-	if first.Inbound.Text != "plain-now" || first.Covered != 1 || first.Pending != 1 {
-		t.Fatalf("mixed immediate push=%+v; want only the non-voice row with covered=1 pending=1", first)
+	if first.Inbound.Text != "plain-one\nplain-two" || first.Covered != 2 || first.Pending != 1 {
+		t.Fatalf("mixed immediate push=%+v; want two non-voice rows with covered=2 pending=1", first)
+	}
+	if len(first.Inbound.Merged) != 2 || first.Inbound.Merged[0].MessageID != plainFirst.MessageID ||
+		first.Inbound.Merged[1].MessageID != plainSecond.MessageID {
+		t.Fatalf("pending voice must be excluded from Merged: %+v", first.Inbound.Merged)
+	}
+	for _, source := range first.Inbound.Merged {
+		if source.MessageID == voice.MessageID {
+			t.Fatalf("pending voice %d leaked into Merged: %+v", voice.MessageID, first.Inbound.Merged)
+		}
 	}
 	if strings.Contains(first.Inbound.Text, "transcription") || strings.Contains(first.Inbound.Text, "voice-final") {
 		t.Fatalf("pending voice leaked into mixed immediate push: %+v", first)

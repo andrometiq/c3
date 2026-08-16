@@ -285,6 +285,12 @@ The `inbound` object's fields (PascalCase, exactly as written):
 - `V`? — record-format version. **Absent or 0 means version 1.** Direct marshaling and legacy queue rewrites preserve an absent key; a **new** durable queue append stamps `V:1` on a copy of the record. That stamp is additive and old-reader-compatible, but it means a newly appended record is not promised to remain byte-identical to its unstamped input. **Readers MUST NOT reject a higher value** — a newer writer sharing a socket or queue directory with an older reader is a normal partially-updated install, and hard-failing turns cosmetic skew into lost messages. Best-effort decode.
 - `ConvKind`? — `"dm"` or `"group"` as stated by the channel. Empty means the channel didn't say.
 - `Edited`? — set **only by the channel** when this is a new version of an already-delivered message. An edit reuses `MessageID`, has `Edited: true`, and carries new `Text`; it is not a duplicate. Never deduplicate inbound records on `MessageID`: the broker preserves occurrences for one id in FIFO order so the original and its correction can both be delivered.
+- `media_group_id`? — the channel's album/media-group id. It is captured and persisted for future album-aware consumers but is not rendered today.
+- `forward_origin`? — flattened forward provenance as `{kind,name?}`. `kind` is `user`, `hidden_user`, `chat`, or `channel`; `name` is the best available display name.
+- `merged`? — ordered delivery structure for a debounced push, as `[{message_id,sender,text?,forward_origin?},…]`. It is presentation-only and is **never persisted**; durable `fetch_queue` rows remain discrete messages.
+- `source_message_id`? — appears inside an `Attachments` entry only on a merged delivery and pairs that attachment with its source entry in `merged`. It is presentation-only and is **never persisted**.
+
+These four provenance keys deliberately use the lower-case JSON spellings shown above, unlike the older PascalCase fields. They are additive: readers must ignore unknown fields, and an older adapter may render less structure but must not reject or lose the inbound. `merged` and `source_message_id` exist only on a multi-message live delivery; a single-message push retains its prior wire shape.
 
 `ChatID` sign convention follows Telegram's: positive = user/DM, negative = group, `-100…` = supergroup.
 
@@ -562,7 +568,7 @@ Tool names are **unprefixed** across all adapters: the MCP server name provides 
 
 The broker emits a normalised message; converting it to what the host can ingest is **real work, not a pass-through**. The reference Claude Code implementation is roughly 200 lines: it string-coerces the metadata map, branches to a separate event-frame builder for poll/reaction/callback kinds, formats timestamps, and decorates the content with the pending-backlog nudge. Budget accordingly.
 
-**Claude Code** uses `notifications/claude/channel` with `meta` attributes that render as `<channel source="…" chat_id="…" message_id="…" user="…" reply_to_message_id="…" reply_to_text="…">`.
+**Claude Code** uses `notifications/claude/channel` with string-valued `meta` attributes that render as `<channel source="…" chat_id="…" message_id="…" user="…" reply_to_message_id="…" reply_to_text="…">`. Attachments use the unsuffixed `attachment_kind`, `attachment_file_id`, `attachment_size`, `attachment_mime`, and `attachment_name` keys for the first item; multiple attachments add `attachment_count` and repeat those keys with `_2`, `_3`, and so on. A merged delivery additionally carries `merged_count`, comma-joined `merged_message_ids`, and `attachment_message_id` / `attachment_message_id_N` pairing keys. A discrete forwarded message carries `forwarded_from`.
 
 **Codex** doesn't render unsolicited MCP notifications in the TUI today (upstream issues #18056, #17543, #15299). The Codex adapter therefore does two things in parallel:
 

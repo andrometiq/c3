@@ -548,6 +548,10 @@ var sttFlushTimeout = 750 * time.Second
 //   - ReplyTo: from the FIRST message that has one (only one quote-reply
 //     attribution per merged block — agent sees the original anchor).
 //   - Attachments: concatenated in order — agent sees all media.
+//   - Merged: one delivery-only source descriptor per non-voice inbound;
+//     attachments carry their source message id on the delivery copy only.
+//   - ForwardOrigin: retained at top level only when every source shares it;
+//     per-source origins remain available in Merged either way.
 //   - OnInbound chain runs ONCE on the merged Inbound, not per-message.
 func (w *RouteWorker) flushInbounds(ctx context.Context, batch []*c3types.Inbound) {
 	defer recoverGoroutine(fmt.Sprintf("worker.flushInbounds chan=%s chat=%d", w.key.Channel, w.key.ChatID))
@@ -999,14 +1003,31 @@ func mergeBatch(batch []*c3types.Inbound) *c3types.Inbound {
 		Kind:  last.Kind,
 		Event: last.Event,
 	}
+	if batch[0].ForwardOrigin != nil {
+		origin := *batch[0].ForwardOrigin
+		out.ForwardOrigin = &origin
+	}
 	var texts []string
 	for _, in := range batch {
+		out.Merged = append(out.Merged, c3types.MergedSource{
+			MessageID:     in.MessageID,
+			Sender:        in.Sender,
+			Text:          in.Text,
+			ForwardOrigin: in.ForwardOrigin,
+		})
 		if in.Text != "" {
 			texts = append(texts, in.Text)
 		}
-		out.Attachments = append(out.Attachments, in.Attachments...)
+		for _, attachment := range in.Attachments {
+			attachment.SourceMessageID = in.MessageID
+			out.Attachments = append(out.Attachments, attachment)
+		}
 		if out.ReplyTo == nil && in.ReplyTo != nil {
 			out.ReplyTo = in.ReplyTo
+		}
+		if out.ForwardOrigin != nil && (in.ForwardOrigin == nil ||
+			*out.ForwardOrigin != *in.ForwardOrigin) {
+			out.ForwardOrigin = nil
 		}
 	}
 	out.Text = strings.Join(texts, "\n")

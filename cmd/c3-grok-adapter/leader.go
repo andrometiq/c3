@@ -936,14 +936,11 @@ func sanitizeInjectBody(body string) string {
 	return strings.Join(lines, "\n")
 }
 
-// formatInboundTurnText renders one inbound as a Grok user turn.
-// Body first so the TUI sticky/preview shows real text (not "message...").
-// Meta last — short, for routing/download only — and STRUCTURALLY owned by
-// the host: every meta line starts with c3TrailerSentinel and is derived only
-// from broker-supplied fields, while the untrusted body is sanitized so it
-// cannot fabricate such a line (see sanitizeInjectBody). Without that split,
-// any allowlisted-group member could forge an attribution trailer inside
-// their message body and speak to the agent with the operator's voice.
+// formatInboundTurnText renders one inbound as a Grok user turn. The shared
+// renderer owns message, sender, attachment, and merge structure so live Grok
+// injection cannot drift from fetch_queue or the other plain-text adapters.
+// The Grok-only trailer adds route context; sanitizeInjectBody prevents
+// untrusted content from fabricating that host-owned line.
 func formatInboundTurnText(in *c3types.Inbound) string {
 	user := strconv.FormatInt(in.Sender.UserID, 10)
 	if in.Sender.Username != "" {
@@ -954,23 +951,8 @@ func formatInboundTurnText(in *c3types.Inbound) string {
 		channel = fmt.Sprintf("%d/%d", in.ChatID, *in.TopicID)
 	}
 
-	body := strings.TrimSpace(in.Text)
-	// Prefer the human text as the first line so scrollback previews show it.
-	if body == "" && len(in.Attachments) > 0 {
-		body = "(" + string(in.Attachments[0].Kind) + " attachment)"
-	}
-	if body == "" {
-		body = "(empty Telegram message)"
-	}
-
 	var b strings.Builder
-	b.WriteString(sanitizeInjectBody(body))
+	b.WriteString(sanitizeInjectBody(c3types.RenderQueuedInbound(in)))
 	fmt.Fprintf(&b, "\n\n%s — %s · %s", c3TrailerSentinel, user, channel)
-	for _, att := range in.Attachments {
-		fmt.Fprintf(&b, "\n%s file: kind=%s file_id=%s", c3TrailerSentinel, att.Kind, att.FileID)
-		if att.Name != "" {
-			fmt.Fprintf(&b, " name=%q", att.Name)
-		}
-	}
 	return b.String()
 }

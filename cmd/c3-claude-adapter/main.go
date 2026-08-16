@@ -1219,6 +1219,16 @@ func buildClaudeChannelFrame(in *c3types.Inbound) map[string]any {
 	if in.MessageID != 0 {
 		meta["message_id"] = strconv.FormatInt(in.MessageID, 10)
 	}
+	if len(in.Merged) > 0 {
+		messageIDs := make([]string, 0, len(in.Merged))
+		for _, source := range in.Merged {
+			messageIDs = append(messageIDs, strconv.FormatInt(source.MessageID, 10))
+		}
+		meta["merged_count"] = strconv.Itoa(len(in.Merged))
+		meta["merged_message_ids"] = strings.Join(messageIDs, ",")
+	} else if in.ForwardOrigin != nil {
+		meta["forwarded_from"] = in.ForwardOrigin.Name
+	}
 	if in.Sender.Username != "" {
 		meta["user"] = in.Sender.Username
 	} else if in.Sender.UserID != 0 {
@@ -1260,6 +1270,9 @@ func buildClaudeChannelFrame(in *c3types.Inbound) map[string]any {
 		if att.Name != "" {
 			meta["attachment_name"] = att.Name
 		}
+		if att.SourceMessageID != 0 {
+			meta["attachment_message_id"] = strconv.FormatInt(att.SourceMessageID, 10)
+		}
 		// Multiple attachments (album / media-group, or a rich message with
 		// several media blocks): surface EVERY attachment so the agent can
 		// download each one. The first stays on the unsuffixed keys above;
@@ -1286,12 +1299,15 @@ func buildClaudeChannelFrame(in *c3types.Inbound) map[string]any {
 				if a.Name != "" {
 					meta["attachment_name_"+n] = a.Name
 				}
+				if a.SourceMessageID != 0 {
+					meta["attachment_message_id_"+n] = strconv.FormatInt(a.SourceMessageID, 10)
+				}
 			}
 		}
 	}
 
-	text := in.Text
-	if text == "" && len(in.Attachments) > 0 {
+	text := c3types.RenderInboundBody(in)
+	if text == "" && len(in.Merged) == 0 && len(in.Attachments) > 0 {
 		// Channel may have left text empty for voice (STT plugin not yet
 		// substituting). Fall back to a label so the agent at least sees
 		// something. With several attachments (album/media-group), report the

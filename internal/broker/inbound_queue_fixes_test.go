@@ -352,6 +352,69 @@ func TestFlushInbounds_MixedBatchCoveredCountsActualAppends(t *testing.T) {
 	}
 }
 
+func TestFlushInbounds_MergedPresentationNeverPersists(t *testing.T) {
+	t.Setenv("C3_QUEUE_DIR", t.TempDir())
+	b := brokerWithChannel(t, mfWithTelegram(), &fakeChannel{})
+	defer b.Shutdown()
+
+	topicID := int64(914)
+	key := MakeRouteKey("telegram", -100, &topicID)
+	_, pushes := liveHolderFrames(t, b, key)
+	w := newRouteWorker(context.Background(), key, time.Hour, b)
+	defer w.Stop()
+
+	firstOrigin := &c3types.ForwardOrigin{Kind: "user", Name: "Forwarded Alice"}
+	secondOrigin := &c3types.ForwardOrigin{Kind: "channel", Name: "News Desk"}
+	batch := []*c3types.Inbound{
+		{
+			Channel: "telegram", ChatID: -100, TopicID: &topicID, MessageID: 901, Text: "first", Timestamp: time.Now(),
+			MediaGroupID: "album-7", ForwardOrigin: firstOrigin,
+			Attachments: []c3types.Attachment{{Kind: "photo", FileID: "photo-901"}},
+		},
+		{
+			Channel: "telegram", ChatID: -100, TopicID: &topicID, MessageID: 902, Text: "second", Timestamp: time.Now(),
+			ForwardOrigin: secondOrigin,
+			Attachments:   []c3types.Attachment{{Kind: "document", FileID: "document-902"}},
+		},
+	}
+
+	w.flushInbounds(context.Background(), batch)
+	push := waitInboundPush(t, pushes)
+	if push.Inbound.Text != "first\nsecond" {
+		t.Fatalf("merged wire Text = %q, want byte-identical newline join", push.Inbound.Text)
+	}
+	if len(push.Inbound.Merged) != 2 {
+		t.Fatalf("live push Merged count = %d, want 2", len(push.Inbound.Merged))
+	}
+	if got := []int64{push.Inbound.Attachments[0].SourceMessageID, push.Inbound.Attachments[1].SourceMessageID}; got[0] != 901 || got[1] != 902 {
+		t.Fatalf("live attachment source ids = %v, want [901 902]", got)
+	}
+
+	rows, err := b.Queue.Peek(queueRouteKey(key), -1)
+	if err != nil {
+		t.Fatalf("peek stored rows: %v", err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("stored row count = %d, want 2", len(rows))
+	}
+	if rows[0].MediaGroupID != "album-7" || rows[0].ForwardOrigin == nil || *rows[0].ForwardOrigin != *firstOrigin {
+		t.Fatalf("first stored row lost ingest provenance: %+v", rows[0])
+	}
+	if rows[1].ForwardOrigin == nil || *rows[1].ForwardOrigin != *secondOrigin {
+		t.Fatalf("second stored row lost forward provenance: %+v", rows[1])
+	}
+	for i, row := range rows {
+		if len(row.Merged) != 0 {
+			t.Errorf("stored row %d leaked Merged: %+v", i, row.Merged)
+		}
+		for _, attachment := range row.Attachments {
+			if attachment.SourceMessageID != 0 {
+				t.Errorf("stored row %d attachment leaked SourceMessageID: %+v", i, attachment)
+			}
+		}
+	}
+}
+
 // I7: per-topic /status reads the in-memory index (StatusFor), not the queue
 // files. Appending bumps the index; statusForTopic reflects it without any
 // off-goroutine file read.
