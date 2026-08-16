@@ -78,12 +78,12 @@ func TestRenderQueuedInbound_MergedPreservesSourcesAndPairing(t *testing.T) {
 	forwarded := &ForwardOrigin{Kind: "user", Name: "Forwarded Alice"}
 	in := &Inbound{
 		MessageID: 13,
-		Sender:    Sender{Username: "bob"},
+		Sender:    Sender{UserID: 2, Username: "bob"},
 		Text:      "caption\nfollowup",
 		Merged: []MergedSource{
-			{MessageID: 11, Sender: Sender{Username: "alice"}, Text: "caption", ForwardOrigin: forwarded},
-			{MessageID: 12, Sender: Sender{Username: "bob"}},
-			{MessageID: 13, Sender: Sender{Username: "bob"}, Text: "followup"},
+			{MessageID: 11, Sender: Sender{UserID: 1, Username: "alice"}, Text: "caption", ForwardOrigin: forwarded},
+			{MessageID: 12, Sender: Sender{UserID: 2, Username: "bob"}},
+			{MessageID: 13, Sender: Sender{UserID: 2, Username: "bob"}, Text: "followup"},
 		},
 		Attachments: []Attachment{
 			{Kind: "photo", FileID: "P11", SourceMessageID: 11},
@@ -97,6 +97,37 @@ func TestRenderQueuedInbound_MergedPreservesSourcesAndPairing(t *testing.T) {
 		"attachment=document file_id=D12 message_id=12 merged=3"
 	if got := RenderQueuedInbound(in); got != want {
 		t.Fatalf("merged render:\n got: %q\nwant: %q", got, want)
+	}
+}
+
+func TestRenderQueuedInbound_MergedCaptionlessAlbumLabel(t *testing.T) {
+	in := &Inbound{
+		MessageID: 110,
+		Sender:    Sender{UserID: 7},
+		Merged:    make([]MergedSource, 10),
+		Attachments: []Attachment{
+			{Kind: "photo", FileID: "P101", SourceMessageID: 101},
+			{Kind: "photo", FileID: "P102", SourceMessageID: 102},
+			{Kind: "photo", FileID: "P103", SourceMessageID: 103},
+			{Kind: "photo", FileID: "P104", SourceMessageID: 104},
+			{Kind: "photo", FileID: "P105", SourceMessageID: 105},
+			{Kind: "photo", FileID: "P106", SourceMessageID: 106},
+			{Kind: "photo", FileID: "P107", SourceMessageID: 107},
+			{Kind: "photo", FileID: "P108", SourceMessageID: 108},
+			{Kind: "photo", FileID: "P109", SourceMessageID: 109},
+			{Kind: "photo", FileID: "P110", SourceMessageID: 110},
+		},
+	}
+	for i := range in.Merged {
+		in.Merged[i] = MergedSource{MessageID: int64(101 + i), Sender: Sender{UserID: 7}}
+	}
+
+	got := RenderQueuedInbound(in)
+	if !strings.HasPrefix(got, "(10 attachments)\n") {
+		t.Fatalf("captionless merged album has no human body label: %q", got)
+	}
+	if !strings.Contains(got, "attachment=photo file_id=P101 message_id=101") || !strings.HasSuffix(got, "merged=10") {
+		t.Fatalf("captionless merged album lost pairing metadata: %q", got)
 	}
 }
 
@@ -135,14 +166,28 @@ func TestRenderQueuedInbound_FormerlyMergedRowsStayDiscrete(t *testing.T) {
 
 func TestRenderInboundBody_MixedSenderPrefix(t *testing.T) {
 	in := &Inbound{
-		Sender: Sender{Username: "latest"},
+		Sender: Sender{UserID: 2, Username: "latest"},
 		Merged: []MergedSource{
-			{MessageID: 41, Sender: Sender{Username: "earlier"}, Text: "first"},
-			{MessageID: 42, Sender: Sender{Username: "latest"}, Text: "second"},
+			{MessageID: 41, Sender: Sender{UserID: 1, Username: "earlier"}, Text: "first"},
+			{MessageID: 42, Sender: Sender{UserID: 2, Username: "latest"}, Text: "second"},
 		},
 	}
 	if got, want := RenderInboundBody(in), "[msg 41 @earlier] first\n[msg 42] second"; got != want {
 		t.Fatalf("mixed sender body = %q, want %q", got, want)
+	}
+}
+
+func TestRenderInboundBody_HandlelessMixedSenderUsesUserID(t *testing.T) {
+	in := &Inbound{
+		Sender: Sender{UserID: 22},
+		Merged: []MergedSource{
+			{MessageID: 51, Sender: Sender{UserID: 11}, Text: "first"},
+			{MessageID: 52, Sender: Sender{UserID: 22}, Text: "second"},
+		},
+	}
+	want := "[msg 51 @uid=11] first\n[msg 52] second"
+	if got := RenderInboundBody(in); got != want {
+		t.Fatalf("handleless mixed-sender body = %q, want %q", got, want)
 	}
 }
 

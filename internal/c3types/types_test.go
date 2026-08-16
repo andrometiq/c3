@@ -7,30 +7,6 @@ import (
 	"testing"
 )
 
-// additiveJSONNames pins the explicitly named additive keys introduced after
-// the original Go-name-shaped format freeze. Every legacy field still maps to
-// its Go name; these exceptions are exact contracts, not a general permission
-// to restyle tags.
-var additiveJSONNames = map[string]string{
-	"Inbound.MediaGroupID":       "media_group_id",
-	"Inbound.ForwardOrigin":      "forward_origin",
-	"Inbound.Merged":             "merged",
-	"ForwardOrigin.Kind":         "kind",
-	"ForwardOrigin.Name":         "name",
-	"MergedSource.MessageID":     "message_id",
-	"MergedSource.Sender":        "sender",
-	"MergedSource.Text":          "text",
-	"MergedSource.ForwardOrigin": "forward_origin",
-	"Attachment.SourceMessageID": "source_message_id",
-}
-
-func frozenJSONName(typeName, fieldName string) string {
-	if name, ok := additiveJSONNames[typeName+"."+fieldName]; ok {
-		return name
-	}
-	return fieldName
-}
-
 // liveQueueLine is a VERBATIM line lifted from a real .jsonl queue file. It is
 // the format that is already on users' disks, so it is the thing this package
 // is not allowed to break. Kept as an opaque string on purpose: it must never
@@ -50,11 +26,10 @@ const liveQueueLine = `{"Channel":"telegram","ChatID":-1003990699908,"TopicID":3
 // that are already queued on disk and adapters that are already parsing them.
 // This test makes that a build failure instead of a silent data-loss event.
 //
-// If you are here because you added a field: add its specified name to the
-// frozen map when it intentionally differs from the Go identifier. If you
-// renamed a field, the tag must NOT follow the rename — the old key is the
-// contract.
-func TestJSONTagNamesMatchFrozenWireNames(t *testing.T) {
+// If you are here because you added a field: add the tag with the identical
+// name. If you are here because you renamed one: the tag must NOT follow the
+// rename — the old key is the contract.
+func TestJSONTagNamesAreFrozenToGoFieldNames(t *testing.T) {
 	roots := []reflect.Type{
 		reflect.TypeOf(Inbound{}), reflect.TypeOf(InboundEvent{}), reflect.TypeOf(SystemEvent{}),
 		reflect.TypeOf(HealthEvent{}), reflect.TypeOf(PollResult{}), reflect.TypeOf(PollOptionTally{}),
@@ -89,10 +64,9 @@ func TestJSONTagNamesMatchFrozenWireNames(t *testing.T) {
 			if i := strings.Index(tag, ","); i >= 0 {
 				name = tag[:i]
 			}
-			want := frozenJSONName(rt.Name(), f.Name)
-			if name != want {
-				t.Errorf("%s.%s is tagged json:%q — the frozen wire key is %q. Renaming it breaks queued records and mixed-version adapters.",
-					rt.Name(), f.Name, tag, want)
+			if name != f.Name {
+				t.Errorf("%s.%s is tagged json:%q — the tag name MUST be byte-identical to the Go field name (%q). Renaming the key breaks every record already on disk.",
+					rt.Name(), f.Name, tag, f.Name)
 			}
 			walk(f.Type)
 		}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -359,7 +360,7 @@ func TestFlushInbounds_MergedPresentationNeverPersists(t *testing.T) {
 
 	topicID := int64(914)
 	key := MakeRouteKey("telegram", -100, &topicID)
-	_, pushes := liveHolderFrames(t, b, key)
+	holder, pushes := liveHolderFrames(t, b, key)
 	w := newRouteWorker(context.Background(), key, time.Hour, b)
 	defer w.Stop()
 
@@ -411,6 +412,82 @@ func TestFlushInbounds_MergedPresentationNeverPersists(t *testing.T) {
 			if attachment.SourceMessageID != 0 {
 				t.Errorf("stored row %d attachment leaked SourceMessageID: %+v", i, attachment)
 			}
+		}
+	}
+
+	// Do not process an OpInboundDelivered ack: the holder dies after the live
+	// write but before proving it handled the turn. The next delivery's confirmed-
+	// death sweep must flush pendingAck as the two original discrete rows, never
+	// as the one merged presentation object that went over IPC.
+	holder.MarkDisconnected()
+	holder.PID = deadPID(t)
+	deathProbe := &c3types.Inbound{
+		Channel: "telegram", ChatID: -100, TopicID: &topicID, MessageID: 999,
+		Kind: c3types.InboundPollResult,
+		Event: &c3types.InboundEvent{
+			PollResult: &c3types.PollResult{PollID: "death-probe", IsClosed: true},
+		},
+	}
+	w.forwardOrFallback(context.Background(), deathProbe, 0)
+
+	recovered, err := b.Queue.Peek(queueRouteKey(key), -1)
+	if err != nil {
+		t.Fatalf("peek rows after holder death: %v", err)
+	}
+	if len(recovered) != 4 {
+		t.Fatalf("rows after pending-ack recovery = %d, want 4 (2 original durable rows + 2 discrete re-queues): %+v", len(recovered), recovered)
+	}
+	if !reflect.DeepEqual(recovered[2:], recovered[:2]) {
+		t.Fatalf("pending-ack recovery did not restore the discrete originals:\n original: %+v\nrequeued: %+v", recovered[:2], recovered[2:])
+	}
+	for i, row := range recovered[2:] {
+		if len(row.Merged) != 0 {
+			t.Errorf("re-queued row %d leaked Merged: %+v", i, row.Merged)
+		}
+		for _, attachment := range row.Attachments {
+			if attachment.SourceMessageID != 0 {
+				t.Errorf("re-queued row %d attachment leaked SourceMessageID: %+v", i, attachment)
+			}
+		}
+	}
+}
+
+func TestForwardOrFallbackCovering_AppendFallbackPersistsDiscreteSources(t *testing.T) {
+	t.Setenv("C3_QUEUE_DIR", t.TempDir())
+	b := brokerWithChannel(t, mfWithTelegram(), &fakeChannel{})
+	defer b.Shutdown()
+
+	topicID := int64(914)
+	key := MakeRouteKey("telegram", -100, &topicID)
+	w := newRouteWorker(context.Background(), key, time.Hour, b)
+	defer w.Stop()
+	sources := []*c3types.Inbound{
+		{
+			Channel: "telegram", ChatID: -100, TopicID: &topicID, MessageID: 701, Text: "first", Timestamp: time.Now(),
+			Attachments: []c3types.Attachment{{Kind: "photo", FileID: "P701"}},
+		},
+		{
+			Channel: "telegram", ChatID: -100, TopicID: &topicID, MessageID: 702, Text: "second", Timestamp: time.Now(),
+			Attachments: []c3types.Attachment{{Kind: "document", FileID: "D702"}},
+		},
+	}
+	presentation := mergeBatch(sources)
+
+	// An exact empty covered-ID set is the transient-all-appends-failed shape.
+	// With no holder, append-if-absent must retry each discrete source rather than
+	// persisting the merged presentation copy.
+	w.forwardOrFallbackCovering(context.Background(), presentation, sources, 0, nil, true)
+
+	rows, err := b.Queue.Peek(queueRouteKey(key), -1)
+	if err != nil {
+		t.Fatalf("Peek: %v", err)
+	}
+	if len(rows) != 2 || rows[0].MessageID != 701 || rows[1].MessageID != 702 {
+		t.Fatalf("append fallback rows = %+v, want discrete messages 701 and 702", rows)
+	}
+	for i, row := range rows {
+		if len(row.Merged) != 0 || len(row.Attachments) != 1 || row.Attachments[0].SourceMessageID != 0 {
+			t.Errorf("append fallback row %d leaked merged presentation: %+v", i, row)
 		}
 	}
 }

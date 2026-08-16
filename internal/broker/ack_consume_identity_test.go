@@ -97,7 +97,7 @@ func TestLiveAck_ConsumesCoveredLines_NotQueueHead(t *testing.T) {
 	if err != nil {
 		t.Fatalf("append third: %v", err)
 	}
-	w.forwardOrFallbackCovering(ctx, third, 1, []string{thirdRecordID}, true)
+	w.forwardOrFallbackCovering(ctx, third, []*c3types.Inbound{third}, 1, []string{thirdRecordID}, true)
 
 	if n, _ := b.Queue.Pending(qrk); n != 3 {
 		t.Fatalf("all three should still be queued until the ack; got %d", n)
@@ -147,7 +147,7 @@ func TestLiveAck_NoBacklog_ConsumesThePushedLine(t *testing.T) {
 	if err != nil {
 		t.Fatalf("append: %v", err)
 	}
-	w.forwardOrFallbackCovering(ctx, only, 1, []string{onlyRecordID}, true)
+	w.forwardOrFallbackCovering(ctx, only, []*c3types.Inbound{only}, 1, []string{onlyRecordID}, true)
 	w.handleConsume(ctx, &ConsumeJob{MessageID: only.MessageID, Count: 1})
 
 	if n, _ := b.Queue.Pending(qrk); n != 0 {
@@ -184,7 +184,7 @@ func TestLiveAck_MergedPush_ConsumesEveryCoveredLine(t *testing.T) {
 	}
 	// The merged push presents as the last message of the batch.
 	merged := inbound(tid, 12, "batch-merged")
-	w.forwardOrFallbackCovering(ctx, merged, len(ids), ids, true)
+	w.forwardOrFallbackCovering(ctx, merged, []*c3types.Inbound{merged}, len(ids), ids, true)
 	w.handleConsume(ctx, &ConsumeJob{MessageID: merged.MessageID, Count: len(ids)})
 
 	left, err := b.Queue.Peek(qrk, 10)
@@ -302,7 +302,7 @@ func TestLiveAck_DuplicateMessageIDAckedOutOfOrderRemovesExactRecord(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	w.forwardOrFallbackCovering(ctx, original, 1, []string{originalID}, true)
+	w.forwardOrFallbackCovering(ctx, original, []*c3types.Inbound{original}, 1, []string{originalID}, true)
 	firstPush := <-pushes
 
 	edit := inbound(tid, 7, "edited")
@@ -311,7 +311,7 @@ func TestLiveAck_DuplicateMessageIDAckedOutOfOrderRemovesExactRecord(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	w.forwardOrFallbackCovering(ctx, edit, 1, []string{editID}, true)
+	w.forwardOrFallbackCovering(ctx, edit, []*c3types.Inbound{edit}, 1, []string{editID}, true)
 	secondPush := <-pushes
 
 	if firstPush.DeliveryToken == "" || secondPush.DeliveryToken == "" || firstPush.DeliveryToken == secondPush.DeliveryToken {
@@ -379,7 +379,8 @@ func TestLivePush_ZeroAppended_AdvertisesZeroCovered(t *testing.T) {
 	pushes := capturingHolder(t, b, key)
 
 	// A push whose caller knows it appended nothing.
-	w.forwardOrFallbackCovering(ctx, inbound(tid, 2, "stored-nothing"), 0, nil, true)
+	storedNothing := inbound(tid, 2, "stored-nothing")
+	w.forwardOrFallbackCovering(ctx, storedNothing, []*c3types.Inbound{storedNothing}, 0, nil, true)
 
 	select {
 	case m := <-pushes:

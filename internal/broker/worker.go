@@ -222,16 +222,19 @@ type RouteWorker struct {
 	// the worker's single run goroutine (flushInbounds), so it needs no lock.
 	dedup *deliveredDedup
 
-	// pendingAck holds human inbounds delivered to the current holder that it has
-	// not yet demonstrably processed (no outbound since delivery). The adapter acks
-	// a push as delivered the moment it writes to the CLI's stdin — a blind ack that
-	// CONSUMES the durable copy — so if the holder then dies/exits without handling
-	// them, they vanish silently (the 2026-07-12 dentist incident: a stolen-then-
-	// dead session ate two messages with no warning). On confirmed holder death
-	// these are re-queued + a notice fires (flushPendingAck); any outbound from the
-	// holder clears them (it is alive and handling the turn). Worker-goroutine-only
-	// (delivered path + dispatchOutbound + pulseTyping), so it needs no lock.
-	pendingAck []*c3types.Inbound
+	// pendingAck holds the discrete source rows behind human pushes delivered to
+	// the current holder that it has not yet demonstrably processed (no outbound
+	// since delivery). The adapter acks a push as delivered the moment it writes to
+	// the CLI's stdin — a blind ack that CONSUMES the durable copies — so if the
+	// holder then dies/exits without handling them, they vanish silently (the
+	// 2026-07-12 dentist incident: a stolen-then-dead session ate two messages with
+	// no warning). A debounced push is presentation-merged, but its pending-ack
+	// entry retains every original row so confirmed holder death can restore the
+	// exact message boundaries and attachments. On death these are re-queued + a
+	// notice fires (flushPendingAck); any outbound from the holder clears them (it
+	// is alive and handling the turn). Worker-goroutine-only (delivered path +
+	// dispatchOutbound + pulseTyping), so it needs no lock.
+	pendingAck [][]*c3types.Inbound
 
 	// coveredByPush records, per live push, the durable queue lines that push
 	// actually covered. The broker-minted DeliveryToken is the primary
@@ -757,7 +760,7 @@ func (w *RouteWorker) flushInbounds(ctx context.Context, batch []*c3types.Inboun
 	// queue is wired (unit tests) deliveryAppended stays 0 and covEffective
 	// normalizes to 1. deliveryIDs names those same lines so the ack removes them
 	// by identity; pending voice rows are excluded from both.
-	w.forwardOrFallbackCovering(ctx, merged, deliveryAppended, deliveryIDs, true)
+	w.forwardOrFallbackCovering(ctx, merged, deliveryBatch, deliveryAppended, deliveryIDs, true)
 }
 
 // enqueueVoiceReadback preserves the existing off-critical-path FIFO chain, but
@@ -1055,16 +1058,19 @@ func mergeBatch(batch []*c3types.Inbound) *c3types.Inbound {
 // production text inbound goes through flushInbounds, which knows the ids and
 // calls forwardOrFallbackCovering.
 func (w *RouteWorker) forwardOrFallback(ctx context.Context, in *c3types.Inbound, covered int) {
-	w.forwardOrFallbackCovering(ctx, in, covered, nil, false)
+	w.forwardOrFallbackCovering(ctx, in, []*c3types.Inbound{in}, covered, nil, false)
 }
 
 // forwardOrFallbackCovering additionally records which durable queue lines this
 // push covered, so the delivered-ack removes exactly those lines rather than
-// dropping `covered` lines off the queue head. See RouteWorker.coveredByPush.
+// dropping `covered` lines off the queue head. sources is the discrete source
+// batch behind the presentation inbound; pending-ack recovery and the no-claim
+// append fallback persist those rows, never the merged presentation. See
+// RouteWorker.coveredByPush.
 //
 // idsKnown says the caller enumerated the appended lines exactly, so
 // len(coveredIDs) — including ZERO — is authoritative for this push.
-func (w *RouteWorker) forwardOrFallbackCovering(_ context.Context, in *c3types.Inbound, covered int, coveredIDs []string, idsKnown bool) {
+func (w *RouteWorker) forwardOrFallbackCovering(_ context.Context, in *c3types.Inbound, sources []*c3types.Inbound, covered int, coveredIDs []string, idsKnown bool) {
 	holder, claimed := w.broker.Routes.Holder(w.key)
 
 	// Liveness sweep: if the holder's PID is dead (e.g. Claude Code killed
@@ -1241,7 +1247,7 @@ func (w *RouteWorker) forwardOrFallbackCovering(_ context.Context, in *c3types.I
 		// proves it handled the turn (any outbound clears pendingAck) — else it is
 		// re-queued if the holder dies. Events carry no lost content, never queued.
 		if !in.IsEvent() {
-			w.trackPendingAck(in)
+			w.trackPendingAck(sources)
 		}
 		return
 	}
@@ -1256,24 +1262,27 @@ func (w *RouteWorker) forwardOrFallbackCovering(_ context.Context, in *c3types.I
 			w.key.Channel, w.key.ChatID, TopicKeyStr(w.key), in.MessageID, in.Kind)
 		return
 	}
-	// Append-if-absent: the normal path already appended this message (and its
-	// MessageID is recorded in w.dedup) in flushInbounds. A direct-call/test path
-	// (or any future caller that reaches forwardOrFallback without flushInbounds)
-	// has NOT — so append it here, gated by the SAME dedup set so the normal path
-	// does not double-store (flushInbounds already recorded the id, so alreadySeen
-	// returns true here and we skip). We use the alreadySeen/record split (C2) so a
-	// failed Append never poisons the dedup set: only record on a successful Append.
-	// This keeps the running count below accurate for the message the user just
-	// sent. Events are never queued.
+	// Append-if-absent: the normal path already appended these source messages
+	// (and their MessageIDs are recorded in w.dedup) in flushInbounds. A direct-
+	// call/test path (or any future caller that reaches forwardOrFallback without
+	// flushInbounds) has NOT — so append each source here, gated by the SAME dedup
+	// set so the normal path does not double-store (flushInbounds already recorded
+	// each id, so alreadySeen returns true here and we skip). We use the
+	// alreadySeen/record split (C2) so a failed Append never poisons the dedup set:
+	// only record on a successful Append. This keeps the running count below
+	// accurate for the messages the user just sent. Events are never queued.
 	if w.broker.Queue != nil {
 		// A caller that supplies at least one exact record identity has already
 		// persisted this delivery. That proof also works for MessageID=0, which
 		// the replay deduper intentionally cannot identify.
 		alreadyPersisted := idsKnown && len(coveredIDs) > 0
-		if !alreadyPersisted && (w.dedup == nil || !w.dedup.alreadySeen(in.MessageID)) {
-			if err := w.broker.Queue.Append(queueRouteKey(w.key), in); err == nil {
-				if w.dedup != nil {
-					w.dedup.record(in.MessageID)
+		if !alreadyPersisted {
+			for _, source := range sources {
+				if source == nil || source.IsEvent() || (w.dedup != nil && w.dedup.alreadySeen(source.MessageID)) {
+					continue
+				}
+				if err := w.broker.Queue.Append(queueRouteKey(w.key), source); err == nil && w.dedup != nil {
+					w.dedup.record(source.MessageID)
 				}
 			}
 		}
@@ -2037,7 +2046,7 @@ func (w *RouteWorker) handleResolveVoiceTarget(ctx context.Context, scheduler *V
 		scheduler.markResolveApplied(job.Key, target.recordID)
 		durableApplied = true
 		w.finishVoiceGroup(ctx, in, target.group)
-		w.forwardOrFallbackCovering(ctx, w.voiceResolvePresentation(in), 0, nil, true)
+		w.forwardOrFallbackCovering(ctx, w.voiceResolvePresentation(in), []*c3types.Inbound{in}, 0, nil, true)
 		w.runVoiceResolveTestHook("after_push")
 		return false
 	}
@@ -2075,7 +2084,7 @@ func (w *RouteWorker) handleResolveVoiceTarget(ctx context.Context, scheduler *V
 					w.dedup.record(final.Inbound.MessageID)
 				}
 				w.finishVoiceGroup(ctx, &final.Inbound, target.group)
-				w.forwardOrFallbackCovering(ctx, w.voiceResolvePresentation(&final.Inbound), 1, []string{recordID}, true)
+				w.forwardOrFallbackCovering(ctx, w.voiceResolvePresentation(&final.Inbound), []*c3types.Inbound{&final.Inbound}, 1, []string{recordID}, true)
 				w.runVoiceResolveTestHook("after_push")
 			}
 		}
@@ -2101,7 +2110,7 @@ func (w *RouteWorker) handleResolveVoiceTarget(ctx context.Context, scheduler *V
 	}
 	w.evictIfOverCap(qrk)
 	w.finishVoiceGroup(ctx, revision, target.group)
-	w.forwardOrFallbackCovering(ctx, w.voiceResolvePresentation(revision), 1, []string{revisionID}, true)
+	w.forwardOrFallbackCovering(ctx, w.voiceResolvePresentation(revision), []*c3types.Inbound{revision}, 1, []string{revisionID}, true)
 	w.runVoiceResolveTestHook("after_push")
 	return false
 }
@@ -2333,11 +2342,21 @@ func (w *RouteWorker) disarmTyping() {
 	w.typingPulses = 0
 }
 
-// trackPendingAck records a delivered-but-unconfirmed human inbound for the
-// silent-loss net, bounded by maxPendingAck (oldest dropped + logged past the
-// cap). See the pendingAck field and flushPendingAck.
-func (w *RouteWorker) trackPendingAck(in *c3types.Inbound) {
-	w.pendingAck = append(w.pendingAck, in)
+// trackPendingAck records the discrete source rows behind one delivered-but-
+// unconfirmed human push for the silent-loss net, bounded by maxPendingAck
+// pushes (oldest dropped + logged past the cap). See the pendingAck field and
+// flushPendingAck.
+func (w *RouteWorker) trackPendingAck(sources []*c3types.Inbound) {
+	discrete := make([]*c3types.Inbound, 0, len(sources))
+	for _, source := range sources {
+		if source != nil && !source.IsEvent() {
+			discrete = append(discrete, source)
+		}
+	}
+	if len(discrete) == 0 {
+		return
+	}
+	w.pendingAck = append(w.pendingAck, discrete)
 	if over := len(w.pendingAck) - maxPendingAck; over > 0 {
 		log.Printf("pendingAck chan=%s chat=%d topic=%s: over cap, dropping %d oldest tracked delivery(ies)",
 			w.key.Channel, w.key.ChatID, TopicKeyStr(w.key), over)
@@ -2362,19 +2381,25 @@ func (w *RouteWorker) flushPendingAck(reason string) {
 	}
 	lost := w.pendingAck
 	w.pendingAck = nil
+	lostRows := 0
+	for _, sources := range lost {
+		lostRows += len(sources)
+	}
 	requeued := 0
 	if w.broker != nil && w.broker.Queue != nil {
-		for _, in := range lost {
-			if err := w.broker.Queue.Append(queueRouteKey(w.key), in); err != nil {
-				log.Printf("pendingAck flush FAIL chan=%s chat=%d topic=%s msg=%d: re-queue: %v",
-					w.key.Channel, w.key.ChatID, TopicKeyStr(w.key), in.MessageID, err)
-				continue
+		for _, sources := range lost {
+			for _, in := range sources {
+				if err := w.broker.Queue.Append(queueRouteKey(w.key), in); err != nil {
+					log.Printf("pendingAck flush FAIL chan=%s chat=%d topic=%s msg=%d: re-queue: %v",
+						w.key.Channel, w.key.ChatID, TopicKeyStr(w.key), in.MessageID, err)
+					continue
+				}
+				requeued++
 			}
-			requeued++
 		}
 	}
-	log.Printf("pendingAck flush chan=%s chat=%d topic=%s: %s — re-queued %d/%d unprocessed delivery(ies)",
-		w.key.Channel, w.key.ChatID, TopicKeyStr(w.key), reason, requeued, len(lost))
+	log.Printf("pendingAck flush chan=%s chat=%d topic=%s: %s — re-queued %d/%d unprocessed message(s) from %d delivery(ies)",
+		w.key.Channel, w.key.ChatID, TopicKeyStr(w.key), reason, requeued, lostRows, len(lost))
 	if requeued == 0 || w.broker == nil {
 		return
 	}

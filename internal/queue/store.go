@@ -151,13 +151,31 @@ func (s *Store) appendTracked(rk RouteKey, in *c3types.Inbound, sourceRecordID s
 	// The stamp goes on a COPY, never on the caller's struct: Append takes a
 	// pointer the broker still holds and delivers over IPC after this returns,
 	// and mutating it here would be a side effect on the caller's value rather
-	// than a change to what the queue stores. A shallow copy marshals
-	// byte-identically to the original (the shared slices/pointers are only
-	// read during marshal). A nil `in` keeps its existing behaviour — marshals
-	// to "null" — instead of panicking on the dereference.
+	// than a change to what the queue stores. Apart from the presentation-field
+	// normalization below, the copy marshals byte-identically to the original
+	// (shared slices/pointers are only read during marshal). A nil `in` keeps its
+	// existing behaviour — marshals to "null" — instead of panicking on the
+	// dereference.
 	var rec *storedInbound
 	if in != nil {
 		cp := *in
+		// A merged burst is a live-delivery presentation assembled only after its
+		// source messages were persisted as discrete rows. appendTracked is the
+		// single entrance to durable queue storage, so enforce that presentation
+		// never persists here even if a recovery/fallback caller hands us a poisoned
+		// Inbound. Clear Merged on the copy, and copy Attachments before clearing
+		// SourceMessageID so the caller's live presentation remains untouched.
+		cp.Merged = nil
+		for _, attachment := range cp.Attachments {
+			if attachment.SourceMessageID == 0 {
+				continue
+			}
+			cp.Attachments = append([]c3types.Attachment(nil), cp.Attachments...)
+			for i := range cp.Attachments {
+				cp.Attachments[i].SourceMessageID = 0
+			}
+			break
+		}
 		if cp.V == 0 {
 			cp.V = c3types.InboundRecordVersion
 		}

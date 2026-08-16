@@ -591,6 +591,86 @@ func TestChannelFrame_MergedBurstGolden(t *testing.T) {
 	}
 }
 
+func TestChannelFrame_MergedCaptionlessAlbumGolden(t *testing.T) {
+	in := &c3types.Inbound{
+		Channel:   "telegram",
+		ChatID:    -100,
+		MessageID: 110,
+		Sender:    c3types.Sender{UserID: 7, Username: "album-user"},
+		Timestamp: time.Date(2026, 8, 16, 10, 11, 12, 0, time.UTC),
+		Merged: []c3types.MergedSource{
+			{MessageID: 101, Sender: c3types.Sender{UserID: 7, Username: "album-user"}},
+			{MessageID: 102, Sender: c3types.Sender{UserID: 7, Username: "album-user"}},
+			{MessageID: 103, Sender: c3types.Sender{UserID: 7, Username: "album-user"}},
+			{MessageID: 104, Sender: c3types.Sender{UserID: 7, Username: "album-user"}},
+			{MessageID: 105, Sender: c3types.Sender{UserID: 7, Username: "album-user"}},
+			{MessageID: 106, Sender: c3types.Sender{UserID: 7, Username: "album-user"}},
+			{MessageID: 107, Sender: c3types.Sender{UserID: 7, Username: "album-user"}},
+			{MessageID: 108, Sender: c3types.Sender{UserID: 7, Username: "album-user"}},
+			{MessageID: 109, Sender: c3types.Sender{UserID: 7, Username: "album-user"}},
+			{MessageID: 110, Sender: c3types.Sender{UserID: 7, Username: "album-user"}},
+		},
+		Attachments: []c3types.Attachment{
+			{Kind: "photo", FileID: "photo-101", SourceMessageID: 101},
+			{Kind: "photo", FileID: "photo-102", SourceMessageID: 102},
+			{Kind: "photo", FileID: "photo-103", SourceMessageID: 103},
+			{Kind: "photo", FileID: "photo-104", SourceMessageID: 104},
+			{Kind: "photo", FileID: "photo-105", SourceMessageID: 105},
+			{Kind: "photo", FileID: "photo-106", SourceMessageID: 106},
+			{Kind: "photo", FileID: "photo-107", SourceMessageID: 107},
+			{Kind: "photo", FileID: "photo-108", SourceMessageID: 108},
+			{Kind: "photo", FileID: "photo-109", SourceMessageID: 109},
+			{Kind: "photo", FileID: "photo-110", SourceMessageID: 110},
+		},
+	}
+	want := map[string]any{
+		"content": "(10 attachments)",
+		"meta": map[string]any{
+			"chat_id":                  "-100",
+			"ts":                       "2026-08-16T10:11:12.000Z",
+			"message_id":               "110",
+			"merged_count":             "10",
+			"merged_message_ids":       "101,102,103,104,105,106,107,108,109,110",
+			"user":                     "album-user",
+			"user_id":                  "7",
+			"attachment_kind":          "photo",
+			"attachment_file_id":       "photo-101",
+			"attachment_message_id":    "101",
+			"attachment_count":         "10",
+			"attachment_kind_2":        "photo",
+			"attachment_file_id_2":     "photo-102",
+			"attachment_message_id_2":  "102",
+			"attachment_kind_3":        "photo",
+			"attachment_file_id_3":     "photo-103",
+			"attachment_message_id_3":  "103",
+			"attachment_kind_4":        "photo",
+			"attachment_file_id_4":     "photo-104",
+			"attachment_message_id_4":  "104",
+			"attachment_kind_5":        "photo",
+			"attachment_file_id_5":     "photo-105",
+			"attachment_message_id_5":  "105",
+			"attachment_kind_6":        "photo",
+			"attachment_file_id_6":     "photo-106",
+			"attachment_message_id_6":  "106",
+			"attachment_kind_7":        "photo",
+			"attachment_file_id_7":     "photo-107",
+			"attachment_message_id_7":  "107",
+			"attachment_kind_8":        "photo",
+			"attachment_file_id_8":     "photo-108",
+			"attachment_message_id_8":  "108",
+			"attachment_kind_9":        "photo",
+			"attachment_file_id_9":     "photo-109",
+			"attachment_message_id_9":  "109",
+			"attachment_kind_10":       "photo",
+			"attachment_file_id_10":    "photo-110",
+			"attachment_message_id_10": "110",
+		},
+	}
+	if got := buildClaudeChannelFrame(in); !reflect.DeepEqual(got, want) {
+		t.Fatalf("captionless merged album frame:\n got: %#v\nwant: %#v", got, want)
+	}
+}
+
 func TestChannelFrame_SingleMessageGoldenUnchanged(t *testing.T) {
 	topicID := int64(914)
 	in := &c3types.Inbound{

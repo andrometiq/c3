@@ -72,6 +72,21 @@ func InboundsHaveAttachment(msgs []Inbound) bool {
 	return false
 }
 
+// AttachmentBodyLabel returns the human-readable body used when an inbound has
+// attachments but no rendered text. A single attachment keeps the historical
+// kind label; an album reports its full count instead of masquerading as one
+// media message.
+func AttachmentBodyLabel(attachments []Attachment) string {
+	switch len(attachments) {
+	case 0:
+		return ""
+	case 1:
+		return "(" + attachments[0].Kind + " message)"
+	default:
+		return fmt.Sprintf("(%d attachments)", len(attachments))
+	}
+}
+
 // RenderInboundBody returns the unchanged text of a discrete inbound. For a
 // merged delivery it renders the non-empty source texts in batch order, keeping
 // message, sender, and forwarding attribution attached to each fragment.
@@ -86,8 +101,13 @@ func RenderInboundBody(in *Inbound) string {
 		}
 		var prefix strings.Builder
 		fmt.Fprintf(&prefix, "[msg %d", source.MessageID)
-		if source.Sender.Username != in.Sender.Username {
-			fmt.Fprintf(&prefix, " @%s", source.Sender.Username)
+		if source.Sender.UserID != in.Sender.UserID {
+			switch {
+			case source.Sender.Username != "":
+				fmt.Fprintf(&prefix, " @%s", source.Sender.Username)
+			case source.Sender.UserID != 0:
+				fmt.Fprintf(&prefix, " @uid=%d", source.Sender.UserID)
+			}
 		}
 		if source.ForwardOrigin != nil {
 			fmt.Fprintf(&prefix, " fwd %s", source.ForwardOrigin.Name)
@@ -153,10 +173,13 @@ func RenderQueuedInbound(in *Inbound) string {
 	if bodyCouldForgeMeta(text) {
 		text = fmt.Sprintf("%q", text)
 	}
-	if text == "" && len(in.Merged) == 0 {
+	if text == "" {
 		switch {
 		case len(in.Attachments) > 0:
-			text = "(" + in.Attachments[0].Kind + " message)"
+			text = AttachmentBodyLabel(in.Attachments)
+		case len(in.Merged) > 0:
+			// Preserve the existing metadata-only shape for an empty merged
+			// presentation that carries neither text nor attachments.
 		case in.IsEvent():
 			text = "(" + string(in.Kind) + " event)"
 		default:

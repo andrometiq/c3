@@ -1307,16 +1307,12 @@ func buildClaudeChannelFrame(in *c3types.Inbound) map[string]any {
 	}
 
 	text := c3types.RenderInboundBody(in)
-	if text == "" && len(in.Merged) == 0 && len(in.Attachments) > 0 {
+	if text == "" && len(in.Attachments) > 0 {
 		// Channel may have left text empty for voice (STT plugin not yet
 		// substituting). Fall back to a label so the agent at least sees
 		// something. With several attachments (album/media-group), report the
 		// count so the agent knows more than one arrived.
-		if len(in.Attachments) > 1 {
-			text = fmt.Sprintf("(%d attachments)", len(in.Attachments))
-		} else {
-			text = fmt.Sprintf("(%s message)", in.Attachments[0].Kind)
-		}
+		text = c3types.AttachmentBodyLabel(in.Attachments)
 	}
 
 	return map[string]any{
