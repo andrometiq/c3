@@ -14,26 +14,31 @@ import "time"
 //
 // ChatID sign convention follows Telegram's Bot API: positive = user
 // or DM, negative = group/channel, -100… = supergroup/channel.
-// EVERY exported field below carries an EXPLICIT json tag whose name is
-// BYTE-IDENTICAL to the Go field name. That is not decoration: until these tags
-// existed, encoding/json fell back to the Go field name verbatim, so the Go
-// identifiers WERE the on-disk queue format (internal/queue/store.go marshals
-// this struct straight into a .jsonl with no intermediate DTO) and WERE the IPC
-// wire format third-party adapters read. A rename — however innocuous — would
-// have silently changed both and eaten users' queued messages. The tags pin the
-// keys so the Go names are free to change without moving the format. Do NOT
-// "tidy" a tag to snake_case or camelCase: that is the exact data-loss event
-// this freeze exists to prevent.
+// EVERY exported field below carries an EXPLICIT json tag. That is not
+// decoration: until these tags existed, encoding/json fell back to the Go field
+// name verbatim, so the Go identifiers WERE the on-disk queue format
+// (internal/queue/store.go marshals this struct straight into a .jsonl with no
+// intermediate DTO) and WERE the IPC wire format third-party adapters read.
+// The original fields therefore retain BYTE-IDENTICAL Go-name keys; newer
+// additive fields use their explicitly specified keys. Once introduced, every
+// key is frozen: a rename — however innocuous — would silently change both
+// formats and eat users' queued messages. Do NOT "tidy" any existing tag.
 type Inbound struct {
-	Channel     string        `json:"Channel"`
-	ChatID      int64         `json:"ChatID"`
-	TopicID     *int64        `json:"TopicID"` // nil = no topic, &1 = General, >1 = custom
-	MessageID   int64         `json:"MessageID"`
-	Sender      Sender        `json:"Sender"`
-	Text        string        `json:"Text"`
-	Attachments []Attachment  `json:"Attachments"`
-	ReplyTo     *ReplyContext `json:"ReplyTo"`
-	Timestamp   time.Time     `json:"Timestamp"`
+	Channel       string         `json:"Channel"`
+	ChatID        int64          `json:"ChatID"`
+	TopicID       *int64         `json:"TopicID"` // nil = no topic, &1 = General, >1 = custom
+	MessageID     int64          `json:"MessageID"`
+	Sender        Sender         `json:"Sender"`
+	Text          string         `json:"Text"`
+	Attachments   []Attachment   `json:"Attachments"`
+	ReplyTo       *ReplyContext  `json:"ReplyTo"`
+	Timestamp     time.Time      `json:"Timestamp"`
+	MediaGroupID  string         `json:"media_group_id,omitempty"`
+	ForwardOrigin *ForwardOrigin `json:"forward_origin,omitempty"`
+	// Merged carries delivery-time source boundaries for a debounced push. Queue
+	// rows are persisted before merging, so this presentation-only field is never
+	// stored on an organic row.
+	Merged []MergedSource `json:"merged,omitempty"`
 
 	// Kind classifies this inbound. The zero value ("") is an ordinary text/
 	// media message — every pre-existing caller and the whole delivery path are
@@ -259,15 +264,30 @@ type Sender struct {
 	Username string `json:"Username"`
 }
 
+// ForwardOrigin is the flattened provenance of a forwarded message.
+type ForwardOrigin struct {
+	Kind string `json:"kind"`           // "user" | "hidden_user" | "chat" | "channel"
+	Name string `json:"name,omitempty"` // best available display name
+}
+
+// MergedSource describes one source message inside a merged delivery push.
+type MergedSource struct {
+	MessageID     int64          `json:"message_id"`
+	Sender        Sender         `json:"sender"`
+	Text          string         `json:"text,omitempty"`
+	ForwardOrigin *ForwardOrigin `json:"forward_origin,omitempty"`
+}
+
 // Attachment is one piece of attached media on an Inbound. Channel
 // implementations fill the fields they can; absent metadata is the
 // zero value. Kind is an open enum on Telegram terms.
 type Attachment struct {
-	Kind   string `json:"Kind"` // "voice", "audio", "video", "video_note", "document", "photo", "sticker"
-	FileID string `json:"FileID"`
-	Size   int64  `json:"Size"`
-	MIME   string `json:"MIME"`
-	Name   string `json:"Name"`
+	Kind            string `json:"Kind"` // "voice", "audio", "video", "video_note", "document", "photo", "sticker"
+	FileID          string `json:"FileID"`
+	Size            int64  `json:"Size"`
+	MIME            string `json:"MIME"`
+	Name            string `json:"Name"`
+	SourceMessageID int64  `json:"source_message_id,omitempty"`
 }
 
 // ReplyContext describes the message an Inbound is replying to (quote-

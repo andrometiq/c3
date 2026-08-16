@@ -2,9 +2,12 @@ package telegram
 
 import (
 	"encoding/json"
+	"reflect"
 	"testing"
 
 	"github.com/PaulSonOfLars/gotgbot/v2"
+
+	"github.com/Andrometiq/c3/internal/c3types"
 )
 
 func TestConvertInbound_TextMessage(t *testing.T) {
@@ -185,5 +188,58 @@ func TestConvertInbound_RichDecodeFailFallsBackToMarker(t *testing.T) {
 	in := convertInbound("telegram", msg, "", json.RawMessage(`{bad`))
 	if in.Text != "[rich message]" {
 		t.Errorf("Text=%q", in.Text)
+	}
+}
+
+func TestConvertInbound_CapturesMediaGroupAndForwardOrigins(t *testing.T) {
+	tests := []struct {
+		name   string
+		origin gotgbot.MessageOrigin
+		want   *c3types.ForwardOrigin
+	}{
+		{
+			name: "user full name",
+			origin: gotgbot.MessageOriginUser{SenderUser: gotgbot.User{
+				FirstName: "Alice", LastName: "Example", Username: "alice",
+			}},
+			want: &c3types.ForwardOrigin{Kind: "user", Name: "Alice Example"},
+		},
+		{
+			name:   "user username fallback",
+			origin: gotgbot.MessageOriginUser{SenderUser: gotgbot.User{Username: "fallback"}},
+			want:   &c3types.ForwardOrigin{Kind: "user", Name: "fallback"},
+		},
+		{
+			name:   "hidden user",
+			origin: gotgbot.MessageOriginHiddenUser{SenderUserName: "Hidden Sender"},
+			want:   &c3types.ForwardOrigin{Kind: "hidden_user", Name: "Hidden Sender"},
+		},
+		{
+			name:   "chat",
+			origin: gotgbot.MessageOriginChat{SenderChat: gotgbot.Chat{Title: "Source Group"}},
+			want:   &c3types.ForwardOrigin{Kind: "chat", Name: "Source Group"},
+		},
+		{
+			name:   "channel",
+			origin: gotgbot.MessageOriginChannel{Chat: gotgbot.Chat{Title: "Source Channel"}},
+			want:   &c3types.ForwardOrigin{Kind: "channel", Name: "Source Channel"},
+		},
+		{name: "absent"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			msg := &gotgbot.Message{
+				MessageId: 12, From: &gotgbot.User{Id: 42}, Chat: gotgbot.Chat{Id: -100},
+				Text: "forwarded", MediaGroupId: "album-7", ForwardOrigin: test.origin,
+			}
+			in := convertInbound("telegram", msg, "", nil)
+			if in.MediaGroupID != "album-7" {
+				t.Fatalf("MediaGroupID = %q, want album-7", in.MediaGroupID)
+			}
+			if !reflect.DeepEqual(in.ForwardOrigin, test.want) {
+				t.Fatalf("ForwardOrigin = %+v, want %+v", in.ForwardOrigin, test.want)
+			}
+		})
 	}
 }

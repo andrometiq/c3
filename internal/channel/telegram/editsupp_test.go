@@ -1,6 +1,7 @@
 package telegram
 
 import (
+	"reflect"
 	"testing"
 	"time"
 
@@ -108,6 +109,30 @@ func TestDispatchMessage_SetsEditedMarker(t *testing.T) {
 	}
 	if got[1].Edited {
 		t.Fatal("an ordinary message must be emitted with Edited=false (the flag must not be a constant)")
+	}
+}
+
+func TestDispatchMessage_EditedCapturesMediaGroupAndForwardOrigin(t *testing.T) {
+	h := &fakeHost{decision: channel.GateInboundAllow, emitDrops: false}
+	c := makeChannel(h)
+	msg := textMsg("corrected forward", 42)
+	msg.MediaGroupId = "edited-album"
+	msg.ForwardOrigin = gotgbot.MessageOriginChannel{Chat: gotgbot.Chat{Title: "News"}}
+
+	c.dispatchMessage(101, msg, true, nil)
+
+	h.mu.Lock()
+	got := append([]*c3types.Inbound(nil), h.emitted...)
+	h.mu.Unlock()
+	if len(got) != 1 {
+		t.Fatalf("edited dispatches = %d, want 1", len(got))
+	}
+	if !got[0].Edited || got[0].MediaGroupID != "edited-album" {
+		t.Fatalf("edited inbound = %+v, want Edited and MediaGroupID captured", got[0])
+	}
+	want := &c3types.ForwardOrigin{Kind: "channel", Name: "News"}
+	if !reflect.DeepEqual(got[0].ForwardOrigin, want) {
+		t.Fatalf("ForwardOrigin = %+v, want %+v", got[0].ForwardOrigin, want)
 	}
 }
 

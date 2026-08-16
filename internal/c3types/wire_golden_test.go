@@ -88,28 +88,31 @@ func wireGoldens() []wireGolden {
 		{
 			name: "Inbound",
 			value: Inbound{
-				Channel:     "telegram",
-				ChatID:      -1001,
-				TopicID:     ptrInt64(7),
-				MessageID:   42,
-				Sender:      Sender{UserID: 1, Username: "u"},
-				Text:        "t",
-				Attachments: []Attachment{{Kind: "voice"}},
-				ReplyTo:     &ReplyContext{MessageID: 41},
-				Timestamp:   ts,
-				Kind:        InboundPollResult,
-				Event:       &InboundEvent{PollResult: &PollResult{PollID: "p"}},
-				DrainedFrom: "telegram__-1001__7",
-				V:           InboundRecordVersion,
-				ConvKind:    "group",
-				Edited:      true,
+				Channel:       "telegram",
+				ChatID:        -1001,
+				TopicID:       ptrInt64(7),
+				MessageID:     42,
+				Sender:        Sender{UserID: 1, Username: "u"},
+				Text:          "t",
+				Attachments:   []Attachment{{Kind: "voice"}},
+				ReplyTo:       &ReplyContext{MessageID: 41},
+				Timestamp:     ts,
+				MediaGroupID:  "album-7",
+				ForwardOrigin: &ForwardOrigin{Kind: "user", Name: "Alice"},
+				Merged:        []MergedSource{{MessageID: 42, Sender: Sender{UserID: 1}, Text: "t"}},
+				Kind:          InboundPollResult,
+				Event:         &InboundEvent{PollResult: &PollResult{PollID: "p"}},
+				DrainedFrom:   "telegram__-1001__7",
+				V:             InboundRecordVersion,
+				ConvKind:      "group",
+				Edited:        true,
 			},
 			keys: []string{
 				"Channel", "ChatID", "TopicID", "MessageID", "Sender", "Text",
-				"Attachments", "ReplyTo", "Timestamp", "Kind", "Event",
+				"Attachments", "ReplyTo", "Timestamp", "media_group_id", "forward_origin", "merged", "Kind", "Event",
 				"DrainedFrom", "V", "ConvKind", "Edited",
 			},
-			omitEmpty: []string{"Kind", "Event", "DrainedFrom", "V", "ConvKind", "Edited"},
+			omitEmpty: []string{"media_group_id", "forward_origin", "merged", "Kind", "Event", "DrainedFrom", "V", "ConvKind", "Edited"},
 		},
 		{
 			name: "InboundEvent",
@@ -177,11 +180,26 @@ func wireGoldens() []wireGolden {
 			omitEmpty: nil,
 		},
 		{
+			name:      "ForwardOrigin",
+			value:     ForwardOrigin{Kind: "user", Name: "Alice"},
+			keys:      []string{"kind", "name"},
+			omitEmpty: []string{"name"},
+		},
+		{
+			name: "MergedSource",
+			value: MergedSource{
+				MessageID: 42, Sender: Sender{UserID: 1, Username: "u"}, Text: "t",
+				ForwardOrigin: &ForwardOrigin{Kind: "user", Name: "Alice"},
+			},
+			keys:      []string{"message_id", "sender", "text", "forward_origin"},
+			omitEmpty: []string{"text", "forward_origin"},
+		},
+		{
 			name: "Attachment",
 			// MIME, not Mime and not mime. FileID, not file_id.
-			value:     Attachment{Kind: "voice", FileID: "F", Size: 1024, MIME: "audio/ogg", Name: "n.ogg"},
-			keys:      []string{"Kind", "FileID", "Size", "MIME", "Name"},
-			omitEmpty: nil,
+			value:     Attachment{Kind: "voice", FileID: "F", Size: 1024, MIME: "audio/ogg", Name: "n.ogg", SourceMessageID: 42},
+			keys:      []string{"Kind", "FileID", "Size", "MIME", "Name", "source_message_id"},
+			omitEmpty: []string{"source_message_id"},
 		},
 		{
 			// ReplyContext is the type behind the "ReplyTo" key on Inbound. The
@@ -744,9 +762,8 @@ func TestUnknownFutureKeyIsIgnored(t *testing.T) {
 // types declared HERE (stdlib types like time.Time are not ours to police).
 var pkgPath = reflect.TypeOf(Inbound{}).PkgPath()
 
-// TestEveryExportedFieldTagEqualsGoFieldName is the project rule turned into a
-// build failure: every exported field of every type in this package must carry
-// an explicit json tag whose NAME is byte-identical to the Go field name.
+// TestEveryExportedFieldTagMatchesFrozenWireName turns the project rule into a
+// build failure: every exported field must carry its exact frozen JSON key.
 //
 // The rule exists because, before the tags, encoding/json fell back to the Go
 // field name — so the Go identifiers WERE the on-disk queue format and the IPC
@@ -756,10 +773,10 @@ var pkgPath = reflect.TypeOf(Inbound{}).PkgPath()
 // WHAT IT CATCHES:
 //   - a NEW field added with no tag (the Go name silently becomes the key again,
 //     re-arming the original trap for the next rename).
-//   - a tag "tidied" to snake_case or camelCase — the single most likely way
-//     this format gets broken, because it looks like hygiene.
+//   - a tag restyled away from its exact frozen name — the single most likely
+//     way this format gets broken, because it looks like hygiene.
 //   - a tag that followed a Go-level rename instead of staying behind.
-func TestEveryExportedFieldTagEqualsGoFieldName(t *testing.T) {
+func TestEveryExportedFieldTagMatchesFrozenWireName(t *testing.T) {
 	seen := map[reflect.Type]bool{}
 
 	var walk func(rt reflect.Type, path string)
@@ -794,10 +811,11 @@ func TestEveryExportedFieldTagEqualsGoFieldName(t *testing.T) {
 					"Write the name explicitly: `json:%q`.", rt.Name(), f.Name, tag, f.Name+opts)
 				continue
 			}
-			if name != f.Name {
-				t.Errorf("%s.%s is tagged json:%q but the wire key MUST be %q (byte-identical to the Go field name). "+
-					"If you renamed the Go field, the tag must NOT follow the rename — the old key is the contract, and every "+
-					"record already queued on disk is spelled with it.", rt.Name(), f.Name, tag, f.Name)
+			want := frozenJSONName(rt.Name(), f.Name)
+			if name != want {
+				t.Errorf("%s.%s is tagged json:%q but the frozen wire key is %q. "+
+					"If you renamed the Go field, the tag must NOT follow the rename — the old key is the contract.",
+					rt.Name(), f.Name, tag, want)
 			}
 			walk(f.Type, path+"."+f.Name)
 		}

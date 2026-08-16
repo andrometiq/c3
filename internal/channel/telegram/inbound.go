@@ -27,12 +27,14 @@ func convertInbound(channel string, msg *gotgbot.Message, sttPrefix string, rich
 	}
 
 	in := &c3types.Inbound{
-		Channel:   channel,
-		ChatID:    msg.Chat.Id,
-		MessageID: msg.MessageId,
-		Sender:    convertSender(msg.From),
-		Timestamp: time.Unix(msg.Date, 0).UTC(),
-		ConvKind:  convKindFromChat(msg.Chat),
+		Channel:       channel,
+		ChatID:        msg.Chat.Id,
+		MessageID:     msg.MessageId,
+		Sender:        convertSender(msg.From),
+		Timestamp:     time.Unix(msg.Date, 0).UTC(),
+		MediaGroupID:  msg.MediaGroupId,
+		ForwardOrigin: convertForwardOrigin(msg.ForwardOrigin),
+		ConvKind:      convKindFromChat(msg.Chat),
 	}
 	if msg.MessageThreadId != 0 {
 		t := msg.MessageThreadId
@@ -150,6 +152,39 @@ func convertSender(u *gotgbot.User) c3types.Sender {
 		UserID:   u.Id,
 		Username: u.Username,
 	}
+}
+
+func convertForwardOrigin(origin gotgbot.MessageOrigin) *c3types.ForwardOrigin {
+	if origin == nil {
+		return nil
+	}
+	merged := origin.MergeMessageOrigin()
+	forward := &c3types.ForwardOrigin{Kind: merged.Type}
+	switch merged.Type {
+	case "user":
+		if merged.SenderUser != nil {
+			forward.Name = merged.SenderUser.FirstName
+			if merged.SenderUser.LastName != "" {
+				forward.Name += " " + merged.SenderUser.LastName
+			}
+			if forward.Name == "" {
+				forward.Name = merged.SenderUser.Username
+			}
+		}
+	case "hidden_user":
+		forward.Name = merged.SenderUserName
+	case "chat":
+		if merged.SenderChat != nil {
+			forward.Name = merged.SenderChat.Title
+		}
+	case "channel":
+		if merged.Chat != nil {
+			forward.Name = merged.Chat.Title
+		}
+	default:
+		return nil
+	}
+	return forward
 }
 
 // replyText returns the text or caption of a replied-to message, whichever is
