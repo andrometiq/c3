@@ -23,6 +23,7 @@ build:
 	go build -ldflags "$(VERSION_LDFLAGS)" -o $(BIN_DIR)/c3-grok-adapter ./cmd/c3-grok-adapter
 	go build -ldflags "$(VERSION_LDFLAGS)" -o $(BIN_DIR)/c3-agy-adapter ./cmd/c3-agy-adapter
 	go build -ldflags "$(VERSION_LDFLAGS)" -o $(BIN_DIR)/c3-cursor-adapter ./cmd/c3-cursor-adapter
+	go build -ldflags "$(VERSION_LDFLAGS)" -o $(BIN_DIR)/c3-dcode-adapter ./cmd/c3-dcode-adapter
 	go build -ldflags "$(VERSION_LDFLAGS)" -o $(BIN_DIR)/c3-desktop-adapter ./cmd/c3-desktop-adapter
 	go build -ldflags "$(VERSION_LDFLAGS)" -o $(BIN_DIR)/codex ./cmd/codex
 	go build -ldflags "$(VERSION_LDFLAGS)" -o $(BIN_DIR)/claude-shim ./cmd/claude-shim
@@ -43,9 +44,9 @@ clean:
 
 install:
 	go install -ldflags "$(VERSION_LDFLAGS)" \
-		./cmd/c3-broker ./cmd/c3-claude-adapter ./cmd/c3-codex-adapter \
-		./cmd/c3-grok-adapter ./cmd/c3-agy-adapter ./cmd/c3-cursor-adapter ./cmd/c3-desktop-adapter \
-		./cmd/claude-shim ./cmd/migrate-legacy
+	./cmd/c3-broker ./cmd/c3-claude-adapter ./cmd/c3-codex-adapter \
+	./cmd/c3-grok-adapter ./cmd/c3-agy-adapter ./cmd/c3-cursor-adapter ./cmd/c3-dcode-adapter ./cmd/c3-desktop-adapter \
+	./cmd/claude-shim ./cmd/migrate-legacy
 
 # Opt-in: this binary is named `codex` so putting it in GOBIN shadows the real
 # Codex CLI. The guarded end-user path is INSTALL.md §5.

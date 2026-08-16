@@ -17,35 +17,35 @@ support.
 |-----------------|-----------------------------------|---------------|-----------------------------------------------------------------------------------------------------------------------|
 | `status`        | `c3-broker status` (CLI)          | pure shell    | Daemon liveness, socket reachability, mappings.json validation, channel state, **live route claims** (via OpListClaims). |
 | `topics`        | `c3-broker topics` (CLI)          | pure shell    | List every topic in mappings.json + which session (if any) currently claims it.                                       |
-| `build`         | core `go install` package set (shell) | pure shell | Rebuild C3's eight core binaries; the PATH-shadowing Codex launcher remains opt-in. |
+| `build`         | core `go install` package set (shell) | pure shell | Rebuild C3's nine core binaries; the PATH-shadowing Codex launcher remains opt-in. |
 | `setup`         | `c3-broker setup …` (CLI)         | agent-guided / interactive | Configure C3. Primary path: the `/c3:setup` slash command drives the phased subcommands one step at a time — `setup token` (validate via getMe + record), `setup pair dm` / `setup pair group` (code-based id discovery: a 4-digit code sent in Telegram discovers the user id / group chat id — no id hunting), `setup stt`, `setup finish` (host integrations + broker restart). Bare `c3-broker setup` is the full interactive TTY flow (fallback for a plain terminal). Writes mappings.json (mode 0600). |
 | `reload-config` | `pkill -HUP c3-broker`            | pure shell    | Signal the broker to re-read mappings.json. Non-disruptive — no process restart, in-memory pointer swap, live claims preserved. For binary updates, restart Claude Code instead. |
 | `pair`          | `c3-broker pair …` (CLI)          | pure shell    | Arm a Telegram pairing window. A 4-digit code sent from Telegram allowlists the DM `user_id` (`pair dm`) or a group `chat_id` (`pair group <chat_id>`). The setup flow uses this under the hood for id-free discovery. |
 | `ping`          | `c3-broker ping` (CLI)            | pure shell    | Send a one-shot "this is me" message to the attached topic, identifying which CLI session currently owns it. Run in each candidate tab to find the owner before force-stealing. |
 | `sessions`      | `c3-broker sessions` (CLI)        | pure shell    | List every live Claude Code / Codex session the broker tracks — CWD, attached topic, and a "you are here" marker for the calling terminal. |
 | `attach`        | `attach(expr=…)` (MCP tool)       | LLM dispatch  | Attach this session's adapter to a Telegram topic. Broker parses `expr` and either claims an explicit target, resumes the session's own topic, or proposes a picker/confirmation. |
-| `detach`        | `detach()` (MCP tool)             | LLM dispatch  | Release the session's current claim (sends `OpRelease`). Claude + Codex + Grok. |
-| `fetch-queue`   | `fetch_queue(limit=…)` (MCP tool) + `fetch-queue` (MCP prompt on Desktop/Cursor) | LLM dispatch / prompt inject | Drain held inbound for this session's topic. Bare = all; optional count fetches the oldest N. Claude: `/c3:fetch-queue` and short alias `/c3:fetch`. Desktop: `/fetch-queue` MCP prompt. Cursor: MCP prompt `fetch-queue` plus `~/.cursor/commands/{fetch,c3-fetch}.md` from `install-cursor`. |
+| `detach`        | `detach()` (MCP tool)             | LLM dispatch  | Release the session's current claim (sends `OpRelease`). Claude + Codex + Grok + dcode (every adapter with the tool). |
+| `fetch-queue`   | `fetch_queue(limit=…)` (MCP tool) + `fetch-queue` (MCP prompt on Desktop/Cursor) | LLM dispatch / prompt inject | Drain held inbound for this session's topic. Bare = all; optional count fetches the oldest N. Claude: `/c3:fetch-queue` and short alias `/c3:fetch`. Desktop: `/fetch-queue` MCP prompt. Cursor: MCP prompt `fetch-queue` plus `~/.cursor/commands/{fetch,c3-fetch}.md` from `install-cursor`. dcode: `/skill:c3-fetch` user skill from `install-dcode`. |
 | `release`       | `c3-broker release <cwd>` (CLI)   | pure shell    | **Stubbed in v1** — intended to drop a route claim by cwd without restarting the broker; returns 'not yet implemented' today; workaround is `/exit` the holding session. |
 
 ## MCP tools (agent-invoked)
 
 Beyond `attach` / `detach` / `topics`, the adapters expose a set of message and interaction tools the agent calls directly (no slash wrapper). All are broker-dispatched; the `✓ / —` columns are per-CLI availability.
 
-| Tool                 | Claude | Codex | Grok | What it does                                                                 |
-|----------------------|:------:|:-----:|:----:|------------------------------------------------------------------------------|
-| `reply`              |   ✓    |   ✓   |  ✓   | Send a markdown reply (text/media/quote-reply/buttons) into the attached topic. |
-| `react`              |   ✓    |   ✓   |  ✓   | Set a single emoji reaction on a message (validated against Telegram's set).  |
-| `edit_message`       |   ✓    |   ✓   |  ✓   | Edit a previously-sent message's text and/or inline keyboard.                 |
-| `poll`               |   ✓    |   ✓   |  ✓   | Send a Telegram poll (regular or quiz; anonymous/multiple/timer options).     |
-| `stop_poll`          |   ✓    |   ✓   |  ✓   | Force-close a bot-sent poll and return its final aggregate tally.             |
-| `download_attachment`|   ✓    |   ✓   |  ✓   | Download an inbound attachment by `file_id` to the local cache.               |
-| `fetch_queue`        |   ✓    |   ✓   |  ✓   | Drain held inbound from the durable queue (`limit` / `"all"`; `ack` peek vs consume). |
-| `retranscribe`       |   ✓    |   ✓   |  ✓   | Re-run saved audio through the durable STT scheduler; resolve a pending row or append a transcript-update row. |
-| `ask`                |   ✓    |   —   |  —   | Blocking human question (single/multi-select + Skip) via an inline keyboard.  |
-| `codex_forward`      |   —    |   ✓   |  —   | Env-gated debug tool: forward a payload into the Codex app-server (diagnostics). |
+| Tool                 | Claude | Codex | Grok | dcode | What it does                                                                 |
+|----------------------|:------:|:-----:|:----:|:-----:|------------------------------------------------------------------------------|
+| `reply`              |   ✓    |   ✓   |  ✓   |   ✓   | Send a markdown reply (text/media/quote-reply/buttons) into the attached topic. |
+| `react`              |   ✓    |   ✓   |  ✓   |   ✓   | Set a single emoji reaction on a message (validated against Telegram's set).  |
+| `edit_message`       |   ✓    |   ✓   |  ✓   |   ✓   | Edit a previously-sent message's text and/or inline keyboard.                 |
+| `poll`               |   ✓    |   ✓   |  ✓   |   ✓   | Send a Telegram poll (regular or quiz; anonymous/multiple/timer options).     |
+| `stop_poll`          |   ✓    |   ✓   |  ✓   |   ✓   | Force-close a bot-sent poll and return its final aggregate tally.             |
+| `download_attachment`|   ✓    |   ✓   |  ✓   |   ✓   | Download an inbound attachment by `file_id` to the local cache.               |
+| `fetch_queue`        |   ✓    |   ✓   |  ✓   |   ✓   | Drain held inbound from the durable queue (`limit` / `"all"`; `ack` peek vs consume). |
+| `retranscribe`       |   ✓    |   ✓   |  ✓   |   ✓   | Re-run saved audio through the durable STT scheduler; resolve a pending row or append a transcript-update row. |
+| `ask`                |   ✓    |   —   |  —   |   —   | Blocking human question (single/multi-select + Skip) via an inline keyboard.  |
+| `codex_forward`      |   —    |   ✓   |  —   |   —   | Env-gated debug tool: forward a payload into the Codex app-server (diagnostics). |
 
-Codex is at parity on the message/queue tools and lacks only `ask` (and `detach`, above). Grok matches that message/queue set **and** has `detach`; live inbound inject requires leader mode (`[cli] use_leader = true`) — see [`GROK-INJECT.md`](GROK-INJECT.md). The permission relay is Claude Code only.
+Codex is at parity on the message/queue tools and lacks only `ask` (and `detach`, above). Grok matches that message/queue set **and** has `detach`; live inbound inject requires leader mode (`[cli] use_leader = true`) — see [`GROK-INJECT.md`](GROK-INJECT.md). dcode matches that message/queue set and has `detach` and `topics`; live inbound needs `DEEPAGENTS_CODE_EXTERNAL_EVENT_SOCKET=1` at TUI launch (else pull-only). The permission relay is Claude Code only.
 
 ## Telegram bot commands (human-typed, broker-owned)
 
@@ -151,21 +151,26 @@ flag set.
 Claude Code exposes each verb as a plugin slash command under
 `plugins/c3/commands/`. Codex has **no plugin slash-command layer**, so its C3
 surface is the MCP tools (agent-invoked) plus the `c3-broker` subcommands run
-from any shell — the shared broker logic is identical either way.
+from any shell — the shared broker logic is identical either way. dcode has no
+plugin command component either, but its user skills ARE slash commands
+(`/skill:<name>`), so `c3-broker install-dcode` installs the three most-used
+verbs as `~/.deepagents/agent/skills/c3-{attach,fetch,topics}/SKILL.md`; the
+rest of the surface is the MCP tools plus `c3-broker` subcommands, as on Codex.
 
-| Verb            | Claude Code                                     | Codex                                   |
-|-----------------|-------------------------------------------------|-----------------------------------------|
-| `status`        | `/c3:status` (`commands/status.md`)             | `c3-broker status` (shell)              |
-| `topics`        | `/c3:topics` + `topics` MCP tool                | `topics` MCP tool · `c3-broker topics`  |
-| `build`         | `/c3:build` (`commands/build.md`)               | core `go install` package set (shell)   |
-| `setup`         | `/c3:setup` (`commands/setup.md`)               | `c3-broker setup` (TTY)                 |
-| `reload-config` | `/c3:reload-config`                             | `pkill -HUP c3-broker`                  |
-| `pair`          | `/c3:pair` (`commands/pair.md`)                 | `c3-broker pair …` (shell)              |
-| `ping`          | `/c3:ping` (`commands/ping.md`)                 | `c3-broker ping` (shell)                |
-| `sessions`      | `/c3:sessions` (`commands/sessions.md`)         | `c3-broker sessions` (shell)            |
-| `attach`        | `/c3:attach` + `attach` MCP tool                | `attach` MCP tool                       |
-| `detach`        | `/c3:detach` + `detach` MCP tool                | `detach` MCP tool                       |
-| `update`        | `/c3:update` (`commands/update.md`)             | `c3-broker update [--check]` (shell)    |
+| Verb            | Claude Code                                     | Codex                                   | dcode                                        |
+|-----------------|-------------------------------------------------|-----------------------------------------|----------------------------------------------|
+| `status`        | `/c3:status` (`commands/status.md`)             | `c3-broker status` (shell)              | `c3-broker status` (shell)                   |
+| `topics`        | `/c3:topics` + `topics` MCP tool                | `topics` MCP tool · `c3-broker topics`  | `/skill:c3-topics` + `topics` MCP tool       |
+| `build`         | `/c3:build` (`commands/build.md`)               | core `go install` package set (shell)   | core `go install` package set (shell)        |
+| `setup`         | `/c3:setup` (`commands/setup.md`)               | `c3-broker setup` (TTY)                 | `c3-broker setup` (TTY)                      |
+| `reload-config` | `/c3:reload-config`                             | `pkill -HUP c3-broker`                  | `pkill -HUP c3-broker`                       |
+| `pair`          | `/c3:pair` (`commands/pair.md`)                 | `c3-broker pair …` (shell)              | `c3-broker pair …` (shell)                   |
+| `ping`          | `/c3:ping` (`commands/ping.md`)                 | `c3-broker ping` (shell)                | `c3-broker ping` (shell)                     |
+| `sessions`      | `/c3:sessions` (`commands/sessions.md`)         | `c3-broker sessions` (shell)            | `c3-broker sessions` (shell)                 |
+| `attach`        | `/c3:attach` + `attach` MCP tool                | `attach` MCP tool                       | `/skill:c3-attach` + `attach` MCP tool       |
+| `detach`        | `/c3:detach` + `detach` MCP tool                | `detach` MCP tool                       | `detach` MCP tool                            |
+| `fetch-queue`   | `/c3:fetch-queue` / `/c3:fetch`                 | `fetch_queue` MCP tool                  | `/skill:c3-fetch` + `fetch_queue` MCP tool   |
+| `update`        | `/c3:update` (`commands/update.md`)             | `c3-broker update [--check]` (shell)    | `c3-broker update [--check]` (shell)         |
 
 When adding a new verb:
 1. Implement the shared interface (broker subcommand or MCP tool).

@@ -3,6 +3,30 @@
 Entries are newest first. This is the public architecture record: it records
 rulings and rationale, never private operational details.
 
+## D019: dcode adapter — live push via the external-event socket; slash commands as user skills
+
+**Date:** 2026-08-16
+
+**Decision:** Ship `c3-dcode-adapter` with live inbound over dcode's
+external-event Unix socket (`{"kind":"prompt"}` events; the `{"ok":true}` ack
+is the landing confirmation, and the broker ack follows only after it), plus
+`c3-broker install-dcode` merging `~/.deepagents/.mcp.json`. dcode's plugin
+system has no `commands` component, but its user skills ARE slash commands
+(`/skill:<name> [args]` with autocomplete), so `install-dcode` also installs
+`c3-attach`, `c3-fetch`, and `c3-topics` skills into
+`~/.deepagents/agent/skills/` — the three highest-value verbs for a host whose
+MCP tools are otherwise agent-invoked only. `recover_session` is skipped:
+dcode exposes no stable session id to MCP children; fail closed rather than
+guess.
+
+**Why:** dcode (deepagents-code) is a TUI-first agent harness whose only
+out-of-band ingress is the experimental event socket, gated behind
+`DEEPAGENTS_CODE_EXTERNAL_EVENT_SOCKET=1`. Prompt-kind events enter the
+conversation as literal user text (never parsed as a slash command), which
+matches C3's injection-safety requirement. Without the flag the adapter is
+honest about being pull-only (`cannot_render_channels: true`), like Cursor and
+Antigravity.
+
 ## D018: Cursor Agent CLI is poll-only (stock TUI over ACP inject)
 
 **Date:** 2026-07-31
@@ -126,7 +150,7 @@ system.
 
 **Structural choices baked in:**
 
-- One Go module and ten release binaries: `c3-broker`, six CLI adapters,
+- One Go module and eleven release binaries: `c3-broker`, seven CLI adapters,
   `codex`, `claude-shim`, and `migrate-legacy`.
 - Telegram channel implementation in Go; typed IPC structs and operations; and
   a value-typed route key.

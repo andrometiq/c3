@@ -31,8 +31,8 @@ C3 runs under three host environments. **Ask the user which one they want**
 | **CoWork** | Claude Desktop's **Cowork** tab (optionally on a scheduled timer) | §3B — same `install-desktop` | **poll-only** + optional hourly poll task |
 
 (Codex is an optional add-on to any of these — §5. **Grok Build**, the **Antigravity
-CLI**, and **Cursor Agent CLI** are also supported; they are one-command add-ons layered on
-the same binaries and config — §5B.)
+CLI**, **Cursor Agent CLI**, and **dcode** (deepagents-code) are also supported; they are
+one-command add-ons layered on the same binaries and config — §5B.)
 
 ### Platform support
 
@@ -61,9 +61,9 @@ the same binaries and config — §5B.)
 
 ## 1. Install the binaries (all environments)
 
-C3 ships ten binaries: `c3-broker`, `c3-claude-adapter`, `c3-codex-adapter`,
-`c3-grok-adapter`, `c3-agy-adapter`, `c3-cursor-adapter`, `c3-desktop-adapter`,
-`claude-shim`, `codex`, `migrate-legacy`. Prefer the prebuilt release tarball; build from
+C3 ships eleven binaries: `c3-broker`, `c3-claude-adapter`, `c3-codex-adapter`,
+`c3-grok-adapter`, `c3-agy-adapter`, `c3-cursor-adapter`, `c3-dcode-adapter`,
+`c3-desktop-adapter`, `claude-shim`, `codex`, `migrate-legacy`. Prefer the prebuilt release tarball; build from
 source only if there's no tarball for the user's platform. (**Windows:** a
 prebuilt tarball *is* published, but Windows is **beta** — see §7 for the
 Windows-specific steps and caveats.)
@@ -102,7 +102,7 @@ sha256sum -c SHA256SUMS.this || shasum -a 256 -c SHA256SUMS.this
 tar xzf "${pkg}.tar.gz"
 mkdir -p ~/.local/bin/plugins/c3/stt ~/.local/bin/plugins/c3-grok ~/.local/libexec/c3
 for b in c3-broker c3-claude-adapter c3-codex-adapter c3-grok-adapter \
-         c3-agy-adapter c3-cursor-adapter c3-desktop-adapter claude-shim migrate-legacy; do
+         c3-agy-adapter c3-cursor-adapter c3-dcode-adapter c3-desktop-adapter claude-shim migrate-legacy; do
   install -m 0755 "${pkg}/${b}" ~/.local/bin/
 done
 cp -R "${pkg}/plugins/c3/stt/." ~/.local/bin/plugins/c3/stt/
@@ -140,7 +140,7 @@ build:
 [ -d ~/.local/share/c3/.git ] && git -C ~/.local/share/c3 pull || git clone https://github.com/Andrometiq/c3 ~/.local/share/c3
 cd ~/.local/share/c3 && go install \
   ./cmd/c3-broker ./cmd/c3-claude-adapter ./cmd/c3-codex-adapter \
-  ./cmd/c3-grok-adapter ./cmd/c3-agy-adapter ./cmd/c3-cursor-adapter ./cmd/c3-desktop-adapter \
+  ./cmd/c3-grok-adapter ./cmd/c3-agy-adapter ./cmd/c3-cursor-adapter ./cmd/c3-dcode-adapter ./cmd/c3-desktop-adapter \
   ./cmd/claude-shim ./cmd/migrate-legacy
 ```
 
@@ -475,9 +475,9 @@ after `npm install -g @openai/codex` (or however they get Codex).
 (On Windows, Codex has no symlink/NVM equivalent yet and stays poll-only —
 tracked as a beta follow-up.)
 
-## 5B. (Optional) Grok Build / Antigravity / Cursor
+## 5B. (Optional) Grok Build / Antigravity / Cursor / dcode
 
-All three are add-ons to the install above — same binaries (§1), same `mappings.json` (§2), one
+All four are add-ons to the install above — same binaries (§1), same `mappings.json` (§2), one
 extra command each. None replaces a §3 host; you can run them alongside one.
 
 **Grok Build:**
@@ -518,6 +518,22 @@ has no idle-wake / channel push, so inbound is **poll-only** — call `fetch_que
 `/fetch` / `/c3-fetch` (or the MCP prompt `fetch-queue`). Do not point Cursor at
 `c3-claude-adapter` (black-hole risk). After install: `agent mcp enable c3` if prompted, then
 `agent` and `attach`.
+
+**dcode (deepagents-code):**
+
+```bash
+c3-broker install-dcode
+```
+
+Merges `mcpServers.c3` → `c3-dcode-adapter` into `~/.deepagents/.mcp.json` (preserves other
+servers) and installs `/skill:c3-attach`, `/skill:c3-fetch`, and `/skill:c3-topics` slash
+commands as dcode user skills (`~/.deepagents/agent/skills/` — dcode has no plugin command
+layer, so user skills are its slash-command surface). Live inbound needs the TUI launched
+with `DEEPAGENTS_CODE_EXTERNAL_EVENT_SOCKET=1`; the adapter then injects Telegram messages
+into the conversation as literal user turns over dcode's external-event socket. Without the
+flag inbound is **poll-only** — `fetch_queue` or `/skill:c3-fetch`. **Linux only for live
+push**: the adapter finds the TUI's event socket by walking `/proc` ancestors, so on macOS
+(without `/proc`) it stays pull-only even with the flag set.
 
 ## 6. (Optional, Linux only) Supervise the broker with systemd
 
@@ -567,7 +583,7 @@ Apply these instead of the Linux-only steps referenced above:
 
 - **§1 binaries — prebuilt tarball or source.** The release publishes
   `c3_<version>_windows_amd64.tar.gz` and `..._windows_arm64.tar.gz`; the
-  binaries inside carry the `.exe` suffix. Extract it and put the eight core
+  binaries inside carry the `.exe` suffix. Extract it and put the nine core
   `.exe` files from §1 on your PATH; leave `codex.exe` out unless and until the
   Windows Codex integration graduates from its current beta limitation (the §1
   verify loop and every `c3-broker …` command work the same under Git Bash /
@@ -576,7 +592,7 @@ Apply these instead of the Linux-only steps referenced above:
   "beta" means here. To build them yourself instead, install **Go ≥1.25** (the
   portable zip needs no admin), then `git clone https://github.com/Andrometiq/c3`
   (or `git pull` if you already have it) into a durable dir and run §1's same
-  eight-package `go install` command.
+  nine-package `go install` command.
 - **§1 PATH — edit the *User* PATH; there is no shell rc.** Two safe ways:
 
   **GUI (recommended).** Start → search "Edit environment variables for your
@@ -636,7 +652,7 @@ Apply these instead of the Linux-only steps referenced above:
   Windows: replacing some live `.exe` files can leave a mixed-version install.
   Fully quit C3 / Claude Desktop / the coding CLI, then re-extract the newer
   release tarball over the installed binaries. A source install can instead use
-  `git pull` → §1's eight-package `go install`, followed by a full restart.
+  `git pull` → §1's nine-package `go install`, followed by a full restart.
 - **Skip §6 (systemd).** There is no systemd on Windows; the default on-demand
   broker spawn is what you get.
 

@@ -1,6 +1,6 @@
 # Writing C3 CLI Adapters
 
-A C3 adapter is the bridge between the broker and a specific CLI's MCP-server expectations. The built-in adapters are `c3-claude-adapter` (Claude Code), `c3-codex-adapter` (Codex), `c3-grok-adapter` (Grok Build), `c3-desktop-adapter` (Claude Desktop, poll-only — see [`DESKTOP.md`](DESKTOP.md)), `c3-agy-adapter` (Antigravity, poll-only), and `c3-cursor-adapter` (Cursor Agent CLI, poll-only). If you want to integrate C3 with a CLI we don't yet support — Aider, plain shell, your own thing — write an adapter.
+A C3 adapter is the bridge between the broker and a specific CLI's MCP-server expectations. The built-in adapters are `c3-claude-adapter` (Claude Code), `c3-codex-adapter` (Codex), `c3-grok-adapter` (Grok Build), `c3-desktop-adapter` (Claude Desktop, poll-only — see [`DESKTOP.md`](DESKTOP.md)), `c3-agy-adapter` (Antigravity, poll-only), `c3-cursor-adapter` (Cursor Agent CLI, poll-only), and `c3-dcode-adapter` (dcode, live-push via the external-event socket). If you want to integrate C3 with a CLI we don't yet support — Aider, plain shell, your own thing — write an adapter.
 
 Adapters are not channels. Channels move bytes between users and the broker over the network (Telegram, web, voice). Adapters move messages between the broker and a single CLI process over MCP stdio. The two never see each other directly — both talk to the broker.
 
@@ -552,7 +552,7 @@ Half the reference tool set never touches `tool_call`. Get this wrong and you ge
 | `fetch_queue` | direct **`fetch_queue`** op |
 | `retranscribe` | direct **`retranscribe`** op |
 
-The six dedicated-op tools are adapter-local because the *wording* of what the user sees differs per CLI — Claude Code natively renders `<channel>` blocks, Codex sees `notifications/message` log entries — and because several of them (attach proposals, the ask round-trip) need adapter-side state.
+The dedicated-op tools are adapter-local because the *wording* of what the user sees differs per CLI — Claude Code natively renders `<channel>` blocks, Codex sees `notifications/message` log entries — and because several of them (attach proposals, the ask round-trip) need adapter-side state.
 
 Tool names are **unprefixed** across all adapters: the MCP server name provides the namespace, so per-tool prefixing is redundant.
 
@@ -572,6 +572,8 @@ The broker emits a normalised message; converting it to what the host can ingest
 **Grok Build** has no channel-notification dialect. Live inject **requires leader mode** (`[cli] use_leader = true`). The Grok adapter registers as a client on the leader socket and issues ACP `session/prompt` against the TUI session id (see [`GROK-INJECT.md`](GROK-INJECT.md)). Without a leader socket, inbound stays in the durable queue for `fetch_queue`.
 
 **Claude Desktop** has no way for an MCP server to push into a chat at all, so `c3-desktop-adapter` is **pull-only**: inbound never surfaces on its own — it stays in the durable queue and the user drains it by asking Claude to call `fetch_queue`. See [`DESKTOP.md`](DESKTOP.md). **Antigravity** (`c3-agy-adapter`) and **Cursor Agent CLI** (`c3-cursor-adapter`) are pull-only for the same class of reason: the host has no channel push that starts a turn (and Cursor additionally has no idle-wake API into the stock interactive TUI).
+
+**dcode** (`c3-dcode-adapter`) has a real out-of-band push: when the TUI is launched with `DEEPAGENTS_CODE_EXTERNAL_EVENT_SOCKET=1`, it listens on `<runtime>/deepagents/events-<tui-pid>.sock` and accepts newline-JSON events; a `{"kind":"prompt"}` event enters the conversation as literal user text (mode "normal" — never parsed as a slash/shell command), and the `{"ok":true}` reply line is the landing confirmation. The adapter binds the socket by walking `/proc` ancestors (dcode spawns MCP servers with a sanitized env, so `XDG_RUNTIME_DIR` is not inherited) and acks the broker only after that confirmation, with `count=covered` and the `delivery_token` echoed. Without the flag the adapter reports `cannot_render_channels: true` and falls back to `fetch_queue`. `recover_session` is skipped: dcode exposes no stable session id to MCP children, and the rule is fail-closed rather than guess.
 
 Held messages — anything that arrived while no session was attached — are **not** buffered in the adapter. They live in the broker's durable per-route queue and the agent drains them with `fetch_queue`.
 
@@ -600,7 +602,7 @@ A built-in adapter binary lives at `cmd/<cli>-adapter/main.go` and is installed 
 
 If your target CLI has a plugin marketplace, ship the adapter as a thin manifest referencing the binary. If it doesn't, document the manual MCP server registration steps in your adapter's `SETUP.md`.
 
-**Budget for real work.** The six built-in adapters are, whole-package and excluding tests: Claude Code ~3.0k LOC, Codex ~2.4k, Grok Build ~3.1k, Claude Desktop ~2.4k, Antigravity ~1.4k, Cursor ~1.7k — each reimplementing the handshake, attach, tool forwarding, reconnect, delivery acknowledgement, and host-specific inbound translation. This is the hardest of C3's three extension seams.
+**Budget for real work.** The built-in adapters are, whole-package and excluding tests: Claude Code ~3.0k LOC, Codex ~2.4k, Grok Build ~3.1k, Claude Desktop ~2.4k, Antigravity ~1.4k, Cursor ~1.7k, dcode ~1.6k — each reimplementing the handshake, attach, tool forwarding, reconnect, delivery acknowledgement, and host-specific inbound translation. This is the hardest of C3's three extension seams.
 
 ## Adding a new adapter — checklist
 

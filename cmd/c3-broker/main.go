@@ -144,6 +144,12 @@ func main() {
 				os.Exit(exitConfig)
 			}
 			return
+		case "install-dcode":
+			if err := runInstallDcode(os.Args[2:]); err != nil {
+				fmt.Fprintf(os.Stderr, "c3-broker install-dcode: %v\n", err)
+				os.Exit(exitConfig)
+			}
+			return
 		case "install-desktop":
 			if err := runInstallDesktop(os.Args[2:]); err != nil {
 				fmt.Fprintf(os.Stderr, "c3-broker install-desktop: %v\n", err)
@@ -221,6 +227,12 @@ Usage:
                         Poll-only — Cursor has no idle-wake / channel push; use
                         fetch_queue for inbound. Do not use c3-claude-adapter
                         under Cursor (black-hole risk).
+  c3-broker install-dcode
+                        Register the C3 adapter with dcode (deepagents-code):
+                        merge mcpServers.c3 → c3-dcode-adapter into
+                        ~/.deepagents/.mcp.json. Live inbound when dcode runs
+                        with DEEPAGENTS_CODE_EXTERNAL_EVENT_SOCKET=1; otherwise
+                        pull-only via fetch_queue.
   c3-broker install-desktop [--config PATH]
                         Register the C3 adapter with Claude Desktop: merge an
                         mcpServers.c3 entry into claude_desktop_config.json at

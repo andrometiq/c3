@@ -270,8 +270,8 @@ has no release identity to compare against.)
 **Manual update (one command).** Run `/c3:update` in Claude Code, or `c3-broker
 update` from any shell. It queries the latest release, downloads the tarball for
 your platform, verifies it against the release's `SHA256SUMS`, and validates all
-nine shipped binaries plus the complete, non-empty STT handler, runner,
-vocabulary, and provider layout. It replaces the eight core binaries and
+eleven shipped binaries plus the complete, non-empty STT handler, runner,
+vocabulary, and provider layout. It replaces the nine core binaries and
 bundled STT runtime in place, and refreshes `codex` only if that destination is
 already a verified C3 launcher; an absent or unrelated `codex` is never created
 or overwritten. Nothing is replaced before the whole download and runtime

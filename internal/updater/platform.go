@@ -6,8 +6,8 @@ import (
 	"strings"
 )
 
-// BinaryNames are the ten runnable binaries a release tarball carries,
-// WITHOUT a platform extension. Update validates all ten, but only installs
+// BinaryNames are the eleven runnable binaries a release tarball carries,
+// WITHOUT a platform extension. Update validates all of them, but only installs
 // the opt-in `codex` launcher when a verified C3 launcher is already present at
 // the destination. MUST stay in sync with
 // scripts/package.sh's BINS list — if package.sh adds/removes a binary, update
@@ -21,6 +21,7 @@ var BinaryNames = []string{
 	"c3-grok-adapter",
 	"c3-agy-adapter",
 	"c3-cursor-adapter",
+	"c3-dcode-adapter",
 	"c3-desktop-adapter",
 	"codex",
 	"claude-shim",

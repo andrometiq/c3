@@ -22,7 +22,7 @@ OUTDIR="${4:?usage: package.sh <goos> <goarch> <version> <outdir>}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
 # Every main package under cmd/ that ships as a runnable binary.
-BINS="c3-broker c3-claude-adapter c3-codex-adapter c3-grok-adapter c3-agy-adapter c3-cursor-adapter c3-desktop-adapter codex claude-shim migrate-legacy"
+BINS="c3-broker c3-claude-adapter c3-codex-adapter c3-grok-adapter c3-agy-adapter c3-cursor-adapter c3-dcode-adapter c3-desktop-adapter codex claude-shim migrate-legacy"
 
 # Go package path whose Version var the auto-updater reads; injected at build
 # time via -ldflags -X so a release binary knows its own version (dev builds,
