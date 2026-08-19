@@ -2,14 +2,14 @@
 
 Requires: OPENROUTER_API_KEY env var (or in ~/.claude/stt.env)
 
-MODEL SUPERSEDED 2026-07-26. This provider shipped pinned to
-`google/gemini-3-flash-preview` (published 2025-12-17). Google has since
-released two newer audio-capable Flash generations; OpenRouter's live model
-index on 2026-07-26 lists `google/gemini-3.6-flash` (published 2026-07-21) as
-the current one, so that is now the default. The FILE NAME is deliberately
-unchanged: the filename is the provider's identity in every chain string and
-in existing ~/.claude/stt.env files, and renaming it would silently drop the
-provider out of those chains.
+MODEL FOLLOWS THE CURRENT AUDIO-CAPABLE FLASH. This provider shipped pinned to
+`google/gemini-3-flash-preview` (published 2025-12-17), moved to
+`google/gemini-3.6-flash` on 2026-07-26, and to `google/gemini-3.7-flash`
+(published 2026-08-13) on 2026-08-19 after a 20-sample bake-off showed no
+regression on any catalogued failure axis at half the list price. The FILE
+NAME is deliberately unchanged: the filename is the provider's identity in
+every chain string and in existing ~/.claude/stt.env files, and renaming it
+would silently drop the provider out of those chains.
 
 Override the model without touching source:
     C3_STT_GEMINI_MODEL=google/gemini-3.1-pro-preview
@@ -20,18 +20,18 @@ with the bake-off harness before paying for it.)
 import os, json, base64, urllib.request, urllib.error
 
 # Current audio-capable Gemini Flash on OpenRouter (verified against
-# https://openrouter.ai/api/v1/models on 2026-07-26: created 2026-07-21,
+# https://openrouter.ai/api/v1/models on 2026-08-19: created 2026-08-13,
 # input_modalities includes "audio").
-DEFAULT_MODEL = "google/gemini-3.6-flash"
+DEFAULT_MODEL = "google/gemini-3.7-flash"
 MODEL_ID = os.environ.get("C3_STT_GEMINI_MODEL", "").strip() or DEFAULT_MODEL
 
 # All-in estimate, USD per minute of audio, for the bake-off cost column.
-# OpenRouter list price for google/gemini-3.6-flash on 2026-07-26:
-# $1.50/M input tokens, $7.50/M output tokens. Google bills audio at 32 tokens
-# per second = 1,920 input tokens/min -> $0.00288/min in. Transcript output at
-# ~150 wpm is ~200 tokens/min -> $0.0015/min out. Total ~= $0.0043/min
-# ($0.26/hr). Re-check when the model or its price changes.
-COST_PER_MINUTE_USD = 0.0043
+# OpenRouter list price for google/gemini-3.7-flash on 2026-08-19:
+# $0.375/M input tokens, $1.875/M output tokens. Google bills audio at 32
+# tokens per second = 1,920 input tokens/min -> $0.00072/min in. Transcript
+# output at ~150 wpm is ~200 tokens/min -> $0.000375/min out. Total ~=
+# $0.0011/min ($0.065/hr). Re-check when the model or its price changes.
+COST_PER_MINUTE_USD = 0.0011
 
 # --- Load API key ---
 _OR_KEY = None

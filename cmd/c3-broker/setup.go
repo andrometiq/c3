@@ -1772,9 +1772,11 @@ const sttNotes = `Notes:
 // so collects API keys for the bundled provider chain and writes a 0600
 // env file at ~/.claude/stt.env that the broker's STT subprocess inherits.
 //
-// The default chain is Gemini 3 Flash (via OpenRouter) → Sarvam Saaras v3.
-// Gemini 3 Flash (google/gemini-3-flash-preview) is called out because it
-// handles multilingual audio and mid-sentence language switches well.
+// The default chain is Gemini Flash (via OpenRouter) → Sarvam Saaras v3.
+// Gemini Flash is called out because it handles multilingual audio and
+// mid-sentence language switches well. The exact model id is owned by the
+// provider (stt-pkg/providers/gemini-3-flash-openrouter.py) — don't repeat
+// it here, it drifts.
 //
 // Returns (written, err). written=true iff the env file was created with
 // at least one key. The caller uses this to decide whether to print a
@@ -1783,9 +1785,9 @@ func promptSTTSetup(r *bufio.Reader) (bool, error) {
 	fmt.Println()
 	fmt.Println("Voice transcription (optional)")
 	fmt.Println("Voice notes from Telegram are transcribed and handed to the CLI as text.")
-	fmt.Println("Default provider chain: Gemini 3 Flash → Sarvam Saaras v3. Gemini 3 Flash")
-	fmt.Println("(google/gemini-3-flash-preview via OpenRouter) handles multilingual audio")
-	fmt.Println("and mid-sentence language switches well.")
+	fmt.Println("Default provider chain: Gemini Flash → Sarvam Saaras v3. Gemini Flash")
+	fmt.Println("(the current audio-capable Flash via OpenRouter) handles multilingual")
+	fmt.Println("audio and mid-sentence language switches well.")
 	fmt.Println()
 	fmt.Print("Set up STT? [Y/n]: ")
 	yes := readBoolDefault(r, true)
