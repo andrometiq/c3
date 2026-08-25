@@ -78,7 +78,6 @@ The first is cleaner; the second is far easier to reason about when it misbehave
 - External (non-Go) loadable plugins.
 - Broker-side `/list` and `/route` commands.
 - Monitoring dashboard, persistent message history, STT latency instrumentation.
-- Revive the bundled Gemini STT provider with a working key, or redocument the chain on the Sarvam default — the docs still describe a Gemini-first chain.
 - Async-dispatch more non-critical broker sends (as the voice-readback echo already does), preserving strict per-topic ordering.
 - Delivery-contingent consume for `fetch_queue` — the live-push half now consumes by message id (the ack removes exactly the lines its push covered), but the fetch path still commits its consume before the response is known to have been received, so an adapter that abandons a fetch can have the batch consumed anyway. Close that window the same way: peek, respond, then an explicit id-targeted ack. Needed by the pooled-queue work regardless.
 - Attach-replay refinements: gate `disambiguate_dm` on `Replay`, and honor `group` in the step-2 name lookup, so a replayed DM or non-default-group attach restores cleanly instead of falling to a discarded proposal. This also covers a case the steal-sanitize introduced: a DM attach that steered past disambiguation with `steal=true` is remembered as `{Target:"dm", Steal:false}` (the one-shot steal is stripped), so a fresh-broker replay lands back on the `disambiguate_dm` proposal — discarded → detached (the auto-recover net usually restores it) — which the `Replay` gate would fix.
