@@ -226,6 +226,45 @@ func TestRunSessionHook_WritesHandoff(t *testing.T) {
 	}
 }
 
+// TestRunSessionHook_WritesHandoffUnderBothInstanceAndStableKeys covers the
+// 2026-08-25 auto-reattach regression: Claude Code ≥2.1.245 exports the STABLE
+// (resumed) session id — not the ephemeral instance id — to MCP servers as
+// CLAUDE_CODE_SESSION_ID, so the adapter polls for <stable>.json while the hook,
+// keyed on CLAUDE_ENV_FILE, only ever wrote <instance>.json. The hook must now
+// write BOTH keys so recovery fires whichever id the host exports.
+func TestRunSessionHook_WritesHandoffUnderBothInstanceAndStableKeys(t *testing.T) {
+	_ = setupTestEnv(t)
+	envFile := filepath.Join(t.TempDir(), "ephem-instance", "sessionstart-hook-1.sh")
+	t.Setenv("CLAUDE_ENV_FILE", envFile)
+
+	input := `{"session_id":"stable-sess","cwd":"/home/k/proj","source":"resume","hook_event_name":"SessionStart"}`
+	withStdin(t, input, func() {
+		if err := runSessionHook(); err != nil {
+			t.Fatalf("runSessionHook returned error (must be nil): %v", err)
+		}
+	})
+
+	// Old convention (env == ephemeral id): <instance>.json resolves.
+	byInstance, ok := sessionhandoff.Read("ephem-instance")
+	if !ok || byInstance.StableSessionID != "stable-sess" {
+		t.Fatalf("instance-keyed handoff missing/wrong: ok=%v entry=%+v", ok, byInstance)
+	}
+	// New convention (env == stable id): <stable>.json must also resolve, to the
+	// same stable id (a self-referential, terminal handoff).
+	byStable, ok := sessionhandoff.Read("stable-sess")
+	if !ok || byStable.StableSessionID != "stable-sess" {
+		t.Fatalf("stable-keyed handoff missing/wrong: ok=%v entry=%+v", ok, byStable)
+	}
+	if byInstance.CWD != "/home/k/proj" || byStable.CWD != "/home/k/proj" {
+		t.Fatalf("handoff CWDs = %q / %q, want /home/k/proj", byInstance.CWD, byStable.CWD)
+	}
+	// Both aliases share one timestamp so the terminal-handoff walk terminates on
+	// the not-newer guard rather than chasing between them.
+	if byInstance.UnixNano != byStable.UnixNano {
+		t.Fatalf("aliases must share one UnixNano: instance=%d stable=%d", byInstance.UnixNano, byStable.UnixNano)
+	}
+}
+
 func TestRunSessionHook_EmptyEnvFileNoOp(t *testing.T) {
 	state := setupTestEnv(t)
 	t.Setenv("CLAUDE_ENV_FILE", "") // no instance id derivable

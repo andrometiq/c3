@@ -185,6 +185,44 @@ func TestPing_PIDMatch_NoLiveStubReturnsNotAttached(t *testing.T) {
 	}
 }
 
+// TestPing_PIDMatch_UnattachedSessionDoesNotImpersonateNeighbor covers the
+// 2026-08-25 report: when auto-reattach fails, /c3:ping from the affected
+// (unattached) session must say "not attached" — never fall through to the CWD
+// tier and ping a DIFFERENT session that merely shares the launch dir. The PID
+// walk positively identifies this session's own (unattached) stub, so ownership
+// is known; impersonating a neighbor is the exact misattribution to prevent.
+func TestPing_PIDMatch_UnattachedSessionDoesNotImpersonateNeighbor(t *testing.T) {
+	mf := mfWithTelegram()
+	fc := &fakeChannel{}
+	b := brokerWithChannel(t, mf, fc)
+	defer b.Shutdown()
+
+	// This session's own stub: PID 100 at "/p", but UNATTACHED (never claimed).
+	_ = b.Stubs.Register("claude", 100, "/p", nil)
+
+	// A neighbor at the SAME launch dir "/p" that IS attached to "neighbor".
+	neighbor := b.Stubs.Register("claude", 200, "/p", nil)
+	tid := int64(412)
+	key := MakeRouteKey("telegram", -200, &tid)
+	if !b.tryClaim(nil, neighbor, key, "neighbor", false, false) {
+		t.Fatal("neighbor stub: claim failed")
+	}
+	waitForReplies(fc, 1) // neighbor's welcome
+	beforePing := len(fc.sendRepliesSnapshot())
+
+	// Ping carries THIS session's PID (100) and the shared launch dir "/p".
+	resp := pingOverIPC(t, b, 100, "/p")
+	if resp.OK {
+		t.Fatalf("ping must not succeed for an unattached PID-matched session; got %+v", resp)
+	}
+	if !strings.Contains(strings.ToLower(resp.Err), "not attached") {
+		t.Errorf("ping Err should say 'not attached', got %q", resp.Err)
+	}
+	if got := len(fc.sendRepliesSnapshot()); got != beforePing {
+		t.Errorf("ping must not SendReply to the neighbor; got %d extra send(s)", got-beforePing)
+	}
+}
+
 // TestPing_PIDMatch_TieHighestConnIDWins preserves the determinism
 // guarantee in the PID-match phase: if two live stubs share a PID (e.g. a
 // reconnect re-registered the same logical session under a new ConnID

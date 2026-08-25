@@ -112,13 +112,41 @@ func runSessionHook() error {
 		return nil
 	}
 
-	if err := sessionhandoff.Write(instanceID, sessionhandoff.Entry{
+	// One entry, written under BOTH keys the adapter might poll for. The adapter
+	// derives its lookup key from CLAUDE_CODE_SESSION_ID (instanceIDFromEnv):
+	//   - Claude Code ≤2.1.241 exports the EPHEMERAL per-MCP-spawn id there — the
+	//     same id we get from CLAUDE_ENV_FILE (instanceID). <instance>.json matches.
+	//   - Claude Code ≥2.1.245 exports the STABLE (resumed) session id there
+	//     instead, so the adapter polls <stable>.json. Without the alias below,
+	//     that file never existed and auto-reattach silently never fired.
+	// Writing both keys makes recovery robust to either host convention. The two
+	// aliases SHARE one UnixNano so the adapter's terminal-handoff walk terminates
+	// on its not-newer guard instead of chasing between them; <stable>.json is
+	// self-referential (StableSessionID == its own filename) and resolveTerminalHandoff
+	// treats that as terminal. Each write is fail-closed (Path rejects an unsafe id);
+	// we log a per-key failure but succeed as long as at least one key landed.
+	entry := sessionhandoff.Entry{
 		StableSessionID: in.SessionID,
 		CWD:             in.CWD,
 		Source:          in.Source,
 		UnixNano:        time.Now().UnixNano(),
-	}); err != nil {
-		fmt.Fprintf(os.Stderr, "c3-broker session-hook: write handoff: %v (ignoring)\n", err)
+	}
+	wroteAny := false
+	if err := sessionhandoff.Write(instanceID, entry); err != nil {
+		fmt.Fprintf(os.Stderr, "c3-broker session-hook: write handoff (instance key %q): %v (ignoring)\n", instanceID, err)
+	} else {
+		wroteAny = true
+	}
+	// Skip the alias when the two ids are identical (the Grok branch above already
+	// keyed by the stable id) so we never write the same file twice.
+	if in.SessionID != instanceID {
+		if err := sessionhandoff.Write(in.SessionID, entry); err != nil {
+			fmt.Fprintf(os.Stderr, "c3-broker session-hook: write handoff (stable key %q): %v (ignoring)\n", in.SessionID, err)
+		} else {
+			wroteAny = true
+		}
+	}
+	if !wroteAny {
 		return nil
 	}
 

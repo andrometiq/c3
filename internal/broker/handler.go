@@ -941,13 +941,19 @@ func (b *Broker) handlePingThisSession(conn *ipc.Conn, raw []byte) {
 	var target *Stub
 	candidateCount := 0
 	matchRule := "none"
+	pidIdentifiedUnattached := false
 	if req.PID != 0 {
 		for _, s := range b.Stubs.Snapshot() {
-			if s.CurrentRoute() == nil {
-				continue
-			}
 			rule, ok := b.stubMatchesPID(s, req.PID)
 			if !ok {
+				continue
+			}
+			// A PID / CLI-ancestor match IS this session — even if it never
+			// attached (e.g. auto-reattach-on-resume failed). Note it so we can
+			// report "not attached" instead of falling through to the CWD tier,
+			// which would impersonate a neighbor sharing the launch dir.
+			if s.CurrentRoute() == nil {
+				pidIdentifiedUnattached = true
 				continue
 			}
 			candidateCount++
@@ -957,7 +963,18 @@ func (b *Broker) handlePingThisSession(conn *ipc.Conn, raw []byte) {
 			}
 		}
 	}
-	// Tertiary CWD fallback: no PID hint, or PID hint matched nothing.
+	// The PID walk positively identified THIS session but it isn't attached: say
+	// so, and never reach the CWD tier. Reporting a neighbor's topic as "this is
+	// me" is the exact misattribution /c3:ping exists to prevent (2026-08-25).
+	if target == nil && pidIdentifiedUnattached {
+		_ = conn.WriteJSON(ipc.PingThisSessionReplyMsg{
+			Op: ipc.OpPingThisSessionReply, OK: false,
+			Err: "this session is not attached; use /c3:attach first",
+		})
+		return
+	}
+	// Tertiary CWD fallback: only when the PID hint was absent, or matched nothing
+	// at all (attached or not) — never after a positive but unattached PID match.
 	if target == nil {
 		for _, s := range b.Stubs.Snapshot() {
 			if s.CurrentRoute() == nil {

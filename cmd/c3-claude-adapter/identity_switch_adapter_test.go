@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net"
 	"strings"
 	"sync"
@@ -95,6 +97,57 @@ func TestResolveTerminalHandoff(t *testing.T) {
 			t.Fatalf("single-hop handoff behavior changed: ok=%v entry=%+v", ok, got)
 		}
 	})
+
+	// A self-referential handoff (StableSessionID == its own filename) is
+	// terminal by construction and EXPECTED, not a cycle: the SessionStart hook
+	// writes a <stable-id>.json alias for hosts that export the stable id as
+	// CLAUDE_CODE_SESSION_ID (Claude Code ≥2.1.245), and the Grok handoff has
+	// always been keyed by its own stable id. It must resolve to itself WITHOUT
+	// tripping the "cycle" warning that would otherwise fire on every such resume.
+	t.Run("self-referential handoff is terminal without a cycle warning", func(t *testing.T) {
+		t.Setenv("XDG_STATE_HOME", t.TempDir())
+		writeIdentityHandoff(t, "stable-self", "stable-self", 10)
+
+		var buf bytes.Buffer
+		orig := log.Writer()
+		log.SetOutput(&buf)
+		defer log.SetOutput(orig)
+
+		got, ok := resolveTerminalHandoff("stable-self")
+		if !ok || got.StableSessionID != "stable-self" || got.UnixNano != 10 {
+			t.Fatalf("self-referential handoff not returned as terminal: ok=%v entry=%+v", ok, got)
+		}
+		if strings.Contains(buf.String(), "cycle") {
+			t.Errorf("self-referential handoff logged a spurious cycle warning: %q", buf.String())
+		}
+	})
+}
+
+// TestCheckForIdentitySwitch_SameIdNewerAliasAdvancesWatermarkNoSwitch pins the
+// interaction between the new self-referential <stable>.json alias and the
+// identity-switch probe. A compact (or a stale prior-generation alias consumed at
+// resume) rewrites <stable>.json newer with the SAME stable id; that must NOT be
+// read as an identity switch, and the probe must advance its high-water mark so it
+// stops re-reading + re-resolving the alias on every subsequent tools/call.
+func TestCheckForIdentitySwitch_SameIdNewerAliasAdvancesWatermarkNoSwitch(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	a := newAdapter()
+	establishSettledIdentity(a, sessionhandoff.Entry{
+		StableSessionID: "sess-x", CWD: "/projects/sess-x", UnixNano: 10,
+	})
+
+	// A compact rewrites the self-alias newer, same stable id.
+	writeIdentityHandoff(t, "sess-x", "sess-x", 20)
+
+	a.checkForIdentitySwitch(context.Background())
+
+	current, settled := a.currentStableIdentity()
+	if !settled || current.StableSessionID != "sess-x" {
+		t.Fatalf("same-id newer alias must not switch identity: settled=%v current=%+v", settled, current)
+	}
+	if current.UnixNano != 20 {
+		t.Fatalf("watermark not advanced: current.UnixNano=%d, want 20 (else every later probe re-reads the alias)", current.UnixNano)
+	}
 }
 
 func establishSettledIdentity(a *adapter, entry sessionhandoff.Entry) {

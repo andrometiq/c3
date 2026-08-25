@@ -2233,10 +2233,43 @@ const (
 // so one read is not necessarily terminal. The strict timestamp increase
 // rejects stale cross-generation files. Cycle detection and a depth cap keep a
 // corrupt handoff graph bounded; both fail closed at the newest accepted entry.
+// handoffDirSummary returns a short, bounded description of the session-handoff
+// directory for the watch-expiry diagnostic — just the entry count, so a key
+// mismatch (the host's CLAUDE_CODE_SESSION_ID vs the hook's handoff filename) is
+// visible in the log rather than masquerading as "not a resumed session". Never
+// errors: any problem collapses to a plain string.
+func handoffDirSummary() string {
+	dir, err := sessionhandoff.Dir()
+	if err != nil {
+		return "handoff dir unavailable"
+	}
+	ents, err := os.ReadDir(dir)
+	if err != nil {
+		return "handoff dir empty or unreadable"
+	}
+	n := 0
+	for _, e := range ents {
+		if !e.IsDir() && filepath.Ext(e.Name()) == ".json" {
+			n++
+		}
+	}
+	return fmt.Sprintf("handoff dir has %d handoff entries", n)
+}
+
 func resolveTerminalHandoff(inst string) (sessionhandoff.Entry, bool) {
 	entry, ok := sessionhandoff.Read(inst)
 	if !ok {
 		return sessionhandoff.Entry{}, false
+	}
+
+	// A self-referential handoff — StableSessionID == its own filename — is
+	// terminal by construction and EXPECTED, not a cycle: the SessionStart hook
+	// writes a <stable-id>.json alias so auto-reattach works when the host exports
+	// the stable id as CLAUDE_CODE_SESSION_ID (Claude Code ≥2.1.245), and the Grok
+	// handoff has always been keyed by its own stable id. Return it directly so the
+	// chain walk below never logs a spurious "cycle" for the common resume case.
+	if entry.StableSessionID == inst {
+		return entry, true
 	}
 
 	visited := map[string]struct{}{inst: {}}
@@ -2283,6 +2316,20 @@ func (a *adapter) setCurrentStableIdentity(entry sessionhandoff.Entry) {
 	a.idmu.Unlock()
 }
 
+// advanceIdentityWatermark bumps the settled identity's handoff timestamp to a
+// newer write for the SAME stable id (e.g. a compact rewriting the self-referential
+// <stable>.json alias), so checkForIdentitySwitch's next probe short-circuits at its
+// not-newer guard instead of re-reading and re-resolving the alias on every
+// tools/call. A no-op if the identity changed underneath us or seen isn't newer, so
+// it can never stomp a concurrent genuine switch.
+func (a *adapter) advanceIdentityWatermark(stableID string, seen int64) {
+	a.idmu.Lock()
+	defer a.idmu.Unlock()
+	if a.currentStableID == stableID && a.currentHandoffEntry.UnixNano < seen {
+		a.currentHandoffEntry.UnixNano = seen
+	}
+}
+
 // checkForIdentitySwitch performs the cheap per-tools-call probe: exactly one
 // stat of <currentStableID>.json. Only a hit is read, required to be newer than
 // the entry that established the settled identity, and chain-walked to its
@@ -2305,6 +2352,14 @@ func (a *adapter) checkForIdentitySwitch(ctx context.Context) {
 	}
 	terminal, ok := resolveTerminalHandoff(current.StableSessionID)
 	if !ok || terminal.StableSessionID == current.StableSessionID {
+		// Same identity, just a newer handoff for it (e.g. a compact rewrote the
+		// self-referential <stable>.json alias, or a stale prior-generation alias
+		// was consumed at resume). Advance the high-water mark so the next probe
+		// early-returns at the not-newer guard above instead of re-reading and
+		// re-resolving the alias on every tools/call for the rest of the session.
+		if ok {
+			a.advanceIdentityWatermark(current.StableSessionID, first.UnixNano)
+		}
 		return
 	}
 	a.beginIdentitySwitch(ctx, current.StableSessionID, terminal)
@@ -2466,6 +2521,7 @@ func (a *adapter) recoverSessionOnResume(ctx context.Context) {
 func (a *adapter) watchForHandoff(ctx context.Context, inst string, interval, budget time.Duration) (sessionhandoff.Entry, bool) {
 	start := time.Now()
 	deadline := start.Add(budget)
+	log.Printf("recover-session: watching for handoff key %q (from CLAUDE_CODE_SESSION_ID) for up to %s", inst, budget)
 	for {
 		if e, ok := resolveTerminalHandoff(inst); ok {
 			if elapsed := time.Since(start); elapsed > recoverLateThreshold {
@@ -2475,7 +2531,14 @@ func (a *adapter) watchForHandoff(ctx context.Context, inst string, interval, bu
 			return e, true
 		}
 		if !time.Now().Before(deadline) {
-			log.Printf("recover-session: no handoff within %s — not a resumed session (or the SessionStart hook never ran)", budget)
+			// Name the key AND the dir state: a resumed session whose host exports a
+			// CLAUDE_CODE_SESSION_ID that no longer matches the hook's handoff filename
+			// would otherwise look identical to a genuine non-resume here. The hook now
+			// writes both the ephemeral and stable keys, so this should be reachable only
+			// for true non-resumes — but if a THIRD id convention appears, this line makes
+			// it diagnosable instead of silent.
+			log.Printf("recover-session: no handoff for key %q within %s — not a resumed session, or the host's CLAUDE_CODE_SESSION_ID does not match the hook's handoff key (%s)",
+				inst, budget, handoffDirSummary())
 			return sessionhandoff.Entry{}, false
 		}
 		select {
