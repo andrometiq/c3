@@ -41,7 +41,7 @@ The first is cleaner; the second is far easier to reason about when it misbehave
 
 - Interactive Q&A: free-text / "Other" / comment answers (single/multi-select + Skip already ship).
 - Native free-text option in the attach picker — today "type your own" is body prose (`/c3:attach <name>`); a real free-text choice needs the deferred free-text answer surface above.
-- Codex parity for tap-to-approve, `ask`, and `detach`.
+- Codex parity for tap-to-approve and `ask`.
 - Per-user access control — who is allowed to drive which CLI.
 - Trusted-operator authorization for actions the CLI would otherwise hard-deny.
 - Permission-relay niceties: "see more" expansion, a text `y/n` fallback.

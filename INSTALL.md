@@ -40,7 +40,7 @@ one-command add-ons layered on the same binaries and config — §5B.)
 > binaries, optional systemd supervision.
 > **macOS** is supported — prebuilt binaries; use `launchd` where the Linux
 > steps say `systemd`.
-> **Windows (Claude Desktop + the bundled Claude Code) is _beta_ for v0.1.0.**
+> **Windows (Claude Desktop + the bundled Claude Code) is _beta_.**
 > The install works and the known Windows-specific bugs are fixed, and prebuilt
 > Windows tarballs **are** published — but: inbound is **poll-only** (pull with
 > `/c3:fetch-queue` / `fetch_queue`), the Windows binaries are cross-compiled
@@ -152,7 +152,7 @@ above, or the prebuilt tarball.)
 ### Verify the binaries are installed
 
 ```bash
-for bin in c3-broker c3-claude-adapter c3-codex-adapter c3-grok-adapter c3-agy-adapter c3-cursor-adapter c3-desktop-adapter claude-shim migrate-legacy; do
+for bin in c3-broker c3-claude-adapter c3-codex-adapter c3-grok-adapter c3-agy-adapter c3-cursor-adapter c3-dcode-adapter c3-desktop-adapter claude-shim migrate-legacy; do
   command -v "$bin" >/dev/null && echo "  ✓ $bin" || echo "  ✗ $bin (missing)"
 done
 command -v c3-broker >/dev/null || echo "WARNING: the install dir is not on \$PATH"
@@ -503,7 +503,7 @@ c3-broker install-agy
 Writes a `c3` plugin into `~/.gemini/antigravity-cli/plugins/c3/` (`plugin.json`,
 `mcp_config.json`, `hooks.json`) pointing at `c3-agy-adapter`, then prints the verification
 steps. Antigravity has no async push, so inbound is **poll-only** — pull it with
-`fetch_queue`. This is the newest adapter and the least travelled; expect rougher edges than
+`fetch_queue`. This adapter is the least travelled; expect rougher edges than
 the Claude Code path.
 
 **Cursor Agent CLI:**
@@ -571,7 +571,7 @@ Details in `docs/systemd/README.md`.
 
 ## 7. Windows (beta) — platform deltas
 
-> **Windows is beta for v0.1.0.** Everything below is the standard
+> **Windows is beta.** Everything below is the standard
 > "Unix-syscall-on-Windows" class of difference; the known bugs are fixed.
 > Inbound is **poll-only** on Windows (for both Claude Code and Claude Desktop):
 > the render-detector fails safe and **holds inbound in the durable queue**
@@ -583,7 +583,7 @@ Apply these instead of the Linux-only steps referenced above:
 
 - **§1 binaries — prebuilt tarball or source.** The release publishes
   `c3_<version>_windows_amd64.tar.gz` and `..._windows_arm64.tar.gz`; the
-  binaries inside carry the `.exe` suffix. Extract it and put the nine core
+  binaries inside carry the `.exe` suffix. Extract it and put the ten core
   `.exe` files from §1 on your PATH; leave `codex.exe` out unless and until the
   Windows Codex integration graduates from its current beta limitation (the §1
   verify loop and every `c3-broker …` command work the same under Git Bash /
@@ -592,7 +592,7 @@ Apply these instead of the Linux-only steps referenced above:
   "beta" means here. To build them yourself instead, install **Go ≥1.25** (the
   portable zip needs no admin), then `git clone https://github.com/Andrometiq/c3`
   (or `git pull` if you already have it) into a durable dir and run §1's same
-  nine-package `go install` command.
+  ten-package `go install` command.
 - **§1 PATH — edit the *User* PATH; there is no shell rc.** Two safe ways:
 
   **GUI (recommended).** Start → search "Edit environment variables for your
@@ -652,7 +652,7 @@ Apply these instead of the Linux-only steps referenced above:
   Windows: replacing some live `.exe` files can leave a mixed-version install.
   Fully quit C3 / Claude Desktop / the coding CLI, then re-extract the newer
   release tarball over the installed binaries. A source install can instead use
-  `git pull` → §1's nine-package `go install`, followed by a full restart.
+  `git pull` → §1's ten-package `go install`, followed by a full restart.
 - **Skip §6 (systemd).** There is no systemd on Windows; the default on-demand
   broker spawn is what you get.
 

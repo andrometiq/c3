@@ -88,7 +88,7 @@ An adapter is a small MCP server that connects one host CLI to the broker. Seven
 | `c3-codex-adapter` | Codex | live push through the Codex app-server | 12 | Adds `codex_forward`. No `ask`, no permission relay. Heavier install: launcher → app-server → adapter → TUI. |
 | `c3-desktop-adapter` | Claude Desktop | pull only | 13 | Adds `observe` and `open_inbox`, plus an inbox panel. You ask Claude to check; it calls `fetch_queue`. |
 | `c3-grok-adapter` | Grok Build | live push, needs leader mode | 11 | Requires `[cli] use_leader = true` in Grok's config. Without it, pull only. |
-| `c3-agy-adapter` | Antigravity CLI | pull only | 11 | The host has no async push. Newest and least travelled; no dedicated doc yet. |
+| `c3-agy-adapter` | Antigravity CLI | pull only | 11 | The host has no async push. Least travelled; no dedicated doc yet. |
 | `c3-cursor-adapter` | Cursor Agent CLI | pull only | 11 | Stock interactive TUI. No idle-wake / channel push on Cursor — use `fetch_queue`. Install: `c3-broker install-cursor`. |
 | `c3-dcode-adapter` | dcode (deepagents-code) | live push via the external-event socket; pull only without it | 11 | `{"kind":"prompt"}` events land as literal user turns. Needs `DEEPAGENTS_CODE_EXTERNAL_EVENT_SOCKET=1` at TUI launch, else `fetch_queue`. Slash commands `/skill:c3-{attach,fetch,topics}`. Install: `c3-broker install-dcode`. |
 
@@ -120,8 +120,8 @@ One, compiled into the broker: `stt`.
 | `stt` | Transcribes Telegram voice notes into `[Transcribed voice]: …` | on | `python3`, an API key for at least one provider, and `ffmpeg` for the pre-send silence gate (optional) |
 
 It's a Go hook that shells out to a bundled Python chain. Four providers ship on disk and
-run in order until one returns a transcript: OpenRouter Gemini Flash, Soniox Async v5,
-ElevenLabs Scribe, then Sarvam Saaras. Providers without keys skip immediately;
+run in order until one returns a transcript: OpenRouter Gemini 3 Flash, Soniox Async v5,
+ElevenLabs Scribe v2, then Sarvam Saaras v3. Providers without keys skip immediately;
 `C3_STT_CHAIN` overrides the order. The handler resolves through an explicit config path,
 Claude Code's plugin root, a source checkout, or the runtime bundle beside release
 binaries; `install-desktop` records the resolved path for non-plugin hosts. Disable it with
@@ -278,13 +278,13 @@ overlap. If you only need one of them, one of the above is probably the easier i
    │  (Go)        │   plugin host, local IPC socket
    └──────┬───────┘
           │  local Unix socket
-   ┌──────┼────────┬─────────┬─────────┐
-   ▼      ▼        ▼         ▼         ▼
- claude  codex  desktop    grok       agy
- adapter adapter adapter  adapter   adapter
-   │      │        │         │         │
-   ▼      ▼        ▼         ▼         ▼
- CLI     TUI    Desktop     TUI       CLI
+   ┌──────┼────────┬─────────┬─────────┬─────────┬─────────┐
+   ▼      ▼        ▼         ▼         ▼         ▼         ▼
+ claude  codex  desktop    grok       agy      cursor    dcode
+ adapter adapter adapter  adapter   adapter   adapter   adapter
+   │      │        │         │         │         │         │
+   ▼      ▼        ▼         ▼         ▼         ▼         ▼
+ CLI     TUI    Desktop     TUI       CLI       CLI       CLI
 ```
 
 **Broker.** One long-running Go process owns the Telegram poller, per-route workers, topic

@@ -1,5 +1,5 @@
 ---
-description: Rebuild C3's nine core binaries from source (the Codex launcher remains opt-in).
+description: Rebuild C3's ten core binaries from source (the Codex launcher remains opt-in).
 ---
 
 !cd "${CLAUDE_PLUGIN_ROOT}/../.." && go install ./cmd/c3-broker ./cmd/c3-claude-adapter ./cmd/c3-codex-adapter ./cmd/c3-grok-adapter ./cmd/c3-agy-adapter ./cmd/c3-cursor-adapter ./cmd/c3-dcode-adapter ./cmd/c3-desktop-adapter ./cmd/claude-shim ./cmd/migrate-legacy

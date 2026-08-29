@@ -260,7 +260,7 @@ func TestInboundInjectThenAck(t *testing.T) {
 			Channel:   "telegram",
 			ChatID:    -100,
 			MessageID: 42,
-			Sender:    c3types.Sender{UserID: 7, Username: "karthi"},
+			Sender:    c3types.Sender{UserID: 7, Username: "sampleuser"},
 			Text:      "run the tests",
 		},
 		Covered:       2, // merged push
