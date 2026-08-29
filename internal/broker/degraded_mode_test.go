@@ -383,7 +383,7 @@ func TestDocsQuoteTheRealNotices(t *testing.T) {
 		path   string
 		quotes []string
 	}{
-		{"../../README.md", []string{heldReplyText(1), heldDegradedText()}},
+		{"../../README.md", []string{heldReplyText("telegram", 1), heldDegradedText()}},
 		// The log substring matters as much as the notices: USAGE.md tells an
 		// operator what to grep broker.log for, and a paraphrase there sends
 		// them looking for a line C3 never writes. Quote it, don't describe it.

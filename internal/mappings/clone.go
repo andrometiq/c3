@@ -97,6 +97,10 @@ func cloneSessionAttachment(sa SessionAttachment) SessionAttachment {
 
 func cloneChannelConfig(cc ChannelConfig) ChannelConfig {
 	out := cc
+	if cc.Enabled != nil {
+		v := *cc.Enabled
+		out.Enabled = &v
+	}
 	if cc.Groups != nil {
 		out.Groups = make(map[string]GroupConfig, len(cc.Groups))
 		for k, v := range cc.Groups {

@@ -10,12 +10,13 @@ Antigravity CLI — not another agent runtime, not a hosted service. Your bot to
 your hardware. Go, MIT, Linux and macOS (Windows in beta).
 
 ```text
-Telegram topic "api"  ⇄  c3-broker  ⇄  attached CLI session
-                              │
-                    no session attached?
-                              │
-                              ▼
-                     durable inbound queue
+Telegram topic "api" ─┐
+                       ├─⇄ c3-broker ⇄ attached CLI session
+Web chat (operator) ───┘        │
+                         no session attached?
+                                │
+                                ▼
+                       durable inbound queue
 ```
 
 ## What it looks like
@@ -100,16 +101,17 @@ install-claude-shim`, `install-codex-shim`, `install-desktop`, `install-grok`,
 
 ## Channels
 
-One: Telegram.
+Telegram and a private, text-only web chat ship in the broker.
 
 | Channel | Status | Carries |
 |---|---|---|
 | Telegram | shipping | Markdown, quote-replies, six media kinds, edits, reactions, polls, inline buttons |
+| Web | shipping (phase 1) | Plain text, typing, edits, held/system notices; magic-link login through the Telegram operator DM |
 
-`internal/channel/channel.go` is the seam a second channel would sit behind, but nothing else
-implements it — adding one is Go work today, not configuration. If your config has no
-`channels.telegram.bot_token`, the broker starts with no transport at all rather than
-failing. See [`docs/CHANNELS.md`](docs/CHANNELS.md).
+Each CLI session drives one claimed route at a time: use `attach web` on the go and attach
+back to a Telegram topic at the desk. The web surface is private-first and intentionally
+drive-only in phase 1; permission prompts remain at the laptop. See
+[`docs/WEB.md`](docs/WEB.md) and [`docs/CHANNELS.md`](docs/CHANNELS.md).
 
 ## Bundled plugins
 
@@ -225,10 +227,10 @@ deliberately:
   is kept, because a version skew is the normal state for a few seconds after an update.
 - **`~/.config/c3/mappings.json` carries a `schema_version`.** The broker refuses a version it
   doesn't recognise rather than guessing at it.
-- **Conversation, user, and message identifiers are Telegram-shaped 64-bit integers in v0.1.**
-  They will become channel-scoped in a future minor version, when a second channel makes that
-  necessary. That's a planned iteration, published here in advance — not a promise we intend
-  to break quietly.
+- **Conversation, user, and message identifiers remain 64-bit integers in v0.1.** Route keys
+  namespace them by channel; phase-1 web deliberately reuses the numeric Telegram operator id.
+  Transports with opaque string ids still need a durable mapping, and the interface may evolve
+  when one lands — not silently underneath the pinned queue or IPC formats.
 
 ## Releases
 
@@ -287,16 +289,16 @@ overlap. If you only need one of them, one of the above is probably the easier i
  CLI     TUI    Desktop     TUI       CLI
 ```
 
-**Broker.** One long-running Go process owns the Telegram poller, per-route workers, topic
-claims, durable queues, outbound rate limits, and plugin hooks. Adapters connect over a local
-Unix socket. A singleton lock stops two brokers polling one token on the same machine.
+**Broker.** One long-running Go process owns the Telegram poller, web listener, per-route
+workers, claims, durable queues, outbound rate limits, and plugin hooks. Adapters connect over
+a local Unix socket. A singleton lock stops two brokers polling one token on the same machine.
 
 **Adapters.** Thin MCP stdio servers connecting each host process to the broker. They expose
 only the capabilities that host can actually support, and reconnect after a broker bounce.
 Codex's live path adds its launcher and app-server because the app-server — not the TUI —
 owns MCP startup.
 
-**Channels.** Telegram, and the interface a second transport would implement.
+**Channels.** Telegram plus the private phase-1 web chat, behind one internal transport interface.
 
 **Plugins.** Built-in Go plugins subscribe to broker hooks. The shipped STT plugin drives a
 bundled Python provider chain; external loadable plugins remain roadmap work.

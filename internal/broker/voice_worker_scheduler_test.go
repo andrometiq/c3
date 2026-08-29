@@ -181,7 +181,7 @@ func TestVoiceWorkerPersistsBeforeSTTAndKeepsServingRoute(t *testing.T) {
 	persisted := make(chan struct{})
 	var persistedOnce sync.Once
 	var persistedBeforeSTT atomic.Bool
-	b.SetPersistedCallback(func(*c3types.Inbound) {
+	b.SetPersistedCallback("telegram", func(*c3types.Inbound) {
 		persistedBeforeSTT.Store(true)
 		persistedOnce.Do(func() { close(persisted) })
 	})

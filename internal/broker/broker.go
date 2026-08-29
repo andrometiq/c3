@@ -87,17 +87,21 @@ type Broker struct {
 	mappings   atomic.Pointer[mappings.MappingsFile]
 	mutationMu sync.Mutex
 
-	// persistedCB is invoked (best-effort, off the hot path is fine) when an
-	// inbound's source update_id has been durably appended to the queue. The
-	// telegram channel registers this to advance its persisted-offset tracker.
-	// nil ⇒ no-op (non-telegram / unit tests).
+	// persistedCB is keyed by source channel so one transport can never consume
+	// another transport's persistence acknowledgement. Telegram registers its
+	// offset tracker here; channels without a cursor register nothing.
 	persistedMu sync.RWMutex
-	persistedCB func(in *c3types.Inbound)
+	persistedCB map[string]func(in *c3types.Inbound)
 	// persistFailedCB mirrors persistedCB for the FAILURE case: invoked when an
 	// inbound's durable Append FAILED so the telegram channel can evict that
 	// update's poll-side dedup entry and let the held Telegram offset redeliver +
-	// genuinely retry (item 1). Guarded by the same persistedMu. nil ⇒ no-op.
-	persistFailedCB func(in *c3types.Inbound)
+	// genuinely retry (item 1). Guarded by the same persistedMu.
+	persistFailedCB map[string]func(in *c3types.Inbound)
+
+	// loginLinkLast is the broker-side attach debounce: near-simultaneous web
+	// claims for one operator send one Telegram DM, not one per connection.
+	loginLinkMu   sync.Mutex
+	loginLinkLast map[int64]time.Time
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -153,6 +157,9 @@ func New(mf *mappings.MappingsFile) *Broker {
 		ctx:                 ctx,
 		cancel:              cancel,
 		channels:            map[string]*channelRegistration{},
+		persistedCB:         map[string]func(in *c3types.Inbound){},
+		persistFailedCB:     map[string]func(in *c3types.Inbound){},
+		loginLinkLast:       map[int64]time.Time{},
 		desktopNotifier:     newDesktopNotifier(), // desktop notifications removed 2026-07-07 per maintainer; retained dormant, health surfaces only on the status line
 		lastHealth:          map[string]c3types.HealthEvent{},
 		sessionPIDResolver:  proctree.CLISessionPID,
@@ -229,6 +236,11 @@ func (b *Broker) RegisterBuiltinPlugins(builtins []BuiltinPlugin) error {
 // A name that is already registered is REFUSED (error, nothing started):
 // registering a second channel under one name is a duplicate, never a replace.
 func (b *Broker) RegisterChannel(ch channel.Channel) error {
+	if ch.Name() == "web" {
+		if _, err := b.Channel("telegram"); err != nil {
+			return fmt.Errorf("broker: start channel %q: telegram must be registered first so login links have a delivery path", ch.Name())
+		}
+	}
 	b.chMu.Lock()
 	_, dup := b.channels[ch.Name()]
 	b.chMu.Unlock()
@@ -436,19 +448,23 @@ func (b *Broker) SetMappings(mf *mappings.MappingsFile) {
 	}
 }
 
-// SetPersistedCallback registers the durable-persist notifier (the telegram
-// channel sets this to advance its persisted-offset tracker). Safe to call once
-// at channel start.
-func (b *Broker) SetPersistedCallback(fn func(in *c3types.Inbound)) {
+// SetPersistedCallback registers a channel's durable-persist notifier.
+func (b *Broker) SetPersistedCallback(channelName string, fn func(in *c3types.Inbound)) {
 	b.persistedMu.Lock()
 	defer b.persistedMu.Unlock()
-	b.persistedCB = fn
+	if b.persistedCB == nil {
+		b.persistedCB = map[string]func(in *c3types.Inbound){}
+	}
+	b.persistedCB[channelName] = fn
 }
 
-// notifyPersisted invokes the registered persist callback, if any.
+// notifyPersisted invokes only the source channel's persist callback, if any.
 func (b *Broker) notifyPersisted(in *c3types.Inbound) {
+	if in == nil {
+		return
+	}
 	b.persistedMu.RLock()
-	fn := b.persistedCB
+	fn := b.persistedCB[in.Channel]
 	b.persistedMu.RUnlock()
 	if fn != nil {
 		fn(in)
@@ -459,16 +475,22 @@ func (b *Broker) notifyPersisted(in *c3types.Inbound) {
 // telegram channel sets this to evict a poll-side dedup entry on Append failure
 // so the held offset's redelivery genuinely retries — item 1). Safe to call once
 // at channel start.
-func (b *Broker) SetPersistFailedCallback(fn func(in *c3types.Inbound)) {
+func (b *Broker) SetPersistFailedCallback(channelName string, fn func(in *c3types.Inbound)) {
 	b.persistedMu.Lock()
 	defer b.persistedMu.Unlock()
-	b.persistFailedCB = fn
+	if b.persistFailedCB == nil {
+		b.persistFailedCB = map[string]func(in *c3types.Inbound){}
+	}
+	b.persistFailedCB[channelName] = fn
 }
 
-// notifyPersistFailed invokes the registered persist-failure callback, if any.
+// notifyPersistFailed invokes only the source channel's failure callback.
 func (b *Broker) notifyPersistFailed(in *c3types.Inbound) {
+	if in == nil {
+		return
+	}
 	b.persistedMu.RLock()
-	fn := b.persistFailedCB
+	fn := b.persistFailedCB[in.Channel]
 	b.persistedMu.RUnlock()
 	if fn != nil {
 		fn(in)

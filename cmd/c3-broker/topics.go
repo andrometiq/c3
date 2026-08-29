@@ -31,6 +31,16 @@ func runTopics() error {
 	var b strings.Builder
 	fmt.Fprintln(&b, "known topics:")
 	for _, tp := range msg.Topics {
+		if tp.RouteKind == "dm" {
+			row := fmt.Sprintf("  • %s (chat %d, no topic)", tp.Name, tp.ChatID)
+			if tp.ClaimedBy != nil {
+				row += fmt.Sprintf(" — held by %s pid %d", tp.ClaimedBy.CLI, tp.ClaimedBy.PID)
+			} else {
+				row += " — free"
+			}
+			fmt.Fprintln(&b, row)
+			continue
+		}
 		grp := tp.Group
 		if grp == "" {
 			grp = "(no-group)"

@@ -49,6 +49,52 @@ func (h *BrokerHost) Config(name string, target any) error {
 	return nil
 }
 
+// ChannelRegistered lets a transport enforce a live dependency without
+// importing the broker package. Web requires Telegram because Telegram is the
+// login-link delivery path.
+func (h *BrokerHost) ChannelRegistered(name string) bool {
+	_, err := h.broker.Channel(name)
+	return err == nil
+}
+
+// UserAllowed exposes only the yes/no fact web needs at startup; the channel
+// never receives or mutates the allowlist itself.
+func (h *BrokerHost) UserAllowed(userID int64) bool {
+	for _, allowedID := range h.broker.Mappings().AllowlistOrEmpty().Users {
+		if allowedID == userID {
+			return true
+		}
+	}
+	return false
+}
+
+// MaxQueuedMessageID returns the largest pending id for one route. Web seeds
+// its lifetime counter above this value so a restart cannot collide with held
+// input already on disk.
+func (h *BrokerHost) MaxQueuedMessageID(channelName string, chatID int64, topicID *int64) (int64, error) {
+	if h.broker.Queue == nil {
+		return 0, nil
+	}
+	rows, err := h.broker.Queue.Peek(queueRouteKey(MakeRouteKey(channelName, chatID, topicID)), -1)
+	if err != nil {
+		return 0, err
+	}
+	var maxID int64
+	for i := range rows {
+		if rows[i].MessageID > maxID {
+			maxID = rows[i].MessageID
+		}
+	}
+	return maxID, nil
+}
+
+// SendWebLoginLink asks the broker to mint through the registered web channel
+// and deliver through Telegram. Identity and destination remain broker-owned.
+func (h *BrokerHost) SendWebLoginLink(requestedBy string) (bool, error) {
+	delivery, err := h.broker.sendWebLoginLink(nil, requestedBy, false, true)
+	return delivery == webLoginSent && err == nil, err
+}
+
 // Emit submits an inbound to the per-route worker pool. The worker drains
 // the pipeline (STT, OnInbound chain, debounce, forward to claimed stub).
 //
@@ -98,7 +144,7 @@ func (h *BrokerHost) Logf(format string, args ...any) {
 // type-assertion on its host at Start; it is not part of the channel.Host
 // interface (only the telegram channel needs it).
 func (h *BrokerHost) SetPersistedCallback(fn func(in *c3types.Inbound)) {
-	h.broker.SetPersistedCallback(fn)
+	h.broker.SetPersistedCallback(h.channel, fn)
 }
 
 // SetPersistFailedCallback delegates to the broker so the telegram channel can be
@@ -106,7 +152,7 @@ func (h *BrokerHost) SetPersistedCallback(fn func(in *c3types.Inbound)) {
 // dedup entry so the held offset's redelivery genuinely retries). Discovered via
 // an interface type-assertion at Start, like SetPersistedCallback.
 func (h *BrokerHost) SetPersistFailedCallback(fn func(in *c3types.Inbound)) {
-	h.broker.SetPersistFailedCallback(fn)
+	h.broker.SetPersistFailedCallback(h.channel, fn)
 }
 
 // Done returns the broker's shutdown channel.

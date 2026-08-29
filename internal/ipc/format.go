@@ -22,10 +22,15 @@ import (
 func FormatAttached(a *AttachedMsg) string {
 	if a.OK {
 		s := fmt.Sprintf("attached to %q", a.Name)
-		if a.TopicID != nil {
+		if a.Channel == "web" {
+			s += " (on-the-go chat)"
+		} else if a.TopicID != nil {
 			s += fmt.Sprintf(" (chat %d, thread %d)", a.ChatID, *a.TopicID)
 		} else {
 			s += fmt.Sprintf(" (chat %d, DM)", a.ChatID)
+		}
+		if a.Notice != "" {
+			s += "\n" + a.Notice
 		}
 		return s
 	}
@@ -153,6 +158,10 @@ func formatPickTopic(p *Proposal) string {
 		}
 		fmt.Fprintf(&b, "\n  %d. %s → %s", n, desc, cmd)
 	}
+	if p.WebAvailable {
+		n++
+		fmt.Fprintf(&b, "\n  %d. web — on-the-go chat (`attach web`)", n)
+	}
 	if p.HasMore {
 		n++
 		fmt.Fprintf(&b, "\n  %d. See the full list → call the `topics` tool, then attach by name/id", n)
@@ -182,8 +191,12 @@ func FormatTopics(list *TopicsListMsg) string {
 		if t.ClaimedBy != nil {
 			state = fmt.Sprintf("held by %s pid %d", t.ClaimedBy.CLI, t.ClaimedBy.PID)
 		}
-		lines = append(lines, fmt.Sprintf("  • %s/%s (chat %d, thread %d) — %s",
-			t.Group, t.Name, t.ChatID, t.TopicID, state))
+		if t.RouteKind == "dm" {
+			lines = append(lines, fmt.Sprintf("  • %s (chat %d, no topic) — %s", t.Name, t.ChatID, state))
+		} else {
+			lines = append(lines, fmt.Sprintf("  • %s/%s (chat %d, thread %d) — %s",
+				t.Group, t.Name, t.ChatID, t.TopicID, state))
+		}
 	}
 	return strings.Join(lines, "\n")
 }

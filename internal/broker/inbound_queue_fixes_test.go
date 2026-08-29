@@ -140,7 +140,7 @@ func TestFlushInbounds_AppendFailDoesNotPoisonDedup(t *testing.T) {
 
 	// Track which update_ids got marked persisted (the offset-eligibility signal).
 	var persisted []int64
-	b.SetPersistedCallback(func(in *c3types.Inbound) { persisted = append(persisted, in.MessageID) })
+	b.SetPersistedCallback("telegram", func(in *c3types.Inbound) { persisted = append(persisted, in.MessageID) })
 
 	// Force the FIRST Append to fail deterministically: build a store, then remove
 	// its directory out from under it so Append's OpenFile(O_CREATE) fails. Swap
@@ -193,7 +193,7 @@ func TestFlushInbounds_DedupSkipMarksPersisted(t *testing.T) {
 	defer w.Stop()
 
 	var marked int
-	b.SetPersistedCallback(func(in *c3types.Inbound) { marked++ })
+	b.SetPersistedCallback("telegram", func(in *c3types.Inbound) { marked++ })
 
 	first := &c3types.Inbound{Channel: "telegram", ChatID: -100, TopicID: &tid, MessageID: 8, Text: "hi", Timestamp: time.Now()}
 	w.flushInbounds(context.Background(), []*c3types.Inbound{first})
@@ -226,8 +226,8 @@ func TestFlushInbounds_AppendFailNotifiesPersistFailed(t *testing.T) {
 	defer w.Stop()
 
 	var persisted, failed []int64
-	b.SetPersistedCallback(func(in *c3types.Inbound) { persisted = append(persisted, in.MessageID) })
-	b.SetPersistFailedCallback(func(in *c3types.Inbound) { failed = append(failed, in.MessageID) })
+	b.SetPersistedCallback("telegram", func(in *c3types.Inbound) { persisted = append(persisted, in.MessageID) })
+	b.SetPersistFailedCallback("telegram", func(in *c3types.Inbound) { failed = append(failed, in.MessageID) })
 
 	// Force the Append to fail: a store whose backing dir was removed.
 	brokenDir := t.TempDir()
@@ -270,7 +270,7 @@ func TestFlushInbounds_NilQueueStillMarksPersisted(t *testing.T) {
 	defer w.Stop()
 
 	var marked []int64
-	b.SetPersistedCallback(func(in *c3types.Inbound) { marked = append(marked, in.MessageID) })
+	b.SetPersistedCallback("telegram", func(in *c3types.Inbound) { marked = append(marked, in.MessageID) })
 
 	batch := []*c3types.Inbound{
 		{Channel: "telegram", ChatID: -100, TopicID: &tid, MessageID: 10, Text: "a", Timestamp: time.Now()},

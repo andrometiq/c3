@@ -76,6 +76,9 @@ func (c *Channel) SendReply(args c3types.ReplyArgs) (int64, error) {
 
 	text := args.Text
 	opts := &gotgbot.SendMessageOpts{}
+	if args.DisableLinkPreview {
+		opts.LinkPreviewOptions = &gotgbot.LinkPreviewOptions{IsDisabled: true}
+	}
 	if args.TopicID != nil {
 		opts.MessageThreadId = *args.TopicID
 	}

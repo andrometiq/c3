@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Sign in to C3</title>
+  <style>
+    :root { color-scheme: dark; font: 18px/1.5 system-ui, sans-serif; background: #0b0d10; color: #f4f6f8; }
+    body { min-height: 100dvh; margin: 0; display: grid; place-items: center; padding: 1.25rem; }
+    main { width: min(30rem, 100%); text-align: center; }
+    button { width: 100%; min-height: 3.5rem; margin: 1rem 0; border: 0; border-radius: .65rem; background: #2f8ad5; color: #fff; font: 700 1rem system-ui, sans-serif; }
+    .hint, #result { color: #aeb8c4; font-size: .9rem; }
+    .failure { color: #ff6b6b !important; }
+  </style>
+</head>
+<body>
+<main>
+  <p>Send a fresh single-use sign-in link to your Telegram DM.</p>
+  <button id="fresh" type="button">Send me a fresh link</button>
+  <p class="hint">Opened inside Telegram? Use <em>Open in browser</em> before following the link.</p>
+  <p id="result" role="status" aria-live="polite"></p>
+</main>
+<script>
+(() => {
+  const button = document.getElementById('fresh');
+  const result = document.getElementById('result');
+  button.addEventListener('click', async () => {
+    button.disabled = true;
+    result.className = '';
+    result.textContent = 'Requesting…';
+    try {
+      const controller = new AbortController();
+      const timeout = window.setTimeout(() => controller.abort(), 15000);
+      const response = await fetch('/login/link', {method: 'POST', signal: controller.signal});
+      window.clearTimeout(timeout);
+      if (response.status === 202) result.textContent = 'Link sent — check your Telegram DM.';
+      else if (response.status === 429) result.textContent = 'A link was requested recently. Check Telegram or wait a minute.';
+      else throw new Error('unavailable');
+    } catch (_) {
+      result.textContent = 'Could not send a link. Try again.';
+      result.className = 'failure';
+    } finally {
+      button.disabled = false;
+    }
+  });
+})();
+</script>
+</body>
+</html>

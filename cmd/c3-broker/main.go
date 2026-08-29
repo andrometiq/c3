@@ -3,6 +3,7 @@
 //	c3-broker             (default) — run as daemon
 //	c3-broker setup       — interactive config; calls Telegram getMe; writes mappings.json
 //	c3-broker status      — read-only health check
+//	c3-broker web link    — mint a web login link and deliver it by Telegram DM
 //	c3-broker validate    — parse + validate mappings.json
 //	c3-broker release CWD — drop the claim on a route bound to CWD
 //	c3-broker reload-config — re-read mappings.json without dropping live claims (running broker only)
@@ -28,7 +29,9 @@ import (
 	"time"
 
 	"github.com/Andrometiq/c3/internal/broker"
+	"github.com/Andrometiq/c3/internal/channel"
 	"github.com/Andrometiq/c3/internal/channel/telegram"
+	webchannel "github.com/Andrometiq/c3/internal/channel/web"
 	"github.com/Andrometiq/c3/internal/mappings"
 	"github.com/Andrometiq/c3/internal/osutil"
 	"github.com/Andrometiq/c3/internal/plugin"
@@ -41,6 +44,39 @@ import (
 // runs them in slice order.
 var builtinPlugins = []broker.BuiltinPlugin{
 	{Name: stt.Name, Register: func(h plugin.Host) error { return stt.Register(h) }},
+}
+
+type channelFactory func() channel.Channel
+
+// registerConfiguredChannels constructs enabled transports in dependency order
+// and isolates Start failures to the affected channel.
+func registerConfiguredChannels(br *broker.Broker, mf *mappings.MappingsFile, telegramFactory, webFactory channelFactory) {
+	type registration struct {
+		name    string
+		factory channelFactory
+	}
+	var registrations []registration
+	if cc, ok := mf.Channels["telegram"]; ok && cc.BotToken != "" && cc.EnabledOrDefault() {
+		registrations = append(registrations, registration{name: "telegram", factory: telegramFactory})
+	} else {
+		fmt.Fprintln(os.Stderr, "c3-broker: no enabled telegram bot_token in mappings.json — running without Telegram transport")
+	}
+	if cc, ok := mf.Channels["web"]; ok && cc.EnabledOrDefault() {
+		if webFactory != nil {
+			registrations = append(registrations, registration{name: "web", factory: webFactory})
+		} else {
+			log.Printf("c3-broker: web channel is configured but this build has no web transport")
+		}
+	}
+	for _, registration := range registrations {
+		if registration.factory == nil {
+			continue
+		}
+		if err := br.RegisterChannel(registration.factory()); err != nil {
+			log.Printf("c3-broker: channel %s failed to start: %v — continuing with other channels", registration.name, err)
+			fmt.Fprintf(os.Stderr, "c3-broker: channel %s failed to start: %v — continuing\n", registration.name, err)
+		}
+	}
 }
 
 // Exit codes follow BSD sysexits(3) where applicable so shell scripts can
@@ -72,6 +108,12 @@ func main() {
 		case "topics":
 			if err := runTopics(); err != nil {
 				fmt.Fprintf(os.Stderr, "c3-broker topics: %v\n", err)
+				os.Exit(exitFailure)
+			}
+			return
+		case "web":
+			if err := runWeb(os.Args[2:]); err != nil {
+				fmt.Fprintf(os.Stderr, "c3-broker web: %v\n", err)
 				os.Exit(exitFailure)
 			}
 			return
@@ -200,6 +242,8 @@ Usage:
                         channels, plugins, live claims).
   c3-broker topics      List known topics + claim state (queries the
                         running broker via the unix socket).
+  c3-broker web link    Mint a fresh web login link and send it through
+                        the configured Telegram operator DM.
   c3-broker validate [path]
                         Parse + validate mappings.json. Defaults to default
                         path. Exits 0 on valid, 1 on invalid.
@@ -415,13 +459,10 @@ func runDaemon() (err error) {
 		}
 	})
 
-	if cc, ok := mf.Channels["telegram"]; ok && cc.BotToken != "" {
-		if err := br.RegisterChannel(telegram.New()); err != nil {
-			return fmt.Errorf("register telegram channel: %w", err)
-		}
-	} else {
-		fmt.Fprintln(os.Stderr, "c3-broker: no telegram bot_token in mappings.json — running without inbound transport")
-	}
+	registerConfiguredChannels(br, mf,
+		func() channel.Channel { return telegram.New() },
+		func() channel.Channel { return webchannel.New() },
+	)
 
 	// Default-deny posture (TODO #1): if no users are allowlisted yet,
 	// auto-arm DM pairing so the operator can register their account

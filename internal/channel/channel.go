@@ -49,18 +49,33 @@ type Channel interface {
 	ValidateTopic(chatID int64, threadID int64) error
 }
 
+// ReadbackSender is the optional voice-transcript renderer implemented by a
+// channel that wants a channel-native readback after STT succeeds. The broker
+// discovers it with a type assertion; it is intentionally not required by
+// Channel.
+type ReadbackSender interface {
+	SendReadback(c3types.ReadbackArgs) (sentMessageID int64, err error)
+}
+
+// LoginLinker is the optional authenticated-web-session bridge implemented by
+// a channel that can mint single-use login links. The broker type-asserts it
+// after a successful claim and from the local `c3-broker web link` admin path;
+// channels without browser sessions do not implement it.
+type LoginLinker interface {
+	HasLiveSession(userID int64) bool
+	MintLoginLink(userID int64) (string, error)
+}
+
 // Host is what the broker passes to a Channel. Subset of plugin.Host scoped
 // to channel concerns (config + emit + log + done + gate).
 type Host interface {
 	Config(name string, target any) error
 	// Emit submits an inbound to the broker's per-route worker pool. It returns
-	// true when the inbound was accepted onto a worker queue (and will be
-	// persisted there), false when it was DROPPED (worker queue full or stopped).
-	// On a false return the inbound never reaches durable storage, so a caller
-	// that staged any in-flight bookkeeping for it (e.g. the persisted-offset
-	// tracker's msgToUpdate seam) MUST resolve that bookkeeping itself — otherwise
-	// the source update_id stays in-flight forever and wedges the contiguous-prefix
-	// offset for ALL inbound (I4).
+	// true when the inbound was accepted onto a worker queue. Acceptance is not
+	// durability: the worker persists it later, so a crash between true and that
+	// append can lose it. False means it was not accepted or persisted; the
+	// channel remains the retry authority and must leave the source available for
+	// redelivery (an HTTP channel should return a retryable failure).
 	Emit(in *c3types.Inbound) bool
 	Logf(format string, args ...any)
 	Done() <-chan struct{}

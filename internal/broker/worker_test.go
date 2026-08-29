@@ -99,12 +99,12 @@ func TestShutdown_DroppedInboundRecoversViaPersistFailed(t *testing.T) {
 
 	var mu sync.Mutex
 	var failed, persisted []int64
-	b.SetPersistFailedCallback(func(in *c3types.Inbound) {
+	b.SetPersistFailedCallback("telegram", func(in *c3types.Inbound) {
 		mu.Lock()
 		failed = append(failed, in.MessageID)
 		mu.Unlock()
 	})
-	b.SetPersistedCallback(func(in *c3types.Inbound) {
+	b.SetPersistedCallback("telegram", func(in *c3types.Inbound) {
 		mu.Lock()
 		persisted = append(persisted, in.MessageID)
 		mu.Unlock()
@@ -141,7 +141,7 @@ func TestShutdown_DroppedEventNotRecovered(t *testing.T) {
 
 	var mu sync.Mutex
 	var failed []int64
-	b.SetPersistFailedCallback(func(in *c3types.Inbound) {
+	b.SetPersistFailedCallback("telegram", func(in *c3types.Inbound) {
 		mu.Lock()
 		failed = append(failed, in.MessageID)
 		mu.Unlock()

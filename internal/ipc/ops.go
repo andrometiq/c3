@@ -46,6 +46,7 @@ const (
 	// blocking tool to unblock, so the broker sends no synchronous ack (unlike
 	// OpAskRegister). The verdict comes back later as OpPermissionVerdict.
 	OpPermissionRequest Op = "permission_request"
+	OpWebLoginLink      Op = "web_login_link"
 	OpBye               Op = "bye"
 
 	// broker → adapter
@@ -84,5 +85,6 @@ const (
 	// notifications/claude/channel/permission. Fire-and-forget (no caller blocks
 	// on it — a never-delivered verdict just leaves CC waiting in the TUI).
 	OpPermissionVerdict Op = "permission_verdict"
+	OpWebLoginLinkReply Op = "web_login_link_reply"
 	OpError             Op = "error"
 )

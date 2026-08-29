@@ -89,9 +89,18 @@ func runStatus() error {
 	if mf != nil {
 		fmt.Fprintln(&b, "Channels:")
 		for name, cc := range mf.Channels {
+			if name == "web" {
+				listen := cc.Listen
+				if listen == "" {
+					listen = "127.0.0.1:8371"
+				}
+				fmt.Fprintf(&b, "  - %-10s enabled=%v listen=%q public_url=%q\n",
+					name, cc.EnabledOrDefault(), listen, cc.PublicURL)
+				continue
+			}
 			tokenSet := cc.BotToken != ""
-			fmt.Fprintf(&b, "  - %-10s token=%v default_group=%q groups=%d topics=%d\n",
-				name, tokenSet, cc.DefaultGroup, len(cc.Groups), len(cc.Topics))
+			fmt.Fprintf(&b, "  - %-10s enabled=%v token=%v default_group=%q groups=%d topics=%d\n",
+				name, cc.EnabledOrDefault(), tokenSet, cc.DefaultGroup, len(cc.Groups), len(cc.Topics))
 		}
 	}
 

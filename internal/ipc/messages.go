@@ -389,7 +389,8 @@ type ListTopicsReq struct {
 	Op Op `json:"op"` // = OpListTopics
 }
 
-// TopicsListMsg is the broker's response to ListTopicsReq.
+// TopicsListMsg is the broker's response to ListTopicsReq. It also includes a
+// registered channel's named non-topic route (currently web).
 type TopicsListMsg struct {
 	Op     Op           `json:"op"` // = OpTopicsList
 	Topics []TopicEntry `json:"topics"`
@@ -432,6 +433,20 @@ type ListHealthReq struct {
 	Op Op `json:"op"` // = OpListHealth
 }
 
+// WebLoginLinkReq asks the running broker to mint and deliver a fresh web
+// login link through the configured Telegram operator DM.
+type WebLoginLinkReq struct {
+	Op Op `json:"op"` // = OpWebLoginLink
+}
+
+// WebLoginLinkReply reports whether the link was delivered. The link itself is
+// never returned over IPC; it stays on the authenticated Telegram DM path.
+type WebLoginLinkReply struct {
+	Op  Op     `json:"op"` // = OpWebLoginLinkReply
+	OK  bool   `json:"ok"`
+	Err string `json:"err,omitempty"`
+}
+
 // HealthListMsg is the broker's response to ListHealthReq. One entry per channel
 // that has reported at least one health edge. Renders into the `c3-broker
 // status` "Channel health:" section.
@@ -457,14 +472,16 @@ type HealthEntry struct {
 	DownForSec int64  `json:"down_for_sec,omitempty"`
 }
 
-// TopicEntry is one row in TopicsListMsg.Topics. Also reused by Proposal.Existing
-// to describe a found-but-not-claimed topic (in which case ClaimedBy is nil).
+// TopicEntry is one row in TopicsListMsg.Topics. RouteKind="dm" identifies a
+// named non-topic route. Also reused by Proposal.Existing to describe a
+// found-but-not-claimed topic (in which case ClaimedBy is nil).
 type TopicEntry struct {
 	Channel   string  `json:"channel"`
 	ChatID    int64   `json:"chat_id"`
 	TopicID   int64   `json:"topic_id"`
 	Name      string  `json:"name"`
 	Group     string  `json:"group,omitempty"`
+	RouteKind string  `json:"route_kind,omitempty"` // "dm" for a non-topic route such as web
 	ClaimedBy *Holder `json:"claimed_by,omitempty"`
 }
 
@@ -527,6 +544,7 @@ const (
 //     picker; never a silent cwd-saved claim)
 //     "dm" (any case)     → target=dm (with disambiguation if a topic
 //     named "dm" also exists)
+//     "web" / "telegram" → channel selector (case-insensitive)
 //     "<int>"             → topic_id=<int>
 //     "<name>" / "create <name>" / "-y <name>"
 //     → name=<name> (create=true if prefix used)
@@ -631,6 +649,9 @@ type AttachedMsg struct {
 	// Additive + omitempty: zero/nil for an empty queue and for older brokers.
 	QueuedCount   int          `json:"queued_count,omitempty"`
 	QueuedSummary []QueuedItem `json:"queued_summary,omitempty"`
+
+	// Notice is additive post-attach guidance for a channel-specific next step.
+	Notice string `json:"notice,omitempty"`
 }
 
 // Proposal describes what the broker would do if the agent confirms.
@@ -661,9 +682,10 @@ type Proposal struct {
 
 	// pick_topic payload (bare-attach friendly picker, spec §4). Additive +
 	// omitempty so every other proposal action and older brokers are byte-stable.
-	Suggestions []PickSuggestion `json:"suggestions,omitempty"` // ≤3, ranked (current project, then recently used)
-	Project     string           `json:"project,omitempty"`     // basename(cwd) — the label source for the create row
-	HasMore     bool             `json:"has_more,omitempty"`    // registry holds more existing topics than shown → offer "See the full list"
+	Suggestions  []PickSuggestion `json:"suggestions,omitempty"`   // ≤3, ranked (current project, then recently used)
+	Project      string           `json:"project,omitempty"`       // basename(cwd) — the label source for the create row
+	HasMore      bool             `json:"has_more,omitempty"`      // registry holds more existing topics than shown → offer "See the full list"
+	WebAvailable bool             `json:"web_available,omitempty"` // show the explicit attach-web picker row
 }
 
 // PickSuggestion is one ranked option in a "pick_topic" proposal (spec §4). The

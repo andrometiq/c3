@@ -133,7 +133,7 @@ func (b *Broker) handleObserve(conn *ipc.Conn, stub *Stub, raw []byte) {
 
 	chanName := req.Channel
 	if chanName == "" {
-		chanName = b.defaultChannel()
+		chanName = b.primaryChannel()
 	}
 	res := b.resolveTopicRoute(chanName, req.Name, req.Target, req.TopicID, req.Group)
 	if res.status != observeOK {

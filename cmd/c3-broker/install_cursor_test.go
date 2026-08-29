@@ -98,7 +98,7 @@ func TestMergeMCPDisabled_AddsClaudePluginIds(t *testing.T) {
 
 func TestDisableClaudePluginC3InProjects(t *testing.T) {
 	projects := t.TempDir()
-	proj := filepath.Join(projects, "home-karthi-arogara")
+	proj := filepath.Join(projects, "home-user-workspace")
 	if err := os.MkdirAll(proj, 0700); err != nil {
 		t.Fatal(err)
 	}

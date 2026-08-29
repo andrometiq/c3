@@ -77,3 +77,37 @@ func TestAttach_RefusesChannelThatIsConfiguredButNotRunning(t *testing.T) {
 		}
 	}
 }
+
+func TestAttachWebWithoutStanzaSaysNotConfigured(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	br := New(mfWithTelegram())
+	defer br.Shutdown()
+	br.chMu.Lock()
+	br.channels["web"] = &channelRegistration{Channel: &webFakeChannel{fakeChannel: &fakeChannel{}}}
+	br.chMu.Unlock()
+
+	a, b := net.Pipe()
+	go br.HandleConn(a)
+	peer := ipc.NewConn(b)
+	defer peer.Close()
+	if err := peer.WriteJSON(ipc.HelloMsg{Op: ipc.OpHello, CLI: "claude", PID: 1, CWD: "/x"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := peer.ReadFrame(); err != nil {
+		t.Fatal(err)
+	}
+	if err := peer.WriteJSON(ipc.AttachReq{Op: ipc.OpAttach, Expr: "web"}); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := peer.ReadFrame()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ack ipc.AttachedMsg
+	if err := json.Unmarshal(raw, &ack); err != nil {
+		t.Fatal(err)
+	}
+	if ack.OK || ack.Err != "no `web` channel is configured" {
+		t.Fatalf("attach web response=%+v", ack)
+	}
+}

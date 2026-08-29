@@ -97,6 +97,23 @@ func TestClone_PreservesRichInbound(t *testing.T) {
 	}
 }
 
+func TestClone_DeepCopiesChannelEnabled(t *testing.T) {
+	enabled := false
+	original := &MappingsFile{
+		SchemaVersion: 1,
+		Channels:      map[string]ChannelConfig{"web": {Enabled: &enabled}},
+	}
+	clone := original.Clone()
+	cloned := clone.Channels["web"]
+	if cloned.Enabled == nil || *cloned.Enabled {
+		t.Fatalf("clone Enabled = %v, want explicit false", cloned.Enabled)
+	}
+	*cloned.Enabled = true
+	if *original.Channels["web"].Enabled {
+		t.Fatal("mutating cloned Enabled changed the original pointer")
+	}
+}
+
 func TestClone_NilSafe(t *testing.T) {
 	var mf *MappingsFile
 	if got := mf.Clone(); got != nil {

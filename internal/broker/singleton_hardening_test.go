@@ -72,6 +72,25 @@ func TestRegisterChannel_RefusesDuplicateName(t *testing.T) {
 	}
 }
 
+func TestRegisterChannel_RefusesWebBeforeTelegram(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	b := New(&mappings.MappingsFile{
+		SchemaVersion: 1,
+		Channels:      map[string]mappings.ChannelConfig{"web": {}},
+		Mappings:      map[string]mappings.Mapping{},
+	})
+	defer b.Shutdown()
+	web := &dupNameChannel{fakeChannel: &fakeChannel{}, name: "web"}
+	err := b.RegisterChannel(web)
+	if err == nil || !strings.Contains(err.Error(), "telegram must be registered first") {
+		t.Fatalf("RegisterChannel(web) error=%v, want telegram dependency refusal", err)
+	}
+	if web.started {
+		t.Fatal("web Start ran before the Telegram dependency was checked")
+	}
+}
+
 // TestStateRoot_AgreesWithAndWithoutXDG pins that the plugin state root is ONE
 // directory regardless of whether the broker was spawned with XDG_STATE_HOME
 // set.
@@ -123,34 +142,22 @@ func mfWithTwoChannels() *mappings.MappingsFile {
 	return mf
 }
 
-// TestDefaultChannel_AmbiguousRefusesToGuess pins that with 2+ configured
-// channels the broker refuses to pick one rather than coin-flipping.
-//
-// The defect it guards: defaultChannel() was `for name := range …Channels {
-// return name }`. Go randomises map iteration order, so it returned a DIFFERENT
-// channel per call, and no adapter sets AttachReq.Channel — so it decided the
-// channel for EVERY attach. The coin flip is not cosmetic: the queue file name,
-// the saved cwd default and the capability manifest are all keyed on it, so the
-// session gets claimed on one channel while its inbound is queued under the
-// other, silently.
-func TestDefaultChannel_AmbiguousRefusesToGuess(t *testing.T) {
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	b := New(mfWithTwoChannels())
+// TestDefaultChannel_CountsRegisteredEnabledChannels pins that a configured
+// stanza which never started does not make the live broker ambiguous.
+func TestDefaultChannel_CountsRegisteredEnabledChannels(t *testing.T) {
+	b := brokerWithChannel(t, mfWithTwoChannels(), &fakeChannel{})
 	defer b.Shutdown()
 
 	for i := 0; i < 100; i++ {
-		if got := b.defaultChannel(); got != "" {
-			t.Fatalf("defaultChannel() GUESSED %q on call %d with 2 channels configured: map iteration order picks the winner, so the session binds to a channel the user never named (call it again and it may answer differently)", got, i+1)
+		if got := b.defaultChannel(); got != "telegram" {
+			t.Fatalf("defaultChannel()=%q on call %d with only telegram registered, want telegram", got, i+1)
 		}
 	}
 }
 
-// TestAttach_AmbiguousChannelIsReportedNotGuessed is the wire-level half of the
-// same defect: an attach that cannot resolve a channel must FAIL with advice
-// that names the real problem, not silently claim a coin-flipped route and not
-// render the canned "run c3-broker setup" (there IS a channel configured — two
-// of them).
-func TestAttach_AmbiguousChannelIsReportedNotGuessed(t *testing.T) {
+// TestAttach_TwoConfiguredOneRegisteredResolvesTelegram is the wire-level half
+// of the registered+enabled rule.
+func TestAttach_TwoConfiguredOneRegisteredResolvesTelegram(t *testing.T) {
 	fc := &fakeChannel{}
 	b := brokerWithChannel(t, mfWithTwoChannels(), fc)
 	defer b.Shutdown()
@@ -171,31 +178,55 @@ func TestAttach_AmbiguousChannelIsReportedNotGuessed(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if ack.OK {
-		t.Fatalf("attach SUCCEEDED with two channels configured and none named: it claimed channel=%q by coin flip — inbound for the other channel queues to a file this session never reads", ack.Channel)
+	if !ack.OK || ack.Channel != "telegram" {
+		t.Fatalf("attach with only telegram registered = OK %v channel %q err %q, want telegram success", ack.OK, ack.Channel, ack.Err)
 	}
-	// The remedy must be one the user can actually perform. AttachReq has a
-	// Channel field, but no shipped adapter exposes it in its attach tool schema,
-	// so "pass channel=<name>" is advice nobody can follow — the refusal has to
-	// name the configured channels and point at the file the user can edit.
-	for _, want := range []string{"slack", "telegram", "mappings.json"} {
+	if len(fc.validateCalls) != 0 {
+		t.Fatalf("name attach unexpectedly validated by id: %+v", fc.validateCalls)
+	}
+}
+
+// TestAttach_TwoTopicCapableRegisteredNoSelectorRefuses keeps the fail-closed
+// case: two live topic transports must never coin-flip.
+func TestAttach_TwoTopicCapableRegisteredNoSelectorRefuses(t *testing.T) {
+	fc := &fakeChannel{}
+	b := brokerWithChannel(t, mfWithTwoChannels(), fc)
+	defer b.Shutdown()
+	b.chMu.Lock()
+	b.channels["slack"] = &channelRegistration{Channel: &dupNameChannel{fakeChannel: &fakeChannel{}, name: "slack"}}
+	b.chMu.Unlock()
+
+	peer, done := peerPair(t, b)
+	defer done()
+	helloAck(t, peer, "/x")
+	if err := peer.WriteJSON(ipc.AttachReq{Op: ipc.OpAttach, Name: "c3"}); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := peer.ReadFrame()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ack ipc.AttachedMsg
+	if err := json.Unmarshal(raw, &ack); err != nil {
+		t.Fatal(err)
+	}
+	if ack.OK {
+		t.Fatalf("attach guessed %q with two registered topic-capable channels", ack.Channel)
+	}
+	for _, want := range []string{"slack", "telegram", "will not guess"} {
 		if !strings.Contains(ack.Err, want) {
-			t.Errorf("ambiguous attach refusal is missing %q, so the user cannot act on it; Err=%q (status=%q)", want, ack.Err, ack.Status)
+			t.Errorf("ambiguous attach refusal missing %q: %q", want, ack.Err)
 		}
 	}
-	if strings.Contains(ack.Err, "pass channel=") {
-		t.Errorf("the refusal tells the user to pass channel=<name>, which NO adapter's attach schema exposes — a refusal whose remedy cannot be performed is worse than the guess it replaced; Err=%q", ack.Err)
-	}
 	if ack.Status == ipc.AttachStatusNoTopicsConfigured {
-		t.Errorf("ambiguous attach reported Status=%q, which format.go renders as \"run c3-broker setup\" — misleading when mappings.json already configures two channels", ack.Status)
+		t.Errorf("ambiguous attach reported setup status: %q", ack.Status)
 	}
 }
 
 // TestDefaultChannel_SingleChannelUnchanged is the regression guard: the fix
 // must not make the ordinary one-channel install ambiguous.
 func TestDefaultChannel_SingleChannelUnchanged(t *testing.T) {
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	b := New(mfWithTelegram())
+	b := brokerWithChannel(t, mfWithTelegram(), &fakeChannel{})
 	defer b.Shutdown()
 
 	if got := b.defaultChannel(); got != "telegram" {
