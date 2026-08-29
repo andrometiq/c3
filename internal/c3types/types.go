@@ -318,6 +318,10 @@ type Outbound struct {
 	Markup  Markup      `json:"Markup"`
 	Media   []MediaItem `json:"Media"`
 	Poll    *PollSpec   `json:"Poll"`
+	// DisableLinkPreview asks channels that render URL previews to suppress
+	// them. It is used for single-use login links so a chat preview fetch never
+	// creates a misleading authentication surface.
+	DisableLinkPreview bool `json:"DisableLinkPreview,omitempty"`
 	// ReplyTo is a MESSAGE ID (the message being replied to), not a route or a
 	// user — the Go name does not contain "MessageID", so a name-based audit of
 	// this file misses it. Tagged "ReplyTo" like everything else: the wire key is

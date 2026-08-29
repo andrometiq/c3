@@ -99,13 +99,13 @@ func TestForwardOrFallback_NoSession_EditCapable_DebouncesHeldNotices(t *testing
 }
 
 func TestHeldReplyText_CarriesCount(t *testing.T) {
-	got := heldReplyText(3)
+	got := heldReplyText("telegram", 3)
 	// Pin a specific count-bearing phrase, not a stray '3'.
 	if !strings.Contains(got, "3 messages queued") {
-		t.Fatalf("heldReplyText(3) = %q, want '3 messages queued'", got)
+		t.Fatalf("heldReplyText(telegram, 3) = %q, want '3 messages queued'", got)
 	}
-	if !strings.Contains(heldReplyText(1), "1 message queued") {
-		t.Fatalf("heldReplyText(1) should use the singular '1 message queued'; got %q", heldReplyText(1))
+	if !strings.Contains(heldReplyText("telegram", 1), "1 message queued") {
+		t.Fatalf("heldReplyText(telegram, 1) should use the singular '1 message queued'; got %q", heldReplyText("telegram", 1))
 	}
 }
 

@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <meta name="color-scheme" content="dark">
+  <title>Continue to C3</title>
+  <style>
+    :root { color-scheme: dark; font: 18px/1.5 system-ui, sans-serif; background: #0b0d10; color: #f4f6f8; }
+    body { min-height: 100dvh; margin: 0; display: grid; place-items: center; padding: 1.25rem; }
+    main { width: min(30rem, 100%); text-align: center; }
+    button { width: 100%; min-height: 3.5rem; margin: 1rem 0; border: 0; border-radius: .65rem; background: #2f8ad5; color: #fff; font: 700 1rem system-ui, sans-serif; }
+    .hint, #result { color: #aeb8c4; font-size: .9rem; }
+    .failure { color: #ff6b6b !important; }
+  </style>
+</head>
+<body>
+<main>
+  <p>Continue once to exchange this private link for a browser session.</p>
+  <button id="continue" type="button">Continue</button>
+  <p class="hint">Opened inside Telegram? Use <em>Open in browser</em> first, then Continue.</p>
+  <p id="result" role="status" aria-live="polite"></p>
+</main>
+<script>
+(() => {
+  const token = location.hash.startsWith('#') ? location.hash.slice(1) : '';
+  history.replaceState(null, '', location.pathname);
+  const button = document.getElementById('continue');
+  const result = document.getElementById('result');
+  button.addEventListener('click', async () => {
+    button.disabled = true;
+    result.className = '';
+    result.textContent = 'Signing in…';
+    try {
+      const controller = new AbortController();
+      const timeout = window.setTimeout(() => controller.abort(), 15000);
+      const response = await fetch('/auth', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({token}),
+        signal: controller.signal
+      });
+      window.clearTimeout(timeout);
+      if (!response.ok) throw new Error('denied');
+      location.assign('/');
+    } catch (_) {
+      result.textContent = 'Link invalid or expired — request a fresh one.';
+      result.className = 'failure';
+      button.disabled = false;
+    }
+  });
+})();
+</script>
+</body>
+</html>

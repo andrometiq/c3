@@ -57,6 +57,10 @@ func refuseIncompatibleStateChange(conn *ipc.Conn, stub *Stub, op ipc.Op, raw []
 		refuse()
 		_ = conn.WriteJSON(ipc.RetranscribeResp{Op: ipc.OpRetranscribeResult, ID: req.ID, Err: reason})
 		return true
+	case ipc.OpWebLoginLink:
+		refuse()
+		_ = conn.WriteJSON(ipc.WebLoginLinkReply{Op: ipc.OpWebLoginLinkReply, Err: reason})
+		return true
 	default:
 		return false
 	}

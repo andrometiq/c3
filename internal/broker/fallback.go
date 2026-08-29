@@ -61,7 +61,10 @@ const fallbackText = "No CLI is currently attached to this topic. Run `c3-broker
 // ONLY valid while the durable queue is live. When it is not, the reassurance is
 // a lie told at the exact moment the message is destroyed — use
 // heldDegradedText() instead (worker.go picks between them on Broker.Queue).
-func heldReplyText(n int) string {
+func heldReplyText(channelName string, n int) string {
+	if channelName == "web" {
+		return "📨 Held — no session is attached. Attach one from the CLI: `attach web`."
+	}
 	plural := "messages"
 	if n == 1 {
 		plural = "message"

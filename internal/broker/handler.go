@@ -246,6 +246,8 @@ func (b *Broker) HandleConn(nc net.Conn) {
 			b.handlePermissionRequest(conn, stub, raw)
 		case ipc.OpPermissionSettled:
 			b.handlePermissionSettled(conn, stub, raw)
+		case ipc.OpWebLoginLink:
+			b.handleWebLoginLink(conn)
 		case ipc.OpFetchQueue:
 			b.handleFetchQueue(conn, stub, raw)
 		case ipc.OpObserve:
@@ -294,10 +296,10 @@ func (b *Broker) buildHelloAck(hello ipc.HelloMsg, stub *Stub) ipc.HelloAckMsg {
 	// Capability manifest: prefer the cwd-mapped channel, then the default. nil
 	// is a valid wire value — the adapter falls back to a default Capabilities.
 	chanName := ""
-	if m, ok := b.Mappings().LookupByCwd(hello.CWD); ok && m.Channel != "" {
+	if m, ok := b.Mappings().LookupByCwd(hello.CWD); ok && m.Channel != "" && b.isRegisteredEnabled(m.Channel) {
 		chanName = m.Channel
 	} else {
-		chanName = b.defaultChannel()
+		chanName = b.primaryChannel()
 	}
 	ack.Capabilities = b.capsForChannel(chanName)
 	return ack
@@ -476,7 +478,7 @@ func (b *Broker) handleRecoverSession(conn *ipc.Conn, stub *Stub, raw []byte, ro
 					resp.Group = tp.Group
 				}
 			} else {
-				resp.Name = "dm"
+				resp.Name = nonTopicRouteName(key.Channel)
 			}
 		}
 		// Guaranteed-visible confirmation: post a one-shot Telegram note to the
@@ -694,7 +696,20 @@ func (b *Broker) handlePermissionRequest(_ *ipc.Conn, stub *Stub, raw []byte) {
 	// it on a channel that can't render keyboards rather than silently dropping
 	// buttons. No behavior change for Telegram (InlineKeyboards=true).
 	if !ch.Capabilities().InlineKeyboards {
-		log.Printf("perm DROP id=%s: channel %s does not support interactive keyboards", req.RequestID, route.Channel)
+		var topicID *int64
+		if route.HasTopic {
+			t := route.TopicID
+			topicID = &t
+		}
+		text := fmt.Sprintf("⏸ Permission needed at the laptop: %s — %s", req.ToolName, req.Preview)
+		if _, err := ch.SendReply(c3types.ReplyArgs{
+			Channel: route.Channel, ChatID: route.ChatID, TopicID: topicID,
+			Text: text, Markup: c3types.MarkupNone,
+		}); err != nil {
+			log.Printf("perm NOTICE id=%s: channel %s send failed: %v", req.RequestID, route.Channel, err)
+			return
+		}
+		log.Printf("perm NOTICE id=%s: channel %s requires laptop approval", req.RequestID, route.Channel)
 		return
 	}
 
@@ -776,6 +791,21 @@ func (b *Broker) handleListTopics(conn *ipc.Conn) {
 				// with `c3-broker status`, which has always reaped at read time
 				// (handleListClaims below). Two views of one fact must not be
 				// able to give different answers.
+				if holder.IsAlive() {
+					entry.ClaimedBy = &ipc.Holder{CLI: holder.CLI, PID: holder.PID, CWD: holder.CWD}
+				} else {
+					b.Routes.Release(key, holder.ConnID)
+				}
+			}
+			resp.Topics = append(resp.Topics, entry)
+		}
+	}
+	if b.isRegisteredEnabled("web") {
+		if key, _, err := b.webOperatorRoute(); err == nil {
+			entry := ipc.TopicEntry{
+				Channel: "web", ChatID: key.ChatID, Name: "web", RouteKind: "dm",
+			}
+			if holder, ok := b.Routes.Holder(key); ok {
 				if holder.IsAlive() {
 					entry.ClaimedBy = &ipc.Holder{CLI: holder.CLI, PID: holder.PID, CWD: holder.CWD}
 				} else {
@@ -1087,7 +1117,7 @@ func (b *Broker) stubMatchesPID(s *Stub, reqPID int) (rule string, ok bool) {
 // "topic-<id>" fallback so we never surface a bare integer.
 func pingTopicLabel(b *Broker, key RouteKey) string {
 	if !key.HasTopic {
-		return "dm"
+		return nonTopicRouteName(key.Channel)
 	}
 	if tp, ok := b.Mappings().LookupTopicByID(key.Channel, key.ChatID, key.TopicID); ok && tp.Name != "" {
 		return tp.Name
@@ -1188,7 +1218,7 @@ func (b *Broker) handleListSessions(conn *ipc.Conn, raw []byte) {
 // (its consumer doesn't want the group qualifier).
 func sessionTopicLabel(b *Broker, key RouteKey) string {
 	if !key.HasTopic {
-		return "dm"
+		return nonTopicRouteName(key.Channel)
 	}
 	tp, ok := b.Mappings().LookupTopicByID(key.Channel, key.ChatID, key.TopicID)
 	if !ok || tp.Name == "" {

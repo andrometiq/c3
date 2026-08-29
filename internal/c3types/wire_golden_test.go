@@ -214,9 +214,10 @@ func wireGoldens() []wireGolden {
 			name: "Outbound",
 			value: Outbound{
 				Channel: "telegram", ChatID: -1001, TopicID: ptrInt64(7), Text: "t",
-				Markup: MarkupMarkdown,
-				Media:  []MediaItem{{Kind: MediaPhoto, Path: "/tmp/x.png"}},
-				Poll:   &PollSpec{Question: "q"},
+				Markup:             MarkupMarkdown,
+				Media:              []MediaItem{{Kind: MediaPhoto, Path: "/tmp/x.png"}},
+				Poll:               &PollSpec{Question: "q"},
+				DisableLinkPreview: true,
 				// ReplyTo here is a MESSAGE ID, not a route and not a user. The
 				// Go name does not say "MessageID", which is exactly why a
 				// name-based audit misses it and why it is pinned explicitly.
@@ -225,9 +226,9 @@ func wireGoldens() []wireGolden {
 			},
 			keys: []string{
 				"Channel", "ChatID", "TopicID", "Text", "Markup", "Media",
-				"Poll", "ReplyTo", "Buttons",
+				"Poll", "DisableLinkPreview", "ReplyTo", "Buttons",
 			},
-			omitEmpty: []string{"Buttons"},
+			omitEmpty: []string{"DisableLinkPreview", "Buttons"},
 		},
 		{
 			// Data and URL are both omitempty and are mutually exclusive in real

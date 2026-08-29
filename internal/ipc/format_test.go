@@ -29,6 +29,13 @@ func TestFormatAttached_OKDM(t *testing.T) {
 	}
 }
 
+func TestFormatAttached_OKWeb(t *testing.T) {
+	msg := &AttachedMsg{OK: true, Channel: "web", Name: "web", ChatID: 42}
+	if got, want := FormatAttached(msg), `attached to "web" (on-the-go chat)`; got != want {
+		t.Fatalf("FormatAttached(ok+web)=%q, want %q", got, want)
+	}
+}
+
 // TestFormatAttached_ProposalParity confirms every proposal action the
 // broker can emit is rendered with actionable user-facing text — no
 // "unspecified failure" leakage. maintainer 2026-05-18: "I absolutely need

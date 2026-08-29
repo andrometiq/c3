@@ -86,7 +86,7 @@ func TestFlushInbounds_AppendFailSendsNotice(t *testing.T) {
 	defer w.Stop()
 
 	var persisted []int64
-	b.SetPersistedCallback(func(in *c3types.Inbound) { persisted = append(persisted, in.MessageID) })
+	b.SetPersistedCallback("telegram", func(in *c3types.Inbound) { persisted = append(persisted, in.MessageID) })
 
 	// Force Append to fail: build a store, then remove its directory so OpenFile
 	// fails (same technique as the no-poison test).

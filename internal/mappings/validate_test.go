@@ -59,3 +59,63 @@ func TestValidate_MappingChannelMissing(t *testing.T) {
 		t.Errorf("expected unknown-channel error, got %v", err)
 	}
 }
+
+func TestValidate_WebConfig(t *testing.T) {
+	valid := []ChannelConfig{
+		{},
+		{Listen: "127.0.0.1:8371"},
+		{Listen: "[::1]:8371", PublicURL: "https://device.example"},
+		{PublicURL: "https://device.example:8443"},
+	}
+	for _, config := range valid {
+		mf := newTestFile()
+		mf.SchemaVersion = 1
+		mf.Channels["web"] = config
+		if err := mf.Validate(); err != nil {
+			t.Errorf("valid web config %+v: %v", config, err)
+		}
+	}
+
+	invalid := []struct {
+		name   string
+		config ChannelConfig
+	}{
+		{"listen missing port", ChannelConfig{Listen: "127.0.0.1"}},
+		{"listen bad port", ChannelConfig{Listen: "127.0.0.1:70000"}},
+		{"public http", ChannelConfig{PublicURL: "http://device.example"}},
+		{"public path", ChannelConfig{PublicURL: "https://device.example/auth"}},
+		{"public slash path", ChannelConfig{PublicURL: "https://device.example/"}},
+		{"public query", ChannelConfig{PublicURL: "https://device.example?q=1"}},
+		{"public empty query", ChannelConfig{PublicURL: "https://device.example?"}},
+		{"public fragment", ChannelConfig{PublicURL: "https://device.example#x"}},
+		{"public empty fragment", ChannelConfig{PublicURL: "https://device.example#"}},
+		{"public bad port", ChannelConfig{PublicURL: "https://device.example:70000"}},
+		{"web master id", ChannelConfig{MasterUserID: 42}},
+		{"web bot token", ChannelConfig{BotToken: "secret"}},
+		{"web dm chat", ChannelConfig{DMChatID: 42}},
+		{"web default group", ChannelConfig{DefaultGroup: "main"}},
+		{"web groups", ChannelConfig{Groups: map[string]GroupConfig{"main": {ChatID: -1}}}},
+		{"web topics", ChannelConfig{Topics: []Topic{{ChatID: -1, TopicID: 2, Name: "x"}}}},
+	}
+	for _, tc := range invalid {
+		t.Run(tc.name, func(t *testing.T) {
+			mf := newTestFile()
+			mf.SchemaVersion = 1
+			mf.Channels["web"] = tc.config
+			if err := mf.Validate(); err == nil {
+				t.Fatalf("invalid web config accepted: %+v", tc.config)
+			}
+		})
+	}
+}
+
+func TestWebPublicURLIsPrivate(t *testing.T) {
+	for _, raw := range []string{"", "https://127.0.0.1", "https://[::1]:8443", "https://device.ts.net"} {
+		if !WebPublicURLIsPrivate(raw) {
+			t.Errorf("WebPublicURLIsPrivate(%q)=false, want true", raw)
+		}
+	}
+	if WebPublicURLIsPrivate("https://chat.example.com") {
+		t.Fatal("ordinary public host was classified private")
+	}
+}

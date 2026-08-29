@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/Andrometiq/c3/internal/c3types"
+	"github.com/Andrometiq/c3/internal/channel"
 	"github.com/Andrometiq/c3/internal/ipc"
 	"github.com/Andrometiq/c3/internal/queue"
 )
@@ -913,9 +914,7 @@ func (w *RouteWorker) echoReadback(in *c3types.Inbound, transcript, failNotice s
 	}
 	// Echo the transcript via the channel's optional readback renderer. Other
 	// channels simply don't implement it and are skipped.
-	rb, ok := ch.(interface {
-		SendReadback(c3types.ReadbackArgs) (int64, error)
-	})
+	rb, ok := ch.(channel.ReadbackSender)
 	if !ok {
 		return
 	}
@@ -1315,7 +1314,7 @@ func (w *RouteWorker) forwardOrFallbackCovering(_ context.Context, in *c3types.I
 	// update. Sending the reassurance here would tell the operator "nothing lost"
 	// at the exact moment the message is destroyed, so warn instead.
 	degraded := w.broker.Queue == nil
-	text := heldReplyText(count)
+	text := heldReplyText(in.Channel, count)
 	held := fmt.Sprintf("no claim, queued (count=%d)", count)
 	if degraded {
 		// No count: nothing was stored, and printing "count=1" next to a DROPPED

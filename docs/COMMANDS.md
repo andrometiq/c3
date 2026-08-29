@@ -17,6 +17,7 @@ support.
 |-----------------|-----------------------------------|---------------|-----------------------------------------------------------------------------------------------------------------------|
 | `status`        | `c3-broker status` (CLI)          | pure shell    | Daemon liveness, socket reachability, mappings.json validation, channel state, **live route claims** (via OpListClaims). |
 | `topics`        | `c3-broker topics` (CLI)          | pure shell    | List every topic in mappings.json + which session (if any) currently claims it.                                       |
+| `web link`      | `c3-broker web link` (CLI)         | pure shell    | Ask the running broker to mint a fresh web login link and deliver it through the configured Telegram operator DM. The token is not printed on the local IPC response. |
 | `build`         | core `go install` package set (shell) | pure shell | Rebuild C3's ten core binaries; the PATH-shadowing Codex launcher remains opt-in. |
 | `update`        | `c3-broker update [--check]` (CLI) | pure shell    | Checks the latest GitHub release and performs checksum-verified on-disk binary replacement; does not touch the running broker. |
 | `setup`         | `c3-broker setup …` (CLI)         | agent-guided / interactive | Configure C3. Primary path: the `/c3:setup` slash command drives the phased subcommands one step at a time — `setup token` (validate via getMe + record), `setup pair dm` / `setup pair group` (code-based id discovery: a 4-digit code sent in Telegram discovers the user id / group chat id — no id hunting), `setup stt`, `setup finish` (host integrations + broker restart). Bare `c3-broker setup` is the full interactive TTY flow (fallback for a plain terminal). Writes mappings.json (mode 0600). |
@@ -24,7 +25,7 @@ support.
 | `pair`          | `c3-broker pair …` (CLI)          | pure shell    | Arm a Telegram pairing window. A 4-digit code sent from Telegram allowlists the DM `user_id` (`pair dm`) or a group `chat_id` (`pair group <chat_id>`). The setup flow uses this under the hood for id-free discovery. |
 | `ping`          | `c3-broker ping` (CLI)            | pure shell    | Send a one-shot "this is me" message to the attached topic, identifying which CLI session currently owns it. Run in each candidate tab to find the owner before force-stealing. |
 | `sessions`      | `c3-broker sessions` (CLI)        | pure shell    | List every live Claude Code / Codex session the broker tracks — CWD, attached topic, and a "you are here" marker for the calling terminal. |
-| `attach`        | `attach(expr=…)` (MCP tool)       | LLM dispatch  | Attach this session's adapter to a Telegram topic. Broker parses `expr` and either claims an explicit target, resumes the session's own topic, or proposes a picker/confirmation. |
+| `attach`        | `attach(expr=…)` (MCP tool)       | LLM dispatch  | Attach this session to a Telegram DM/topic or the web route. Broker parses `expr` first, then resolves the requested channel and target. |
 | `detach`        | `detach()` (MCP tool)             | LLM dispatch  | Release the session's current claim (sends `OpRelease`). Claude + Codex + Grok + dcode (every adapter with the tool). |
 | `fetch-queue`   | `fetch_queue(limit=…)` (MCP tool) + `fetch-queue` (MCP prompt on Desktop/Cursor) | LLM dispatch / prompt inject | Drain held inbound for this session's topic. Bare = all; optional count fetches the oldest N. Claude: `/c3:fetch-queue` and short alias `/c3:fetch`. Desktop: `/fetch-queue` MCP prompt. Cursor: MCP prompt `fetch-queue` plus `~/.cursor/commands/{fetch,c3-fetch}.md` from `install-cursor`. dcode: `/skill:c3-fetch` user skill from `install-dcode`. |
 | `release`       | `c3-broker release <cwd>` (CLI)   | pure shell    | **Stubbed in v1** — intended to drop a route claim by cwd without restarting the broker; returns 'not yet implemented' today; workaround is `/exit` the holding session. |
@@ -98,12 +99,34 @@ once").
 |------------------------------------|----------------------------------------------|
 | `""` (empty)                       | bare attach — never guesses (see below)      |
 | `"dm"` / `"DM"` (case-insensitive) | `target = "dm"` (DM disambiguation may fire) |
+| `"web"` / `"telegram"` (case-insensitive) | channel selector |
 | `"<int>"`                          | `topic_id = <int>`                           |
 | `"create <name>"`                  | `name = <name>, create = true`               |
 | `"-y <name>"` / `"yes <name>"`     | `name = <name>, create = true`               |
 | `"<other string>"`                 | `name = <string>`                            |
 
 Whitespace is trimmed. Unparsable input falls through to `name`.
+
+Because the two exact tokens are selectors, a Telegram topic literally named
+`web` or `telegram` must be selected with the structured `name="web"` /
+`name="telegram"` form or by topic id.
+
+Channel resolution is request-aware:
+
+| Request | Channel result |
+|---|---|
+| explicit `channel` or selector token | that registered, enabled channel |
+| `dm`, topic name, topic id, or create | the unique registered, enabled topic-capable channel (normally Telegram) |
+| bare attach, already attached | the current route's channel |
+| bare attach, recoverable session record | that session's recorded route channel |
+| bare attach, no recorded route | the unique topic-capable channel and its picker |
+| two topic-capable channels, no selector | refuse; never guess |
+
+A successful `attach web` claims the operator's web route. If the browser has
+no live authenticated session, the broker sends a login link through the
+Telegram DM and the attach response says so. The response also reminds the
+agent to use reply-tool (“Telegram”) mode so `reply` lands on the claimed web
+route, and that permission prompts/`ask` still require the laptop.
 
 ### Bare `attach` (empty input) — never guesses
 
@@ -162,6 +185,7 @@ rest of the surface is the MCP tools plus `c3-broker` subcommands, as on Codex.
 |-----------------|-------------------------------------------------|-----------------------------------------|----------------------------------------------|
 | `status`        | `/c3:status` (`commands/status.md`)             | `c3-broker status` (shell)              | `c3-broker status` (shell)                   |
 | `topics`        | `/c3:topics` + `topics` MCP tool                | `topics` MCP tool · `c3-broker topics`  | `/skill:c3-topics` + `topics` MCP tool       |
+| `web link`      | `c3-broker web link` (shell)                    | `c3-broker web link` (shell)            | `c3-broker web link` (shell)                 |
 | `build`         | `/c3:build` (`commands/build.md`)               | core `go install` package set (shell)   | core `go install` package set (shell)        |
 | `setup`         | `/c3:setup` (`commands/setup.md`)               | `c3-broker setup` (TTY)                 | `c3-broker setup` (TTY)                      |
 | `reload-config` | `/c3:reload-config`                             | `pkill -HUP c3-broker`                  | `pkill -HUP c3-broker`                       |

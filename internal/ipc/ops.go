@@ -51,6 +51,7 @@ const (
 	// owner-checks it against the requesting stub. Fire-and-forget: it only clears
 	// the pending keyboard and never produces a verdict or synchronous reply.
 	OpPermissionSettled Op = "permission_settled"
+	OpWebLoginLink      Op = "web_login_link"
 	OpBye               Op = "bye"
 
 	// broker → adapter
@@ -89,5 +90,6 @@ const (
 	// notifications/claude/channel/permission. Fire-and-forget (no caller blocks
 	// on it — a never-delivered verdict just leaves CC waiting in the TUI).
 	OpPermissionVerdict Op = "permission_verdict"
+	OpWebLoginLinkReply Op = "web_login_link_reply"
 	OpError             Op = "error"
 )

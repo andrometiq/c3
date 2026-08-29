@@ -46,6 +46,12 @@ func (b *Broker) handleAttach(conn *ipc.Conn, stub *Stub, raw []byte) {
 		})
 		return
 	}
+	// Expr is the user-facing selector grammar, so parse it before resolving a
+	// channel. In particular, the exact tokens "web" and "telegram" are channel
+	// selectors rather than topic names.
+	if req.Expr != "" {
+		applyExprToAttachReq(&req)
+	}
 
 	// Policy-rejected hint: the CLI host's policy layer rejected the
 	// prior attach (e.g. Codex approvals_reviewer="auto_review"
@@ -65,40 +71,31 @@ func (b *Broker) handleAttach(conn *ipc.Conn, stub *Stub, raw []byte) {
 		return
 	}
 
-	chanName := req.Channel
+	chanName, resolveErr := b.resolveAttachChannel(&req, stub)
 	if chanName == "" {
-		chanName = b.defaultChannel()
-	}
-	if chanName == "" {
-		// Distinguish "none configured" from "ambiguous". Only the former is
-		// setup advice: format.go maps AttachStatusNoTopicsConfigured to
-		// "Run `c3-broker setup`", which is wrong (and misleading) when the
-		// problem is that mappings.json has two channels and the request named
-		// neither. No Status → format.go's `attach failed: <err>` fall-through.
-		if configured := b.Mappings().Channels; len(configured) > 1 {
-			// Name them, and do NOT tell the user to "pass channel=<name>". The
-			// AttachReq carries a Channel field, but no shipped adapter exposes it
-			// in its attach tool schema — so that advice is un-followable, and a
-			// refusal whose remedy cannot be performed is worse than the guess it
-			// replaced. Until an adapter can select a channel, the honest remedy is
-			// the config file. (Unreachable today: only telegram is ever registered.)
-			names := make([]string, 0, len(configured))
-			for name := range configured {
-				names = append(names, name)
-			}
-			sort.Strings(names) // map order is random; a refusal must read the same every time
-			_ = conn.WriteJSON(ipc.AttachedMsg{
-				Op: ipc.OpAttached, OK: false,
-				Err: fmt.Sprintf("mappings.json configures %d channels (%s) and attach will not guess between them. "+
-					"Selecting a channel from the attach tool is not supported yet — leave one channel configured in mappings.json, "+
-					"or remove the others until it is.", len(configured), strings.Join(names, ", ")),
-			})
+		if resolveErr != "" {
+			_ = conn.WriteJSON(ipc.AttachedMsg{Op: ipc.OpAttached, OK: false, Err: resolveErr})
 			return
 		}
 		_ = conn.WriteJSON(ipc.AttachedMsg{
 			Op: ipc.OpAttached, OK: false,
 			Status: ipc.AttachStatusNoTopicsConfigured,
 			Err:    "no channel registered; configure mappings.json:channels.<name>",
+		})
+		return
+	}
+
+	if cc, ok := b.Mappings().Channels[chanName]; ok && !cc.EnabledOrDefault() {
+		_ = conn.WriteJSON(ipc.AttachedMsg{
+			Op: ipc.OpAttached, OK: false,
+			Err: fmt.Sprintf("channel %q is disabled in mappings.json", chanName),
+		})
+		return
+	}
+	if _, ok := b.Mappings().Channels[chanName]; !ok {
+		_ = conn.WriteJSON(ipc.AttachedMsg{
+			Op: ipc.OpAttached, OK: false,
+			Err: fmt.Sprintf("no `%s` channel is configured", chanName),
 		})
 		return
 	}
@@ -122,12 +119,9 @@ func (b *Broker) handleAttach(conn *ipc.Conn, stub *Stub, raw []byte) {
 		return
 	}
 
-	// If the caller passed a freeform Expr, parse it into structured fields
-	// before dispatching. This is the shared parser every CLI's slash-command
-	// wrapper invokes via `attach(expr=$ARGUMENTS)` — keeps each CLI's
-	// per-command file a one-liner with no duplicated parsing.
-	if req.Expr != "" {
-		applyExprToAttachReq(&req)
+	if req.Channel == "web" && !attachTargetSpecified(&req) {
+		b.attachWeb(conn, stub, req.Steal, req.Replay)
+		return
 	}
 
 	switch {
@@ -176,7 +170,7 @@ func (b *Broker) handleAttach(conn *ipc.Conn, stub *Stub, raw []byte) {
 func (b *Broker) attachBare(conn *ipc.Conn, stub *Stub, chanName, cwd, group string, steal, replay bool) {
 	// (i) Already attached — idempotent OK, no re-claim, no re-peek.
 	if cur := stub.CurrentRoute(); cur != nil {
-		name, groupName := "dm", ""
+		name, groupName := nonTopicRouteName(cur.Channel), ""
 		var topicID *int64
 		if cur.HasTopic {
 			t := cur.TopicID
@@ -205,7 +199,7 @@ func (b *Broker) attachBare(conn *ipc.Conn, stub *Stub, chanName, cwd, group str
 	// stamp both straight onto the response (no withBacklog re-peek, which would
 	// re-introduce the §3c double-peek TOCTOU on this manual path).
 	if key, cnt, preview, ok := b.recoverSession(stub); ok {
-		name, groupName := "dm", ""
+		name, groupName := nonTopicRouteName(key.Channel), ""
 		if sa, ok := b.lookupSessionAttachment(stub.CLI, stub.StableSessionIDValue()); ok {
 			name = sa.Name
 			groupName = sa.Group
@@ -219,7 +213,7 @@ func (b *Broker) attachBare(conn *ipc.Conn, stub *Stub, chanName, cwd, group str
 					name = fmt.Sprintf("topic-%d", key.TopicID)
 				}
 			} else {
-				name = "dm"
+				name = nonTopicRouteName(key.Channel)
 			}
 		}
 		var topicID *int64
@@ -251,8 +245,9 @@ func (b *Broker) attachBare(conn *ipc.Conn, stub *Stub, chanName, cwd, group str
 }
 
 // maxPickOptions bounds the host AskUserQuestion budget for the friendly picker:
-// the shown suggestions plus an optional "See the full list" row must fit within
-// this many options (spec §4). The create row is itself a suggestion.
+// the shown suggestions, optional web row, and optional "See the full list"
+// row must fit within this many options (spec §4). The create row is itself a
+// suggestion.
 const maxPickOptions = 4
 
 // buildPickTopic assembles the ranked suggestion set for a bare attach that
@@ -287,6 +282,13 @@ func (b *Broker) buildPickTopic(stub *Stub, chanName, cwd string) *ipc.Proposal 
 	_ = stub
 	mf := b.Mappings()
 	cc, hasChan := mf.Channels[chanName]
+	webAvailable := false
+	for _, name := range b.registeredEnabledChannels() {
+		if name == "web" {
+			webAvailable = true
+			break
+		}
+	}
 
 	var suggestions []ipc.PickSuggestion
 	seen := map[RouteKey]bool{}
@@ -438,6 +440,9 @@ func (b *Broker) buildPickTopic(stub *Stub, chanName, cwd string) *ipc.Proposal 
 		if hasMore {
 			rows++
 		}
+		if webAvailable {
+			rows++
+		}
 		if rows <= maxPickOptions || len(suggestions) == 0 {
 			break
 		}
@@ -445,11 +450,12 @@ func (b *Broker) buildPickTopic(stub *Stub, chanName, cwd string) *ipc.Proposal 
 	}
 
 	return &ipc.Proposal{
-		Action:      "pick_topic",
-		Channel:     chanName,
-		Project:     project,
-		Suggestions: suggestions,
-		HasMore:     hasMore,
+		Action:       "pick_topic",
+		Channel:      chanName,
+		Project:      project,
+		Suggestions:  suggestions,
+		HasMore:      hasMore,
+		WebAvailable: webAvailable,
 	}
 }
 
@@ -498,6 +504,7 @@ func sessionAttachmentSortKey(sa mappings.SessionAttachment) string {
 //	                              idempotent guard → session's OWN recover → picker;
 //	                              NEVER a silent cwd-saved claim — spec §1-§2)
 //	"dm" / "DM" (case-insens)   → Target = "dm"
+//	"web" / "telegram"          → Channel selector (case-insensitive)
 //	"<int>"                     → TopicID = <int>
 //	"-y <name>" / "yes <name>" / "create <name>"
 //	                            → Name = <name>, Create = true
@@ -511,6 +518,10 @@ func sessionAttachmentSortKey(sa mappings.SessionAttachment) string {
 func applyExprToAttachReq(req *ipc.AttachReq) {
 	expr := strings.TrimSpace(req.Expr)
 	if expr == "" {
+		return
+	}
+	if strings.EqualFold(expr, "web") || strings.EqualFold(expr, "telegram") {
+		req.Channel = strings.ToLower(expr)
 		return
 	}
 	if strings.EqualFold(expr, "dm") {
@@ -532,6 +543,31 @@ func applyExprToAttachReq(req *ipc.AttachReq) {
 		}
 	}
 	req.Name = expr
+}
+
+func attachTargetSpecified(req *ipc.AttachReq) bool {
+	return req != nil && (req.Target != "" || req.Name != "" || req.TopicID != nil || req.Create)
+}
+
+// attachWeb claims the web channel's one non-topic route for the configured
+// operator. Operator identity comes only from the telegram stanza.
+func (b *Broker) attachWeb(conn *ipc.Conn, stub *Stub, steal, replay bool) {
+	key, _, err := b.webOperatorRoute()
+	if err != nil {
+		_ = conn.WriteJSON(ipc.AttachedMsg{Op: ipc.OpAttached, OK: false, Err: "attach web: " + err.Error()})
+		return
+	}
+	if !b.tryClaim(conn, stub, key, "web", steal, replay) {
+		return
+	}
+	b.recordSessionAttachment(stub, "web", key.ChatID, nil, "web", "")
+	delivery, linkErr := b.sendWebLoginLink(stub, "attach web", true, true)
+	_ = conn.WriteJSON(b.withBacklog(key, ipc.AttachedMsg{
+		Op: ipc.OpAttached, OK: true, Status: ipc.AttachStatusOK,
+		Channel: "web", ChatID: key.ChatID, Name: "web",
+		Capabilities: b.capsForChannel("web"),
+		Notice:       webAttachGuidance(delivery, linkErr),
+	}))
 }
 
 // attachDM claims the user's 1-on-1 chat with the bot. Spec §5.5: never
@@ -1271,7 +1307,7 @@ func (b *Broker) recoverSession(stub *Stub) (RouteKey, int, []ipc.QueuedItem, bo
 // empty (recordSessionAttachment guards that).
 func (b *Broker) recordCurrentRouteForStable(stub *Stub, key RouteKey) {
 	var topicID *int64
-	name, group := "dm", ""
+	name, group := nonTopicRouteName(key.Channel), ""
 	if key.HasTopic {
 		t := key.TopicID
 		topicID = &t
@@ -1283,6 +1319,13 @@ func (b *Broker) recordCurrentRouteForStable(stub *Stub, key RouteKey) {
 		}
 	}
 	b.recordSessionAttachment(stub, key.Channel, key.ChatID, topicID, name, group)
+}
+
+func nonTopicRouteName(channelName string) string {
+	if channelName == "web" {
+		return "web"
+	}
+	return "dm"
 }
 
 func (b *Broker) persistMapping(stub *Stub, chanName string, chatID, topicID int64, name, group string) {
@@ -1419,29 +1462,106 @@ func (b *Broker) resolveGroup(cc mappings.ChannelConfig, groupName string) (stri
 	return groupName, gCfg, ok
 }
 
-// defaultChannel returns THE channel when mappings configure exactly one.
-// Zero or two-plus → "": Go randomises map iteration order, so "the first
-// entry" is a DIFFERENT channel on different calls, and a coin flip binds the
-// session to a channel the user never named — the queue file name
-// (queue/paths.go:52-58), the saved cwd default (persistMapping below) and the
-// capability manifest (capsForChannel) all key on it. An unknown identity never
-// matches; refusing to guess is the whole rule.
-//
-// The length check, not a first-entry sentinel: a `""` channel key would make
-// any "first non-empty name" form order-dependent again.
-//
-// All three callers are safe on "": handleAttach below reports it, observe.go's
-// resolveTopicRoute returns observeNoChannel, and capsForChannel("") returns
-// nil, which handler.go documents as a valid wire value.
+// resolveAttachChannel applies the request-aware channel rule. Explicit
+// selection wins. DM/topic requests go to the unique topic-capable channel.
+// Bare attach preserves the session's current or recorded route before falling
+// back to that same unique topic channel.
+func (b *Broker) resolveAttachChannel(req *ipc.AttachReq, stub *Stub) (string, string) {
+	if req.Channel != "" {
+		return req.Channel, ""
+	}
+	if !attachTargetSpecified(req) {
+		if cur := stub.CurrentRoute(); cur != nil {
+			return cur.Channel, ""
+		}
+		if sid := stub.StableSessionIDValue(); sid != "" {
+			if sa, ok := b.lookupSessionAttachment(stub.CLI, sid); ok && sa.Recoverable(time.Now(), SessionAttachmentTTL) {
+				return sa.Channel, ""
+			}
+		}
+	}
+	candidates := b.topicCapableChannels()
+	if len(candidates) == 0 {
+		// Preserve the configured-vs-running diagnostic: resolve a sole configured
+		// topic channel far enough for the running-channel check below to explain
+		// that its transport failed to start.
+		candidates = b.configuredTopicCapableChannels()
+	}
+	switch len(candidates) {
+	case 1:
+		return candidates[0], ""
+	case 0:
+		return "", ""
+	default:
+		return "", fmt.Sprintf("%d topic-capable channels (%s) can satisfy this attach and C3 will not guess; select a channel explicitly",
+			len(candidates), strings.Join(candidates, ", "))
+	}
+}
+
+func (b *Broker) configuredTopicCapableChannels() []string {
+	var names []string
+	for name, cc := range b.Mappings().Channels {
+		if !cc.EnabledOrDefault() {
+			continue
+		}
+		if name == "telegram" || cc.DMChatID != 0 || cc.DefaultGroup != "" || len(cc.Groups) > 0 || len(cc.Topics) > 0 {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	return names
+}
+
+func (b *Broker) topicCapableChannels() []string {
+	var names []string
+	for _, name := range b.registeredEnabledChannels() {
+		cc := b.Mappings().Channels[name]
+		ch, _ := b.Channel(name)
+		if name == "telegram" || ch.Capabilities().Threads || cc.DMChatID != 0 || cc.DefaultGroup != "" || len(cc.Groups) > 0 || len(cc.Topics) > 0 {
+			names = append(names, name)
+		}
+	}
+	return names
+}
+
+func (b *Broker) registeredEnabledChannels() []string {
+	var names []string
+	for _, name := range b.Channels() {
+		cc, ok := b.Mappings().Channels[name]
+		if ok && cc.EnabledOrDefault() {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	return names
+}
+
+func (b *Broker) isRegisteredEnabled(name string) bool {
+	for _, registered := range b.registeredEnabledChannels() {
+		if registered == name {
+			return true
+		}
+	}
+	return false
+}
+
+func (b *Broker) primaryChannel() string {
+	for _, name := range b.registeredEnabledChannels() {
+		if name == "telegram" {
+			return name
+		}
+	}
+	return b.defaultChannel()
+}
+
+// defaultChannel returns the sole registered, enabled channel. Configured but
+// disabled or failed-to-start stanzas do not participate.
 func (b *Broker) defaultChannel() string {
-	chans := b.Mappings().Channels
+	chans := b.registeredEnabledChannels()
 	if len(chans) != 1 {
 		return ""
 	}
-	for name := range chans {
-		return name
-	}
-	return ""
+	return chans[0]
 }
 
 // backlogSummaryMax bounds the compact attach-time preview (full content comes

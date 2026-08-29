@@ -96,8 +96,13 @@ type Allowlist struct {
 	Groups []int64 `json:"groups,omitempty"`
 }
 
-// ChannelConfig holds per-channel state. v1 only uses telegram.
+// ChannelConfig holds typed per-channel state for the in-tree transports.
 type ChannelConfig struct {
+	// Enabled defaults to true when omitted. The web channel uses it to keep a
+	// configured stanza dormant without making attach resolution ambiguous.
+	Enabled             *bool                  `json:"enabled,omitempty"`
+	Listen              string                 `json:"listen,omitempty"`
+	PublicURL           string                 `json:"public_url,omitempty"`
 	BotToken            string                 `json:"bot_token,omitempty"`
 	DefaultGroup        string                 `json:"default_group,omitempty"`
 	Groups              map[string]GroupConfig `json:"groups,omitempty"`
@@ -121,6 +126,12 @@ type ChannelConfig struct {
 	// would zero-value to false and silently disable decoding for everyone who
 	// never set it — the trap documented for notifications.invasive.
 	RichInbound *bool `json:"rich_inbound,omitempty"`
+}
+
+// EnabledOrDefault reports whether a configured channel is enabled. An absent
+// field defaults on; only an explicit false disables the stanza.
+func (cc ChannelConfig) EnabledOrDefault() bool {
+	return cc.Enabled == nil || *cc.Enabled
 }
 
 // GroupConfig identifies a Telegram supergroup the bot can create topics in.
