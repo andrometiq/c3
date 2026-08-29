@@ -46,6 +46,11 @@ const (
 	// blocking tool to unblock, so the broker sends no synchronous ack (unlike
 	// OpAskRegister). The verdict comes back later as OpPermissionVerdict.
 	OpPermissionRequest Op = "permission_request"
+	// OpPermissionSettled reports that a previously-relayed Claude Code
+	// permission prompt was resolved in the CLI. Carries NO route — the broker
+	// owner-checks it against the requesting stub. Fire-and-forget: it only clears
+	// the pending keyboard and never produces a verdict or synchronous reply.
+	OpPermissionSettled Op = "permission_settled"
 	OpBye               Op = "bye"
 
 	// broker → adapter

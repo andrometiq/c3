@@ -106,9 +106,9 @@ The socket carries request/response traffic **and** unsolicited broker pushes on
 The correct shape is **one dedicated reader task** that dispatches every frame by op, plus a pending-request map that wakes the right caller:
 
 - Ops that carry a correlation `id` — `tool_call`/`tool_result`, `fetch_queue`/`fetch_queue_result`, `retranscribe`/`retranscribe_result`, `observe`/`observe_result` — are matched on that id. Generate it yourself; the broker echoes it verbatim.
-- `ask_register`/`ask_registered`/`ask_result` are matched on `ask_id`; `permission_request`/`permission_verdict` on `request_id`.
+- `ask_register`/`ask_registered`/`ask_result` are matched on `ask_id`; `permission_request`/`permission_verdict`/`permission_settled` on `request_id`. Claude Code derives that five-letter permission id from the corresponding transcript `tool_use_id`; other hosts may mint it differently.
 - **`attach`/`attached`, `list_topics`/`topics_list`, and every op in the CLI-client section carry no correlation id** and are matched **by op alone**. Keep at most one of each in flight per connection. (An optional `id` may be added additively in a future version; until then, serialise them.)
-- On a compatible dialect, `release`, `inbound_delivered`, `permission_request`, and `bye` get **no reply on their normal path**. Do not await one — you will deadlock. An incompatible `release` or `inbound_delivered` is refused with `error`; your demux reader handles that unsolicited frame.
+- On a compatible dialect, `release`, `inbound_delivered`, `permission_request`, `permission_settled`, and `bye` get **no reply on their normal path**. Do not await one — you will deadlock. An incompatible `release` or `inbound_delivered` is refused with `error`; your demux reader handles that unsolicited frame.
 
 On a broker drop, wake every pending request with an error so the host CLI's tool calls don't hang.
 
@@ -396,7 +396,7 @@ Carries **no route** — the broker derives it from your current claim.
 
 #### `permission_request` → `permission_verdict` (unsolicited)
 
-*Provisional: this is a trust boundary under active hardening — verdict-to-prompt binding in particular.*
+*Provisional: this is a trust boundary under active hardening. Verdicts bind to the prompt message and requesting session; settle reports bind to the requesting session and cannot clear another session's prompt.*
 
 Relays a host tool-use permission prompt to the operator as an Allow/Deny keyboard.
 
@@ -410,6 +410,20 @@ Carries **no route** — derived from your current claim. `preview` must be a sh
 **`permission_request` is fire-and-forget: the broker sends no reply on any path.** A nil route, a channel lookup failure, a channel without inline keyboards, and a send failure are all logged broker-side and dropped. If you await an ack here you will deadlock.
 
 `permission_verdict` is an **unsolicited push**; `behavior` is the string `"allow"` or `"deny"`. If you do not handle it, the operator taps Allow on their phone and their CLI waits forever with no indication why. This is the most user-visible consequence of an incomplete op switch.
+
+##### `permission_settled` (adapter → broker, no reply)
+
+Reports that the host resolved a relayed prompt outside C3, so the broker can remove the stale keyboard.
+
+```json
+{"op":"permission_settled","request_id":"<same>","outcome":"allow"}
+```
+
+`outcome` is `"allow"` when the host can prove the tool result was not an error, and `"unknown"` otherwise. The broker renders “Allowed in the CLI” only for `allow`; every other value renders “Settled in the CLI” and never invents a denial. The report is owner-bound to the stub that sent `permission_request` (or a reconnect with the same `cli`/`pid`/`cwd`). An unknown id is a no-op; a non-owner report is refused and leaves the prompt live.
+
+**A settle only removes the pending entry and clears the keyboard. It never emits `permission_verdict`.** If the keyboard send is still in flight, the broker records the settle and clears the message as soon as its message id arrives.
+
+The Claude adapter observes complete `tool_result` records appended after the permission request to the main session transcript or its subagent transcript subtree. The pending observation set is process-local: restarting the adapter loses it because the host does not re-send old permission requests; those keyboards fall back to the broker's 30-minute reaper. An absent `transcript_path` keeps the previous relay behavior. An old broker treats this additive op as unknown and returns `error`; the adapter logs that frame and stays connected.
 
 #### `retranscribe` → `retranscribe_result`
 
@@ -490,7 +504,7 @@ While running:
 - **`tools/list`** → return your tool list.
 - **`tools/call`** → either forward via `tool_call` and await `tool_result` on the correlation id, or run it inline against a dedicated op (see the table below).
 - **`inbound` push** → render, **then acknowledge**. See the next section.
-- **`ask_result` / `permission_verdict` pushes** → route to the waiting caller / emit into the host.
+- **`ask_result` / `permission_verdict` pushes** → route to the waiting caller / emit into the host; when the host can observe an out-of-band permission resolution, send `permission_settled` without awaiting a reply.
 - **`ping`** → respond `{}`.
 
 On the broker dropping the connection:
@@ -626,7 +640,7 @@ If your target CLI has a plugin marketplace, ship the adapter as a thin manifest
 - [ ] **`inbound_delivered` sent on every successful render** — echo `delivery_token` unchanged when present, `update_id` = `MessageID`, `count` = `covered`, never for a non-empty `Kind`, never on render failure; preserve same-`MessageID` occurrences in delivery order
 - [ ] Reconnect with backoff → `hello` → replay last attach with `replay: true` → re-fire `recover_session`; wake pending calls with an error
 - [ ] `recover_session` sent once per **connection**, post-hello, with the **stable** session id — then re-sent after every reconnect, or resume deliberately skipped
-- [ ] `ask_result` and `permission_verdict` handled if you expose `ask` / permission relay
+- [ ] `ask_result` and `permission_verdict` handled if you expose `ask` / permission relay; `permission_settled` sent when that host exposes a reliable local-resolution signal
 - [ ] Marketplace manifest authored if the CLI has one; `SETUP.md` if it doesn't
 - [ ] Tests (see below)
 

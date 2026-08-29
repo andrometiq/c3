@@ -17,7 +17,10 @@ func useScratchDir(t *testing.T) string {
 
 func TestWriteReadRoundTrip(t *testing.T) {
 	dir := useScratchDir(t)
-	want := Entry{StableSessionID: "70341717-stable", CWD: "/home/k/proj", Source: "resume", UnixNano: time.Now().UnixNano()}
+	want := Entry{
+		StableSessionID: "70341717-stable", CWD: "/workspace/project", Source: "resume",
+		TranscriptPath: "/state/sessions/70341717-stable.jsonl", UnixNano: time.Now().UnixNano(),
+	}
 	if err := Write("b60e8044-instance", want); err != nil {
 		t.Fatalf("Write: %v", err)
 	}
@@ -34,8 +37,22 @@ func TestWriteReadRoundTrip(t *testing.T) {
 	if !ok {
 		t.Fatal("Read returned ok=false for a written entry")
 	}
-	if got.StableSessionID != want.StableSessionID || got.CWD != want.CWD || got.Source != want.Source {
+	if got.StableSessionID != want.StableSessionID || got.CWD != want.CWD || got.Source != want.Source || got.TranscriptPath != want.TranscriptPath {
 		t.Fatalf("round-trip mismatch: got %+v want %+v", got, want)
+	}
+}
+
+func TestReadLegacyEntryWithoutTranscriptPath(t *testing.T) {
+	dir := useScratchDir(t)
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "legacy.json"), []byte(`{"stable_session_id":"stable","unix_nano":1}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	entry, ok := Read("legacy")
+	if !ok || entry.StableSessionID != "stable" || entry.TranscriptPath != "" {
+		t.Fatalf("legacy handoff did not remain readable: ok=%v entry=%+v", ok, entry)
 	}
 }
 

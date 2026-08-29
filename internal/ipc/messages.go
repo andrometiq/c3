@@ -230,6 +230,15 @@ type PermissionReq struct {
 	Preview   string `json:"preview,omitempty"`
 }
 
+// PermissionSettledMsg is the adapter → broker report that a relayed prompt
+// was resolved in the CLI. Outcome is "allow" when the transcript tool_result
+// is not an error and "unknown" otherwise. Fire-and-forget: there is no reply.
+type PermissionSettledMsg struct {
+	Op        Op     `json:"op"` // = OpPermissionSettled
+	RequestID string `json:"request_id"`
+	Outcome   string `json:"outcome"`
+}
+
 // PermissionVerdictMsg is the broker → adapter UNSOLICITED push of a human's
 // Allow/Deny verdict for a previously-relayed permission_request. Behavior is the
 // STRING "allow" | "deny" (matching the reference Telegram plugin's contract);

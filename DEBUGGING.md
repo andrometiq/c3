@@ -73,6 +73,7 @@ and the log is the last place to find it.
 | `fallback … sent fallback reply` | **Yes** — user got a boilerplate, but no CLI processed the original. |
 | `fallback FAIL …` | **Yes** — couldn't even send the boilerplate. |
 | `telegram: skip update=… (unsupported service)` | **No** — these are forum_topic_created / new_chat_members type events with no useful content. |
+| `perm settled …` / `perm settled DEFERRED …` / `perm settled REFUSED …` | **No** — a CLI-local resolution cleared the keyboard, is waiting for the in-flight message id, or was rejected as a non-owner. These lines carry ids and session metadata, never the prompt preview. |
 
 Specifics:
 

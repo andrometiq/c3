@@ -175,7 +175,7 @@ func wireGoldens() []wireGolden {
 		},
 		{
 			name:      "Sender",
-			value:     Sender{UserID: 85720317, Username: "u"},
+			value:     Sender{UserID: 70123456, Username: "u"},
 			keys:      []string{"UserID", "Username"},
 			omitEmpty: nil,
 		},
@@ -514,14 +514,14 @@ func TestMarshalForward_FrozenOmitEmptySurface(t *testing.T) {
 //
 // Note for reviewers/PII audit: this is real captured traffic (real chat id,
 // user ids, handle, and message text) retained deliberately for provenance.
-const liveQueueLineCaptured20260725 = `{"Channel":"telegram","ChatID":-1003990699908,"TopicID":3826,"MessageID":6675,"Sender":{"UserID":85720317,"Username":"skarthi"},"Text":"Need to steal as much ideas and conventions from this.","Attachments":null,"ReplyTo":{"MessageID":3826,"User":{"UserID":1205071350,"Username":"OCDWaterBot"},"Text":""},"Timestamp":"2026-07-25T14:44:04Z"}`
+const liveQueueLineCaptured20260725 = `{"Channel":"telegram","ChatID":-1009876543210,"TopicID":3826,"MessageID":6675,"Sender":{"UserID":70123456,"Username":"sampleuser"},"Text":"A captured line kept verbatim to pin the wire format.","Attachments":null,"ReplyTo":{"MessageID":3826,"User":{"UserID":1200000001,"Username":"SampleRelayBot"},"Text":""},"Timestamp":"2026-07-25T14:44:04Z"}`
 
 // TestUnmarshalBackward_LiveQueueLine decodes the captured line and asserts that
 // EVERY field landed in the right place, including the nested Sender and the
 // nested ReplyTo (which has a Sender of its own).
 //
 // WHAT IT CATCHES: any tag rename, at the point where it actually hurts. Rename
-// ChatID's tag and this test reports `ChatID = 0, want -1003990699908` — the
+// ChatID's tag and this test reports `ChatID = 0, want -1009876543210` — the
 // literal damage, in the literal units of the bug: a queued message whose route
 // has been zeroed and can therefore never be delivered. A symmetric round-trip
 // reports nothing at all.
@@ -539,8 +539,8 @@ func TestUnmarshalBackward_LiveQueueLine(t *testing.T) {
 	}
 	// Negative id = supergroup, per Telegram's sign convention. A zero here means
 	// the key stopped matching and the message is undeliverable.
-	if in.ChatID != -1003990699908 {
-		t.Errorf("ChatID = %d, want -1003990699908 — a zeroed chat id means this queued message can never be delivered", in.ChatID)
+	if in.ChatID != -1009876543210 {
+		t.Errorf("ChatID = %d, want -1009876543210 — a zeroed chat id means this queued message can never be delivered", in.ChatID)
 	}
 	if in.TopicID == nil {
 		t.Errorf("TopicID = nil, want 3826 — a nil topic silently re-routes a forum-topic message to the DM/root")
@@ -550,7 +550,7 @@ func TestUnmarshalBackward_LiveQueueLine(t *testing.T) {
 	if in.MessageID != 6675 {
 		t.Errorf("MessageID = %d, want 6675 — dedup and reply-quoting both key on this", in.MessageID)
 	}
-	if in.Text != "Need to steal as much ideas and conventions from this." {
+	if in.Text != "A captured line kept verbatim to pin the wire format." {
 		t.Errorf("Text = %q, want the captured text — the message body itself was lost", in.Text)
 	}
 	if in.Attachments != nil {
@@ -558,11 +558,11 @@ func TestUnmarshalBackward_LiveQueueLine(t *testing.T) {
 	}
 
 	// Nested Sender.
-	if in.Sender.UserID != 85720317 {
-		t.Errorf("Sender.UserID = %d, want 85720317 — this feeds the allowlist trust boundary", in.Sender.UserID)
+	if in.Sender.UserID != 70123456 {
+		t.Errorf("Sender.UserID = %d, want 70123456 — this feeds the allowlist trust boundary", in.Sender.UserID)
 	}
-	if in.Sender.Username != "skarthi" {
-		t.Errorf("Sender.Username = %q, want %q", in.Sender.Username, "skarthi")
+	if in.Sender.Username != "sampleuser" {
+		t.Errorf("Sender.Username = %q, want %q", in.Sender.Username, "sampleuser")
 	}
 
 	// Nested ReplyTo, including ITS nested Sender under the key "User".
@@ -572,11 +572,11 @@ func TestUnmarshalBackward_LiveQueueLine(t *testing.T) {
 	if in.ReplyTo.MessageID != 3826 {
 		t.Errorf("ReplyTo.MessageID = %d, want 3826", in.ReplyTo.MessageID)
 	}
-	if in.ReplyTo.User.UserID != 1205071350 {
-		t.Errorf("ReplyTo.User.UserID = %d, want 1205071350 — note the key is %q, not %q", in.ReplyTo.User.UserID, "User", "Sender")
+	if in.ReplyTo.User.UserID != 1200000001 {
+		t.Errorf("ReplyTo.User.UserID = %d, want 1200000001 — note the key is %q, not %q", in.ReplyTo.User.UserID, "User", "Sender")
 	}
-	if in.ReplyTo.User.Username != "OCDWaterBot" {
-		t.Errorf("ReplyTo.User.Username = %q, want %q", in.ReplyTo.User.Username, "OCDWaterBot")
+	if in.ReplyTo.User.Username != "SampleRelayBot" {
+		t.Errorf("ReplyTo.User.Username = %q, want %q", in.ReplyTo.User.Username, "SampleRelayBot")
 	}
 	if in.ReplyTo.Text != "" {
 		t.Errorf("ReplyTo.Text = %q, want empty", in.ReplyTo.Text)
@@ -722,8 +722,8 @@ func TestAbsentVersionReadsAsVersionOne(t *testing.T) {
 // WHAT IT CATCHES: anyone adding DisallowUnknownFields to a decoder path, or
 // adding a strict `if in.V > InboundRecordVersion { return error }` guard.
 func TestUnknownFutureKeyIsIgnored(t *testing.T) {
-	const fromTheFuture = `{"Channel":"telegram","ChatID":-1003990699908,"TopicID":3826,"MessageID":9001,` +
-		`"Sender":{"UserID":85720317,"Username":"u","FutureSenderField":"ignore me"},` +
+	const fromTheFuture = `{"Channel":"telegram","ChatID":-1009876543210,"TopicID":3826,"MessageID":9001,` +
+		`"Sender":{"UserID":70123456,"Username":"u","FutureSenderField":"ignore me"},` +
 		`"Text":"written by a newer build","Attachments":null,"ReplyTo":null,` +
 		`"Timestamp":"2026-07-25T14:44:04Z","V":99,"ConvKind":"group",` +
 		`"SomeFieldInventedLater":{"nested":[1,2,3]},"AnotherOne":true}`
@@ -743,10 +743,10 @@ func TestUnknownFutureKeyIsIgnored(t *testing.T) {
 	if in.Text != "written by a newer build" {
 		t.Errorf("Text = %q — the known fields must survive alongside the unknown ones", in.Text)
 	}
-	if in.ChatID != -1003990699908 || in.MessageID != 9001 {
+	if in.ChatID != -1009876543210 || in.MessageID != 9001 {
 		t.Errorf("routing fields lost: ChatID=%d MessageID=%d", in.ChatID, in.MessageID)
 	}
-	if in.Sender.UserID != 85720317 {
+	if in.Sender.UserID != 70123456 {
 		t.Errorf("Sender.UserID = %d — an unknown key INSIDE a nested object must not poison its known siblings", in.Sender.UserID)
 	}
 	if in.ConvKind != "group" {

@@ -2,6 +2,8 @@ package broker
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net"
 	"os"
 	"strings"
@@ -38,6 +40,7 @@ type permFakeChannel struct {
 	// point for anything that must happen inside the registration window (the
 	// force_steal race the owner binding exists to survive).
 	onCapabilities func()
+	onSendReply    func()
 }
 
 func (f *permFakeChannel) Capabilities() c3types.Capabilities {
@@ -53,6 +56,14 @@ func (f *permFakeChannel) AnswerCallback(callbackID, text string, showAlert bool
 	defer f.ansMu.Unlock()
 	f.answers = append(f.answers, answeredCallback{callbackID, text, showAlert})
 	return nil
+}
+
+func (f *permFakeChannel) SendReply(args c3types.ReplyArgs) (int64, error) {
+	if hook := f.onSendReply; hook != nil {
+		f.onSendReply = nil
+		hook()
+	}
+	return f.fakeChannel.SendReply(args)
 }
 
 func (f *permFakeChannel) answersSnapshot() []answeredCallback {
@@ -476,6 +487,53 @@ func TestPermRegistry_ExpiresStale(t *testing.T) {
 	}
 }
 
+func TestPermRegistry_SettledDeferredExpiryAndEvictionAreSilent(t *testing.T) {
+	key := RouteKey{Channel: "telegram", ChatID: 42}
+
+	t.Run("expiry", func(t *testing.T) {
+		b, fc, _, _ := bindingBroker(t, key)
+		defer b.Shutdown()
+		b.Perms.register(&pendingPerm{
+			requestID: "abcde", route: key, settled: true, outcome: "allow",
+			createdAt: time.Now().Add(-permExpiryTTL - time.Minute),
+		})
+		logs := captureLog(t, b.sweepExpiredPerms)
+		if b.Perms.has("abcde") {
+			t.Fatal("expired settled-deferred entry remained registered")
+		}
+		if len(fc.editSnapshot()) != 0 || logs != "" {
+			t.Fatalf("expired settled-deferred entry was rendered or logged: edits=%+v log=%q", fc.editSnapshot(), logs)
+		}
+	})
+
+	t.Run("capacity eviction", func(t *testing.T) {
+		b, fc, owner, _ := bindingBroker(t, key)
+		defer b.Shutdown()
+		oldest := time.Now().Add(-time.Hour)
+		b.Perms.register(&pendingPerm{
+			requestID: "settled", route: key, owner: owner, settled: true, outcome: "unknown", createdAt: oldest,
+		})
+		for i := 1; i < maxPendingPerms; i++ {
+			if _, ok := b.Perms.register(&pendingPerm{
+				requestID: fmt.Sprintf("live-%d", i), route: key, owner: owner, createdAt: oldest.Add(time.Duration(i) * time.Millisecond),
+			}); !ok {
+				t.Fatalf("fill registration %d failed", i)
+			}
+		}
+		logs := captureLog(t, func() {
+			if !b.registerPerm(&pendingPerm{requestID: "new-entry", route: key, owner: owner}) {
+				t.Fatal("capacity registration failed instead of silently evicting settled entry")
+			}
+		})
+		if b.Perms.has("settled") || !b.Perms.has("new-entry") {
+			t.Fatal("capacity eviction did not replace the settled-deferred entry")
+		}
+		if len(fc.editSnapshot()) != 0 || logs != "" {
+			t.Fatalf("settled-deferred eviction was rendered or logged: edits=%+v log=%q", fc.editSnapshot(), logs)
+		}
+	})
+}
+
 // TestHandlePermissionRequest_SendsKeyboard drives the broker handler: a valid
 // OpPermissionRequest on a claimed route registers a pendingPerm (before send),
 // sends the Allow/Deny keyboard, and stores the sent message id. No ack frame is
@@ -689,5 +747,284 @@ func TestResolvePerm_VerdictEditRendersVerbatim(t *testing.T) {
 	}
 	if !strings.Contains(last.Text, preview) {
 		t.Errorf("the approved command must be recorded verbatim.\nwant substring: %q\ngot: %q", preview, last.Text)
+	}
+}
+
+func TestHandlePermissionSettled_ClearsWithoutVerdictAndRefusesLaterTap(t *testing.T) {
+	key := RouteKey{Channel: "telegram", ChatID: 42}
+	b, fc, agentConn := permBrokerWithOperator(t, key)
+	defer b.Shutdown()
+	owner := pendingOwner(t, b, key)
+	b.Perms.register(&pendingPerm{
+		requestID: "abcde", route: key, toolName: "Bash", preview: "make test", messageID: 77, owner: owner,
+	})
+
+	verdict := make(chan struct{}, 1)
+	go func() {
+		if _, err := agentConn.ReadFrame(); err == nil {
+			verdict <- struct{}{}
+		}
+	}()
+	b.handlePermissionSettled(nil, owner, mustMarshalJSON(t, ipc.PermissionSettledMsg{
+		Op: ipc.OpPermissionSettled, RequestID: "abcde", Outcome: "allow",
+	}))
+	select {
+	case <-verdict:
+		t.Fatal("a CLI settle wrote a permission verdict frame")
+	case <-time.After(100 * time.Millisecond):
+	}
+	if b.Perms.has("abcde") {
+		t.Fatal("a settled prompt must leave the registry")
+	}
+	edits := fc.editSnapshot()
+	if len(edits) != 1 || !strings.Contains(edits[0].Text, "✅ Allowed in the CLI") {
+		t.Fatalf("allow settle must edit the durable body; got %+v", edits)
+	}
+	if edits[0].Buttons == nil || len(edits[0].Buttons) != 0 {
+		t.Fatalf("settle must clear the keyboard with a non-nil empty slice; got %+v", edits[0].Buttons)
+	}
+	if b.resolvePerm(key, &c3types.CallbackEvent{
+		CallbackID: "late-tap", Data: "perm:allow:abcde", MessageID: 77,
+		Actor: c3types.Sender{UserID: testOperatorUID},
+	}) {
+		t.Fatal("a tap after CLI settle must be refused")
+	}
+	answers := fc.answersSnapshot()
+	if len(answers) != 1 || !strings.Contains(answers[0].Text, "no longer active") {
+		t.Fatalf("late tap must explain that the prompt is inactive; got %+v", answers)
+	}
+}
+
+func TestHandlePermissionSettled_RendersExactOutcomeAndEmptyKeyboard(t *testing.T) {
+	key := RouteKey{Channel: "telegram", ChatID: 42}
+	tests := []struct {
+		requestID string
+		outcome   string
+		verdict   string
+	}{
+		{requestID: "allow", outcome: "allow", verdict: "✅ Allowed in the CLI"},
+		{requestID: "other", outcome: "unknown", verdict: "🖥 Settled in the CLI"},
+	}
+	for _, test := range tests {
+		t.Run(test.outcome, func(t *testing.T) {
+			b, fc, owner, _ := bindingBroker(t, key)
+			defer b.Shutdown()
+			b.Perms.register(&pendingPerm{
+				requestID: test.requestID, route: key, toolName: "Bash", preview: "go test ./...", messageID: 77, owner: owner,
+			})
+			before := time.Now().Format("15:04")
+			b.handlePermissionSettled(nil, owner, mustMarshalJSON(t, ipc.PermissionSettledMsg{
+				Op: ipc.OpPermissionSettled, RequestID: test.requestID, Outcome: test.outcome,
+			}))
+			after := time.Now().Format("15:04")
+			edits := fc.editSnapshot()
+			if len(edits) != 1 {
+				t.Fatalf("settle edits = %d, want 1", len(edits))
+			}
+			wantBefore := "🔐 Permission: Bash\n\ngo test ./...\n\n" + test.verdict + " · " + before
+			wantAfter := "🔐 Permission: Bash\n\ngo test ./...\n\n" + test.verdict + " · " + after
+			if edits[0].Text != wantBefore && edits[0].Text != wantAfter {
+				t.Fatalf("settled text = %q, want exactly %q", edits[0].Text, wantAfter)
+			}
+			if edits[0].Buttons == nil || len(edits[0].Buttons) != 0 {
+				t.Fatalf("settled keyboard = %#v, want non-nil empty", edits[0].Buttons)
+			}
+		})
+	}
+}
+
+func TestHandlePermissionSettled_TrustAndOutcomeBranches(t *testing.T) {
+	key := RouteKey{Channel: "telegram", ChatID: 42}
+	t.Run("non-owner cannot clear and owner can still tap", func(t *testing.T) {
+		b, fc, stubA, connA := bindingBroker(t, key)
+		defer b.Shutdown()
+		b.Perms.register(&pendingPerm{requestID: "abcde", route: key, toolName: "Read", messageID: 80, owner: stubA})
+		intruder := b.Stubs.Register("claude", 9001, "/other", nil)
+		b.handlePermissionSettled(nil, intruder, mustMarshalJSON(t, ipc.PermissionSettledMsg{
+			Op: ipc.OpPermissionSettled, RequestID: "abcde", Outcome: "allow",
+		}))
+		if !b.Perms.has("abcde") || len(fc.editSnapshot()) != 0 {
+			t.Fatal("a non-owner settle changed the owner's live prompt")
+		}
+		verdicts := permFrames(connA)
+		if !b.resolvePerm(key, &c3types.CallbackEvent{
+			Data: "perm:allow:abcde", MessageID: 80, Actor: c3types.Sender{UserID: testOperatorUID},
+		}) {
+			t.Fatal("the owner's later tap must still work after a refused settle")
+		}
+		select {
+		case got := <-verdicts:
+			if got.RequestID != "abcde" || got.Behavior != "allow" {
+				t.Fatalf("unexpected verdict after refused settle: %+v", got)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("owner's later tap delivered no verdict")
+		}
+	})
+
+	t.Run("unknown id is a no-op", func(t *testing.T) {
+		b, fc, stubA, _ := bindingBroker(t, key)
+		defer b.Shutdown()
+		b.Perms.register(&pendingPerm{requestID: "livep", route: key, messageID: 81, owner: stubA})
+		b.handlePermissionSettled(nil, stubA, mustMarshalJSON(t, ipc.PermissionSettledMsg{
+			Op: ipc.OpPermissionSettled, RequestID: "other", Outcome: "unknown",
+		}))
+		if !b.Perms.has("livep") || len(fc.editSnapshot()) != 0 {
+			t.Fatal("an unknown settle changed an unrelated live prompt")
+		}
+	})
+
+	t.Run("garbage outcome is settled, never denied", func(t *testing.T) {
+		b, fc, stubA, connA := bindingBroker(t, key)
+		defer b.Shutdown()
+		b.Perms.register(&pendingPerm{requestID: "abcde", route: key, toolName: "Write", messageID: 82, owner: stubA})
+		verdict := make(chan struct{}, 1)
+		go func() {
+			if _, err := connA.ReadFrame(); err == nil {
+				verdict <- struct{}{}
+			}
+		}()
+		logs := captureLog(t, func() {
+			b.handlePermissionSettled(nil, stubA, mustMarshalJSON(t, ipc.PermissionSettledMsg{
+				Op: ipc.OpPermissionSettled, RequestID: "abcde", Outcome: "garbage",
+			}))
+		})
+		select {
+		case <-verdict:
+			t.Fatal("garbage settle wrote verdict bytes")
+		case <-time.After(100 * time.Millisecond):
+		}
+		edits := fc.editSnapshot()
+		if len(edits) != 1 || !strings.Contains(edits[0].Text, "🖥 Settled in the CLI") || strings.Contains(edits[0].Text, "Denied") {
+			t.Fatalf("garbage outcome must render only Settled; got %+v", edits)
+		}
+		if !strings.Contains(logs, `invalid outcome "garbage"; coercing to unknown`) || strings.Contains(logs, "outcome=garbage") {
+			t.Fatalf("invalid outcome coercion was not visible and canonical: %q", logs)
+		}
+	})
+
+	t.Run("same logical session reconnect is accepted", func(t *testing.T) {
+		b, fc, stubA, _ := bindingBroker(t, key)
+		defer b.Shutdown()
+		b.Perms.register(&pendingPerm{requestID: "abcde", route: key, messageID: 83, owner: stubA})
+		reconnected := b.Stubs.Register(stubA.CLI, stubA.PID, stubA.CWD, nil)
+		b.handlePermissionSettled(nil, reconnected, mustMarshalJSON(t, ipc.PermissionSettledMsg{
+			Op: ipc.OpPermissionSettled, RequestID: "abcde", Outcome: "unknown",
+		}))
+		if b.Perms.has("abcde") || len(fc.editSnapshot()) != 1 {
+			t.Fatal("same-session reconnect settle was refused")
+		}
+	})
+}
+
+func TestHandlePermissionSettled_DeferredSendWindow(t *testing.T) {
+	key := RouteKey{Channel: "telegram", ChatID: 42}
+	t.Run("settle defers edit and tap cannot consume", func(t *testing.T) {
+		mf := mfWithTelegram()
+		mf.AddAllowedUser(testOperatorUID)
+		fc := &permFakeChannel{fakeChannel: fakeChannel{
+			caps: &c3types.Capabilities{Channel: "telegram", InlineKeyboards: true}, replyReturnID: 91,
+		}}
+		b := brokerWithPermChannel(t, mf, fc)
+		defer b.Shutdown()
+		stub := b.Stubs.Register("claude", 4242, "/work", nil)
+		_, _ = b.Routes.Claim(key, stub)
+		stub.SetRoute(&key)
+		fc.onSendReply = func() {
+			b.handlePermissionSettled(nil, stub, mustMarshalJSON(t, ipc.PermissionSettledMsg{
+				Op: ipc.OpPermissionSettled, RequestID: "abcde", Outcome: "allow",
+			}))
+			if b.resolvePerm(key, &c3types.CallbackEvent{
+				CallbackID: "during-send", Data: "perm:allow:abcde", Actor: c3types.Sender{UserID: testOperatorUID},
+			}) {
+				t.Error("tap during deferred settle resolved")
+			}
+			if !b.Perms.has("abcde") {
+				t.Error("tap during deferred settle deleted the entry")
+			}
+		}
+		b.handlePermissionRequest(nil, stub, mustMarshalJSON(t, ipc.PermissionReq{
+			Op: ipc.OpPermissionRequest, RequestID: "abcde", ToolName: "Bash",
+		}))
+		if b.Perms.has("abcde") {
+			t.Fatal("setMessageID must remove a deferred settle")
+		}
+		edits := fc.editSnapshot()
+		if len(edits) != 1 || edits[0].MessageID != 91 || !strings.Contains(edits[0].Text, "Allowed in the CLI") {
+			t.Fatalf("deferred settle did not clear the posted keyboard: %+v", edits)
+		}
+	})
+
+	t.Run("send failure removes a deferred settle", func(t *testing.T) {
+		mf := mfWithTelegram()
+		fc := &permFakeChannel{fakeChannel: fakeChannel{
+			caps: &c3types.Capabilities{Channel: "telegram", InlineKeyboards: true}, sendReplyErr: errors.New("send failed"),
+		}}
+		b := brokerWithPermChannel(t, mf, fc)
+		defer b.Shutdown()
+		stub := b.Stubs.Register("claude", 4242, "/work", nil)
+		_, _ = b.Routes.Claim(key, stub)
+		stub.SetRoute(&key)
+		fc.onSendReply = func() {
+			b.handlePermissionSettled(nil, stub, mustMarshalJSON(t, ipc.PermissionSettledMsg{
+				Op: ipc.OpPermissionSettled, RequestID: "abcde", Outcome: "unknown",
+			}))
+		}
+		b.handlePermissionRequest(nil, stub, mustMarshalJSON(t, ipc.PermissionReq{
+			Op: ipc.OpPermissionRequest, RequestID: "abcde", ToolName: "Bash",
+		}))
+		if b.Perms.has("abcde") || len(fc.editSnapshot()) != 0 {
+			t.Fatal("send failure must delete the deferred entry without editing an unposted message")
+		}
+	})
+}
+
+func TestPermissionSettled_DispatchUngatedAndUnknownOpStillErrors(t *testing.T) {
+	fc := &permFakeChannel{fakeChannel: fakeChannel{caps: &c3types.Capabilities{Channel: "telegram", InlineKeyboards: true}}}
+	b := brokerWithPermChannel(t, mfWithTelegram(), fc)
+	defer b.Shutdown()
+	peer, done := peerPair(t, b)
+	defer done()
+	if err := peer.WriteJSON(ipc.HelloMsg{
+		Op: ipc.OpHello, CLI: "claude", PID: os.Getpid(), CWD: "/work",
+		ProtocolVersion: ipc.CompatibleProtocolMax + 1,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := peer.ReadFrame()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ack ipc.HelloAckMsg
+	if json.Unmarshal(raw, &ack) != nil || ack.ConnID == 0 {
+		t.Fatalf("bad hello ack: %s", raw)
+	}
+	stub, ok := b.Stubs.Get(ack.ConnID)
+	if !ok {
+		t.Fatal("hello stub not registered")
+	}
+	b.Perms.register(&pendingPerm{requestID: "abcde", route: RouteKey{Channel: "telegram", ChatID: 42}, messageID: 84, owner: stub})
+	if err := peer.WriteJSON(ipc.PermissionSettledMsg{
+		Op: ipc.OpPermissionSettled, RequestID: "abcde", Outcome: "allow",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for b.Perms.has("abcde") && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if b.Perms.has("abcde") {
+		t.Fatal("protocol gate blocked permission_settled")
+	}
+	if err := peer.WriteJSON(map[string]any{"op": "future_unknown"}); err != nil {
+		t.Fatal(err)
+	}
+	raw, err = peer.ReadFrame()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var errorMsg ipc.ErrorMsg
+	if json.Unmarshal(raw, &errorMsg) != nil || errorMsg.Op != ipc.OpError || !strings.Contains(errorMsg.Err, "not implemented") {
+		t.Fatalf("unknown op must still yield OpError and settle must yield no verdict; got %s", raw)
 	}
 }

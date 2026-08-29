@@ -207,7 +207,7 @@ func TestRunSessionHook_WritesHandoff(t *testing.T) {
 	envFile := filepath.Join(t.TempDir(), "b60e8044-instance", "sessionstart-hook-1.sh")
 	t.Setenv("CLAUDE_ENV_FILE", envFile)
 
-	input := `{"session_id":"70341717-stable","cwd":"/home/k/proj","source":"resume","hook_event_name":"SessionStart"}`
+	input := `{"session_id":"70341717-stable","cwd":"/workspace/project","source":"resume","transcript_path":"/state/sessions/70341717-stable.jsonl","hook_event_name":"SessionStart"}`
 	withStdin(t, input, func() {
 		if err := runSessionHook(); err != nil {
 			t.Fatalf("runSessionHook returned error (must be nil): %v", err)
@@ -221,8 +221,29 @@ func TestRunSessionHook_WritesHandoff(t *testing.T) {
 	if e.StableSessionID != "70341717-stable" {
 		t.Fatalf("StableSessionID = %q, want 70341717-stable", e.StableSessionID)
 	}
-	if e.CWD != "/home/k/proj" || e.Source != "resume" {
+	if e.CWD != "/workspace/project" || e.Source != "resume" || e.TranscriptPath != "/state/sessions/70341717-stable.jsonl" {
 		t.Fatalf("handoff entry = %+v", e)
+	}
+}
+
+func TestRunSessionHook_LegacyAndEmptyTranscriptPathStillWrite(t *testing.T) {
+	for _, input := range []string{
+		`{"session_id":"stable-legacy","cwd":"/workspace/project","source":"startup"}`,
+		`{"session_id":"stable-legacy","cwd":"/workspace/project","source":"startup","transcript_path":""}`,
+	} {
+		t.Run(input, func(t *testing.T) {
+			setupTestEnv(t)
+			t.Setenv("CLAUDE_ENV_FILE", filepath.Join(t.TempDir(), "legacy-instance", "hook.sh"))
+			withStdin(t, input, func() {
+				if err := runSessionHook(); err != nil {
+					t.Fatalf("runSessionHook must exit 0: %v", err)
+				}
+			})
+			entry, ok := sessionhandoff.Read("legacy-instance")
+			if !ok || entry.TranscriptPath != "" {
+				t.Fatalf("legacy/empty transcript handoff missing: ok=%v entry=%+v", ok, entry)
+			}
+		})
 	}
 }
 

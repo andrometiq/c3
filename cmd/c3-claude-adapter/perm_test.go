@@ -77,7 +77,7 @@ func TestInterceptConn_PassThrough(t *testing.T) {
 	tx := newNotifyTransport(&scriptedTransport{conn: &scriptedConn{frames: want}})
 	// Set a handler that MUST NOT fire for any of these frames.
 	var fired int
-	tx.SetPermissionHandler(func(string, string, string) { fired++ })
+	tx.SetPermissionHandler(func(string, string, string, permissionSnapshot) { fired++ })
 	conn, err := tx.Connect(ctx)
 	if err != nil {
 		t.Fatalf("Connect: %v", err)
@@ -119,7 +119,7 @@ func TestInterceptConn_DivertsPermissionRequest(t *testing.T) {
 	tx := newNotifyTransport(&scriptedTransport{conn: &scriptedConn{frames: []jsonrpc.Message{permReq, next}}})
 	type capture struct{ id, tool, preview string }
 	got := make(chan capture, 1)
-	tx.SetPermissionHandler(func(id, tool, preview string) {
+	tx.SetPermissionHandler(func(id, tool, preview string, _ permissionSnapshot) {
 		got <- capture{id, tool, preview}
 	})
 	conn, err := tx.Connect(ctx)
@@ -197,7 +197,11 @@ func TestHandlePermissionRequest_SendsToBroker(t *testing.T) {
 
 	// net.Pipe is synchronous: the broker write blocks until the test reads, so
 	// drive the handler from a goroutine.
-	go a.handlePermissionRequest("abcde", "Bash", "rm -rf /tmp/x")
+	done := make(chan struct{})
+	go func() {
+		a.handlePermissionRequest("abcde", "Bash", "rm -rf /tmp/x", permissionSnapshot{})
+		close(done)
+	}()
 
 	raw, err := peer.ReadFrame()
 	if err != nil {
@@ -212,6 +216,13 @@ func TestHandlePermissionRequest_SendsToBroker(t *testing.T) {
 	}
 	if req.RequestID != "abcde" || req.ToolName != "Bash" || req.Preview != "rm -rf /tmp/x" {
 		t.Fatalf("unexpected payload: %+v", req)
+	}
+	<-done
+	a.permMu.Lock()
+	pending, running := len(a.permPending), a.permWatcherRunning
+	a.permMu.Unlock()
+	if pending != 0 || running {
+		t.Fatalf("no transcript_path must leave relay unchanged without a watcher: pending=%d running=%v", pending, running)
 	}
 }
 
