@@ -244,6 +244,8 @@ func (b *Broker) HandleConn(nc net.Conn) {
 			b.handleAskRegister(conn, stub, raw)
 		case ipc.OpPermissionRequest:
 			b.handlePermissionRequest(conn, stub, raw)
+		case ipc.OpPermissionSettled:
+			b.handlePermissionSettled(conn, stub, raw)
 		case ipc.OpFetchQueue:
 			b.handleFetchQueue(conn, stub, raw)
 		case ipc.OpObserve:
@@ -706,7 +708,7 @@ func (b *Broker) handlePermissionRequest(_ *ipc.Conn, stub *Stub, raw []byte) {
 	// in that window makes a DIFFERENT session (see pendingPerm.owner).
 	p := &pendingPerm{requestID: req.RequestID, route: *route, toolName: req.ToolName, preview: req.Preview, owner: stub}
 	if !b.registerPerm(p) {
-		log.Printf("perm DROP id=%s: request id collision", req.RequestID)
+		log.Printf("perm DROP id=%s: request id collision or registry full", req.RequestID)
 		return
 	}
 
@@ -747,7 +749,12 @@ func (b *Broker) handlePermissionRequest(_ *ipc.Conn, stub *Stub, raw []byte) {
 		log.Printf("perm DROP id=%s: send failed: %v", req.RequestID, err)
 		return
 	}
-	b.Perms.setMessageID(req.RequestID, msgID)
+	if settled, ok := b.Perms.setMessageID(req.RequestID, msgID); ok {
+		b.editPermMessage(settled.route, settled.requestID, settled.messageID, permSettledText(settled.toolName, settled.preview, settled.outcome, time.Now()), [][]c3types.Button{})
+		log.Printf("perm settled chan=%s chat=%d topic=%s id=%s tool=%s outcome=%s msg=%d",
+			settled.route.Channel, settled.route.ChatID, TopicKeyStr(settled.route), settled.requestID, settled.toolName, settled.outcome, settled.messageID)
+		return
+	}
 	log.Printf("perm REGISTERED chan=%s chat=%d topic=%s id=%s tool=%s msg=%d",
 		route.Channel, route.ChatID, TopicKeyStr(*route), req.RequestID, req.ToolName, msgID)
 }

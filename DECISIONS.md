@@ -3,6 +3,36 @@
 Entries are newest first. This is the public architecture record: it records
 rulings and rationale, never private operational details.
 
+## D020: Observe Claude transcripts to settle locally-resolved permission prompts
+
+**Date:** 2026-08-30
+
+**Decision:** While a Claude permission relay is pending, observe complete
+`tool_result` records appended to the session or subagent transcript and send
+the additive `permission_settled` op. The broker accepts it only from the
+requesting session (including the same logical session after reconnect), clears
+the keyboard, and records “Allowed in the CLI” or “Settled in the CLI”. A settle
+never produces a permission verdict. This adds no protocol-version bump.
+
+**Why:** Claude emits no channel notification when the terminal resolves a
+prompt, while every allow, deny, cancel, and allowed-tool failure eventually
+lands in the transcript. Hooks were rejected: pre-tool hooks run before the
+decision, post-tool hooks cover only allowed tools after completion, and no
+hook uniformly covers local denial or cancellation. Transcript observation is
+idle while no prompt is pending and fails back to the existing reaper when the
+path or process-local pending set is unavailable.
+
+**Residuals (accepted):** Candidate matching inherits the host's five-letter
+id space, so an unrelated `tool_result` written during a pending window can
+derive to a live prompt's id (roughly 1 in 1,000,000 per result per prompt,
+across eleven candidates). That can wrongly clear a keyboard and make a later
+tap be refused; it is the same class as the host's own residual. The subagent
+transcript layout is undocumented, so layout drift degrades to the reaper and
+is surfaced by the adapter's expiry log. Finally, between a local allow and the
+tool finishing, a Telegram tap can still render as effective even though the
+host drops it; only an upstream `permission_resolved` notification can close
+that window.
+
 ## D019: dcode adapter — live push via the external-event socket; slash commands as user skills
 
 **Date:** 2026-08-16

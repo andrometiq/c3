@@ -95,6 +95,44 @@ func TestErrorMsg_Roundtrip(t *testing.T) {
 	}
 }
 
+func TestPermissionMessages_Roundtrip(t *testing.T) {
+	request := PermissionReq{Op: OpPermissionRequest, RequestID: "abcde", ToolName: "Bash", Preview: "make test"}
+	requestRaw, err := json.Marshal(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var requestOut PermissionReq
+	if err := json.Unmarshal(requestRaw, &requestOut); err != nil || requestOut != request {
+		t.Fatalf("permission request round-trip: got %+v err=%v", requestOut, err)
+	}
+
+	settledRaw := []byte(`{"op":"permission_settled","request_id":"abcde","outcome":"unknown","future":true}`)
+	var settled PermissionSettledMsg
+	if err := json.Unmarshal(settledRaw, &settled); err != nil {
+		t.Fatal(err)
+	}
+	if settled.Op != OpPermissionSettled || settled.RequestID != "abcde" || settled.Outcome != "unknown" {
+		t.Fatalf("permission settled decode mismatch: %+v", settled)
+	}
+	roundTrip, err := json.Marshal(settled)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(roundTrip) != `{"op":"permission_settled","request_id":"abcde","outcome":"unknown"}` {
+		t.Fatalf("permission settled wire shape changed: %s", roundTrip)
+	}
+
+	verdict := PermissionVerdictMsg{Op: OpPermissionVerdict, RequestID: "abcde", Behavior: "deny"}
+	verdictRaw, err := json.Marshal(verdict)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var verdictOut PermissionVerdictMsg
+	if err := json.Unmarshal(verdictRaw, &verdictOut); err != nil || verdictOut != verdict {
+		t.Fatalf("permission verdict round-trip: got %+v err=%v", verdictOut, err)
+	}
+}
+
 func TestPairModeStartReq_Roundtrip(t *testing.T) {
 	in := PairModeStartReq{Op: OpPairModeStart, Target: "group", ChatID: -1009123456789}
 	data, _ := json.Marshal(in)

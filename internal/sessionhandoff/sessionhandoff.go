@@ -27,6 +27,7 @@ type Entry struct {
 	StableSessionID string `json:"stable_session_id"`
 	CWD             string `json:"cwd,omitempty"`
 	Source          string `json:"source,omitempty"`
+	TranscriptPath  string `json:"transcript_path,omitempty"`
 	UnixNano        int64  `json:"unix_nano"`
 }
 

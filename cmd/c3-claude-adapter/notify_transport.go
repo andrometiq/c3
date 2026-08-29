@@ -39,12 +39,13 @@ import (
 // passes through byte-for-byte.
 const permissionRequestMethod = "notifications/claude/channel/permission_request"
 
-// permRequestHandler is invoked (synchronously, on the SDK's read goroutine) for
-// each diverted permission_request frame, carrying the parsed
+// permRequestHandler is dispatched asynchronously for each diverted
+// permission_request frame, carrying the parsed
 // {request_id, tool_name, preview}. preview is input_preview (falling back to
-// description). Set via SetPermissionHandler BEFORE Connect; nil means a diverted
-// frame is simply dropped (logging-only fallback).
-type permRequestHandler func(requestID, toolName, preview string)
+// description) plus transcript offsets captured before asynchronous dispatch.
+// Set via SetPermissionHandler BEFORE Connect; nil means a diverted frame is
+// simply dropped (logging-only fallback).
+type permRequestHandler func(requestID, toolName, preview string, snapshot permissionSnapshot)
 
 // notifyTransport wraps an inner Transport and exposes the live Connection
 // for custom notifications. It ALSO wraps the inbound side: the Connection it
@@ -56,6 +57,7 @@ type notifyTransport struct {
 	mu       sync.Mutex
 	conn     mcp.Connection
 	permFunc permRequestHandler
+	permSnap func() permissionSnapshot
 }
 
 func newNotifyTransport(inner mcp.Transport) *notifyTransport {
@@ -72,10 +74,16 @@ func (t *notifyTransport) SetPermissionHandler(h permRequestHandler) {
 	t.mu.Unlock()
 }
 
-func (t *notifyTransport) permHandler() permRequestHandler {
+func (t *notifyTransport) SetPermissionSnapshotter(snapshotter func() permissionSnapshot) {
+	t.mu.Lock()
+	t.permSnap = snapshotter
+	t.mu.Unlock()
+}
+
+func (t *notifyTransport) permissionDispatch() (permRequestHandler, func() permissionSnapshot) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	return t.permFunc
+	return t.permFunc, t.permSnap
 }
 
 // Connect implements mcp.Transport. It delegates to the wrapped transport,
@@ -132,15 +140,19 @@ func (c *interceptConn) Read(ctx context.Context) (jsonrpc.Message, error) {
 		if !ok || req.ID.IsValid() || req.Method != permissionRequestMethod {
 			return msg, nil
 		}
-		if h := c.owner.permHandler(); h != nil {
+		if h, snapshotter := c.owner.permissionDispatch(); h != nil {
 			if id, tool, preview := parsePermissionRequest(req.Params); id != "" {
+				var snapshot permissionSnapshot
+				if snapshotter != nil {
+					snapshot = snapshotter()
+				}
 				// Dispatch ASYNC: the handler writes to the broker (which then does a
 				// blocking Telegram send), and this runs on the SDK's single inbound
 				// read goroutine — calling it synchronously would let a broker/Telegram
 				// stall freeze the whole session's inbound path. Per-request ordering is
 				// irrelevant (each relay is keyed by request_id), so a goroutine is safe
 				// and matches the fire-and-forget contract.
-				go h(id, tool, preview)
+				go h(id, tool, preview, snapshot)
 			}
 		}
 		// Diverted — loop to read the next frame so the SDK never sees this one.

@@ -1,6 +1,8 @@
 package broker
 
 import (
+	"encoding/json"
+	"fmt"
 	"log"
 	"strings"
 	"sync"
@@ -29,7 +31,8 @@ const (
 	// affect CC — it just removes the (now non-functional) Allow/Deny buttons.
 	permExpiryTTL = 30 * time.Minute
 	// maxPendingPerms caps the registry; register evicts the oldest entry (and
-	// clears its keyboard) when full, so a flood can't grow the map unbounded.
+	// clears its keyboard when one was posted) when full, so a flood can't grow
+	// the map unbounded.
 	maxPendingPerms = 1000
 )
 
@@ -81,6 +84,8 @@ type pendingPerm struct {
 	toolName  string
 	preview   string
 	messageID int64
+	settled   bool
+	outcome   string
 
 	// owner is the SESSION this prompt was relayed FOR — the requesting stub
 	// ITSELF, stamped by handlePermissionRequest, which already holds it (it
@@ -115,6 +120,15 @@ type permRegistry struct {
 	m  map[string]*pendingPerm
 }
 
+type permTakeResult uint8
+
+const (
+	permTakeMiss permTakeResult = iota
+	permTakeRefused
+	permTakeDeferred
+	permTakeTaken
+)
+
 func newPermRegistry() *permRegistry {
 	return &permRegistry{m: map[string]*pendingPerm{}}
 }
@@ -134,13 +148,17 @@ func (r *permRegistry) register(p *pendingPerm) (evicted *pendingPerm, ok bool) 
 	}
 	if len(r.m) >= maxPendingPerms {
 		evicted = r.evictOldestLocked()
+		if evicted == nil {
+			return nil, false
+		}
 	}
 	r.m[p.requestID] = p
 	return evicted, true
 }
 
 // evictOldestLocked removes and returns the entry with the smallest createdAt.
-// Caller holds r.mu.
+// A settled-but-deferred entry is still eligible; the caller suppresses its
+// expiry rendering because it has no posted message to edit. Caller holds r.mu.
 func (r *permRegistry) evictOldestLocked() *pendingPerm {
 	var oldest *pendingPerm
 	for _, p := range r.m {
@@ -154,27 +172,40 @@ func (r *permRegistry) evictOldestLocked() *pendingPerm {
 	return oldest
 }
 
-// sweepExpired removes and returns every perm older than ttl. Used by the reaper.
+// sweepExpired removes every perm older than ttl and returns only unresolved
+// entries whose posted keyboard needs expiry rendering. Used by the reaper.
 func (r *permRegistry) sweepExpired(now time.Time, ttl time.Duration) []*pendingPerm {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	var expired []*pendingPerm
 	for id, p := range r.m {
 		if now.Sub(p.createdAt) >= ttl {
-			expired = append(expired, p)
 			delete(r.m, id)
+			// A settled entry has no posted message id yet; otherwise
+			// setMessageID would already have removed it for the settled edit.
+			// Delete it silently rather than replacing its true outcome with
+			// the cosmetic "Expired" state.
+			if !p.settled {
+				expired = append(expired, p)
+			}
 		}
 	}
 	return expired
 }
 
-// setMessageID records the sent message's id so resolution can edit it.
-func (r *permRegistry) setMessageID(requestID string, id int64) {
+// setMessageID records the sent message's id. A settle that arrived while the
+// send was in flight is removed here and returned for its immediate edit.
+func (r *permRegistry) setMessageID(requestID string, id int64) (*pendingPerm, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if p, ok := r.m[requestID]; ok {
 		p.messageID = id
+		if p.settled {
+			delete(r.m, requestID)
+			return p, true
+		}
 	}
+	return nil, false
 }
 
 // delete removes a perm (e.g. when the send failed after registration).
@@ -198,10 +229,76 @@ func (r *permRegistry) take(requestID string) (*pendingPerm, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	p, ok := r.m[requestID]
+	if ok && p.settled {
+		return nil, false
+	}
 	if ok {
 		delete(r.m, requestID)
 	}
 	return p, ok
+}
+
+// takeOwned resolves a settle only for the session that registered the prompt.
+// A settle received before the keyboard send returns marks the entry in place;
+// setMessageID performs the eventual remove-and-edit.
+func (r *permRegistry) takeOwned(requestID string, stub *Stub, outcome string) (*pendingPerm, permTakeResult) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	p, ok := r.m[requestID]
+	if !ok {
+		return nil, permTakeMiss
+	}
+	if p.owner == nil || stub == nil || (p.owner != stub && !sameLogicalSession(p.owner, stub)) {
+		return p, permTakeRefused
+	}
+	if p.settled {
+		return p, permTakeMiss
+	}
+	if p.messageID == 0 {
+		p.settled = true
+		p.outcome = outcome
+		return p, permTakeDeferred
+	}
+	delete(r.m, requestID)
+	return p, permTakeTaken
+}
+
+func (b *Broker) handlePermissionSettled(_ *ipc.Conn, stub *Stub, raw []byte) {
+	var msg ipc.PermissionSettledMsg
+	if err := json.Unmarshal(raw, &msg); err != nil {
+		log.Printf("perm settled: malformed permission_settled: %v", err)
+		return
+	}
+	if msg.RequestID == "" {
+		log.Printf("perm settled: permission_settled missing request id — dropping")
+		return
+	}
+	if msg.Outcome != "allow" && msg.Outcome != "unknown" {
+		log.Printf("perm settled id=%s: invalid outcome %q; coercing to unknown", msg.RequestID, msg.Outcome)
+		msg.Outcome = "unknown"
+	}
+	p, result := b.Perms.takeOwned(msg.RequestID, stub, msg.Outcome)
+	switch result {
+	case permTakeMiss:
+		log.Printf("perm settled MISS id=%s: no active prompt", msg.RequestID)
+	case permTakeRefused:
+		log.Printf("perm settled REFUSED id=%s owner=%s sender=%s: non-owner settle left pending",
+			msg.RequestID, permStubIdentity(p.owner), permStubIdentity(stub))
+	case permTakeDeferred:
+		log.Printf("perm settled DEFERRED chan=%s chat=%d topic=%s id=%s outcome=%s: keyboard send in flight",
+			p.route.Channel, p.route.ChatID, TopicKeyStr(p.route), msg.RequestID, msg.Outcome)
+	case permTakeTaken:
+		b.editPermMessage(p.route, msg.RequestID, p.messageID, permSettledText(p.toolName, p.preview, msg.Outcome, time.Now()), [][]c3types.Button{})
+		log.Printf("perm settled chan=%s chat=%d topic=%s id=%s tool=%s outcome=%s msg=%d",
+			p.route.Channel, p.route.ChatID, TopicKeyStr(p.route), msg.RequestID, p.toolName, msg.Outcome, p.messageID)
+	}
+}
+
+func permStubIdentity(stub *Stub) string {
+	if stub == nil {
+		return "<none>"
+	}
+	return fmt.Sprintf("%s/pid=%d/cwd=%q/conn=%d", stub.CLI, stub.PID, stub.CWD, stub.ConnID)
 }
 
 // permKeyboard builds the Allow/Deny inline keyboard for a relayed permission
@@ -434,8 +531,9 @@ func (b *Broker) editPermMessage(route RouteKey, requestID string, messageID int
 }
 
 // registerPerm registers p and, when the size cap forces an eviction, best-effort
-// clears the evicted (oldest) perm's now-orphaned keyboard. Returns false on a
-// requestID collision so the caller drops the relay.
+// clears the evicted (oldest) perm's now-orphaned keyboard. A settled-but-
+// deferred entry is deleted silently because it has no keyboard message id yet.
+// Returns false on a requestID collision so the caller drops the relay.
 func (b *Broker) registerPerm(p *pendingPerm) bool {
 	// The owner is stamped by the CALLER, from the stub it already has in hand —
 	// never derived here from the routes table (see pendingPerm.owner: that read
@@ -448,7 +546,7 @@ func (b *Broker) registerPerm(p *pendingPerm) bool {
 			p.route.Channel, p.route.ChatID, TopicKeyStr(p.route), p.requestID)
 	}
 	evicted, ok := b.Perms.register(p)
-	if evicted != nil {
+	if evicted != nil && !evicted.settled {
 		log.Printf("perm EVICTED chan=%s chat=%d topic=%s id=%s reason=cap(max=%d) — clearing keyboard",
 			evicted.route.Channel, evicted.route.ChatID, TopicKeyStr(evicted.route), evicted.requestID, maxPendingPerms)
 		b.editPermMessage(evicted.route, evicted.requestID, evicted.messageID, permExpiredText(evicted.toolName, evicted.preview, time.Now()), [][]c3types.Button{})
@@ -566,6 +664,14 @@ func permResolvedText(tool, preview, behavior string, at time.Time) string {
 	verdict := "✅ Allowed"
 	if behavior == "deny" {
 		verdict = "❌ Denied"
+	}
+	return permPromptText(tool, preview) + "\n\n" + verdict + " · " + at.Format("15:04")
+}
+
+func permSettledText(tool, preview, outcome string, at time.Time) string {
+	verdict := "🖥 Settled in the CLI"
+	if outcome == "allow" {
+		verdict = "✅ Allowed in the CLI"
 	}
 	return permPromptText(tool, preview) + "\n\n" + verdict + " · " + at.Format("15:04")
 }

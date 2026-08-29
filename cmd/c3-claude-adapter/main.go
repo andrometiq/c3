@@ -145,6 +145,7 @@ func run() error {
 	// broker (Allow/Deny keyboard) instead of being silently dropped by the SDK.
 	// Must be set BEFORE server.Run drives notifyTx.Connect.
 	a.notifyTx.SetPermissionHandler(a.handlePermissionRequest)
+	a.notifyTx.SetPermissionSnapshotter(a.capturePermissionSnapshot)
 
 	go a.brokerReader(ctx)
 	go a.recoverSessionOnResume(ctx)
@@ -333,6 +334,17 @@ type adapter struct {
 	askmu         sync.Mutex
 	askRegPending map[string]chan ipc.AskRegisteredMsg
 	askPending    map[string]chan ipc.AskResultMsg
+
+	// Permission transcript observation is process-local. A restarted adapter
+	// cannot reconstruct prompts the host does not re-send; those keyboards fall
+	// back to the broker's 30-minute reaper.
+	permMu             sync.Mutex
+	permPending        map[string]*pendingTranscriptPermission
+	permWithoutWatcher map[string]struct{}
+	permWake           chan struct{}
+	permWatcherRunning bool
+	permTranscriptPath string
+	permSettleDisabled atomic.Bool
 
 	// hostRenderCapable is whether the launching Claude Code host can render
 	// notifications/claude/channel pushes. Detected once from the /proc ancestor
@@ -547,7 +559,7 @@ func (a *adapter) brokerReader(ctx context.Context) {
 		case ipc.OpError:
 			var errMsg ipc.ErrorMsg
 			_ = json.Unmarshal(raw, &errMsg)
-			log.Printf("broker error: %s", errMsg.Err)
+			a.handleBrokerError(errMsg.Err)
 		default:
 			// An op this build does not know — normally a NEWER broker (mixed
 			// versions are routine after `c3 update`; see ipc.ProtocolVersion).
@@ -2314,20 +2326,28 @@ func (a *adapter) setCurrentStableIdentity(entry sessionhandoff.Entry) {
 	a.currentStableID = entry.StableSessionID
 	a.currentHandoffEntry = entry
 	a.idmu.Unlock()
+	a.observePermissionTranscriptPath(entry.TranscriptPath)
 }
 
-// advanceIdentityWatermark bumps the settled identity's handoff timestamp to a
-// newer write for the SAME stable id (e.g. a compact rewriting the self-referential
-// <stable>.json alias), so checkForIdentitySwitch's next probe short-circuits at its
-// not-newer guard instead of re-reading and re-resolving the alias on every
-// tools/call. A no-op if the identity changed underneath us or seen isn't newer, so
-// it can never stomp a concurrent genuine switch.
-func (a *adapter) advanceIdentityWatermark(stableID string, seen int64) {
+// advanceIdentityHandoff refreshes the settled identity from a newer handoff
+// write for the same stable id, including an updated transcript path.
+func (a *adapter) advanceIdentityHandoff(stableID string, entry sessionhandoff.Entry) {
 	a.idmu.Lock()
-	defer a.idmu.Unlock()
-	if a.currentStableID == stableID && a.currentHandoffEntry.UnixNano < seen {
-		a.currentHandoffEntry.UnixNano = seen
+	if a.currentStableID == stableID && a.currentHandoffEntry.UnixNano < entry.UnixNano {
+		a.currentHandoffEntry.UnixNano = entry.UnixNano
+		if entry.TranscriptPath != "" {
+			a.currentHandoffEntry.TranscriptPath = entry.TranscriptPath
+		}
+		if entry.CWD != "" {
+			a.currentHandoffEntry.CWD = entry.CWD
+		}
+		if entry.Source != "" {
+			a.currentHandoffEntry.Source = entry.Source
+		}
 	}
+	transcriptPath := a.currentHandoffEntry.TranscriptPath
+	a.idmu.Unlock()
+	a.observePermissionTranscriptPath(transcriptPath)
 }
 
 // checkForIdentitySwitch performs the cheap per-tools-call probe: exactly one
@@ -2358,7 +2378,7 @@ func (a *adapter) checkForIdentitySwitch(ctx context.Context) {
 		// early-returns at the not-newer guard above instead of re-reading and
 		// re-resolving the alias on every tools/call for the rest of the session.
 		if ok {
-			a.advanceIdentityWatermark(current.StableSessionID, first.UnixNano)
+			a.advanceIdentityHandoff(current.StableSessionID, terminal)
 		}
 		return
 	}
@@ -3244,7 +3264,7 @@ func (a *adapter) flushPendingRecoverNotice() {
 // keyboard on the claimed route. Fire-and-forget — there is no caller to unblock;
 // a broker write failure (or a reconnecting broker) is logged and CC simply keeps
 // waiting in its TUI. NEVER logs the preview body (it can carry tool input).
-func (a *adapter) handlePermissionRequest(requestID, toolName, preview string) {
+func (a *adapter) handlePermissionRequest(requestID, toolName, preview string, snapshot permissionSnapshot) {
 	if requestID == "" {
 		return
 	}
@@ -3260,7 +3280,9 @@ func (a *adapter) handlePermissionRequest(requestID, toolName, preview string) {
 		Preview:   preview,
 	}); err != nil {
 		log.Printf("perm: broker write failed id=%s tool=%s: %v", requestID, toolName, err)
+		return
 	}
+	a.addPendingPermission(requestID, snapshot)
 }
 
 // dispatchPermissionVerdict routes a broker OpPermissionVerdict into Claude Code:
@@ -3272,6 +3294,7 @@ func (a *adapter) dispatchPermissionVerdict(raw []byte) {
 	if err := json.Unmarshal(raw, &msg); err != nil {
 		return
 	}
+	a.removePendingPermission(msg.RequestID)
 	if msg.RequestID == "" || a.notifyTx == nil {
 		return
 	}

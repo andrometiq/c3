@@ -17,9 +17,10 @@ import (
 // Claude Code sends {session_id, cwd, source, transcript_path, hook_event_name};
 // extra fields are ignored.
 type sessionHookInput struct {
-	SessionID string `json:"session_id"`
-	CWD       string `json:"cwd"`
-	Source    string `json:"source"`
+	SessionID      string `json:"session_id"`
+	CWD            string `json:"cwd"`
+	Source         string `json:"source"`
+	TranscriptPath string `json:"transcript_path"`
 }
 
 // runSessionHook implements `c3-broker session-hook`, wired to C3 SessionStart
@@ -55,6 +56,7 @@ func runSessionHook() error {
 			ConvID         string `json:"conversationId"`
 			CWD            string `json:"cwd"`
 			Source         string `json:"source"`
+			TranscriptPath string `json:"transcript_path"`
 		}
 		_ = json.Unmarshal(raw, &alt)
 		if alt.SessionID != "" {
@@ -69,6 +71,9 @@ func runSessionHook() error {
 		}
 		if in.Source == "" {
 			in.Source = alt.Source
+		}
+		if in.TranscriptPath == "" {
+			in.TranscriptPath = alt.TranscriptPath
 		}
 	}
 	if in.SessionID == "" {
@@ -129,6 +134,7 @@ func runSessionHook() error {
 		StableSessionID: in.SessionID,
 		CWD:             in.CWD,
 		Source:          in.Source,
+		TranscriptPath:  in.TranscriptPath,
 		UnixNano:        time.Now().UnixNano(),
 	}
 	wroteAny := false
