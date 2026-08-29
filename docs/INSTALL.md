@@ -24,7 +24,7 @@ binaries, same config, one extra command each (Step 5B).
 
 **Platform support.** **Linux is primary and fully supported.** **macOS** is
 supported (prebuilt binaries; `launchd` instead of systemd). **Windows (Claude
-Desktop + the bundled Claude Code) is beta for v0.1.0** — it works and the known
+Desktop + the bundled Claude Code) is beta** — it works and the known
 Windows bugs are fixed, and the release does publish prebuilt Windows tarballs,
 but inbound is poll-only (`/c3:fetch-queue`) and the Windows binaries are
 cross-compiled without a clean-room CI pass. Windows-specific deltas are collected in the **Windows
@@ -157,7 +157,7 @@ PowerShell snippet in the **Windows (beta)** section. Do not use `setx PATH`.)
 **From source (contributors, or a platform without a prebuilt tarball).**
 With the repo cloned and added as a local marketplace
 (Step 1's contributor path), run `/c3:build` inside Claude Code — a slash
-command that installs the nine core binaries in `$GOBIN` (default `~/go/bin`).
+command that installs the ten core binaries in `$GOBIN` (default `~/go/bin`).
 The PATH-shadowing Codex launcher remains opt-in until Step 5. Needs Go ≥1.25.
 Confirm `$GOBIN` (or `$(go env GOPATH)/bin`) is on your `PATH`:
 
@@ -317,7 +317,7 @@ works, but inbound is pull-only. See [`GROK-INJECT.md`](GROK-INJECT.md).
 
 `install-agy` writes a `c3` plugin into `~/.gemini/antigravity-cli/plugins/c3/` pointing at
 `c3-agy-adapter`. Antigravity has no async push, so inbound there is **poll-only** —
-`fetch_queue`. It's the newest adapter and the least travelled; expect rougher edges than the
+`fetch_queue`. It's the least travelled adapter; expect rougher edges than the
 Claude Code path.
 
 `install-cursor` merges `mcpServers.c3` → `c3-cursor-adapter` into `~/.cursor/mcp.json`.
@@ -380,7 +380,7 @@ that polls on a timer. Full walkthrough, the MSIX config trap, and caveats:
 
 ## Windows (beta)
 
-Windows is **beta for v0.1.0**. The known Windows bugs are fixed, but apply
+Windows is **beta**. The known Windows bugs are fixed, but apply
 these deltas instead of the Linux-only steps above:
 
 - **Binaries + STT runtime — prebuilt tarball or source.** The release publishes
@@ -389,7 +389,7 @@ these deltas instead of the Linux-only steps above:
   clean-room CI pass. Keep the archive's `plugins\c3\stt` directory beside the
   installed `.exe` files; copying only the executables leaves voice
   transcription with no handler. To build instead, install **Go ≥1.25** (the portable zip
-  needs no admin), clone the repo into a durable dir, and run the nine core
+  needs no admin), clone the repo into a durable dir, and run the ten core
   package installs used by `/c3:build`.
 - **PATH — edit the *User* PATH; there is no shell rc.** Easiest is the GUI:
   Start → search "Edit environment variables for your account" → under **User
@@ -502,4 +502,4 @@ The `~/.config/c3/mappings.json` lives outside both plugins; uninstalling the pl
 - **`/c3:setup` says it can't reach Telegram** — check the bot token. Try `curl https://api.telegram.org/bot<TOKEN>/getMe`; should return your bot's info.
 - **Topic creation fails** — the bot isn't an admin with `Manage Topics` in the supergroup. Group settings → Administrators → your bot → toggle "Manage Topics" on.
 - **`which codex` still resolves to NVM** — re-run `c3-broker install-codex-shim`, then `hash -r` (bash/zsh) or open a new terminal. Verify with `readlink $(which codex)`; it should point at the C3 `codex` launcher.
-- **Voice transcription doesn't fire** — the broker log surfaces a `[plugin] stt: ...` line per voice message; check `~/.local/state/c3/broker.log`. Common causes: `~/.claude/stt.env` is missing or has no `OPENROUTER_API_KEY` / `SARVAM_API_KEY` (look for `stt: msg=N error ... stderr-tail=...`); `python3` not on the broker's PATH; `mappings.json:plugins.stt.enabled` is `false`. Failing voice messages now surface as `[STT FAILED: <reason>]` in the CLI rather than silent `(voice message)`. If you don't need voice, set `enabled: false`.
+- **Voice transcription doesn't fire** — the broker log surfaces a `[plugin] stt: ...` line per voice message; check `~/.local/state/c3/broker.log`. Common causes: `~/.claude/stt.env` is missing or has no `OPENROUTER_API_KEY` / `SONIOX_API_KEY` / `ELEVENLABS_API_KEY` / `SARVAM_API_KEY` (look for `stt: msg=N error ... stderr-tail=...`); `python3` not on the broker's PATH; `mappings.json:plugins.stt.enabled` is `false`. Failing voice messages now surface as `[STT FAILED: <reason>]` in the CLI rather than silent `(voice message)`. If you don't need voice, set `enabled: false`.

@@ -259,7 +259,7 @@ Usage:
   c3-broker update [--check]
                         Update C3 to the latest GitHub release: download the
                         platform tarball, verify it against SHA256SUMS, and
-                        stage and replace the eight core binaries in place (and
+                        stage and replace the ten core binaries in place (and
                         refresh a verified, already-installed C3 Codex launcher). --check only
                         reports current vs latest without installing. Does NOT
                         stop a running broker (it keeps its old code until it

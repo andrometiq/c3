@@ -107,22 +107,25 @@ A channel emits one normalized struct per user-originated message. The real defi
 
 ```go
 type Inbound struct {
-	Channel     string        `json:"Channel"`
-	ChatID      int64         `json:"ChatID"`
-	TopicID     *int64        `json:"TopicID"`   // nil = no topic; &1 = Telegram General; >1 = custom
-	MessageID   int64         `json:"MessageID"`
-	Sender      Sender        `json:"Sender"`
-	Text        string        `json:"Text"`
-	Attachments []Attachment  `json:"Attachments"`
-	ReplyTo     *ReplyContext `json:"ReplyTo"`
-	Timestamp   time.Time     `json:"Timestamp"`
+	Channel       string         `json:"Channel"`
+	ChatID        int64          `json:"ChatID"`
+	TopicID       *int64         `json:"TopicID"`   // nil = no topic; &1 = Telegram General; >1 = custom
+	MessageID     int64          `json:"MessageID"`
+	Sender        Sender         `json:"Sender"`
+	Text          string         `json:"Text"`
+	Attachments   []Attachment   `json:"Attachments"`
+	ReplyTo       *ReplyContext  `json:"ReplyTo"`
+	Timestamp     time.Time      `json:"Timestamp"`
+	MediaGroupID  string         `json:"MediaGroupID,omitempty"`
+	ForwardOrigin *ForwardOrigin `json:"ForwardOrigin,omitempty"`
+	Merged        []MergedSource `json:"Merged,omitempty"`
 
-	Kind        InboundKind   `json:"Kind,omitempty"`        // "" = ordinary message; non-empty = channel event
-	Event       *InboundEvent `json:"Event,omitempty"`       // payload for a non-empty Kind
-	DrainedFrom string        `json:"DrainedFrom,omitempty"` // drain provenance; set by the broker, not by you
-	V           int           `json:"V,omitempty"`           // record format version; absent or 0 means 1
-	ConvKind    string        `json:"ConvKind,omitempty"`    // "dm" | "group", stated by the channel
-	Edited      bool          `json:"Edited,omitempty"`      // true only for a new version of an existing MessageID
+	Kind          InboundKind   `json:"Kind,omitempty"`        // "" = ordinary message; non-empty = channel event
+	Event         *InboundEvent `json:"Event,omitempty"`       // payload for a non-empty Kind
+	DrainedFrom   string        `json:"DrainedFrom,omitempty"` // drain provenance; set by the broker, not by you
+	V             int           `json:"V,omitempty"`           // record format version; absent or 0 means 1
+	ConvKind      string        `json:"ConvKind,omitempty"`    // "dm" | "group", stated by the channel
+	Edited        bool          `json:"Edited,omitempty"`      // true only for a new version of an existing MessageID
 }
 ```
 
@@ -331,7 +334,7 @@ Until then: channels are in-tree, the PR is welcome, and this document is the li
 
 `internal/channel/telegram/` is the reference implementation. Things it does that a second channel may want to borrow:
 
-- **Long-polling `getUpdates`** with `allowed_updates` opt-in for `message`, `edited_message`, `callback_query`, `message_reaction`. Forum service-message types are received but ignored in v0.1 — plumbed for future use.
+- **Long-polling `getUpdates`** with `allowed_updates` opt-in for `message`, `edited_message`, `callback_query`, `message_reaction`, `poll`. Forum service-message types are received but ignored in v0.1 — plumbed for future use.
 - **General topic id is `1`, not `0`.** Topic id 0 means "no topic" (DM, non-forum group); General is a real topic with id 1.
 - **The Bot API has no `getForumTopics`.** The local `topics` registry under `mappings.json:channels.telegram.topics` is the source of truth. Topics are added when a session attaches and creates or claims one, never opportunistically from inbound traffic.
 - **Reply threading**: an inbound with `reply_to_message` populates `ReplyContext` with `MessageID`, `User`, `Text`; the Claude adapter renders it as `reply_to_message_id` / `reply_to_text` attributes on the `<channel>` block.

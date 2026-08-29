@@ -157,9 +157,9 @@ Arg and result types live in `internal/c3types`.
 
 ## Tools: registered but not dispatched in v0.1.0
 
-`host.RegisterTools` hands your callback a registry with `Add`/`Remove`/`List`. `Add` is **first-writer-wins**: a held name is refused, the incumbent remains, and the only signal is a broker-log line. Prefix tool names with your plugin name (for example, `<plugin>_<verb>`) to avoid collisions. **Nothing else in the broker reads that map**, no adapter queries it, and there is no wire op to fetch plugin tools. Tool dispatch is a fixed switch over seven built-in names (`reply`, `react`, `edit_message`, `send_typing`, `poll`, `stop_poll`, `download_attachment`) with `unknown tool %q` as the default (`internal/broker/dispatch.go:19-38`).
+`host.RegisterTools` hands your callback a registry with `Add`/`Remove`/`List`. `Add` is **first-writer-wins**: a held name is refused, the incumbent remains, and the only signal is a broker-log line. Prefix tool names with your plugin name (for example, `<plugin>_<verb>`) to avoid collisions. **Nothing else in the broker reads that map**, no adapter queries it, and there is no wire op to fetch plugin tools. Tool dispatch is a fixed switch over seven built-in names (`reply`, `react`, `edit_message`, `send_typing`, `poll`, `stop_poll`, `download_attachment`) with `unknown tool %q` as the default (`internal/broker/dispatch.go:34-51`).
 
-So a plugin-registered tool is never listed to any CLI and is never routable. The shipped counter-example is instructive: STT's `retranscribe` is not a plugin tool at all — it is a dedicated IPC op (`ops.go:35`, `handler.go:157`), because that's what works today.
+So a plugin-registered tool is never listed to any CLI and is never routable. The shipped counter-example is instructive: STT's `retranscribe` is not a plugin tool at all — it is a dedicated IPC op (`ops.go:35`, `handler.go:251`), because that's what works today.
 
 If you need a tool in v0.1.0, add an op to the IPC protocol and the dispatch switch in your fork. Wiring `RegisterTools` end-to-end is roadmap work.
 
@@ -190,7 +190,9 @@ The shim invokes the handler as:
 stdin (line 1):  <bot_token>\n
 argv:            <python> <handler_path> <chat_id> <reply_msg_id> <file_id> <message_thread_id|"">
 env:             C3_TELEGRAM_API_URL=<base url>   (only when a proxy base is configured)
+                 C3_STT_FETCH_NONCE=<nonce>       (per-invocation shared secret for authenticated fetch-error reports)
                  STT_AUDIO_RETENTION=<n>
+                 C3_STT_DEADLINE_SECONDS=<n>      (scaled Go subprocess deadline in seconds)
 ```
 
 **The bot token is on stdin, not argv** — deliberately, so it never appears in `ps`, `/proc/<pid>/cmdline`, or audit logs. A handler that reads a token from `sys.argv` is both broken (every index is shifted by one) and a credential leak. Read line 1 of stdin.

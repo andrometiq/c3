@@ -5,7 +5,7 @@
 #   e.g. scripts/package.sh linux amd64 v1.0.0 dist
 #
 # Produces: <outdir>/c3_<version>_<goos>_<goarch>.tar.gz
-# Each tarball contains the nine compiled binaries, runtime STT + Grok plugin
+# Each tarball contains the eleven compiled binaries, runtime STT + Grok plugin
 # assets, project and third-party licenses, and a MANIFEST.txt.
 # Pure-Go cross-compile (CGO disabled), so every target builds on any host.
 #

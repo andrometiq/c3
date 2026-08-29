@@ -270,15 +270,16 @@ in general they're different concepts.
 ## STT failure modes
 
 The STT plugin shells out to a Python handler that runs the
-gemini-3-flash-openrouter → sarvam-saaras-v3 chain. The broker logs
-explicit failure lines now (no more silent empty transcripts).
+gemini-3-flash-openrouter → soniox-stt-async-v5 → elevenlabs-scribe-v2 →
+sarvam-saaras-v3 chain (providers without configured API keys skip at runtime).
+The broker logs explicit failure lines now (no more silent empty transcripts).
 
 | Log line shape                                                 | Meaning                                                                                |
 |-----------------------------------------------------------------|----------------------------------------------------------------------------------------|
 | `stt: msg=N transcribed in 22s (chars=730)`                    | Success.                                                                               |
-| `stt: msg=N timeout after 5m0s (timeout=5m0s, file_size=...)`  | Hit the broker's 300s subprocess deadline. Long voice notes + slow downloads are the usual culprit. |
+| `stt: msg=N timeout after 5m0s (timeout=5m0s, file_size=...)`  | Hit the broker's file-size-scaled subprocess deadline: base 300s, scaling up to a 720s cap. Long voice notes + slow downloads are the usual culprit. |
 | `stt: msg=N error after Ns (...): exit status 1 \| stderr-tail=...` | Python handler errored. stderr-tail (last 240 chars) shows the cause.                 |
-| `stt: msg=N empty transcript after Ns (no provider returned text)` | Both providers returned empty. Token expired? Provider down?                       |
+| `stt: msg=N empty transcript after Ns (no provider returned text)` | All providers returned empty. Token expired? Provider down?                        |
 | `stt: token read failed for msg=N: ...`                         | mappings.json missing or `bot_token` empty.                                            |
 | `stt: msg=N handler missing at <path> (...)`                    | Handler script went missing between broker start and this message. Marker = `handler_missing`. Restoring the script makes the NEXT voice message transcribe — no broker restart needed. |
 | `stt: handler <path> missing at startup (...); voice messages will surface [STT FAILED: handler_missing] ...` | Startup-time notice that the script is absent. The plugin still registers; per-message check inside the callback decides each time. |
@@ -298,7 +299,7 @@ knows to ask the user to resend. Two safety nets layer here:
    reachable for voice attachments going through the broker pipeline.
 
 Tunables in mappings.json:
-- `plugins.stt.timeout_seconds` — broker's hard deadline (default 300).
+- `plugins.stt.timeout_seconds` — broker's base hard deadline (default 300s), scaling with file size up to a 720s cap.
 - `plugins.stt.handler_path` — override the Python script path.
 - `plugins.stt.enabled` — set false to disable transcription entirely.
 
@@ -375,7 +376,7 @@ regress silently):
 
 - **2026-05-09 — 10s margin still too tight for long-poll.** Even with
   `25s + 10s = 35s`, occasional `context deadline exceeded` showed up
-  under transit-latency spikes. Generalized into `timeoutFor(method)` in
+  under transit-latency spikes. Generalized into `timeoutFor(method, longPollSeconds)` in
   `internal/channel/telegram/resilience.go`: getUpdates gets `25s + 30s`,
   control calls (`getMe`, `setMyCommands`) get 10s, sends/edits get 20s.
 
@@ -457,7 +458,7 @@ Everything C3 reads or writes lives in one of these paths. There is **no** pre-c
 |---|---|---|
 | `~/.config/c3/mappings.json` | Bot token, channel config, cwd→topic mappings, plugin config | broker (config) |
 | `~/.config/c3/mappings.json.bak` | One-generation backup, written before each rewrite | broker |
-| `~/.claude/stt.env` | API keys for STT providers (`OPENROUTER_API_KEY`, `SARVAM_API_KEY`); read by the bundled handler. Optional — skip if STT is disabled or you've pointed `plugins.stt.handler_path` at a custom script that loads keys differently. | user (manual, one-time setup) |
+| `~/.claude/stt.env` | API keys for STT providers (`OPENROUTER_API_KEY`, `SONIOX_API_KEY`, `ELEVENLABS_API_KEY`, `SARVAM_API_KEY`); read by the bundled handler. Optional — skip if STT is disabled or you've pointed `plugins.stt.handler_path` at a custom script that loads keys differently. | user (manual, one-time setup) |
 | `$XDG_RUNTIME_DIR/c3-broker.pid` | Singleton flock + pid | broker |
 | `$XDG_RUNTIME_DIR/c3.sock` | Adapter ↔ broker socket | broker |
 | `$XDG_STATE_HOME/c3/broker.log` | Broker log (this file) | broker |
@@ -468,10 +469,13 @@ Everything C3 reads or writes lives in one of these paths. There is **no** pre-c
 
 ## STT handler path resolution
 
-One rule, no fallbacks:
+Resolution order and fallbacks:
 
 1. If `mappings.json:plugins.stt.handler_path` is set → use that. (User override.)
 2. Else if `$CLAUDE_PLUGIN_ROOT` is in the broker's env → use `$CLAUDE_PLUGIN_ROOT/stt/stt-handler.py`. Claude Code sets this env when it launches the c3 adapter; the adapter inherits it when spawning the broker.
-3. Else → no handler. Voice messages surface `[STT FAILED: handler_missing]` per call.
+3. Else if `$C3_SRC_DIR` is set → use `$C3_SRC_DIR/plugins/c3/stt/stt-handler.py`.
+4. Else use `plugins/c3/stt/stt-handler.py` beside the resolved broker executable, if the release bundle is valid.
+5. Else use `~/.local/share/c3/plugins/c3/stt/stt-handler.py`, if the release bundle is valid.
+6. Else use `~/src/c3/plugins/c3/stt/stt-handler.py`, if it exists. If no candidate resolves, voice messages surface `[STT FAILED: handler_missing]` per call.
 
-If you run `c3-broker` outside Claude Code (manual daemon, systemd unit, debugging), `$CLAUDE_PLUGIN_ROOT` won't be set and you must set `plugins.stt.handler_path` explicitly. That's the supported path for any non-Claude-Code launcher.
+If you run `c3-broker` outside Claude Code (manual daemon, systemd unit, debugging), `$CLAUDE_PLUGIN_ROOT` won't be set; the remaining automatic fallbacks still apply, and `plugins.stt.handler_path` remains the explicit user override.
