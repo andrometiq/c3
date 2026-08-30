@@ -19,7 +19,7 @@ type clientMessageKey struct {
 type clientMessage struct {
 	mu        sync.Mutex
 	messageID int64
-	text      string
+	textHash  [32]byte
 	status    int
 	created   time.Time
 }
@@ -31,26 +31,43 @@ var errClientIDConflict = errors.New("client_id was already used for different t
 func (c *Channel) acceptInbound(sessionID string, current session, text, clientID string) (int64, int, error) {
 	key := clientMessageKey{sessionID: sessionID, clientID: clientID}
 	now := c.now()
+	hash := textHash(text)
+	pruned := false
 	c.clientMu.Lock()
 	for existingKey, existing := range c.clientMessages {
 		if now.Sub(existing.created) >= clientMessageTTL {
 			delete(c.clientMessages, existingKey)
+			pruned = true
 		}
 	}
 	record := c.clientMessages[key]
-	if record == nil {
-		record = &clientMessage{messageID: c.nextID(), text: text, created: now}
-		c.clientMessages[key] = record
-	}
 	c.clientMu.Unlock()
+	if record == nil {
+		candidate := &clientMessage{messageID: c.nextInboundMessageID(), textHash: hash, created: now}
+		c.clientMu.Lock()
+		record = c.clientMessages[key]
+		if record == nil {
+			record = candidate
+			c.clientMessages[key] = record
+		}
+		c.clientMu.Unlock()
+	}
 
 	record.mu.Lock()
-	defer record.mu.Unlock()
-	if record.text != text {
+	if record.textHash != hash {
+		record.mu.Unlock()
+		if pruned {
+			c.persistSessions("stale client-message pruning")
+		}
 		return record.messageID, http.StatusConflict, errClientIDConflict
 	}
 	if record.status != 0 {
-		return record.messageID, record.status, nil
+		messageID, status := record.messageID, record.status
+		record.mu.Unlock()
+		if pruned {
+			c.persistSessions("stale client-message pruning")
+		}
+		return messageID, status, nil
 	}
 	inbound := &c3types.Inbound{
 		Channel: Name, ChatID: c.operatorID, TopicID: nil,
@@ -65,9 +82,15 @@ func (c *Channel) acceptInbound(sessionID string, current session, text, clientI
 	switch c.host.GateInbound(inbound) {
 	case channel.GateInboundAllow:
 		if !c.host.Emit(inbound) {
+			record.mu.Unlock()
+			if pruned {
+				c.persistSessions("stale client-message pruning")
+			}
 			return record.messageID, http.StatusServiceUnavailable, nil
 		}
 		record.status = http.StatusAccepted
+		record.mu.Unlock()
+		c.persistSessions("client-message insert")
 		c.publish(streamEvent{
 			kind: "own",
 			payload: streamPayload{
@@ -82,8 +105,20 @@ func (c *Channel) acceptInbound(sessionID string, current session, text, clientI
 		// Gate drops are final. Retrying cannot turn a denied identity into an
 		// allowed one and would create a busy loop.
 		record.status = http.StatusForbidden
-		return record.messageID, record.status, nil
+		messageID, status := record.messageID, record.status
+		record.mu.Unlock()
+		c.persistSessions("client-message insert")
+		return messageID, status, nil
 	}
+}
+
+func (c *Channel) nextInboundMessageID() int64 {
+	c.idMu.Lock()
+	c.nextInboundFloor++
+	messageID := c.nextInboundFloor
+	c.idMu.Unlock()
+	c.persistSessions("inbound-id advance")
+	return messageID
 }
 
 func validSendText(text string) bool {

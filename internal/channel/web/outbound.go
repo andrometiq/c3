@@ -42,7 +42,7 @@ func (c *Channel) SendReply(args c3types.ReplyArgs) (int64, error) {
 	if args.Poll != nil || len(args.Media) != 0 || len(args.Buttons) != 0 {
 		return 0, fmt.Errorf("%w: rich outbound content", errUnsupported)
 	}
-	messageID := c.nextID()
+	messageID := c.nextReplyMessageID()
 	event := streamEvent{
 		kind:    "message",
 		payload: streamPayload{MessageID: messageID, Text: args.Text, Timestamp: c.now()},
@@ -111,14 +111,29 @@ func isStatusText(text string) bool {
 	return strings.HasPrefix(text, "📨 Held") || strings.HasPrefix(text, "⏸ Permission") || strings.HasPrefix(text, "⚠️")
 }
 
+func (c *Channel) nextReplyMessageID() int64 {
+	c.idMu.Lock()
+	c.nextReplyID++
+	messageID := c.nextReplyID
+	c.idMu.Unlock()
+	c.persistSessions("reply-id advance")
+	return messageID
+}
+
 func (c *Channel) publish(event streamEvent) {
 	if event.kind == "message" || event.kind == "own" || event.kind == "edit" {
 		c.replayMu.Lock()
+		c.idMu.Lock()
 		c.nextEventID++
 		event.sequence = c.nextEventID
+		c.idMu.Unlock()
+		c.persistSessions("event-id advance")
 		c.replay = append(c.replay, event)
 		if len(c.replay) > replayLimit {
 			c.replay = append([]streamEvent(nil), c.replay[len(c.replay)-replayLimit:]...)
+		}
+		if err := c.appendReplay(event); err != nil && c.host != nil {
+			c.host.Logf("web: persist replay event %d: %v", event.sequence, err)
 		}
 		c.broadcastLocked(event)
 		c.replayMu.Unlock()

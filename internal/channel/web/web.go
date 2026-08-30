@@ -80,8 +80,9 @@ type Channel struct {
 	baseURL       string
 	allowedOrigin map[string]bool
 
-	idMu          sync.Mutex
-	nextMessageID int64
+	idMu             sync.Mutex
+	nextReplyID      int64
+	nextInboundFloor int64
 
 	authMu            sync.Mutex
 	tokens            map[string]loginToken
@@ -99,6 +100,11 @@ type Channel struct {
 	replayMu    sync.Mutex
 	replay      []streamEvent
 	nextEventID int64
+
+	persistMu       sync.Mutex
+	stateDirectory  string
+	stateReady      bool
+	replayLineCount int
 
 	now                func() time.Time
 	sleep              func(time.Duration)
@@ -131,7 +137,7 @@ func (c *Channel) Name() string { return Name }
 
 func (c *Channel) Capabilities() c3types.Capabilities {
 	return c3types.Capabilities{
-		Channel: Name, RichText: false, MaxMessageRunes: maxMessageRunes,
+		Channel: Name, RichText: true, RichTables: true, MaxMessageRunes: maxMessageRunes,
 		EditMessages: true, Typing: true, MediaKinds: []c3types.MediaKind{},
 	}
 }
@@ -152,6 +158,9 @@ func (c *Channel) Start(ctx context.Context, host channel.Host) error {
 	}
 	if err := validateConfig(c.cfg); err != nil {
 		return c.refuse(host, "%v", err)
+	}
+	if err := c.loadState(host); err != nil {
+		return c.refuse(host, "load state: %v", err)
 	}
 	var telegram telegramConfig
 	if err := host.Config("telegram", &telegram); err != nil {
@@ -185,7 +194,17 @@ func (c *Channel) Start(ctx context.Context, host channel.Host) error {
 		if err != nil {
 			return c.refuse(host, "read held queue for message-id seed: %v", err)
 		}
-		c.nextMessageID = maxID
+		c.idMu.Lock()
+		seedRaisedFloor := maxID > c.nextInboundFloor
+		if seedRaisedFloor {
+			c.nextInboundFloor = maxID
+		}
+		c.idMu.Unlock()
+		if seedRaisedFloor {
+			if err := c.saveSessions(); err != nil {
+				return c.refuse(host, "persist held queue message-id seed: %v", err)
+			}
+		}
 	}
 	listener, err := c.listenFunc("tcp", listen)
 	if err != nil {
@@ -267,13 +286,6 @@ func (c *Channel) Stop() error {
 	err := server.Shutdown(ctx)
 	c.closeAllStreams()
 	return err
-}
-
-func (c *Channel) nextID() int64 {
-	c.idMu.Lock()
-	defer c.idMu.Unlock()
-	c.nextMessageID++
-	return c.nextMessageID
 }
 
 func (c *Channel) ensureState() {

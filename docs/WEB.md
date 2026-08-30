@@ -106,8 +106,9 @@ loopback HTTP listener.
    different valid link and are paced per remote address.
 3. The secret is carried in a URL fragment. `GET /auth` is side-effect-free;
    only the operator's Continue POST can consume it.
-4. Browser sessions are random, in memory, HttpOnly, SameSite=Lax, and idle out
-   after 24 hours. Secure is set for TLS or an HTTPS public URL.
+4. Browser sessions use random HttpOnly, SameSite=Lax cookies and idle out after
+   24 hours. Only each cookie's SHA-256 hash is persisted; the raw credential
+   exists only in the browser. Secure is set for TLS or an HTTPS public URL.
 5. Authentication, send, logout, and fresh-link POSTs require same-origin
    evidence. SSE requires the cookie and refuses an explicitly foreign Origin.
    No route sends CORS headers.
@@ -126,8 +127,9 @@ loopback HTTP listener.
 11. Outbound replies inherit the broker's structural claimed-route check; a
     tool cannot override the destination with supplied arguments.
 12. The cookie is an **agent-driving credential**: a holder can prompt a CLI
-    whose tools act on the laptop. The surface is tailnet-private by design, not
-    a public chat service.
+    whose tools act on the laptop. Copying the web state files does not supply
+    that credential. The surface is tailnet-private by design, not a public
+    chat service.
 
 ## Transport behavior and limitations
 
@@ -141,14 +143,38 @@ it. A `503` leaves the same browser message in retry state; retries reuse the
 same `client_id` and message id so accepted input is not emitted twice.
 
 Replies use SSE with a 20-second heartbeat. The browser reconnects and replays
-the last 200 reply/edit events held in memory. Typing and status notices are not
-replayed. If the requested point is older than that ring, or the broker restarted
-and the ring is empty, the page says **history may be incomplete**.
+the last 200 sequenced conversation events: agent replies and edits plus
+accepted operator-message echoes. If its `Last-Event-ID` is older than that
+ring, the page says **history may be incomplete**. Reply ids and SSE sequence
+ids remain monotonic across broker restarts. Typing and status notices are live
+only and are not replayed.
 
-Other phase-1 limits: browser sessions and reply history disappear on broker
-restart; there is one web conversation per operator; text only (no media,
-polls, reactions, buttons, or remote permission verdicts); and a CLI session
-can claim only one Telegram or web route at once.
+Agent replies and edits render a safe Markdown subset in the browser: fenced
+and inline code, bold, italic, strike, click-to-reveal `||spoilers||`, links and
+bare HTTP(S) URLs, headings, one-level ordered and unordered lists,
+blockquotes, horizontal rules, paragraphs/line breaks, and GFM tables. The web
+channel advertises both `RichText` and `RichTables`; tables render in a
+horizontal-scroll wrapper. Link targets are created only for
+`http:`, `https:`, `mailto:`, and `tel:` schemes. Operator messages and status
+notices remain literal text with line breaks.
+
+Web state lives in `$XDG_STATE_HOME/c3/web/`, or
+`~/.local/state/c3/web/` when `XDG_STATE_HOME` is unset. The directory is mode
+0700. `sessions.json` stores hard floors for the next reply, inbound, and SSE
+event ids alongside sessions and client-message outcomes. `sessions.json` and
+the append-only `replay.jsonl` are mode 0600 and are
+updated with fsync-backed atomic state writes or fsynced replay appends. Browser
+sessions survive restart for the remainder of their 24-hour idle window, as do
+recent client-id outcomes and the replay ring. Ten-minute login links, typing,
+and status notices do not survive restart.
+
+When the broker holds a message because no CLI owns the web route, the page
+changes its connection label to **no session attached**. A later reply, edit,
+or typing event changes it back to **connected**.
+
+Other current limits: there is one web conversation per operator; text only
+(no media, polls, reactions, buttons, or remote permission verdicts); and a CLI
+session can claim only one Telegram or web route at once.
 
 ## Phone verification checklist
 

@@ -22,10 +22,11 @@ type loginToken struct {
 }
 
 type session struct {
-	userID   int64
-	username string
-	created  time.Time
-	lastSeen time.Time
+	userID        int64
+	username      string
+	created       time.Time
+	lastSeen      time.Time
+	savedLastSeen time.Time
 }
 
 func randomID() (string, error) {
@@ -62,26 +63,27 @@ func (c *Channel) HasLiveSession(userID int64) bool {
 	c.ensureState()
 	now := c.now()
 	var expired []string
+	found := false
 	c.authMu.Lock()
-	for id, current := range c.sessions {
+	for key, current := range c.sessions {
 		if now.Sub(current.lastSeen) >= sessionIdleTTL {
-			delete(c.sessions, id)
-			expired = append(expired, id)
+			delete(c.sessions, key)
+			expired = append(expired, key)
 			continue
 		}
 		if current.userID == userID {
-			c.authMu.Unlock()
-			for _, id := range expired {
-				c.closeSessionStreams(id)
-			}
-			return true
+			found = true
 		}
 	}
 	c.authMu.Unlock()
-	for _, id := range expired {
-		c.closeSessionStreams(id)
+	if len(expired) != 0 {
+		c.deleteClientMessagesForSessions(expired)
+		for _, key := range expired {
+			c.closeSessionStreams(key)
+		}
+		c.persistSessions("idle session eviction")
 	}
-	return false
+	return found
 }
 
 func (c *Channel) consumeToken(token string) (loginToken, bool) {
@@ -100,15 +102,25 @@ func (c *Channel) consumeToken(token string) (loginToken, bool) {
 }
 
 func (c *Channel) createSession(token loginToken) (string, error) {
-	id, err := randomID()
+	cookieValue, err := randomID()
 	if err != nil {
 		return "", err
 	}
+	key := sessionKey(cookieValue)
 	now := c.now()
 	c.authMu.Lock()
-	c.sessions[id] = &session{userID: token.userID, username: token.username, created: now, lastSeen: now}
+	c.sessions[key] = &session{
+		userID: token.userID, username: token.username,
+		created: now, lastSeen: now, savedLastSeen: now,
+	}
 	c.authMu.Unlock()
-	return id, nil
+	if err := c.saveSessions(); err != nil {
+		c.authMu.Lock()
+		delete(c.sessions, key)
+		c.authMu.Unlock()
+		return "", err
+	}
+	return cookieValue, nil
 }
 
 func (c *Channel) authenticate(r *http.Request, touch bool) (string, session, bool) {
@@ -116,32 +128,58 @@ func (c *Channel) authenticate(r *http.Request, touch bool) (string, session, bo
 	if err != nil || cookie.Value == "" {
 		return "", session{}, false
 	}
+	key := sessionKey(cookie.Value)
 	now := c.now()
+	persistTouch := false
 	c.authMu.Lock()
-	current, ok := c.sessions[cookie.Value]
+	current, ok := c.sessions[key]
 	if !ok {
 		c.authMu.Unlock()
 		return "", session{}, false
 	}
-	if now.Sub(current.lastSeen) >= sessionIdleTTL {
-		delete(c.sessions, cookie.Value)
+	if now.Sub(current.lastSeen) >= sessionIdleTTL || c.operatorID != 0 && current.userID != c.operatorID {
+		delete(c.sessions, key)
 		c.authMu.Unlock()
-		c.closeSessionStreams(cookie.Value)
+		c.deleteClientMessagesForSessions([]string{key})
+		c.closeSessionStreams(key)
+		c.persistSessions("idle session eviction")
 		return "", session{}, false
 	}
 	if touch {
 		current.lastSeen = now
+		if now.Sub(current.savedLastSeen) >= sessionTouchWriteInterval {
+			persistTouch = true
+		}
 	}
 	copy := *current
 	c.authMu.Unlock()
-	return cookie.Value, copy, true
+	if persistTouch {
+		c.persistSessions("session last_seen")
+	}
+	return key, copy, true
 }
 
-func (c *Channel) destroySession(id string) {
+func (c *Channel) destroySession(key string) {
 	c.authMu.Lock()
-	delete(c.sessions, id)
+	delete(c.sessions, key)
 	c.authMu.Unlock()
-	c.closeSessionStreams(id)
+	c.deleteClientMessagesForSessions([]string{key})
+	c.closeSessionStreams(key)
+	c.persistSessions("session logout")
+}
+
+func (c *Channel) deleteClientMessagesForSessions(sessionKeys []string) {
+	deleted := make(map[string]bool, len(sessionKeys))
+	for _, key := range sessionKeys {
+		deleted[key] = true
+	}
+	c.clientMu.Lock()
+	for key := range c.clientMessages {
+		if deleted[key.sessionID] {
+			delete(c.clientMessages, key)
+		}
+	}
+	c.clientMu.Unlock()
 }
 
 func (c *Channel) setSessionCookie(w http.ResponseWriter, r *http.Request, id string) {
