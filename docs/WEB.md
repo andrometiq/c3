@@ -161,10 +161,13 @@ or while Voice or Hands-free is on in Chat, C3 requests a screen wake lock and
 re-acquires it after the page becomes visible or the browser releases it.
 Unsupported browsers simply continue without a wake lock.
 
-The v1 mobile boundary is foreground-only: keep the installed app visible and
-the phone screen on, in a cradle or on loudspeaker. The wake lock supports that
-pattern but does not make iOS background audio work; iOS suspends microphone
-and Web Audio capture when the app is backgrounded or the screen locks.
+The normal mobile boundary remains foreground use: keep the installed app
+visible and the phone screen on, in a cradle or on loudspeaker. The wake lock
+supports that pattern but does not make iOS background audio work; iOS suspends
+microphone and Web Audio capture when the app is backgrounded or the screen
+locks. C3 asks an active recorder to stop and save its assembled blob as an
+IndexedDB draft on page hide, but browser termination can still outrun that
+asynchronous recorder and database work.
 
 ## Security model (T1–T19)
 
@@ -322,27 +325,79 @@ breathes, and reduced motion removes that and the press scale. The centre circle
 is only a hold-to-talk target; it has no idle tap or multi-tap command. During a
 push-to-talk hold, an **▲ lock** affordance appears above the circle and brightens
 after 30 px of upward movement. Upward movement of at least 60 px locks the
-recording; downward or sideways movement of at least 60 px cancels it. Movement
-under 30 px does nothing, and movement from 30–59 px only previews the lock.
+recording. Cancellation is down-only and two-stage: a down-dominant movement of
+at least 96 px arms a visible red **release to cancel** zone, and only release
+while still inside that zone's cached bounding rectangle commits. Returning
+above 96 px or making horizontal movement dominant disarms it. Sideways
+movement never arms or commits cancel, and crossing the zone without releasing
+there does not cancel. Arming gives one 20 ms tick; disarming is visual-only.
+Movement under 30 px does nothing, and 30–59 px upward only previews the lock.
 The synthetic click after release is ignored for 400 ms.
 
-| State | Circle press | Circle release | Mute | Live (700 ms hold) | Replay |
-| --- | --- | --- | --- | --- | --- |
-| `idle` | Starts the existing push-to-talk recorder; the first use opens the browser microphone prompt. During the hold, slide up 60 px to lock or down/sideways 60 px to cancel. | Stops and uploads immediately with the existing client-id and retry path unless the hold locked or cancelled. | Latches mute. | Enters Live. | Requests and replays the newest agent reply. |
-| `recording · held` | Keeps recording; up 60 px locks, while down/sideways 60 px cancels. | Sends when unlocked; a locked release keeps recording. | Ignored. | Ignored. | Ignored. |
-| `recording · locked` | A tap stops and sends. A hold of at least 700 ms cancels with the spoken **cancelled** notice. Pointer movement is ignored. | The locking hold's release does nothing; the later short tap sends. | Ignored. | Ignored. | Ignored. |
-| `sending` / `thinking` | Ignored, except that a press during Live's 1.2-second send beat cancels that not-yet-started upload. | Ignored. | Latches mute and prevents the upcoming readout. | Ignored. | Ignored. |
-| `speaking` | Stops and marks this reply interrupted, drops its remaining chunks, and starts push-to-talk; in Live it starts the existing VAD barge-in capture. Push-to-talk retains the lock/cancel slides. | Push-to-talk sends unless locked/cancelled; Live capture still ends through VAD. | Cuts this reply immediately. | Ignored. | Requests and restarts the newest reply. |
-| `live · listening` | Starts recording immediately. Down/sideways 60 px cancels; the push-to-talk lock does not change Live's VAD lifecycle. | Does not end the recording; VAD ends the utterance. | Latches mute without closing the live microphone. | Exits Live. | Requests and replays the newest reply. |
-| `held / no session` | Records like idle and permits the same lock/cancel slides so the driver's action is preserved locally. | Refuses an unlocked send, or keeps a locked recording until its send tap, then gives the fixed **send refused** notice. | Ignored. | Ignored. | Ignored. |
+| State | Circle press | Circle release | Separate Cancel target | Mute | Live (700 ms hold) | Replay |
+| --- | --- | --- | --- | --- | --- | --- |
+| `idle` | Starts the existing push-to-talk recorder; the first use opens the browser microphone prompt. Slide up 60 px to lock or down 96 px into the release zone to arm cancel. | Uploads unless the hold locked or release occurs in the armed cancel zone. | Hidden. | Latches mute. | Enters Live. | Requests and replays the newest agent reply. |
+| `recording · held` | Keeps recording; up 60 px locks, while a down-dominant 96 px drag only arms cancel. | Sends normally; release in the armed zone commits guarded cancel. | Hidden. | Ignored. | Ignored. | Ignored. |
+| `recording · locked` | A tap is send-only; no circle gesture can cancel. | The locking hold's release keeps recording; a later circle release sends. | Hold the visible red **✕ Cancel** target for 700 ms. An early release aborts. | Ignored. | Ignored. | Ignored. |
+| `sending` / `thinking` | Ignored, except that a press during Live's 1.2-second send beat cancels that not-yet-started upload. | Ignored. | Hidden. | Latches mute and prevents the upcoming readout. | Ignored. | Ignored. |
+| `speaking` | Stops and marks this reply interrupted, drops its remaining audio, and starts push-to-talk; in Live it starts the existing VAD barge-in capture. Push-to-talk retains the lock and guarded down-cancel gestures. | Push-to-talk sends unless locked or deliberately cancelled; Live capture still ends through VAD. | Hidden unless the new recording locks. | Cuts this reply immediately. | Ignored. | Requests and restarts the newest reply. |
+| `live · listening` | Starts recording immediately. A down-dominant 96 px drag arms guarded cancel; sideways movement does nothing. | Does not normally end the recording; release in the armed zone cancels, otherwise VAD ends the utterance. | Hidden. | Latches mute without closing the live microphone. | Exits Live. | Requests and replays the newest reply. |
+| `held / no session` | Records like idle and permits the same lock and guarded cancel gestures so the driver's action is preserved locally. | Refuses an unlocked send, or keeps a locked recording until its send tap, then gives the fixed **send refused** notice. | Appears only after lock and uses the same 700 ms hold. | Ignored. | Ignored. | Ignored. |
 
 When Live VAD accepts an utterance, the sending earcon starts a 1.2-second beat
 before the upload. Pressing the circle during that beat cancels the pending
-upload and shows **cancelled** on the transcript line. Push-to-talk has no delay.
+upload and shows **cancelled** on the transcript line. A committed cancel under
+five seconds discards the clip. At five seconds or longer, including during the
+Live send beat, C3 keeps it as the one-slot draft and says **saved as draft**.
+If the document becomes hidden during the beat, C3 cancels the beat timer and
+starts that upload immediately. Push-to-talk has no delay.
 The Live corner target is deliberately hold-only; a short tap shows **hold to
-switch live**. A lock vibrates twice for 20 ms; send and directional cancel use
-30 ms. Directional cancel also sounds the error earcon and leaves **cancelled**
-on the transcript line.
+switch live**. A browser `pointercancel` is not treated as a deliberate cancel:
+an unlocked push-to-talk recording is stopped into the draft slot instead.
+
+All driver feedback goes through one notice table. Earcons use a 0.15 gain and
+a 5 ms attack: `armed` is 880 Hz; `sending` rises 660→880 Hz; `error` is 220 Hz;
+`accepted` is 990 Hz; `reply` is 560 Hz; `endspeak` falls 660→440 Hz; `entering`
+rises 520→760 Hz; `reconnect` rises 520→700 Hz; `leaving` is two 320 Hz tones
+with a 60 ms gap; and `document` is 1040 Hz. The vibration vocabulary includes
+routine 15/20 ms ticks, a 30 ms confirmation, rising `[20,40,20]`, accepted
+`[20,30,20]`, answer `[30,60,30]`, attention `[50,80,50]`, document
+`[10,30,10,30,10]`, discard `[60,40,60]`, and error `[40,60,40,60,40]`.
+
+| # | Change / notice kind | Vibration | Earcon | Spoken notice |
+| --- | --- | --- | --- | --- |
+| 1 | Hold start / `hold-start` | `15` | — | — |
+| 2 | Lock engaged / `locked` | `[20,40,20]` | `entering` | — |
+| 3 | Push-to-talk send / `sending` | `30` | `sending` | — |
+| 4 | Upload accepted / `sent` | `[20,30,20]` | `accepted` | — |
+| 5 | Send or recording discarded / `send-cancelled`, `recording-cancelled` | `[60,40,60]` | `error` | “Send cancelled” or “Cancelled” |
+| 5b | Long cancel retained / `draft-saved` | `[20,30,20]` | `accepted` | “Saved as draft” |
+| 6 | Live on / `live-on` | `[20,40,20]` | `entering` | “Live on” |
+| 7 | Live off / `live-off` | `[20,40,20]` | `endspeak` | “Live off” |
+| 8 | VAD listening / `listening-start` | `15` | `armed` | — |
+| 9 | VAD speech ended / `speech-end` | `20` | `sending` | — |
+| 10 | Transcript ready | folded into reply-ready | — | — |
+| 11 | Reply arrived / `reply-ready` | `[30,60,30]` | `reply` | — |
+| 12 | Reply starts speaking / `speaking-start` | `20` | — | — |
+| 13 | Reply finishes speaking / `speaking-end` | `15` | `endspeak` | — |
+| 14 | Barge-in / `barge-in` | `[30,30]` | `armed` | — |
+| 15 | No session / session returned | `[50,80,50]` / `[20,40,20]` | `leaving` / `entering` | “No session” / “Session” |
+| 16 | Disconnected / reconnected | `[50,80,50]` / `[15,40,15]` | `leaving` / `reconnect` | — |
+| 17 | Permission held / returned | `[50,80,50]` / `[20,40,20]` | `leaving` / `entering` | “Permission held” / “Permission returned” |
+| 18 | Document received / `document` | `[10,30,10,30,10]` | `document` | “Document received” |
+| 19 | Error / send refused | `[40,60,40,60,40]` | `error` | — / “Send refused” |
+| 20 | Mute / unmute | `30` | `endspeak` / `entering` | “Muted” / “Unmuted” |
+
+Each notice carries its speech policy in the same table. The safety words
+`no-session`, `session-returned`, `permission-held`, `permission-returned`,
+`recording-cancelled`, `send-cancelled`, `draft-saved`, `draft-found`,
+`send-refused`, `muted`, `unmuted`, and `reply-timeout` always speak, independent
+of mute. The remaining state words — **Connected**, **Live on**, **Live off**,
+and **Document received** — speak only while spoken replies are enabled and
+unmuted. Earcons and enabled haptics still fire in either case. **Haptics** in
+the **Session & settings** sheet gates vibration only; it defaults on, and the
+Replay tick uses this same gate. Browsers without the Vibration API, notably
+iOS Safari, hide the switch and keep sound-only feedback.
 
 Entering Drive requests spoken replies unless the Drive mute latch is set. If
 mobile autoplay has not been unlocked, the first Drive gesture performs the
@@ -356,16 +411,37 @@ request that persisted agent message through `POST /speak`, so an expired or
 missed live audio event is served from cache or synthesized again. The
 MediaSession pause action has stop semantics rather than resumable pause.
 
-The fixed notices **no session**, **permission held**, **connected**, **live on**,
-**live off**, **muted**, **send cancelled**, **cancelled**, and **send refused** use guarded
-browser speech synthesis only for those exact local strings, plus an earcon and
-guarded haptic.
 Agent text is never sent to browser speech synthesis. The last reply beneath the
 circle is plain text preprocessed with the same Markdown, URL, emoji, and glyph
 stripping rules as the bundled TTS plugin; tapping its text opens Chat, while
 its small play button requests that reply's audio. The one-line
 voice-note label is replaced by its transcript edit. A screen wake lock is held
 for the whole time Drive is visible, even when Voice and Live are off.
+
+`hasUnsentWork()` is the page's single leave predicate. It covers a recorder
+that is active or starting, an active Live capture, Live's pending send beat,
+every optimistic row still in the upload/retry map, an in-memory draft not yet
+confirmed durable, and an IndexedDB write in flight. Thinking or speaking alone
+does not count once the server has accepted the note. Browser navigation and
+close use the native `beforeunload` prompt, and logout uses an explicit
+confirmation; switching between Chat and Drive does not leave the document and
+does not prompt.
+
+On `visibilitychange` to hidden and `pagehide`, an unreleased Chat or Drive
+push-to-talk capture is stopped and assembled into one IndexedDB
+`c3-drive-draft` slot instead of being auto-sent. Live keeps its existing forced
+upload on hide, including immediate delivery of a blob already waiting in the
+send beat. Both push-to-talk and Live recorders request data every second so
+their chunk lists already hold most of the capture before the asynchronous
+`stop` event. The next load never auto-sends: Drive offers **Resend draft ·
+Discard** and says **unsent recording found** once, while Chat shows the same
+choice in a small bar. Resend reuses the stored client id and normal upload retry
+path while retaining the slot through retries. Only a `202 Accepted` response
+deletes it; a refused resend restores the in-memory offer and writes the slot
+again. Discard deletes it. IndexedDB can be unavailable, full, or denied, and a
+browser or operating system can kill the page before the MediaRecorder `stop`
+event or database transaction completes, so this is a best-effort last hook
+rather than a transactional background recorder.
 
 ## Voice
 
