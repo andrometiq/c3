@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -486,7 +487,12 @@ func writeAtomic(path string, data []byte) error {
 	return syncDirectory(directory)
 }
 
+// syncDirectory fsyncs a directory so a renamed entry is durable; Windows
+// cannot open directories for sync, so it is a no-op there.
 func syncDirectory(directory string) error {
+	if runtime.GOOS == "windows" {
+		return nil
+	}
 	directoryFile, err := os.Open(directory)
 	if err != nil {
 		return err

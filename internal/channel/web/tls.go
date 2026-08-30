@@ -17,7 +17,6 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"time"
 )
@@ -43,11 +42,10 @@ type subjectAltNames struct {
 }
 
 func (c *Channel) prepareTLS(listen string) (bool, error) {
-	stateHome, err := xdgStateHomeC3()
+	directory, err := stateDir()
 	if err != nil {
 		return false, err
 	}
-	directory := filepath.Join(stateHome, "web")
 	if err := os.MkdirAll(directory, 0o700); err != nil {
 		return false, fmt.Errorf("create certificate directory %s: %w", directory, err)
 	}
@@ -244,10 +242,31 @@ func derivedSubjectAltNames(listen, publicURL string) (subjectAltNames, string, 
 	}
 	commonName := parsedPublicURL.Hostname()
 	sans.addHost(commonName)
-	if hostname, err := os.Hostname(); err == nil && hostname != "" {
+	if hostname, err := os.Hostname(); err == nil && isHostnameSAN(hostname) {
 		sans.addHost(hostname)
 	}
 	return sans, commonName, nil
+}
+
+// isHostnameSAN reports whether a machine hostname is a valid dNSName SAN
+// (IA5 letters, digits, hyphens, dots); anything else is skipped rather than
+// aborting certificate issuance.
+func isHostnameSAN(hostname string) bool {
+	hostname = strings.TrimSuffix(strings.TrimSpace(hostname), ".")
+	if hostname == "" || len(hostname) > 253 {
+		return false
+	}
+	for _, label := range strings.Split(hostname, ".") {
+		if label == "" || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+			return false
+		}
+		for _, r := range label {
+			if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '-') {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func (sans *subjectAltNames) addHost(host string) {
@@ -351,7 +370,7 @@ func atomicWriteCertificateFile(path string, data []byte, mode os.FileMode) erro
 		_ = os.Remove(temporaryPath)
 		return fmt.Errorf("replace certificate file %s: %w", path, err)
 	}
-	if err := syncCertificateDirectory(filepath.Dir(path)); err != nil {
+	if err := syncDirectory(filepath.Dir(path)); err != nil {
 		return fmt.Errorf("sync certificate directory: %w", err)
 	}
 	return nil
@@ -375,7 +394,7 @@ func atomicWriteCertificatePair(certificatePath string, certificate []byte, cert
 		removeTemporaryKey()
 		return fmt.Errorf("replace certificate file %s: %w", certificatePath, err)
 	}
-	if err := syncCertificateDirectory(filepath.Dir(certificatePath)); err != nil {
+	if err := syncDirectory(filepath.Dir(certificatePath)); err != nil {
 		removeTemporaryKey()
 		_ = removePublishedCertificate(certificatePath)
 		return fmt.Errorf("sync certificate directory after replacing %s: %w", certificatePath, err)
@@ -387,7 +406,7 @@ func atomicWriteCertificatePair(certificatePath string, certificate []byte, cert
 		}
 		return fmt.Errorf("replace certificate key %s: %w", keyPath, err)
 	}
-	if err := syncCertificateDirectory(filepath.Dir(keyPath)); err != nil {
+	if err := syncDirectory(filepath.Dir(keyPath)); err != nil {
 		return fmt.Errorf("sync certificate directory after replacing %s: %w", keyPath, err)
 	}
 	return nil
@@ -426,31 +445,7 @@ func removePublishedCertificate(path string) error {
 	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-	return syncCertificateDirectory(filepath.Dir(path))
-}
-
-func syncCertificateDirectory(directory string) error {
-	if runtime.GOOS == "windows" {
-		return nil
-	}
-	directoryHandle, err := os.Open(directory)
-	if err != nil {
-		return err
-	}
-	defer directoryHandle.Close()
-	return directoryHandle.Sync()
-}
-
-// xdgStateHomeC3 returns $XDG_STATE_HOME/c3 (or ~/.local/state/c3 fallback).
-func xdgStateHomeC3() (string, error) {
-	if x := os.Getenv("XDG_STATE_HOME"); x != "" {
-		return filepath.Join(x, "c3"), nil
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", fmt.Errorf("resolve user state directory: %w", err)
-	}
-	return filepath.Join(home, ".local", "state", "c3"), nil
+	return syncDirectory(filepath.Dir(path))
 }
 
 func (c *Channel) caCertificatePEM() []byte {

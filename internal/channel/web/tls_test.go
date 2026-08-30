@@ -333,7 +333,7 @@ func TestTLSPrepareRefusesMissingStateHome(t *testing.T) {
 	t.Setenv("USERPROFILE", "")
 	channel := New()
 	channel.cfg = Config{PublicURL: "https://127.0.0.1:8371", TLS: true}
-	if _, err := channel.prepareTLS("127.0.0.1:8371"); err == nil || !strings.Contains(err.Error(), "resolve user state directory") {
+	if _, err := channel.prepareTLS("127.0.0.1:8371"); err == nil || !strings.Contains(err.Error(), "resolve home directory") {
 		t.Fatalf("prepareTLS error = %v", err)
 	}
 }
