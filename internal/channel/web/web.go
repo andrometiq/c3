@@ -43,6 +43,7 @@ type Config struct {
 	Enabled   *bool  `json:"enabled,omitempty"`
 	Listen    string `json:"listen,omitempty"`
 	PublicURL string `json:"public_url,omitempty"`
+	TLS       bool   `json:"tls,omitempty"`
 }
 
 type telegramConfig struct {
@@ -66,7 +67,8 @@ type loginDeliveryHost interface {
 	SendWebLoginLink(requestedBy string) (sent bool, err error)
 }
 
-// Channel implements channel.Channel and channel.LoginLinker.
+// Channel implements channel.Channel, channel.LoginLinker, and
+// channel.CertificateProvider.
 type Channel struct {
 	host       channel.Host
 	cfg        Config
@@ -75,6 +77,7 @@ type Channel struct {
 	lifecycleMu   sync.Mutex
 	server        *http.Server
 	listener      net.Listener
+	listeners     []net.Listener
 	cancel        context.CancelFunc
 	listen        string
 	baseURL       string
@@ -105,10 +108,14 @@ type Channel struct {
 	failedAttemptDelay time.Duration
 	heartbeatInterval  time.Duration
 	listenFunc         func(network, address string) (net.Listener, error)
+
+	tlsMu       sync.RWMutex
+	tlsMaterial certificateMaterial
 }
 
 var _ channel.Channel = (*Channel)(nil)
 var _ channel.LoginLinker = (*Channel)(nil)
+var _ channel.CertificateProvider = (*Channel)(nil)
 
 // New returns an unstarted channel.
 func New() *Channel {
@@ -187,24 +194,60 @@ func (c *Channel) Start(ctx context.Context, host channel.Host) error {
 		}
 		c.nextMessageID = maxID
 	}
+	configuredHost, configuredPort, _ := net.SplitHostPort(listen)
+	if c.cfg.TLS {
+		if c.cfg.PublicURL == "" {
+			return c.refuse(host, "tls requires public_url")
+		}
+		if !mappings.WebTLSListenHostAllowed(configuredHost) {
+			return c.refuse(host, "tls listen host must be loopback, localhost, or a Tailscale address; all-interfaces binds are refused")
+		}
+		publicURL, _ := url.Parse(c.cfg.PublicURL)
+		if isLoopbackHost(configuredHost) && !isLoopbackHost(publicURL.Hostname()) {
+			return c.refuse(host, "phone cannot reach a loopback-only listener")
+		}
+	}
 	listener, err := c.listenFunc("tcp", listen)
 	if err != nil {
 		return c.refuse(host, "listen %s: %v", listen, err)
 	}
+	listeners := []net.Listener{listener}
 
 	actualListen := listener.Addr().String()
 	_, actualPort, _ := net.SplitHostPort(actualListen)
-	configuredHost, _, _ := net.SplitHostPort(listen)
 	if configuredHost == "" {
 		configuredHost = "127.0.0.1"
+	}
+	if c.cfg.TLS && !isLoopbackHost(configuredHost) {
+		loopbackListen := net.JoinHostPort("127.0.0.1", actualPort)
+		loopbackListener, err := c.listenFunc("tcp", loopbackListen)
+		if err != nil {
+			_ = listener.Close()
+			return c.refuse(host, "listen %s: %v", loopbackListen, err)
+		}
+		listeners = append(listeners, loopbackListener)
+	}
+	caGenerated := false
+	if c.cfg.TLS {
+		caGenerated, err = c.prepareTLS(net.JoinHostPort(configuredHost, configuredPort))
+		if err != nil {
+			for _, current := range listeners {
+				_ = current.Close()
+			}
+			return c.refuse(host, "tls: %v", err)
+		}
 	}
 	baseURL := c.cfg.PublicURL
 	if baseURL == "" {
 		baseURL = "http://" + net.JoinHostPort(configuredHost, actualPort)
 	}
+	scheme := "http"
+	if c.cfg.TLS {
+		scheme = "https"
+	}
 	allowedOrigins := map[string]bool{
-		normalizeOrigin("http://" + net.JoinHostPort("127.0.0.1", actualPort)): true,
-		normalizeOrigin("http://" + net.JoinHostPort("localhost", actualPort)): true,
+		normalizeOrigin(scheme + "://" + net.JoinHostPort("127.0.0.1", actualPort)): true,
+		normalizeOrigin(scheme + "://" + net.JoinHostPort("localhost", actualPort)): true,
 	}
 	if c.cfg.PublicURL != "" {
 		allowedOrigins[normalizeOrigin(c.cfg.PublicURL)] = true
@@ -216,10 +259,14 @@ func (c *Channel) Start(ctx context.Context, host channel.Host) error {
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       120 * time.Second,
 	}
+	if c.cfg.TLS {
+		server.TLSConfig = c.tlsConfig()
+	}
 	c.lifecycleMu.Lock()
 	c.host = host
 	c.operatorID = telegram.MasterUserID
 	c.listener = listener
+	c.listeners = listeners
 	c.server = server
 	c.cancel = cancel
 	c.listen = actualListen
@@ -227,11 +274,20 @@ func (c *Channel) Start(ctx context.Context, host channel.Host) error {
 	c.allowedOrigin = allowedOrigins
 	c.lifecycleMu.Unlock()
 
-	go func() {
-		if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+	serve := func(listener net.Listener) {
+		var err error
+		if c.cfg.TLS {
+			err = server.ServeTLS(listener, "", "")
+		} else {
+			err = server.Serve(listener)
+		}
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
 			host.Logf("web: listener stopped: %v", err)
 		}
-	}()
+	}
+	for _, current := range listeners {
+		go serve(current)
+	}
 	go func() {
 		<-childContext.Done()
 		shutdownContext, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -239,7 +295,14 @@ func (c *Channel) Start(ctx context.Context, host channel.Host) error {
 		_ = server.Shutdown(shutdownContext)
 		c.closeAllStreams()
 	}()
-	host.Logf("web: listening on %s", actualListen)
+	if c.cfg.TLS {
+		host.Logf("web: listening https://%s (tls: private CA sha256 %s)", actualListen, c.caFingerprint())
+		if caGenerated {
+			host.Logf("web: new CA generated — run 'c3-broker web ca' to send it to the operator")
+		}
+	} else {
+		host.Logf("web: listening on %s", actualListen)
+	}
 	return nil
 }
 
@@ -252,19 +315,27 @@ func (c *Channel) refuse(host channel.Host, format string, args ...any) error {
 func (c *Channel) Stop() error {
 	c.lifecycleMu.Lock()
 	server, cancel := c.server, c.cancel
+	listeners := append([]net.Listener(nil), c.listeners...)
 	c.server = nil
 	c.listener = nil
+	c.listeners = nil
 	c.cancel = nil
 	c.lifecycleMu.Unlock()
 	if cancel != nil {
 		cancel()
 	}
 	if server == nil {
+		for _, listener := range listeners {
+			_ = listener.Close()
+		}
 		return nil
 	}
 	ctx, cancelShutdown := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancelShutdown()
 	err := server.Shutdown(ctx)
+	for _, listener := range listeners {
+		_ = listener.Close()
+	}
 	c.closeAllStreams()
 	return err
 }

@@ -74,17 +74,25 @@ func validateWebChannelConfig(cc ChannelConfig) error {
 		return fmt.Errorf("mappings: channel %q does not support topics", "web")
 	}
 	if cc.DebounceMS != 0 || cc.DebounceMaxMessages != 0 || cc.FallbackCooldownS != 0 || cc.STTPrefix != "" || cc.APIBaseURL != "" || len(cc.APIBaseURLs) != 0 || cc.RichInbound != nil {
-		return fmt.Errorf("mappings: channel %q permits only enabled, listen, and public_url", "web")
+		return fmt.Errorf("mappings: channel %q permits only enabled, listen, public_url, and tls", "web")
 	}
-	if cc.Listen != "" {
-		_, port, err := net.SplitHostPort(cc.Listen)
-		if err != nil {
-			return fmt.Errorf("mappings: channel %q listen must be host:port: %w", "web", err)
-		}
-		n, err := strconv.Atoi(port)
-		if err != nil || n < 1 || n > 65535 {
-			return fmt.Errorf("mappings: channel %q listen has invalid port %q", "web", port)
-		}
+	listen := cc.Listen
+	if listen == "" {
+		listen = "127.0.0.1:8371"
+	}
+	listenHost, port, err := net.SplitHostPort(listen)
+	if err != nil {
+		return fmt.Errorf("mappings: channel %q listen must be host:port: %w", "web", err)
+	}
+	n, err := strconv.Atoi(port)
+	if err != nil || n < 1 || n > 65535 {
+		return fmt.Errorf("mappings: channel %q listen has invalid port %q", "web", port)
+	}
+	if cc.TLS && !WebTLSListenHostAllowed(listenHost) {
+		return fmt.Errorf("mappings: channel %q tls listen host must be loopback, localhost, or a Tailscale address; all-interfaces binds are refused", "web")
+	}
+	if cc.TLS && cc.PublicURL == "" {
+		return fmt.Errorf("mappings: channel %q tls requires public_url", "web")
 	}
 	if cc.PublicURL == "" {
 		return nil
@@ -102,8 +110,25 @@ func validateWebChannelConfig(cc ChannelConfig) error {
 	return nil
 }
 
+// WebTLSListenHostAllowed reports whether host is safe for the private-CA web listener.
+func WebTLSListenHostAllowed(host string) bool {
+	host = strings.ToLower(strings.TrimSuffix(host, "."))
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && (ip.IsLoopback() || tailscaleIP(ip))
+}
+
+func tailscaleIP(ip net.IP) bool {
+	tailscaleIPv4 := &net.IPNet{IP: net.IPv4(100, 64, 0, 0), Mask: net.CIDRMask(10, 32)}
+	tailscaleIPv6 := &net.IPNet{IP: net.ParseIP("fd7a:115c:a1e0::"), Mask: net.CIDRMask(48, 128)}
+	return tailscaleIPv4.Contains(ip) || tailscaleIPv6.Contains(ip)
+}
+
 // WebPublicURLIsPrivate reports whether a validated web public URL names a
-// loopback host or a Tailscale HTTPS name. Empty means no public URL.
+// loopback host, Tailscale IP address, or Tailscale HTTPS name. Empty means no
+// public URL.
 func WebPublicURLIsPrivate(raw string) bool {
 	if raw == "" {
 		return true
@@ -117,5 +142,5 @@ func WebPublicURLIsPrivate(raw string) bool {
 		return true
 	}
 	ip := net.ParseIP(host)
-	return ip != nil && ip.IsLoopback()
+	return ip != nil && (ip.IsLoopback() || tailscaleIP(ip))
 }

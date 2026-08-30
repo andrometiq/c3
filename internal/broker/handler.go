@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/Andrometiq/c3/internal/c3types"
+	"github.com/Andrometiq/c3/internal/channel"
 	"github.com/Andrometiq/c3/internal/ipc"
 )
 
@@ -248,6 +249,8 @@ func (b *Broker) HandleConn(nc net.Conn) {
 			b.handlePermissionSettled(conn, stub, raw)
 		case ipc.OpWebLoginLink:
 			b.handleWebLoginLink(conn)
+		case ipc.OpWebCA:
+			b.handleWebCA(conn)
 		case ipc.OpFetchQueue:
 			b.handleFetchQueue(conn, stub, raw)
 		case ipc.OpObserve:
@@ -875,6 +878,13 @@ func (b *Broker) handleHealth(conn *ipc.Conn) {
 			entry.DownForSec = int64(ev.DownFor.Seconds())
 		}
 		resp.Health = append(resp.Health, entry)
+	}
+	if webChannel, err := b.Channel("web"); err == nil {
+		if provider, ok := webChannel.(channel.CertificateProvider); ok {
+			if _, fingerprint, err := provider.CACertificatePEM(); err == nil {
+				resp.WebCAFingerprint = fingerprint
+			}
+		}
 	}
 	_ = conn.WriteJSON(resp)
 }

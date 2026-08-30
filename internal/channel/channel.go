@@ -66,6 +66,13 @@ type LoginLinker interface {
 	MintLoginLink(userID int64) (string, error)
 }
 
+// CertificateProvider is the optional private-CA export implemented by a
+// channel that terminates TLS itself. The broker uses it only to deliver the
+// public CA certificate and fingerprint to the configured operator.
+type CertificateProvider interface {
+	CACertificatePEM() (pem []byte, sha256Fingerprint string, err error)
+}
+
 // Host is what the broker passes to a Channel. Subset of plugin.Host scoped
 // to channel concerns (config + emit + log + done + gate).
 type Host interface {

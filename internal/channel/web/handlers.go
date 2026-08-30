@@ -22,7 +22,24 @@ func (c *Channel) routes() http.Handler {
 	mux.HandleFunc("GET /events", c.handleEvents)
 	mux.HandleFunc("POST /send", c.handleSend)
 	mux.HandleFunc("GET /healthz", c.handleHealth)
+	mux.HandleFunc("GET /ca.crt", c.handleCACertificate)
 	return mux
+}
+
+func (c *Channel) handleCACertificate(w http.ResponseWriter, r *http.Request) {
+	if !c.cfg.TLS {
+		http.NotFound(w, r)
+		return
+	}
+	certificate := c.caCertificatePEM()
+	if len(certificate) == 0 {
+		http.NotFound(w, r)
+		return
+	}
+	setPageHeaders(w)
+	w.Header().Set("Content-Type", "application/x-x509-ca-cert")
+	w.Header().Set("Content-Disposition", `attachment; filename="c3-web-ca.crt"`)
+	_, _ = w.Write(certificate)
 }
 
 func (c *Channel) handleIndex(w http.ResponseWriter, r *http.Request) {

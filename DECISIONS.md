@@ -57,6 +57,22 @@ explicit: worker-queue acceptance can be lost in a crash before append, browser
 sessions and reply replay are in memory for phase 1, and tool permissions/`ask`
 remain laptop-only.
 
+**Phase-2 reach ruling:** C3 terminates HTTPS on its tailnet listener with a
+broker-managed private CA, installed once on each operator phone. The CA is
+stable and fail-closed; leaf certificates are short-lived and reissued when
+their derived SAN set changes. WireGuard/Tailscale remains the private reach
+layer and no listener is public by default.
+
+Tailscale Serve, `tailscale cert`, and tsnet were preferred when the tailnet
+control server issues certificates, but cannot establish HTTPS on tailnets
+without that issuance. A self-signed leaf plus a browser interstitial does not
+produce the trusted secure context required by media capture, Wake Lock, and
+service workers. Public tunnels violate the private-first boundary, while ACME
+DNS-01 introduces DNS credentials and renewal machinery. A stable local CA won
+because it keeps reach private, needs one explicit trust installation per
+phone, and lets the broker reissue address-correct leaves without changing the
+trusted root.
+
 ## D019: dcode adapter — live push via the external-event socket; slash commands as user skills
 
 **Date:** 2026-08-16
