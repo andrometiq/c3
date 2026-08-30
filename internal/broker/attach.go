@@ -119,16 +119,16 @@ func (b *Broker) handleAttach(conn *ipc.Conn, stub *Stub, raw []byte) {
 		return
 	}
 
-	if req.Channel == "web" && !attachTargetSpecified(&req) {
-		b.attachWeb(conn, stub, req.Steal, req.Replay)
+	if req.Channel == "web" && req.Target == "" && req.Name == "" && req.TopicID == nil && !req.Create {
+		b.attachWeb(conn, stub, req.Steal, req.Replay, req.Add)
 		return
 	}
 
 	switch {
 	case strings.EqualFold(req.Target, "dm"):
-		b.attachDM(conn, stub, chanName, req.Steal, req.Replay)
+		b.attachDM(conn, stub, chanName, req.Steal, req.Replay, req.Add)
 	case req.TopicID != nil:
-		b.attachByTopicID(conn, stub, chanName, req.ChatID, *req.TopicID, req.Group, req.Steal, req.Replay)
+		b.attachByTopicID(conn, stub, chanName, req.ChatID, *req.TopicID, req.Group, req.Steal, req.Replay, req.Add)
 	default:
 		// Explicit name (or create=true) → attachByName (path (i)): the user
 		// typed a name, so an exact bind is inherently safe. A BARE attach (no
@@ -139,10 +139,10 @@ func (b *Broker) handleAttach(conn *ipc.Conn, stub *Stub, raw []byte) {
 		// closes (spec §1-§2). Empty cwd is fine: it falls to the picker, not
 		// an error.
 		if req.Name != "" || req.Create {
-			b.attachByName(conn, stub, chanName, req.Name, req.CWD, req.Group, req.Create, req.Steal, req.Replay)
+			b.attachByName(conn, stub, chanName, req.Name, req.CWD, req.Group, req.Create, req.Steal, req.Replay, req.Add)
 			return
 		}
-		b.attachBare(conn, stub, chanName, req.CWD, req.Group, req.Steal, req.Replay)
+		b.attachBare(conn, stub, chanName, req.CWD, req.Group, req.Steal, req.Replay, req.Add)
 	}
 }
 
@@ -151,25 +151,24 @@ func (b *Broker) handleAttach(conn *ipc.Conn, stub *Stub, raw []byte) {
 // restricted to the session's OWN previously-recorded route. Resolution order
 // (spec §1):
 //
-//  1. Idempotent: the stub is already attached (CurrentRoute != nil) → report
-//     that route, no re-claim, no re-peek. The response carries the resolved
-//     Channel/ChatID/TopicID/Name so FormatAttached can render it (and the
-//     adapter's replay-remember can record the resolved identity).
+//  1. Idempotent: the stub already holds routes → report the whole set and
+//     output route, with no re-claim or re-peek. The legacy response fields
+//     describe the output so older adapters can render and remember it.
 //  2. Own recover — the ONLY silent claim in the system: a recoverable
 //     session_attachment for the stub's STABLE session id → silently re-claim
 //     it. Ungated (a manual bare attach is user-initiated; the auto-resume gate
 //     governs only the automatic handleRecoverSession path). recoverSession
-//     re-claims the session's OWN route only — a mis-target is impossible by
-//     construction.
+//     re-claims the session's OWN recorded set only — a mis-target is impossible
+//     by construction.
 //  3. Otherwise → picker: NEVER claims. cwd only SEEDS a suggestion (Phase 2).
 //     Phase 1 emits the minimal pick_topic proposal; the ranked suggestion list
 //     and its host-neutral formatter case land in Phase 2.
 //
 // cwd/group/steal/replay are threaded for the Phase-2 picker; Phase 1 reads only
 // the stub's own state.
-func (b *Broker) attachBare(conn *ipc.Conn, stub *Stub, chanName, cwd, group string, steal, replay bool) {
+func (b *Broker) attachBare(conn *ipc.Conn, stub *Stub, chanName, cwd, group string, steal, replay, add bool) {
 	// (i) Already attached — idempotent OK, no re-claim, no re-peek.
-	if cur := stub.CurrentRoute(); cur != nil {
+	if cur := stub.OutputRoute(); cur != nil {
 		name, groupName := nonTopicRouteName(cur.Channel), ""
 		var topicID *int64
 		if cur.HasTopic {
@@ -182,13 +181,13 @@ func (b *Broker) attachBare(conn *ipc.Conn, stub *Stub, chanName, cwd, group str
 				name = fmt.Sprintf("topic-%d", cur.TopicID)
 			}
 		}
-		_ = conn.WriteJSON(ipc.AttachedMsg{
+		_ = conn.WriteJSON(b.withRouteSet(stub, ipc.AttachedMsg{
 			Op: ipc.OpAttached, OK: true,
 			Status:  ipc.AttachStatusOK,
 			Channel: cur.Channel, ChatID: cur.ChatID, TopicID: topicID,
 			Name: name, Group: groupName,
 			Capabilities: b.capsForChannel(cur.Channel),
-		})
+		}))
 		return
 	}
 
@@ -221,14 +220,14 @@ func (b *Broker) attachBare(conn *ipc.Conn, stub *Stub, chanName, cwd, group str
 			t := key.TopicID
 			topicID = &t
 		}
-		_ = conn.WriteJSON(ipc.AttachedMsg{
+		_ = conn.WriteJSON(b.withRouteSet(stub, ipc.AttachedMsg{
 			Op: ipc.OpAttached, OK: true,
 			Status:  ipc.AttachStatusOK,
 			Channel: key.Channel, ChatID: key.ChatID, TopicID: topicID,
 			Name: name, Group: groupName,
 			QueuedCount: cnt, QueuedSummary: preview,
 			Capabilities: b.capsForChannel(key.Channel),
-		})
+		}))
 		return
 	}
 
@@ -520,6 +519,13 @@ func applyExprToAttachReq(req *ipc.AttachReq) {
 	if expr == "" {
 		return
 	}
+	if strings.HasPrefix(expr, "+") {
+		req.Add = true
+		expr = strings.TrimSpace(expr[1:])
+		if expr == "" {
+			return
+		}
+	}
 	if strings.EqualFold(expr, "web") || strings.EqualFold(expr, "telegram") {
 		req.Channel = strings.ToLower(expr)
 		return
@@ -546,28 +552,28 @@ func applyExprToAttachReq(req *ipc.AttachReq) {
 }
 
 func attachTargetSpecified(req *ipc.AttachReq) bool {
-	return req != nil && (req.Target != "" || req.Name != "" || req.TopicID != nil || req.Create)
+	return req != nil && (req.Target != "" || req.Name != "" || req.TopicID != nil || req.Channel != "" || req.Create || req.Add)
 }
 
 // attachWeb claims the web channel's one non-topic route for the configured
 // operator. Operator identity comes only from the telegram stanza.
-func (b *Broker) attachWeb(conn *ipc.Conn, stub *Stub, steal, replay bool) {
+func (b *Broker) attachWeb(conn *ipc.Conn, stub *Stub, steal, replay, add bool) {
 	key, _, err := b.webOperatorRoute()
 	if err != nil {
 		_ = conn.WriteJSON(ipc.AttachedMsg{Op: ipc.OpAttached, OK: false, Err: "attach web: " + err.Error()})
 		return
 	}
-	if !b.tryClaim(conn, stub, key, "web", steal, replay) {
+	if !b.tryClaim(conn, stub, key, "web", steal, replay, add) {
 		return
 	}
-	b.recordSessionAttachment(stub, "web", key.ChatID, nil, "web", "")
+	b.recordSessionAttachment(stub)
 	delivery, linkErr := b.sendWebLoginLink(stub, "attach web", true, true)
-	_ = conn.WriteJSON(b.withBacklog(key, ipc.AttachedMsg{
+	_ = conn.WriteJSON(b.withRouteSet(stub, b.withBacklog(key, ipc.AttachedMsg{
 		Op: ipc.OpAttached, OK: true, Status: ipc.AttachStatusOK,
 		Channel: "web", ChatID: key.ChatID, Name: "web",
 		Capabilities: b.capsForChannel("web"),
 		Notice:       webAttachGuidance(delivery, linkErr, b.webTLSEnabled()),
-	}))
+	})))
 }
 
 // attachDM claims the user's 1-on-1 chat with the bot. Spec §5.5: never
@@ -581,7 +587,7 @@ func (b *Broker) attachWeb(conn *ipc.Conn, stub *Stub, steal, replay bool) {
 // DM, agent re-invokes with `attach target="dm"` and a confirm flag (TBD)
 // or just agrees by sending steal=true to bypass. For now: agent re-issues
 // using the explicit form the user chose.
-func (b *Broker) attachDM(conn *ipc.Conn, stub *Stub, chanName string, steal, replay bool) {
+func (b *Broker) attachDM(conn *ipc.Conn, stub *Stub, chanName string, steal, replay, add bool) {
 	cc, ok := b.Mappings().Channels[chanName]
 	if !ok {
 		_ = conn.WriteJSON(ipc.AttachedMsg{
@@ -631,15 +637,15 @@ func (b *Broker) attachDM(conn *ipc.Conn, stub *Stub, chanName string, steal, re
 	}
 
 	key := MakeRouteKey(chanName, cc.DMChatID, nil)
-	if !b.tryClaim(conn, stub, key, "DM", steal, replay) {
+	if !b.tryClaim(conn, stub, key, "DM", steal, replay, add) {
 		return
 	}
 	// Record the recovery entry so a resumed DM session re-attaches. The DM
 	// route is universal and deliberately never cwd-mapped, so persistMapping
 	// (which also writes a cwd default) is the wrong tool here — record the
 	// session attachment only, keyed on the session id (nil TopicID = DM).
-	b.recordSessionAttachment(stub, chanName, cc.DMChatID, nil, "dm", "")
-	_ = conn.WriteJSON(b.withBacklog(key, ipc.AttachedMsg{
+	b.recordSessionAttachment(stub)
+	_ = conn.WriteJSON(b.withRouteSet(stub, b.withBacklog(key, ipc.AttachedMsg{
 		Op:           ipc.OpAttached,
 		OK:           true,
 		Status:       ipc.AttachStatusOK,
@@ -647,7 +653,7 @@ func (b *Broker) attachDM(conn *ipc.Conn, stub *Stub, chanName string, steal, re
 		ChatID:       cc.DMChatID,
 		Name:         "dm",
 		Capabilities: b.capsForChannel(chanName),
-	}))
+	})))
 }
 
 // attachByTopicID validates a topic id against the channel (cheap typing
@@ -658,7 +664,7 @@ func (b *Broker) attachDM(conn *ipc.Conn, stub *Stub, chanName string, steal, re
 // equal the chat the named group resolves to, or the attach is refused — this
 // stops an id-addressed replay with a mismatched/absent group from binding a
 // same-id thread in the wrong chat (item 3).
-func (b *Broker) attachByTopicID(conn *ipc.Conn, stub *Stub, chanName string, chatID int64, topicID int64, groupName string, steal, replay bool) {
+func (b *Broker) attachByTopicID(conn *ipc.Conn, stub *Stub, chanName string, chatID int64, topicID int64, groupName string, steal, replay, add bool) {
 	cc, ok := b.Mappings().Channels[chanName]
 	if !ok {
 		_ = conn.WriteJSON(ipc.AttachedMsg{
@@ -718,13 +724,13 @@ func (b *Broker) attachByTopicID(conn *ipc.Conn, stub *Stub, chanName string, ch
 
 	tid := topicID
 	key := MakeRouteKey(chanName, gCfg.ChatID, &tid)
-	if !b.tryClaim(conn, stub, key, fmt.Sprintf("topic %d", topicID), steal, replay) {
+	if !b.tryClaim(conn, stub, key, fmt.Sprintf("topic %d", topicID), steal, replay, add) {
 		return
 	}
 	tp, _ := b.Mappings().LookupTopicByID(chanName, gCfg.ChatID, topicID)
 	b.persistMapping(stub, chanName, gCfg.ChatID, topicID, tp.Name, gName)
 
-	_ = conn.WriteJSON(b.withBacklog(key, ipc.AttachedMsg{
+	_ = conn.WriteJSON(b.withRouteSet(stub, b.withBacklog(key, ipc.AttachedMsg{
 		Op:           ipc.OpAttached,
 		OK:           true,
 		Status:       ipc.AttachStatusOK,
@@ -734,7 +740,7 @@ func (b *Broker) attachByTopicID(conn *ipc.Conn, stub *Stub, chanName string, ch
 		Name:         tp.Name,
 		Group:        gName,
 		Capabilities: b.capsForChannel(chanName),
-	}))
+	})))
 }
 
 // attachByName runs the explicit-name search flow per spec §5.2-§5.4. It is
@@ -750,7 +756,7 @@ func (b *Broker) attachByTopicID(conn *ipc.Conn, stub *Stub, chanName string, ch
 //
 // On any "propose" outcome the response carries needs_confirmation=true and
 // a Proposal payload; the agent re-calls attach with create=true to confirm.
-func (b *Broker) attachByName(conn *ipc.Conn, stub *Stub, chanName, name, cwd, groupName string, create, steal, replay bool) {
+func (b *Broker) attachByName(conn *ipc.Conn, stub *Stub, chanName, name, cwd, groupName string, create, steal, replay, add bool) {
 	cc, ok := b.Mappings().Channels[chanName]
 	if !ok {
 		_ = conn.WriteJSON(ipc.AttachedMsg{Op: ipc.OpAttached, OK: false,
@@ -780,17 +786,17 @@ func (b *Broker) attachByName(conn *ipc.Conn, stub *Stub, chanName, name, cwd, g
 		// In the default group already — silent claim.
 		tid := tp.TopicID
 		key := MakeRouteKey(chanName, tp.ChatID, &tid)
-		if !b.tryClaim(conn, stub, key, tp.Name, steal, replay) {
+		if !b.tryClaim(conn, stub, key, tp.Name, steal, replay, add) {
 			return
 		}
 		b.persistMapping(stub, chanName, tp.ChatID, tp.TopicID, tp.Name, tp.Group)
-		_ = conn.WriteJSON(b.withBacklog(key, ipc.AttachedMsg{
+		_ = conn.WriteJSON(b.withRouteSet(stub, b.withBacklog(key, ipc.AttachedMsg{
 			Op: ipc.OpAttached, OK: true,
 			Status:  ipc.AttachStatusOK,
 			Channel: chanName, ChatID: tp.ChatID, TopicID: &tid,
 			Name: tp.Name, Group: tp.Group,
 			Capabilities: b.capsForChannel(chanName),
-		}))
+		})))
 		return
 	}
 
@@ -836,11 +842,11 @@ func (b *Broker) attachByName(conn *ipc.Conn, stub *Stub, chanName, name, cwd, g
 		})
 		return
 	}
-	b.createAndClaim(conn, stub, chanName, gName, gCfg.ChatID, name, cwd, steal, replay)
+	b.createAndClaim(conn, stub, chanName, gName, gCfg.ChatID, name, cwd, steal, replay, add)
 }
 
 // createAndClaim invokes channel.CreateTopic, registers the topic, claims, persists.
-func (b *Broker) createAndClaim(conn *ipc.Conn, stub *Stub, chanName, gName string, chatID int64, name, cwd string, steal, replay bool) {
+func (b *Broker) createAndClaim(conn *ipc.Conn, stub *Stub, chanName, gName string, chatID int64, name, cwd string, steal, replay, add bool) {
 	ch, err := b.Channel(chanName)
 	if err != nil {
 		_ = conn.WriteJSON(ipc.AttachedMsg{Op: ipc.OpAttached, OK: false, Err: err.Error()})
@@ -859,7 +865,7 @@ func (b *Broker) createAndClaim(conn *ipc.Conn, stub *Stub, chanName, gName stri
 	})
 	tid := topicID
 	key := MakeRouteKey(chanName, chatID, &tid)
-	if !b.tryClaim(conn, stub, key, name, steal, replay) {
+	if !b.tryClaim(conn, stub, key, name, steal, replay, add) {
 		return
 	}
 	if cwd != "" {
@@ -867,13 +873,13 @@ func (b *Broker) createAndClaim(conn *ipc.Conn, stub *Stub, chanName, gName stri
 	}
 	_ = b.SaveMappings()
 
-	_ = conn.WriteJSON(b.withBacklog(key, ipc.AttachedMsg{
+	_ = conn.WriteJSON(b.withRouteSet(stub, b.withBacklog(key, ipc.AttachedMsg{
 		Op: ipc.OpAttached, OK: true,
 		Status:  ipc.AttachStatusOK,
 		Channel: chanName, ChatID: chatID, TopicID: &tid,
 		Name: name, Group: gName,
 		Capabilities: b.capsForChannel(chanName),
-	}))
+	})))
 }
 
 // heldByDifferentLiveSession reports whether key is currently claimed by a
@@ -905,16 +911,30 @@ func (b *Broker) heldByDifferentLiveSession(key RouteKey, stub *Stub) (*Stub, bo
 // (the LLM-side asks the user; on confirmation, attach is re-invoked with
 // steal=true).
 //
-// Single-claim-per-stub invariant (2026-05-09: "codex was attached
-// to two topic IDs"): if this stub already holds a different route, that
-// claim is released BEFORE the new one is granted. An adapter that wants
-// to switch topics can do so with a single attach call; it will never end
-// up holding two topics simultaneously.
+// Switch mode preserves the legacy invariant by claiming the new route first
+// and releasing every other held route only after success. Add mode keeps prior
+// channels, refuses a second route on the same channel, and makes the new route
+// output.
 //
 // steal=true: the user has confirmed displacement of any existing holder.
 // Force-release first, then claim. Only this path can evict a live PID's
 // claim; everything else returns force_steal proposal for confirmation.
-func (b *Broker) tryClaim(conn *ipc.Conn, stub *Stub, key RouteKey, label string, steal, replay bool) bool {
+func (b *Broker) tryClaim(conn *ipc.Conn, stub *Stub, key RouteKey, label string, steal, replay, add bool) bool {
+	if add {
+		for _, held := range stub.Routes() {
+			if held.Channel != key.Channel {
+				continue
+			}
+			if conn != nil {
+				_ = conn.WriteJSON(ipc.AttachedMsg{
+					Op: ipc.OpAttached, OK: false,
+					Err: fmt.Sprintf("already holding %s; use attach <name> to switch or detach target=%s first",
+						b.routeLabel(held), held.Channel),
+				})
+			}
+			return false
+		}
+	}
 	// Determine whether to fire the on-attach welcome message. Two
 	// suppression conditions:
 	//   1. The adapter marked this attach as a replay (broker bounce or
@@ -938,17 +958,31 @@ func (b *Broker) tryClaim(conn *ipc.Conn, stub *Stub, key RouteKey, label string
 	// confirmed displacement, so we evict the current holder of `key` first.
 	if steal {
 		if evicted := b.Routes.ForceReleaseKey(key); evicted != nil && evicted != stub {
-			// The evicted holder still thinks it owns `key`: its Stub.Route +
-			// routeConfirmed are set, so its next destructive fetch_queue(ack=true)
-			// would drain a topic it no longer owns. Clear its route (item E) so that
-			// drain hits the "no route claimed" refusal instead. Use ClearRouteIf(key),
-			// NOT an unconditional SetRoute(nil): a victim that is MID-SWITCH to a
-			// DIFFERENT topic (its Route already re-pointed away from `key`) must not be
-			// zeroed, or it would skip releasing its OLD route and leak it as an
-			// orphaned claim. ClearRouteIf clears route+routeConfirmed only when the
-			// stub still points at the stolen key; it's stubMu-guarded, so this
-			// cross-connection call is race-safe.
-			evicted.ClearRouteIf(key)
+			// The evicted holder still lists `key` in its set with confirmation, so
+			// its next destructive fetch_queue(ack=true) could drain a route it no
+			// longer owns. Clear only this key: an unconditional ClearRoutes would
+			// destroy sibling claims and could leak table ownership during a
+			// concurrent switch. ClearRouteIf is stubMu-guarded, so this
+			// cross-connection removal is race-safe.
+			removed, wasOutput, newOutput := evicted.ClearRouteIf(key)
+			if removed {
+				b.enqueueOutputRoleChange(evicted, &key, newOutput)
+			}
+			if wasOutput {
+				message := fmt.Sprintf("output route %s was taken by %s (pid %d); ", b.routeLabel(key), stub.CLI, stub.PID)
+				if newOutput == nil {
+					message += "no routes held"
+				} else {
+					message += "replies now go to " + b.routeLabel(*newOutput)
+				}
+				event := &c3types.SystemEvent{
+					Source:  key.Channel,
+					Level:   "warn",
+					Title:   "Output route changed",
+					Message: message,
+				}
+				go b.sendSystemEventTo(evicted, event)
+			}
 		}
 	}
 	holder, ok := b.Routes.Claim(key, stub)
@@ -969,24 +1003,26 @@ func (b *Broker) tryClaim(conn *ipc.Conn, stub *Stub, key RouteKey, label string
 		})
 		return false
 	}
-	// Claim succeeded — now drop the stub's previous route. Single-claim-per-stub
-	// is enforced ONLY by this explicit Release (Routes.Claim is per-key and does
-	// not enforce it). The only window where the stub holds both keys is these
-	// few sequential statements in one goroutine — never an observable steady
-	// state. The `*old != key` guard keeps an idempotent self-reclaim (Claim
-	// returns idempotent/transfer-true when this stub already holds key) from
-	// releasing the very route it just kept.
-	if old := stub.CurrentRoute(); old != nil && *old != key {
-		b.Routes.Release(*old, stub.ConnID)
+	oldOutput := stub.OutputRoute()
+	if !add {
+		for _, held := range stub.Routes() {
+			if held == key {
+				continue
+			}
+			b.Routes.Release(held, stub.ConnID)
+			stub.RemoveRoute(held)
+		}
 	}
-	stub.SetRoute(&key)
+	stub.AddRoute(key)
 	// This is a legitimate, human-driven explicit/steal claim — confirm the route so
 	// the destructive consume paths (spec §5 tripwire) will service it.
-	stub.MarkRouteConfirmed()
+	stub.MarkRouteConfirmed(key)
+	stub.SetOutputRoute(key)
+	b.enqueueOutputRoleChange(stub, oldOutput, &key)
 	// …and it retires the user-detached barrier: someone who detaches and then
 	// deliberately attaches again must be honored. Only RECOVERY stays blocked,
 	// which is why this clear lives in tryClaim (the explicit-claim site) and NOT in
-	// SetRoute or Routes.Claim — recoverSession claims through Routes.Claim directly,
+	// AddRoute or Routes.Claim — recoverSession claims through Routes.Claim directly,
 	// so a recovery can never clear the very barrier that is meant to stop it.
 	// Ordered after the claim succeeds: a refused claim (live collision) leaves the
 	// barrier standing, because nothing about the user's detach was reversed.
@@ -1163,9 +1199,29 @@ const SessionAttachmentTTL = 30 * 24 * time.Hour
 // while keeping the 30-day inactivity TTL reliable.
 const sessionRefreshInterval = time.Hour
 
-// routeKeyFromSessionAttachment builds the route key for a recovered session.
+// routeKeyFromSessionAttachment builds the legacy/output route key for a
+// recovered session.
 func routeKeyFromSessionAttachment(sa mappings.SessionAttachment) RouteKey {
+	if sa.Output != nil {
+		return routeKeyFromRef(*sa.Output)
+	}
 	return MakeRouteKey(sa.Channel, sa.ChatID, sa.TopicID)
+}
+
+func routeRefsFromSessionAttachment(sa mappings.SessionAttachment) []mappings.RouteRef {
+	if len(sa.Routes) > 0 {
+		return append([]mappings.RouteRef(nil), sa.Routes...)
+	}
+	if sa.Channel == "" {
+		return nil
+	}
+	return []mappings.RouteRef{{
+		Channel: sa.Channel,
+		ChatID:  sa.ChatID,
+		TopicID: sa.TopicID,
+		Name:    sa.Name,
+		Group:   sa.Group,
+	}}
 }
 
 // lookupSessionAttachment resolves a CLI-namespaced recovery record. A legacy
@@ -1230,13 +1286,35 @@ func (b *Broker) tombstoneSessionAttachment(cli, id string) bool {
 	return changed
 }
 
-// recoverSession attempts to re-claim the route the stub's STABLE session was
-// last attached to. Returns the claimed key, the held-backlog count, and ok.
+func (b *Broker) dropStoredRoute(cli, id string, key RouteKey, newOutput *RouteKey) bool {
+	if cli == "" || id == "" {
+		return false
+	}
+	removedRef := b.routeRefForKey(key)
+	var outputRef *mappings.RouteRef
+	if newOutput != nil {
+		ref := b.routeRefForKey(*newOutput)
+		outputRef = &ref
+	}
+	changed := false
+	b.mutateMappings(func(mf *mappings.MappingsFile) {
+		if _, ok := mf.LookupSessionAttachment(cli, id); !ok {
+			if _, ok := mf.ClaimLegacySessionAttachment(cli, id); !ok {
+				return
+			}
+		}
+		changed = mf.DropSessionAttachmentRoute(cli, id, removedRef, outputRef)
+	})
+	return changed
+}
+
+// recoverSession attempts to re-claim the route set the stub's STABLE session
+// last held. Returns the restored output key, its held-backlog count, and ok.
 // No-op (ok=false) when: no stable id, no/expired/tombstoned attachment, the
-// route is held by another live session, or the claim fails.
+// every stored route is held by another live session, or every claim fails.
 //
-// Caller MUST hold no lock AND must have already confirmed stub.CurrentRoute()
-// is nil (handleRecoverSession does — the already-attached case takes the
+// Caller MUST hold no lock AND must have already confirmed stub has no held
+// routes (handleRecoverSession does — the already-attached case takes the
 // record-only branch instead). Uses low-level Routes.Claim (NOT tryClaim, which
 // would write an AttachedMsg the conn isn't expecting and could send a welcome);
 // C3's backlog is pull-not-push, so the claim never floods the conn. Refreshes
@@ -1266,19 +1344,36 @@ func (b *Broker) recoverSession(stub *Stub) (RouteKey, int, []ipc.QueuedItem, bo
 	if !ok || !sa.Recoverable(time.Now(), SessionAttachmentTTL) {
 		return RouteKey{}, 0, nil, false
 	}
-	key := routeKeyFromSessionAttachment(sa)
-	if _, held := b.heldByDifferentLiveSession(key, stub); held {
-		log.Printf("recover: SKIPPED session=%s topic=%q (held by another live session)", sid, sa.Name)
+	refs := routeRefsFromSessionAttachment(sa)
+	claimedKeys := make([]RouteKey, 0, len(refs))
+	for _, ref := range refs {
+		key := routeKeyFromRef(ref)
+		if _, held := b.heldByDifferentLiveSession(key, stub); held {
+			log.Printf("recover: SKIPPED session=%s route=%q (held by another live session)", sid, ref.Name)
+			continue
+		}
+		if _, claimed := b.Routes.Claim(key, stub); !claimed {
+			log.Printf("recover: claim FAILED session=%s route=%q", sid, ref.Name)
+			continue
+		}
+		stub.AddRoute(key)
+		stub.MarkRouteConfirmed(key)
+		claimedKeys = append(claimedKeys, key)
+	}
+	if len(claimedKeys) == 0 {
 		return RouteKey{}, 0, nil, false
 	}
-	if _, claimed := b.Routes.Claim(key, stub); !claimed {
-		log.Printf("recover: claim FAILED session=%s topic=%q", sid, sa.Name)
+	storedOutput := routeKeyFromSessionAttachment(sa)
+	if !stub.SetOutputRoute(storedOutput) {
+		stub.SetOutputRoute(claimedKeys[len(claimedKeys)-1])
+	}
+	output := stub.OutputRoute()
+	if output == nil {
+		log.Printf("recover: SKIPPED session=%s — all recovered routes were released before output selection completed", sid)
 		return RouteKey{}, 0, nil, false
 	}
-	stub.SetRoute(&key)
-	// The session re-claiming its OWN recorded route is a legitimate claim — confirm
-	// it so the destructive consume paths (spec §5 tripwire) will service it.
-	stub.MarkRouteConfirmed()
+	key := *output
+	b.enqueueOutputRoleChange(stub, nil, &key)
 	// SINGLE live peek: return the count AND the preview from ONE backlogSummary
 	// job so they always describe the same queue snapshot. Callers (the automatic
 	// handleRecoverSession and the manual attachBare path (ii)) consume both from
@@ -1295,30 +1390,14 @@ func (b *Broker) recoverSession(stub *Stub) (RouteKey, int, []ipc.QueuedItem, bo
 		})
 		_ = b.SaveMappings()
 	}
-	log.Printf("recover: session=%s cli=%s pid=%d → %q (queued=%d)", sid, stub.CLI, stub.PID, sa.Name, cnt)
+	log.Printf("recover: session=%s cli=%s pid=%d → %d route(s), output=%q (queued=%d)", sid, stub.CLI, stub.PID, len(claimedKeys), b.routeLabel(key), cnt)
 	return key, cnt, preview, true
 }
 
-// recordCurrentRouteForStable saves the stub's CURRENT route under its stable
-// session id (the dual-path "attach BEFORE recover" arm). Derives channel /
-// chatID / topicID from the RouteKey, resolves Name/Group from the topic
-// registry (DM = no topic → name "dm"), and records via the session-attachment
-// recorder keyed on stub.StableSessionIDValue(). No-op when the stable id is
-// empty (recordSessionAttachment guards that).
-func (b *Broker) recordCurrentRouteForStable(stub *Stub, key RouteKey) {
-	var topicID *int64
-	name, group := nonTopicRouteName(key.Channel), ""
-	if key.HasTopic {
-		t := key.TopicID
-		topicID = &t
-		if tp, ok := b.Mappings().LookupTopicByID(key.Channel, key.ChatID, key.TopicID); ok {
-			name = tp.Name
-			group = tp.Group
-		} else {
-			name = fmt.Sprintf("topic-%d", key.TopicID)
-		}
-	}
-	b.recordSessionAttachment(stub, key.Channel, key.ChatID, topicID, name, group)
+// recordCurrentRoutesForStable saves the stub's complete held set and output
+// under its stable session id (the dual-path attach-before-recover arm).
+func (b *Broker) recordCurrentRoutesForStable(stub *Stub) {
+	b.recordSessionAttachment(stub)
 }
 
 func nonTopicRouteName(channelName string) string {
@@ -1331,16 +1410,29 @@ func nonTopicRouteName(channelName string) string {
 func (b *Broker) persistMapping(stub *Stub, chanName string, chatID, topicID int64, name, group string) {
 	now := time.Now().UTC()
 	cwd := resolveAttachCWD(stub.CWD, name)
-	var tidPtr *int64
-	if topicID != 0 {
-		t := topicID
-		tidPtr = &t
-	}
 	// Read existing-mapping check and the Upsert(s) under the same mutation
 	// lock — otherwise a concurrent persistMapping for the same cwd could
 	// race past the refusal check.
 	var persisted bool
 	stableID := stub.StableSessionIDValue()
+	attachment, hasAttachment := b.sessionAttachmentForStub(stub, cwd, now)
+	if !hasAttachment {
+		var topicIDRef *int64
+		if topicID != 0 {
+			topic := topicID
+			topicIDRef = &topic
+		}
+		output := mappings.RouteRef{
+			Channel: chanName, ChatID: chatID, TopicID: topicIDRef,
+			Name: name, Group: group,
+		}
+		attachment = mappings.SessionAttachment{
+			Channel: chanName, ChatID: chatID, TopicID: topicIDRef,
+			Name: name, Group: group, CWD: cwd, LastAttachedAt: now,
+			Routes: []mappings.RouteRef{output}, Output: &output,
+		}
+		hasAttachment = true
+	}
 	b.mutateMappings(func(mf *mappings.MappingsFile) {
 		// Session-id recovery store — keyed on the STABLE session id, recorded
 		// INDEPENDENTLY of the cwd rebind guard below (so a refused rebind, or
@@ -1350,11 +1442,8 @@ func (b *Broker) persistMapping(stub *Stub, chanName string, chatID, topicID int
 		// records under it. Empty (non-hook session / recover hasn't arrived) →
 		// no recording (fail-closed). The DM route records via
 		// recordSessionAttachment instead (it must not also write a cwd default).
-		if stableID != "" {
-			mf.UpsertSessionAttachment(stub.CLI, stableID, mappings.SessionAttachment{
-				Channel: chanName, ChatID: chatID, TopicID: tidPtr,
-				Name: name, Group: group, CWD: cwd, LastAttachedAt: now,
-			})
+		if stableID != "" && hasAttachment {
+			mf.UpsertSessionAttachment(stub.CLI, stableID, attachment)
 			persisted = true
 		}
 		// cwd → topic default (existing behavior, incl. the explicit rebind
@@ -1393,18 +1482,37 @@ func (b *Broker) persistMapping(stub *Stub, chanName string, chatID, topicID int
 // the DM route, which is universal and deliberately never cwd-mapped. No-op when
 // the host exposes no session id. Topic attaches record via persistMapping
 // instead (which records the session attachment AND the cwd default together).
-func (b *Broker) recordSessionAttachment(stub *Stub, chanName string, chatID int64, topicID *int64, name, group string) {
+func (b *Broker) recordSessionAttachment(stub *Stub) {
 	sid := stub.StableSessionIDValue()
 	if sid == "" {
 		return
 	}
+	attachment, ok := b.sessionAttachmentForStub(stub, stub.CWD, time.Now().UTC())
+	if !ok {
+		return
+	}
 	b.mutateMappings(func(mf *mappings.MappingsFile) {
-		mf.UpsertSessionAttachment(stub.CLI, sid, mappings.SessionAttachment{
-			Channel: chanName, ChatID: chatID, TopicID: topicID,
-			Name: name, Group: group, CWD: stub.CWD, LastAttachedAt: time.Now().UTC(),
-		})
+		mf.UpsertSessionAttachment(stub.CLI, sid, attachment)
 	})
 	_ = b.SaveMappings()
+}
+
+func (b *Broker) sessionAttachmentForStub(stub *Stub, cwd string, at time.Time) (mappings.SessionAttachment, bool) {
+	routes, output := b.routeSetRefs(stub)
+	if len(routes) == 0 || output == nil {
+		return mappings.SessionAttachment{}, false
+	}
+	return mappings.SessionAttachment{
+		Channel:        output.Channel,
+		ChatID:         output.ChatID,
+		TopicID:        output.TopicID,
+		Name:           output.Name,
+		Group:          output.Group,
+		CWD:            cwd,
+		LastAttachedAt: at,
+		Routes:         routes,
+		Output:         output,
+	}, true
 }
 
 // resolveAttachCWD picks the cwd to persist for a `cwd → topic` mapping.
@@ -1471,7 +1579,7 @@ func (b *Broker) resolveAttachChannel(req *ipc.AttachReq, stub *Stub) (string, s
 		return req.Channel, ""
 	}
 	if !attachTargetSpecified(req) {
-		if cur := stub.CurrentRoute(); cur != nil {
+		if cur := stub.OutputRoute(); cur != nil {
 			return cur.Channel, ""
 		}
 		if sid := stub.StableSessionIDValue(); sid != "" {

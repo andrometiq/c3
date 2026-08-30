@@ -90,9 +90,9 @@ func (b *Broker) HandleConn(nc net.Conn) {
 		// Unregister the OLD stub (now superseded) and transfer its claims.
 		b.Stubs.Unregister(oldConnID)
 		transferred := b.Routes.TransferAllByConnID(oldConnID, stub)
-		// Carry the CLAIM onto the new stub, not just the routing-table entry.
-		// Routes now says this stub holds the route while the stub itself says it
-		// holds nothing, and every stub-derived path reads stub.CurrentRoute():
+		// Carry every claim onto the new stub, not just the routing-table entries.
+		// Routes must never say this stub holds routes while the stub itself says it
+		// holds nothing: every stub-derived path reads this ordered held set.
 		// inbound keeps arriving here (worker.go's Routes.Holder resolves to this
 		// stub) while `reply`/`react`/`poll` answer "no route claimed", the
 		// delivered-ack is dropped so the same lines are handed out again by
@@ -102,26 +102,46 @@ func (b *Broker) HandleConn(nc net.Conn) {
 		// nothing to replay). Confirmation is a property of the CLAIM and it is the
 		// same claim, so re-derive it from the old stub rather than confirming
 		// blindly — a route bound without a real claim must stay fail-closed.
-		switch len(transferred) {
-		case 0:
-		case 1:
-			k := transferred[0]
-			stub.SetRoute(&k)
+		if len(transferred) > 0 {
 			routeIdentity = recoverRouteIdentity{
 				stableID:     existing.StableSessionIDValue(),
 				requireMatch: existing.StableSessionIDValue() != "",
 				automatic:    true,
 			}
-			if existing.RouteConfirmed() {
-				stub.MarkRouteConfirmed()
+			transferredSet := make(map[RouteKey]bool, len(transferred))
+			for _, key := range transferred {
+				transferredSet[key] = true
 			}
-		default:
-			// TransferAllByConnID ranges a map, so "pick the first" would bind an
-			// arbitrary one of N. A stub holds at most one claim (tryClaim releases
-			// the old route before claiming the new one), so this is a broken
-			// invariant, not a case to guess at: leave the route unbound and say so.
-			log.Printf("hello: RECONNECT cli=%s pid=%d cwd=%q transferred %d claims — single-claim-per-stub violated; route left unbound",
-				hello.CLI, hello.PID, hello.CWD, len(transferred))
+			bind := func(key RouteKey) {
+				if !transferredSet[key] {
+					return
+				}
+				stub.AddRoute(key)
+				if existing.RouteConfirmed(key) {
+					stub.MarkRouteConfirmed(key)
+				}
+				delete(transferredSet, key)
+			}
+			for _, key := range existing.Routes() {
+				bind(key)
+			}
+			// A leftover means the table and old stub already disagreed. Preserve
+			// ownership rather than dropping a transferred claim; sort for a stable
+			// fallback order.
+			leftovers := make([]RouteKey, 0, len(transferredSet))
+			for key := range transferredSet {
+				leftovers = append(leftovers, key)
+			}
+			sort.Slice(leftovers, func(i, j int) bool { return routeKeyStr(leftovers[i]) < routeKeyStr(leftovers[j]) })
+			for _, key := range leftovers {
+				stub.AddRoute(key)
+			}
+			if output := existing.OutputRoute(); output != nil && stub.SetOutputRoute(*output) {
+				// Preserved exactly.
+			} else if routes := stub.Routes(); len(routes) > 0 {
+				stub.SetOutputRoute(routes[len(routes)-1])
+			}
+			b.enqueueOutputRoleChange(stub, nil, stub.OutputRoute())
 		}
 		// Carry the outstanding live-push records too: a delivered-ack that arrives
 		// after the reconnect must still resolve to the route its push went out on
@@ -198,18 +218,13 @@ func (b *Broker) HandleConn(nc net.Conn) {
 		}
 		switch op {
 		case ipc.OpAttach:
-			before := stub.CurrentRoute()
-			var beforeKey RouteKey
-			hadBefore := before != nil
-			if hadBefore {
-				beforeKey = *before
-			}
+			before := stub.Routes()
 			stableAtAttach := stub.StableSessionIDValue()
 			var attachReq ipc.AttachReq
 			_ = json.Unmarshal(raw, &attachReq)
 			b.handleAttach(conn, stub, raw)
-			if after := stub.CurrentRoute(); after != nil {
-				routeChanged := !hadBefore || beforeKey != *after
+			if after := stub.Routes(); len(after) > 0 {
+				routeChanged := !sameRouteOrder(before, after)
 				if attachReq.Replay {
 					// A replay is automatic old-state carriage, but an
 					// identity-empty fresh stub has no provenance to enforce.
@@ -237,8 +252,11 @@ func (b *Broker) HandleConn(nc net.Conn) {
 		case ipc.OpListHealth:
 			b.handleHealth(conn)
 		case ipc.OpRelease:
-			b.handleRelease(stub)
-			routeIdentity = recoverRouteIdentity{}
+			if b.handleRelease(conn, stub, raw) {
+				routeIdentity = recoverRouteIdentity{}
+			}
+		case ipc.OpSetOutputRoute:
+			b.handleSetOutputRoute(conn, stub, raw)
 		case ipc.OpToolCall:
 			b.handleToolCall(conn, stub, raw)
 		case ipc.OpAskRegister:
@@ -308,12 +326,10 @@ func (b *Broker) buildHelloAck(hello ipc.HelloMsg, stub *Stub) ipc.HelloAckMsg {
 	return ack
 }
 
-// handleRelease drops the stub's claim on an explicit detach (OpRelease) and
-// tombstones its session attachment so a later resume of the SAME session stays
-// unattached — a deliberate detach is remembered. The dead-PID conn-drop path in
-// HandleConn must NOT call this: that's a process exit, not a user detach, and
-// tombstoning there would wipe recovery on every quit-without-detach (defeating
-// the feature). Conn-drop releases claims directly via Routes.ReleaseAllByConnID.
+// handleRelease detaches either one selected held route or the whole set. Only
+// an empty resulting set raises the explicitly-detached barrier and tombstones
+// recovery; a targeted release rewrites the stored set so sibling routes remain
+// recoverable. It returns whether no routes remain.
 //
 // The tombstone is keyed on the stable session id, which the broker may not have
 // yet: a resumed session's id arrives on a SessionStart handoff that can land
@@ -324,18 +340,81 @@ func (b *Broker) buildHelloAck(hello ipc.HelloMsg, stub *Stub) ipc.HelloAckMsg {
 // had just left. So the release also raises a per-connection barrier that late
 // recovery cannot reverse (Stub.explicitlyDetached) — the identity-independent
 // half of the same decision.
-func (b *Broker) handleRelease(stub *Stub) {
-	b.Routes.ReleaseAllByConnID(stub.ConnID)
-	stub.SetRoute(nil) // also clears routeConfirmed — a detach re-arms the §5 consume tripwire
-	// Set unconditionally (not only in the empty-id case): the flag means "the user
-	// detached THIS connection", so it is true whether or not we could also write
-	// the durable tombstone below. tryClaim clears it on the next explicit attach.
+func (b *Broker) handleRelease(conn *ipc.Conn, stub *Stub, raw []byte) bool {
+	var req ipc.ReleaseReq
+	if err := json.Unmarshal(raw, &req); err != nil {
+		_ = conn.WriteJSON(ipc.ErrorMsg{Op: ipc.OpError, Err: "malformed release: " + err.Error()})
+		return len(stub.Routes()) == 0
+	}
+	if req.Target != "" {
+		key, err := b.resolveHeldRoute(stub, req.Target)
+		if err != nil {
+			_ = conn.WriteJSON(ipc.ReleaseResp{Op: ipc.OpReleaseResult, Err: err.Error()})
+			return false
+		}
+		if holder, held := b.Routes.Holder(key); !held || holder != stub {
+			_ = conn.WriteJSON(ipc.ReleaseResp{Op: ipc.OpReleaseResult, Err: "release refused: selected route is no longer held"})
+			return false
+		}
+		b.Routes.Release(key, stub.ConnID)
+		removed, _, newOutput := stub.RemoveRoute(key)
+		if !removed {
+			_ = conn.WriteJSON(ipc.ReleaseResp{Op: ipc.OpReleaseResult, Err: "release refused: selected route is not held"})
+			return false
+		}
+		b.enqueueOutputRoleChange(stub, &key, newOutput)
+		if len(stub.Routes()) > 0 {
+			stub.SetExplicitlyDetached(false)
+			if sid := stub.StableSessionIDValue(); sid != "" && b.dropStoredRoute(stub.CLI, sid, key, newOutput) {
+				_ = b.SaveMappings()
+			}
+			routes, output := b.routeSetRefs(stub)
+			_ = conn.WriteJSON(ipc.ReleaseResp{Op: ipc.OpReleaseResult, OK: true, Routes: routes, Output: output})
+			return false
+		}
+	} else {
+		b.Routes.ReleaseAllByConnID(stub.ConnID)
+		stub.ClearRoutes()
+	}
+	// Set unconditionally (not only in the empty-id case): the flag means "the
+	// user detached every route on THIS connection", so it is true whether or not
+	// we could also write the durable tombstone below. tryClaim clears it on the
+	// next explicit attach.
 	stub.SetExplicitlyDetached(true)
 	if sid := stub.StableSessionIDValue(); sid != "" {
 		if b.tombstoneSessionAttachment(stub.CLI, sid) {
 			_ = b.SaveMappings()
 		}
 	}
+	if req.Target != "" {
+		routes, output := b.routeSetRefs(stub)
+		_ = conn.WriteJSON(ipc.ReleaseResp{Op: ipc.OpReleaseResult, OK: true, Routes: routes, Output: output})
+	}
+	return true
+}
+
+func (b *Broker) handleSetOutputRoute(conn *ipc.Conn, stub *Stub, raw []byte) {
+	var req ipc.SetOutputRouteReq
+	if err := json.Unmarshal(raw, &req); err != nil {
+		_ = conn.WriteJSON(ipc.SetOutputRouteResp{Op: ipc.OpSetOutputRouteResult, Err: "malformed set_output_route: " + err.Error()})
+		return
+	}
+	key, err := b.resolveHeldRoute(stub, req.Target)
+	if err != nil {
+		_ = conn.WriteJSON(ipc.SetOutputRouteResp{Op: ipc.OpSetOutputRouteResult, Err: err.Error()})
+		return
+	}
+	oldOutput := stub.OutputRoute()
+	if !stub.SetOutputRoute(key) {
+		_ = conn.WriteJSON(ipc.SetOutputRouteResp{Op: ipc.OpSetOutputRouteResult, Err: "selected route is not held"})
+		return
+	}
+	b.enqueueOutputRoleChange(stub, oldOutput, &key)
+	b.recordCurrentRoutesForStable(stub)
+	output := b.routeRefForKey(key)
+	_ = conn.WriteJSON(ipc.SetOutputRouteResp{
+		Op: ipc.OpSetOutputRouteResult, OK: true, Output: &output,
+	})
 }
 
 // handleRecoverSession is the adapter → broker recover op: the resumed session's
@@ -343,16 +422,16 @@ func (b *Broker) handleRelease(stub *Stub) {
 // stub's own connection, so the broker maps stub→stable-id directly. It then
 // takes ONE of two dual-path-recording branches:
 //
-//   - Stub ALREADY attached: RECORD the current route under the stable id only
+//   - Stub ALREADY attached: RECORD the held set and output under the stable id only
 //     when it was a manual attach-before-recover, was carried under this same
 //     stable id, or arrived anonymously and does not conflict with that id's
-//     server-side record. A route stamped for a different id, or anonymous
+//     server-side record. A set stamped for a different id, or anonymous
 //     automatic carriage that conflicts with an existing record, is an identity
 //     switch: release it without a tombstone, then recover the new identity's
-//     own route.
-//   - Stub NOT attached: attempt recoverSession — re-claim the route the stable
-//     id was last attached to, when recoverable and not held by another live
-//     session. On success, report it + the held backlog count so the adapter
+//     own set.
+//   - Stub NOT attached: attempt recoverSession — re-claim the set the stable id
+//     last held, skipping individual collisions. On success, report its output
+//     plus that route's held backlog count so the adapter
 //     can surface a one-shot auto-attach notification.
 //
 // Ahead of the not-attached branch sits the detach barrier: a stub the user
@@ -374,10 +453,10 @@ func (b *Broker) handleRecoverSession(conn *ipc.Conn, stub *Stub, raw []byte, ro
 		routeIdentity.stableID != req.StableSessionID
 	recordedRouteIdentityMismatch := false
 	if routeIdentity != nil && routeIdentity.automatic && !routeIdentity.requireMatch {
-		if cur := stub.CurrentRoute(); cur != nil {
+		if stub.OutputRoute() != nil {
 			if recorded, ok := b.lookupSessionAttachment(stub.CLI, req.StableSessionID); ok &&
 				recorded.Recoverable(time.Now(), SessionAttachmentTTL) {
-				recordedRouteIdentityMismatch = routeKeyFromSessionAttachment(recorded) != *cur
+				recordedRouteIdentityMismatch = !sessionAttachmentMatchesStub(recorded, stub)
 			}
 		}
 	}
@@ -388,7 +467,7 @@ func (b *Broker) handleRecoverSession(conn *ipc.Conn, stub *Stub, raw []byte, ro
 		if routeIdentity == nil {
 			return
 		}
-		if stub.CurrentRoute() == nil {
+		if len(stub.Routes()) == 0 {
 			*routeIdentity = recoverRouteIdentity{}
 			return
 		}
@@ -398,9 +477,9 @@ func (b *Broker) handleRecoverSession(conn *ipc.Conn, stub *Stub, raw []byte, ro
 		}
 	}()
 	if switched {
-		if cur := stub.CurrentRoute(); cur != nil {
+		if cur := stub.OutputRoute(); cur != nil {
 			b.Routes.ReleaseAllByConnID(stub.ConnID)
-			stub.SetRoute(nil)
+			stub.ClearRoutes()
 			from := prev
 			if routeIdentityMismatch {
 				from = routeIdentity.stableID
@@ -416,12 +495,12 @@ func (b *Broker) handleRecoverSession(conn *ipc.Conn, stub *Stub, raw []byte, ro
 		stub.SetExplicitlyDetached(false)
 	}
 	resp := ipc.RecoverSessionResp{Op: ipc.OpRecoverSessionResult}
-	if cur := stub.CurrentRoute(); cur != nil {
-		// Attach-first: a fresh session already claimed a route (by cwd) before
-		// this recover op arrived. Record that route under the stable id so a
+	if len(stub.Routes()) > 0 {
+		// Attach-first: a fresh session already claimed routes before this recover
+		// op arrived. Record the set under the stable id so a
 		// future resume recovers it. No re-claim. This is bookkeeping, not an
 		// auto-re-attach, so it runs regardless of the auto_attach_on_resume gate.
-		b.recordCurrentRouteForStable(stub, *cur)
+		b.recordCurrentRoutesForStable(stub)
 	} else if stub.ExplicitlyDetached() {
 		// The user detached this connection BEFORE its stable id was known, so
 		// handleRelease had nothing to tombstone. Now that the identity has arrived,
@@ -494,8 +573,8 @@ func (b *Broker) handleRecoverSession(conn *ipc.Conn, stub *Stub, raw []byte, ro
 	_ = conn.WriteJSON(resp)
 }
 
-// handleToolCall dispatches a tool-call to the worker for the stub's
-// currently-claimed route. The result returns asynchronously via the worker's
+// handleToolCall dispatches a tool-call to the worker for the selected held
+// route, defaulting to output. The result returns asynchronously via the worker's
 // OutboundJob.ResultCh; we block this connection's read loop on it (which is
 // fine because the writer mutex on the Conn allows other goroutines —
 // inbound forwarding — to write concurrently).
@@ -506,11 +585,11 @@ func (b *Broker) handleToolCall(conn *ipc.Conn, stub *Stub, raw []byte) {
 		return
 	}
 
-	route := stub.CurrentRoute()
-	if route == nil {
+	route, forwardedArgs, err := b.resolveToolRoute(stub, req.Args)
+	if err != nil {
 		_ = conn.WriteJSON(ipc.ToolResultMsg{
 			Op: ipc.OpToolResult, ID: req.ID,
-			Error: &ipc.ErrorPayload{Code: -32000, Message: "tool_call before attach: no route claimed"},
+			Error: &ipc.ErrorPayload{Code: -32000, Message: err.Error()},
 		})
 		return
 	}
@@ -518,10 +597,10 @@ func (b *Broker) handleToolCall(conn *ipc.Conn, stub *Stub, raw []byte) {
 	resultCh := make(chan OutboundResult, 1)
 	job := Job{Kind: JobOutbound, Outbound: &OutboundJob{
 		Tool:     req.Name,
-		Args:     req.Args,
+		Args:     forwardedArgs,
 		ResultCh: resultCh,
 	}}
-	if !b.Workers.Submit(*route, job) {
+	if !b.Workers.Submit(route, job) {
 		_ = conn.WriteJSON(ipc.ToolResultMsg{
 			Op: ipc.OpToolResult, ID: req.ID,
 			Error: &ipc.ErrorPayload{Code: -32000, Message: "worker queue full or stopped"},
@@ -558,8 +637,8 @@ func (b *Broker) handleToolCall(conn *ipc.Conn, stub *Stub, raw []byte) {
 // OpAskResult when the human taps (resolveAsk, worker.go) — this handler does NOT
 // block on it (mirrors OpInbound delivery, not the inline handleToolCall wait).
 //
-// Route resolution mirrors handleToolCall: AskRegisterReq carries no route, so it
-// is derived from stub.CurrentRoute(); a nil route returns OK=false fast. The
+// AskRegisterReq carries no route, so the broker chooses the first held route
+// (output first) that supports inline keyboards. An empty set fails fast. The
 // pendingAsk is registered BEFORE the send (fast-tap race), and removed on a send
 // error so the tool call returns immediately rather than after the answer timeout.
 func (b *Broker) handleAskRegister(conn *ipc.Conn, stub *Stub, raw []byte) {
@@ -576,8 +655,8 @@ func (b *Broker) handleAskRegister(conn *ipc.Conn, stub *Stub, raw []byte) {
 		})
 		return
 	}
-	route := stub.CurrentRoute()
-	if route == nil {
+	routes := orderedHeldRoutes(stub)
+	if len(routes) == 0 {
 		_ = conn.WriteJSON(ipc.AskRegisteredMsg{
 			Op: ipc.OpAskRegistered, AskID: req.AskID, OK: false,
 			Err: "ask before attach: no route claimed",
@@ -593,7 +672,18 @@ func (b *Broker) handleAskRegister(conn *ipc.Conn, stub *Stub, raw []byte) {
 		})
 		return
 	}
-	ch, err := b.Channel(route.Channel)
+	route := routes[0]
+	outputChannel, outputErr := b.Channel(route.Channel)
+	ch, err := outputChannel, outputErr
+	for _, candidate := range routes {
+		candidateChannel, lookupErr := b.Channel(candidate.Channel)
+		if lookupErr == nil && candidateChannel.Capabilities().InlineKeyboards {
+			route = candidate
+			ch = candidateChannel
+			err = nil
+			break
+		}
+	}
 	if err != nil {
 		_ = conn.WriteJSON(ipc.AskRegisteredMsg{
 			Op: ipc.OpAskRegistered, AskID: req.AskID, OK: false,
@@ -620,12 +710,12 @@ func (b *Broker) handleAskRegister(conn *ipc.Conn, stub *Stub, raw []byte) {
 	// list) so toggles and the Done/Skip buttons resolve correctly.
 	//
 	// owner is THIS stub, the session that asked — not a holder re-read from the
-	// routes table at register time. The route was resolved from stub.CurrentRoute()
+	// routes table at register time. The route was selected from the stub's held set
 	// above, so the asking session is already in hand; re-deriving it later reopens
 	// the window in which a force_steal makes the NEW holder the owner of this
 	// session's question (see pendingAsk.owner).
 	p := &pendingAsk{
-		askID: req.AskID, route: *route, question: req.Question, options: req.Options,
+		askID: req.AskID, route: route, question: req.Question, options: req.Options,
 		multi: req.Multi, allowSkip: req.AllowSkip, selected: make([]bool, len(req.Options)),
 		owner: stub,
 	}
@@ -661,15 +751,15 @@ func (b *Broker) handleAskRegister(conn *ipc.Conn, stub *Stub, raw []byte) {
 	}
 	b.Asks.setMessageID(req.AskID, msgID)
 	log.Printf("ask REGISTERED chan=%s chat=%d topic=%s ask=%s opts=%d msg=%d",
-		route.Channel, route.ChatID, TopicKeyStr(*route), req.AskID, len(req.Options), msgID)
+		route.Channel, route.ChatID, TopicKeyStr(route), req.AskID, len(req.Options), msgID)
 	_ = conn.WriteJSON(ipc.AskRegisteredMsg{
 		Op: ipc.OpAskRegistered, AskID: req.AskID, OK: true, MessageID: msgID,
 	})
 }
 
 // handlePermissionRequest relays a Claude Code tool-use permission prompt to the
-// stub's claimed route as an Allow/Deny inline keyboard. Mirrors handleAskRegister
-// (route via stub.CurrentRoute, capability gate, register-before-send, store
+// first keyboard-capable held route as an Allow/Deny inline keyboard. Mirrors
+// handleAskRegister (output-first capability selection, register-before-send, store
 // messageID) but is FIRE-AND-FORGET: there is no blocking tool to unblock, so a
 // nil route / channel error / send failure is logged and dropped with NO error
 // reply (CC simply keeps waiting in its TUI). The operator's tap later pushes an
@@ -684,36 +774,36 @@ func (b *Broker) handlePermissionRequest(_ *ipc.Conn, stub *Stub, raw []byte) {
 		log.Printf("perm: permission_request missing request id — dropping")
 		return
 	}
-	route := stub.CurrentRoute()
-	if route == nil {
+	routes := orderedHeldRoutes(stub)
+	if len(routes) == 0 {
 		// No claim to surface on, and no blocking tool to error — drop + log.
 		log.Printf("perm DROP id=%s tool=%s: no route claimed", req.RequestID, req.ToolName)
 		return
 	}
-	ch, err := b.Channel(route.Channel)
-	if err != nil {
-		log.Printf("perm DROP id=%s: channel lookup: %v", req.RequestID, err)
+	var route *RouteKey
+	var ch channel.Channel
+	for _, candidate := range routes {
+		candidateChannel, err := b.Channel(candidate.Channel)
+		if err != nil || !candidateChannel.Capabilities().InlineKeyboards {
+			continue
+		}
+		selected := candidate
+		route = &selected
+		ch = candidateChannel
+		break
+	}
+	if route == nil {
+		b.sendPermissionNotice(routes[0], req)
 		return
 	}
-	// Capability gate: permission relay is an inline-keyboard round-trip, so refuse
-	// it on a channel that can't render keyboards rather than silently dropping
-	// buttons. No behavior change for Telegram (InlineKeyboards=true).
-	if !ch.Capabilities().InlineKeyboards {
-		var topicID *int64
-		if route.HasTopic {
-			t := route.TopicID
-			topicID = &t
+	for _, candidate := range routes {
+		if candidate == *route {
+			continue
 		}
-		text := fmt.Sprintf("⏸ Permission needed at the laptop: %s — %s", req.ToolName, req.Preview)
-		if _, err := ch.SendReply(c3types.ReplyArgs{
-			Channel: route.Channel, ChatID: route.ChatID, TopicID: topicID,
-			Text: text, Markup: c3types.MarkupNone,
-		}); err != nil {
-			log.Printf("perm NOTICE id=%s: channel %s send failed: %v", req.RequestID, route.Channel, err)
-			return
+		candidateChannel, err := b.Channel(candidate.Channel)
+		if err == nil && !candidateChannel.Capabilities().InlineKeyboards {
+			b.sendPermissionNotice(candidate, req)
 		}
-		log.Printf("perm NOTICE id=%s: channel %s requires laptop approval", req.RequestID, route.Channel)
-		return
 	}
 
 	// Register BEFORE the send so a fast operator tap (before the sendMessage
@@ -721,7 +811,7 @@ func (b *Broker) handlePermissionRequest(_ *ipc.Conn, stub *Stub, raw []byte) {
 	//
 	// owner is THIS stub, the session whose tool call is waiting — not a holder
 	// re-read from the routes table at register time. The route came from
-	// stub.CurrentRoute(), so the requesting session is already in hand; deriving
+	// the held set, so the requesting session is already in hand; deriving
 	// the owner later stamps whoever holds the route by then, which a force_steal
 	// in that window makes a DIFFERENT session (see pendingPerm.owner).
 	p := &pendingPerm{requestID: req.RequestID, route: *route, toolName: req.ToolName, preview: req.Preview, owner: stub}
@@ -775,6 +865,28 @@ func (b *Broker) handlePermissionRequest(_ *ipc.Conn, stub *Stub, raw []byte) {
 	}
 	log.Printf("perm REGISTERED chan=%s chat=%d topic=%s id=%s tool=%s msg=%d",
 		route.Channel, route.ChatID, TopicKeyStr(*route), req.RequestID, req.ToolName, msgID)
+}
+
+func (b *Broker) sendPermissionNotice(route RouteKey, req ipc.PermissionReq) {
+	ch, err := b.Channel(route.Channel)
+	if err != nil {
+		log.Printf("perm NOTICE id=%s: channel lookup: %v", req.RequestID, err)
+		return
+	}
+	var topicID *int64
+	if route.HasTopic {
+		topic := route.TopicID
+		topicID = &topic
+	}
+	text := fmt.Sprintf("⏸ Permission needed at the laptop: %s — %s", req.ToolName, req.Preview)
+	if _, err := ch.SendReply(c3types.ReplyArgs{
+		Channel: route.Channel, ChatID: route.ChatID, TopicID: topicID,
+		Text: text, Markup: c3types.MarkupNone,
+	}); err != nil {
+		log.Printf("perm NOTICE id=%s: channel %s send failed: %v", req.RequestID, route.Channel, err)
+		return
+	}
+	log.Printf("perm NOTICE id=%s: channel %s requires laptop approval", req.RequestID, route.Channel)
 }
 
 func (b *Broker) handleListTopics(conn *ipc.Conn) {
@@ -846,6 +958,9 @@ func (b *Broker) handleListClaims(conn *ipc.Conn) {
 			HolderCWD: e.Stub.CWD,
 			ConnID:    e.Stub.ConnID,
 			Connected: e.Stub.IsConnected(),
+		}
+		if output := e.Stub.OutputRoute(); output != nil && *output == e.Key {
+			entry.IsOutput = true
 		}
 		if e.Key.HasTopic {
 			if tp, ok := b.Mappings().LookupTopicByID(e.Key.Channel, e.Key.ChatID, e.Key.TopicID); ok {
@@ -956,7 +1071,7 @@ func (b *Broker) handlePingThisSession(conn *ipc.Conn, raw []byte) {
 	}
 
 	// Find the attached user session. Skip the transient client itself by
-	// requiring CurrentRoute != nil; the c3-broker-cli stub never attaches.
+	// requiring a held route; the c3-broker-cli stub never attaches.
 	//
 	// Three-tier match (FIX 2, 2026-06-04), shared with /c3:sessions via
 	// stubMatchesPID:
@@ -999,7 +1114,7 @@ func (b *Broker) handlePingThisSession(conn *ipc.Conn, raw []byte) {
 			// attached (e.g. auto-reattach-on-resume failed). Note it so we can
 			// report "not attached" instead of falling through to the CWD tier,
 			// which would impersonate a neighbor sharing the launch dir.
-			if s.CurrentRoute() == nil {
+			if len(s.Routes()) == 0 {
 				pidIdentifiedUnattached = true
 				continue
 			}
@@ -1024,7 +1139,7 @@ func (b *Broker) handlePingThisSession(conn *ipc.Conn, raw []byte) {
 	// at all (attached or not) — never after a positive but unattached PID match.
 	if target == nil {
 		for _, s := range b.Stubs.Snapshot() {
-			if s.CurrentRoute() == nil {
+			if len(s.Routes()) == 0 {
 				continue
 			}
 			if req.CWD == "" || !completeIdentity(s.CLI, s.PID) {
@@ -1056,7 +1171,14 @@ func (b *Broker) handlePingThisSession(conn *ipc.Conn, raw []byte) {
 		return
 	}
 
-	key := target.CurrentRoute()
+	key := target.OutputRoute()
+	if key == nil {
+		_ = conn.WriteJSON(ipc.PingThisSessionReplyMsg{
+			Op: ipc.OpPingThisSessionReply, OK: false,
+			Err: "not attached: no route; use /c3:attach first",
+		})
+		return
+	}
 	ch, err := b.Channel(key.Channel)
 	if err != nil {
 		_ = conn.WriteJSON(ipc.PingThisSessionReplyMsg{
@@ -1198,8 +1320,13 @@ func (b *Broker) handleListSessions(conn *ipc.Conn, raw []byte) {
 			CWD:    s.CWD,
 			ConnID: s.ConnID,
 		}
-		if rk := s.CurrentRoute(); rk != nil {
-			e.AttachedTo = sessionTopicLabel(b, *rk)
+		routes := orderedHeldRoutes(s)
+		if len(routes) > 0 {
+			labels := make([]string, 0, len(routes))
+			for _, route := range routes {
+				labels = append(labels, sessionTopicLabel(b, route))
+			}
+			e.AttachedTo = strings.Join(labels, ", ")
 		}
 		// "you are here" marker. Same PID-match as /c3:ping (FIX 2,
 		// 2026-06-04): direct stub.PID equality OR the stub's CLI-session

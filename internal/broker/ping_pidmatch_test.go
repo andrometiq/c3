@@ -73,7 +73,7 @@ func TestPing_PIDMatch_PrefersChildStubOverParentCWD(t *testing.T) {
 	parent := b.Stubs.Register("claude", 100, "/p", nil)
 	tid1 := int64(281)
 	r1 := MakeRouteKey("telegram", -100, &tid1)
-	if !b.tryClaim(nil, parent, r1, "c3", false, false) {
+	if !b.tryClaim(nil, parent, r1, "c3", false, false, false) {
 		t.Fatal("parent stub: claim failed")
 	}
 
@@ -81,7 +81,7 @@ func TestPing_PIDMatch_PrefersChildStubOverParentCWD(t *testing.T) {
 	child := b.Stubs.Register("claude", 200, "/p/sub", nil)
 	tid2 := int64(412)
 	r2 := MakeRouteKey("telegram", -200, &tid2)
-	if !b.tryClaim(nil, child, r2, "feature-x", false, false) {
+	if !b.tryClaim(nil, child, r2, "feature-x", false, false, false) {
 		t.Fatal("child stub: claim failed")
 	}
 
@@ -119,14 +119,14 @@ func TestPing_PIDZero_FallsBackToCWDMatch(t *testing.T) {
 	parent := b.Stubs.Register("claude", 100, "/p", nil)
 	tid1 := int64(281)
 	r1 := MakeRouteKey("telegram", -100, &tid1)
-	if !b.tryClaim(nil, parent, r1, "c3", false, false) {
+	if !b.tryClaim(nil, parent, r1, "c3", false, false, false) {
 		t.Fatal("parent stub: claim failed")
 	}
 
 	child := b.Stubs.Register("claude", 200, "/p/sub", nil)
 	tid2 := int64(412)
 	r2 := MakeRouteKey("telegram", -200, &tid2)
-	if !b.tryClaim(nil, child, r2, "feature-x", false, false) {
+	if !b.tryClaim(nil, child, r2, "feature-x", false, false, false) {
 		t.Fatal("child stub: claim failed")
 	}
 
@@ -167,7 +167,7 @@ func TestPing_PIDMatch_NoLiveStubReturnsNotAttached(t *testing.T) {
 	other := b.Stubs.Register("claude", 100, "/elsewhere", nil)
 	tid := int64(281)
 	key := MakeRouteKey("telegram", -100, &tid)
-	if !b.tryClaim(nil, other, key, "c3", false, false) {
+	if !b.tryClaim(nil, other, key, "c3", false, false, false) {
 		t.Fatal("stub: claim failed")
 	}
 	waitForReplies(fc, 1)
@@ -204,7 +204,7 @@ func TestPing_PIDMatch_UnattachedSessionDoesNotImpersonateNeighbor(t *testing.T)
 	neighbor := b.Stubs.Register("claude", 200, "/p", nil)
 	tid := int64(412)
 	key := MakeRouteKey("telegram", -200, &tid)
-	if !b.tryClaim(nil, neighbor, key, "neighbor", false, false) {
+	if !b.tryClaim(nil, neighbor, key, "neighbor", false, false, false) {
 		t.Fatal("neighbor stub: claim failed")
 	}
 	waitForReplies(fc, 1) // neighbor's welcome
@@ -241,7 +241,7 @@ func TestPing_PIDMatch_TieHighestConnIDWins(t *testing.T) {
 	older := b.Stubs.Register("claude", pid, "/p", nil)
 	tid1 := int64(281)
 	r1 := MakeRouteKey("telegram", -100, &tid1)
-	if !b.tryClaim(nil, older, r1, "c3", false, false) {
+	if !b.tryClaim(nil, older, r1, "c3", false, false, false) {
 		t.Fatal("older stub: claim failed")
 	}
 
@@ -249,7 +249,7 @@ func TestPing_PIDMatch_TieHighestConnIDWins(t *testing.T) {
 	newer := b.Stubs.Register("claude", pid, "/p", nil)
 	tid2 := int64(412)
 	r2 := MakeRouteKey("telegram", -200, &tid2)
-	if !b.tryClaim(nil, newer, r2, "feature-x", false, false) {
+	if !b.tryClaim(nil, newer, r2, "feature-x", false, false, false) {
 		t.Fatal("newer stub: claim failed")
 	}
 	if newer.ConnID <= older.ConnID {

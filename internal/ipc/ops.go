@@ -10,11 +10,14 @@ type Op string
 
 const (
 	// adapter → broker
-	OpHello           Op = "hello"
-	OpServerInfo      Op = "server_info"
-	OpToolsList       Op = "tools_list"
-	OpAttach          Op = "attach"
-	OpRelease         Op = "release"
+	OpHello      Op = "hello"
+	OpServerInfo Op = "server_info"
+	OpToolsList  Op = "tools_list"
+	OpAttach     Op = "attach"
+	OpRelease    Op = "release"
+	// OpSetOutputRoute changes only the outbound default within the caller's
+	// held route set. It is a brand-new additive op (no version bump).
+	OpSetOutputRoute  Op = "set_output_route"
 	OpListTopics      Op = "list_topics"
 	OpListClaims      Op = "list_claims"
 	OpListHealth      Op = "list_health"
@@ -36,13 +39,13 @@ const (
 	OpRecoverSession   Op = "recover_session"
 	// OpAskRegister registers a blocking, correlated `ask` (question + options)
 	// for round-trip resolution. The answer is pushed back later as an
-	// unsolicited OpAskResult once the human taps a button. Carries NO route —
-	// the broker derives it from the stub's current claim.
+	// unsolicited OpAskResult once the human taps a button. Carries NO route;
+	// the broker selects the first keyboard-capable held route, output first.
 	OpAskRegister Op = "ask_register"
 	// OpPermissionRequest relays a Claude Code tool-use permission prompt
 	// (default / acceptEdits mode) to the broker so it can surface an Allow/Deny
-	// inline keyboard on the stub's claimed route. Carries NO route — the broker
-	// derives it from the stub's current claim. Fire-and-forget: there is no
+	// inline keyboard on a keyboard-capable held route. Carries NO route; the
+	// broker selects output first. Fire-and-forget: there is no
 	// blocking tool to unblock, so the broker sends no synchronous ack (unlike
 	// OpAskRegister). The verdict comes back later as OpPermissionVerdict.
 	OpPermissionRequest Op = "permission_request"
@@ -56,8 +59,13 @@ const (
 	OpBye               Op = "bye"
 
 	// broker → adapter
-	OpHelloAck             Op = "hello_ack"
-	OpAttached             Op = "attached"
+	OpHelloAck Op = "hello_ack"
+	OpAttached Op = "attached"
+	// OpReleaseResult is returned only for a targeted OpRelease. The legacy bare
+	// release remains fire-and-forget.
+	OpReleaseResult Op = "release_result"
+	// OpSetOutputRouteResult is the additive response to OpSetOutputRoute.
+	OpSetOutputRouteResult Op = "set_output_route_result"
 	OpToolResult           Op = "tool_result"
 	OpInbound              Op = "inbound"
 	OpTopicsList           Op = "topics_list"

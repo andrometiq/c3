@@ -62,7 +62,7 @@ type pendingAsk struct {
 
 	// owner is the SESSION this question was asked FOR — the asking stub ITSELF,
 	// stamped by handleAskRegister, which already holds it (it routed via
-	// stub.CurrentRoute()). Without it the recipient is re-derived from the routes
+	// stub's held route set). Without it the recipient is re-derived from the routes
 	// table at TAP time, so an answer is delivered to whoever holds the topic when
 	// the human taps — a different session than the one blocked on the question —
 	// while the chat records "✅ <option>" as though that session's question had

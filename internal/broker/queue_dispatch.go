@@ -38,9 +38,9 @@ var workerJobTimeout = 30 * time.Second
 // correlation-id limit has no reason to create a sanctioned collision.
 const maxFetchIDBytes = 1024
 
-// handleFetchQueue routes a fetch_queue pull through the claimed route's worker
-// (single-owner file access). Limit default + max are clamped by the adapter;
-// the broker honors All (drain everything) and Ack (consume vs peek).
+// handleFetchQueue routes a pull through every held route's worker (output
+// first, then claim order), or one selected held route. Each queue retains its
+// single-owner worker access. Limit caps the combined batch; All drains all.
 func (b *Broker) handleFetchQueue(conn *ipc.Conn, stub *Stub, raw []byte) {
 	var req ipc.FetchQueueReq
 	if err := json.Unmarshal(raw, &req); err != nil {
@@ -69,58 +69,22 @@ func (b *Broker) handleFetchQueue(conn *ipc.Conn, stub *Stub, raw []byte) {
 				len(req.ID), maxFetchIDBytes, ipc.MaxFrameSize)})
 		return
 	}
-	route := stub.CurrentRoute()
-	if route == nil {
+	var routes []RouteKey
+	if req.Channel != "" {
+		route, err := b.resolveHeldRoute(stub, req.Channel)
+		if err != nil {
+			_ = conn.WriteJSON(ipc.FetchQueueResp{Op: ipc.OpFetchQueueResult, ID: req.ID, Err: err.Error()})
+			return
+		}
+		routes = []RouteKey{route}
+	} else {
+		routes = orderedHeldRoutes(stub)
+	}
+	if len(routes) == 0 {
 		_ = conn.WriteJSON(ipc.FetchQueueResp{Op: ipc.OpFetchQueueResult, ID: req.ID, Err: "fetch_queue before attach: no route claimed"})
 		return
 	}
-	// Spec §5 tripwire: refuse the DESTRUCTIVE (Ack=true) consume unless the current
-	// claim was set by a legitimate claim site (MarkRouteConfirmed). Every real
-	// attach/own-recover confirms the route, so this never trips a legitimate flow —
-	// it is fail-closed insurance so a future silent-bind regression cannot drain a
-	// queue. The non-destructive peek (Ack=false) is unaffected: it consumes nothing.
-	if req.Ack && !stub.RouteConfirmed() {
-		_ = conn.WriteJSON(ipc.FetchQueueResp{Op: ipc.OpFetchQueueResult, ID: req.ID, Err: "fetch_queue(ack=true) refused: route not confirmed by an explicit claim"})
-		return
-	}
-	resultCh := make(chan FetchResult, 1)
-	var lease *fetchLease
-	if req.Ack {
-		lease = newFetchLease()
-	}
-	job := Job{Kind: JobFetch, Fetch: &FetchJob{
-		Limit: req.Limit, All: req.All, Ack: req.Ack,
-		// The response echoes req.ID verbatim into the SAME frame as the messages,
-		// so the worker's frame budget has to know it before it consumes anything.
-		RespID: req.ID,
-		Lease:  lease, ResultCh: resultCh,
-	}}
-	if !b.Workers.Submit(*route, job) {
-		_ = conn.WriteJSON(ipc.FetchQueueResp{Op: ipc.OpFetchQueueResult, ID: req.ID, Err: "worker queue full or stopped"})
-		return
-	}
-	var res FetchResult
-	// A stalled worker must not wedge this connection's serial read loop. For an
-	// Ack=true timeout, the lease makes cancellation atomic with starting the
-	// destructive Consume. If cancellation wins, a late worker downgrades to
-	// Peek. If Consume already started, cancellation waits for that short local
-	// queue operation and we deliver its real result rather than orphaning it.
-	select {
-	case res = <-resultCh:
-	case <-time.After(workerJobTimeout):
-		if req.Ack && lease != nil && !lease.cancel() {
-			res = <-resultCh
-			break
-		}
-		_ = conn.WriteJSON(ipc.FetchQueueResp{Op: ipc.OpFetchQueueResult, ID: req.ID, Err: "fetch_queue: worker did not respond within " + workerJobTimeout.String()})
-		return
-	}
-	resp := ipc.FetchQueueResp{Op: ipc.OpFetchQueueResult, ID: req.ID, Remaining: res.Remaining}
-	if res.Err != nil {
-		resp.Err = res.Err.Error()
-	} else {
-		resp.Messages = res.Messages
-	}
+	resp := b.fetchSelectedRoutes(stub, req, routes)
 	// Do NOT discard this error. A refused write puts nothing on the wire, so the
 	// adapter sits until its own timeout with no explanation anywhere — the worst
 	// shape a failure can take. The batch is sized against this exact response
@@ -134,8 +98,8 @@ func (b *Broker) handleFetchQueue(conn *ipc.Conn, stub *Stub, raw []byte) {
 		if req.Ack && len(resp.Messages) > 0 {
 			lost = fmt.Sprintf(" — those %d message(s) were already consumed and did NOT reach the session; recover them from the queue retention window", len(resp.Messages))
 		}
-		log.Printf("fetch_queue chan=%s chat=%d: response not sent (%d messages, remaining=%d): %v%s",
-			route.Channel, route.ChatID, len(resp.Messages), resp.Remaining, err, lost)
+		log.Printf("fetch_queue conn=%d: response not sent (%d messages, remaining=%d): %v%s",
+			stub.ConnID, len(resp.Messages), resp.Remaining, err, lost)
 		return
 	}
 	// A successful destructive pull is SILENT to the topic. The plumbing does not
@@ -143,6 +107,95 @@ func (b *Broker) handleFetchQueue(conn *ipc.Conn, stub *Stub, raw []byte) {
 	// with real content, and that response is the only confirmation the human
 	// needs. A broker-minted "Fetched N queued item" receipt is noise on every
 	// live path and was removed (it had fired for every CLI, not just poll-only).
+}
+
+// fetchSelectedRoutes performs one ordered multi-route fetch over a caller's
+// snapshot. The worker applies the authoritative ownership + confirmation gate
+// immediately around every destructive queue mutation. A stale or unconfirmed
+// route is skipped and counted in Remaining; valid siblings continue.
+func (b *Broker) fetchSelectedRoutes(stub *Stub, req ipc.FetchQueueReq, routes []RouteKey) ipc.FetchQueueResp {
+	resp := ipc.FetchQueueResp{Op: ipc.OpFetchQueueResult, ID: req.ID}
+	remainingLimit := req.Limit
+	authorizedRoutes := 0
+	for routeIndex, route := range routes {
+		limit := remainingLimit
+		if req.All {
+			limit = -1
+		}
+		frameReserve := 0
+		if len(resp.Messages) > 0 {
+			if encoded, err := json.Marshal(resp); err == nil {
+				frameReserve = len(encoded)
+			}
+		}
+		res, err := b.fetchHeldRoute(stub, route, req, limit, frameReserve)
+		if res.SkipReason != "" {
+			pending, _ := b.Queue.Pending(queueRouteKey(route))
+			resp.Remaining += pending
+			log.Printf("fetch_queue conn=%d: SKIPPED route %s: %s", stub.ConnID, b.routeLabel(route), res.SkipReason)
+			continue
+		}
+		authorizedRoutes++
+		if err != nil {
+			if len(resp.Messages) == 0 {
+				resp.Err = err.Error()
+			} else {
+				// Earlier routes may already have consumed the messages now in the
+				// response. Do not turn that successful delivery into a tool error the
+				// adapter discards. Report a partial batch with an honest remaining
+				// count so the next fetch retries this and later routes.
+				for _, pendingRoute := range routes[routeIndex:] {
+					pending, _ := b.Queue.Pending(queueRouteKey(pendingRoute))
+					resp.Remaining += pending
+				}
+				log.Printf("fetch_queue conn=%d: partial multi-route result after %d message(s): route %s failed: %v",
+					stub.ConnID, len(resp.Messages), routeKeyStr(route), err)
+			}
+			break
+		}
+		resp.Messages = append(resp.Messages, res.Messages...)
+		resp.Remaining += res.Remaining
+		if !req.All && remainingLimit > 0 {
+			remainingLimit -= len(res.Messages)
+			if remainingLimit < 0 {
+				remainingLimit = 0
+			}
+		}
+	}
+	if authorizedRoutes == 0 && resp.Err == "" {
+		if req.Ack {
+			resp.Err = "fetch_queue(ack=true) refused: no selected route is still held and confirmed by an explicit claim"
+		} else {
+			resp.Err = "fetch_queue refused: no selected route is still held by this session"
+		}
+	}
+	return resp
+}
+
+func (b *Broker) fetchHeldRoute(stub *Stub, route RouteKey, req ipc.FetchQueueReq, limit, frameReserve int) (FetchResult, error) {
+	resultCh := make(chan FetchResult, 1)
+	var lease *fetchLease
+	if req.Ack {
+		lease = newFetchLease()
+	}
+	job := Job{Kind: JobFetch, Fetch: &FetchJob{
+		Limit: limit, All: req.All, Ack: req.Ack,
+		RespID: req.ID, FrameReserve: frameReserve,
+		Owner: stub, Lease: lease, ResultCh: resultCh,
+	}}
+	if !b.Workers.Submit(route, job) {
+		return FetchResult{}, fmt.Errorf("worker queue full or stopped")
+	}
+	select {
+	case result := <-resultCh:
+		return result, result.Err
+	case <-time.After(workerJobTimeout):
+		if req.Ack && lease != nil && !lease.cancel() {
+			result := <-resultCh
+			return result, result.Err
+		}
+		return FetchResult{}, fmt.Errorf("fetch_queue: worker did not respond within %s", workerJobTimeout)
+	}
 }
 
 // handleRetranscribe joins or creates the same scheduler lease as automatic
@@ -159,7 +212,7 @@ func (b *Broker) handleRetranscribe(conn *ipc.Conn, stub *Stub, raw []byte) {
 		_ = conn.WriteJSON(ipc.RetranscribeResp{Op: ipc.OpRetranscribeResult, ID: req.ID, Err: "retranscribe: file_id required"})
 		return
 	}
-	route := stub.CurrentRoute()
+	route := stub.OutputRoute()
 	transcriptOnly := route == nil || req.MessageID == 0
 	chanName := "telegram"
 	var chatID int64
@@ -247,21 +300,13 @@ func (b *Broker) handleInboundDelivered(stub *Stub, raw []byte) {
 		log.Printf("inbound_delivered update=%d count=%d — nothing to consume (event / zero-covered ack)", msg.UpdateID, msg.Count)
 		return
 	}
-	// Spec §5 tripwire (SAME guard as the fetch Ack=true path): this live-push ack is
-	// the OTHER destructive consume path, so gate it on a confirmed claim too —
-	// guarding only fetch would leave the ack-consume drainable off an unconfirmed
-	// route. Fail-closed insurance; a legitimate holder always has a confirmed route.
-	if !stub.RouteConfirmed() {
-		log.Printf("inbound_delivered update=%d count=%d — route not confirmed by an explicit claim; consume DROPPED (§5 tripwire, Count lines remain as backlog)", msg.UpdateID, msg.Count)
-		return
-	}
 	// The ack carries no route. Its broker-minted delivery token identifies the
 	// exact outstanding push; a legacy no-token ack is accepted only when exactly
 	// one record matches UpdateID. The stub's CURRENT route can have moved
 	// between the push and the ack: the agent attaches to another topic mid-turn
 	// while the grok adapter is still inside injectWithRetry's backoff (~2 min over
 	// 12 attempts — it is retrying precisely BECAUSE the agent is mid-turn). Using
-	// CurrentRoute() here dispatched this DESTRUCTIVE consume to a worker that
+	// the output route here would dispatch this DESTRUCTIVE consume to a worker that
 	// never made the push: same chat it is a duplicate plus a permanently inflated
 	// pending count, and across two chats — Telegram message ids are unique per
 	// CHAT, not globally — it removes lines from the WRONG route's queue.
@@ -284,6 +329,7 @@ func (b *Broker) handleInboundDelivered(stub *Stub, raw []byte) {
 		MessageID: msg.UpdateID,
 		Token:     msg.DeliveryToken,
 		Count:     msg.Count,
+		Owner:     stub,
 	}}); !ok {
 		log.Printf("inbound_delivered update=%d count=%d: worker queue full or stopped — consume DROPPED (Count lines remain as backlog)", msg.UpdateID, msg.Count)
 	}

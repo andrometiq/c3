@@ -193,7 +193,7 @@ func TestBuildPickTopic_ClaimedByMarked(t *testing.T) {
 	holder := b.Stubs.Register("codex", 4242, "/x", struct{}{})
 	tid := int64(281)
 	key := MakeRouteKey("telegram", -100, &tid)
-	if !b.tryClaim(nil, holder, key, "c3", false, true) { // replay=true suppresses the welcome
+	if !b.tryClaim(nil, holder, key, "c3", false, true, false) { // replay=true suppresses the welcome
 		t.Fatal("holder claim should succeed")
 	}
 

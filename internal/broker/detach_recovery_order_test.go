@@ -105,7 +105,7 @@ func TestExplicitAttachClearsDetachBarrier(t *testing.T) {
 	stub.SetExplicitlyDetached(true)
 
 	ack := captureAttached(t, func(c *ipc.Conn) {
-		b.attachByName(c, stub, "telegram", "c3", "/proj", "", false, false, false)
+		b.attachByName(c, stub, "telegram", "c3", "/proj", "", false, false, false, false)
 	})
 	if !ack.OK || ack.Name != "c3" {
 		t.Fatalf("an explicit attach after a detach must succeed; got %+v", ack)
@@ -161,7 +161,8 @@ func TestHandleRelease_EmptyStableIDRaisesBarrier(t *testing.T) {
 	defer b.Shutdown()
 
 	stub := b.Stubs.Register("claude", 1, "/proj", nil) // no stable id — identity unknown
-	b.handleRelease(stub)
+	releaseRaw, _ := json.Marshal(ipc.ReleaseReq{Op: ipc.OpRelease})
+	b.handleRelease(nil, stub, releaseRaw)
 
 	if !stub.ExplicitlyDetached() {
 		t.Fatal("a detach with no known identity must still raise the per-connection barrier; otherwise the detach is remembered nowhere and late recovery re-attaches the session")

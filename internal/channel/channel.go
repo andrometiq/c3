@@ -68,13 +68,16 @@ type LoginLinker interface {
 }
 
 // RouteHolder describes the CLI session currently driving one channel route.
-// Since is the time at which that route claim was established.
+// Since is the time at which that route claim was established. Role is
+// "output" for the holder's outbound default and "input" for every other held
+// route.
 type RouteHolder struct {
 	CLI       string
 	PID       int
 	CWD       string
 	SessionID string
 	Since     time.Time
+	Role      string
 }
 
 // PresenceNotifier is the optional live-route bridge implemented by a channel

@@ -39,13 +39,13 @@ func TestHandleFetchQueue_ConsumesOldest(t *testing.T) {
 		_ = b.Queue.Append(qrk, &c3types.Inbound{Channel: "telegram", ChatID: -100, TopicID: &tid, MessageID: i, Text: "m", Timestamp: time.Now()})
 	}
 	// Stub holding the route. claimedHolder calls Routes.Claim but does NOT set
-	// the stub's CurrentRoute; handleFetchQueue resolves the route via
-	// stub.CurrentRoute(), so set it explicitly (mirroring the retranscribe test
+	// the stub's output route; handleFetchQueue resolves the route via
+	// stub.OutputRoute(), so set it explicitly (mirroring the retranscribe test
 	// below) — otherwise the handler returns the no-route Err branch and the
 	// assertions below fail.
 	stub := claimedHolder(t, b, key)
-	stub.SetRoute(&key)
-	stub.MarkRouteConfirmed() // destructive Ack=true fetch requires a confirmed claim (§5 tripwire)
+	bindOutputRouteForTest(stub, &key)
+	confirmOutputRouteForTest(stub) // destructive Ack=true fetch requires a confirmed claim (§5 tripwire)
 
 	agentSide, brokerSide := newConnPair(t)
 	_ = brokerSide
@@ -93,7 +93,7 @@ func TestHandleFetchQueue_PeekDoesNotConsume(t *testing.T) {
 		_ = b.Queue.Append(qrk, &c3types.Inbound{Channel: "telegram", ChatID: -100, TopicID: &tid, MessageID: i, Text: "m", Timestamp: time.Now()})
 	}
 	stub := claimedHolder(t, b, key)
-	stub.SetRoute(&key)
+	bindOutputRouteForTest(stub, &key)
 
 	agentSide, brokerSide := newConnPair(t)
 	raw, _ := json.Marshal(ipc.FetchQueueReq{Op: ipc.OpFetchQueue, ID: "1", Limit: 2, Ack: false})
@@ -121,7 +121,7 @@ func TestHandleRetranscribe_ReRunsSTT(t *testing.T) {
 		return "", nil
 	})
 	stub := &Stub{CLI: "claude"}
-	stub.SetRoute(&RouteKey{Channel: "telegram", ChatID: -100, HasTopic: true, TopicID: 914})
+	bindOutputRouteForTest(stub, &RouteKey{Channel: "telegram", ChatID: -100, HasTopic: true, TopicID: 914})
 
 	agentSide, brokerSide := newConnPair(t)
 	raw, _ := json.Marshal(ipc.RetranscribeReq{Op: ipc.OpRetranscribe, ID: "1", FileID: "vf"})
@@ -149,7 +149,7 @@ func TestHandleRetranscribe_DownHealthCachedSucceedsOffline(t *testing.T) {
 	})
 	stub := &Stub{CLI: "claude"}
 	route := MakeRouteKey("telegram", -100, ptrI64(914))
-	stub.SetRoute(&route)
+	bindOutputRouteForTest(stub, &route)
 	agentSide, brokerSide := newConnPair(t)
 	raw, _ := json.Marshal(ipc.RetranscribeReq{Op: ipc.OpRetranscribe, ID: "cached-down", FileID: "cached-voice"})
 	go b.handleRetranscribe(brokerSide, stub, raw)
@@ -175,7 +175,7 @@ func TestHandleRetranscribe_DownHealthUncachedFailsFastAndParks(t *testing.T) {
 	})
 	stub := &Stub{CLI: "claude"}
 	route := MakeRouteKey("telegram", -100, ptrI64(914))
-	stub.SetRoute(&route)
+	bindOutputRouteForTest(stub, &route)
 	agentSide, brokerSide := newConnPair(t)
 	raw, _ := json.Marshal(ipc.RetranscribeReq{Op: ipc.OpRetranscribe, ID: "uncached-down", FileID: "uncached-voice", MessageID: 44})
 	started := time.Now()
@@ -217,7 +217,7 @@ func TestHandleRetranscribe_WithoutRouteOrMessageIDIsTranscriptOnly(t *testing.T
 		{name: "no message id", stub: func() *Stub {
 			s := &Stub{CLI: "claude"}
 			route := MakeRouteKey("telegram", -100, ptrI64(914))
-			s.SetRoute(&route)
+			bindOutputRouteForTest(s, &route)
 			return s
 		}(), req: ipc.RetranscribeReq{Op: ipc.OpRetranscribe, ID: "no-message", FileID: "voice-b"}},
 	}
@@ -246,7 +246,7 @@ func TestHandleRetranscribe_AbsentMessageIDReturnsAndAppendsRevision(t *testing.
 		return "fresh transcript", nil
 	})
 	stub := &Stub{CLI: "claude"}
-	stub.SetRoute(&RouteKey{Channel: "telegram", ChatID: -100, HasTopic: true, TopicID: 914})
+	bindOutputRouteForTest(stub, &RouteKey{Channel: "telegram", ChatID: -100, HasTopic: true, TopicID: 914})
 
 	agentSide, brokerSide := newConnPair(t)
 	raw, _ := json.Marshal(ipc.RetranscribeReq{Op: ipc.OpRetranscribe, ID: "2", FileID: "vf", MessageID: 999})
@@ -286,7 +286,7 @@ func TestHandleRetranscribe_ResolvesPendingOwnerInPlace(t *testing.T) {
 		t.Fatal(err)
 	}
 	stub := claimedHolder(t, b, key)
-	stub.SetRoute(&key)
+	bindOutputRouteForTest(stub, &key)
 	agentSide, brokerSide := newConnPair(t)
 	raw, _ := json.Marshal(ipc.RetranscribeReq{Op: ipc.OpRetranscribe, ID: "pending", FileID: "vf", MessageID: 5})
 	go b.handleRetranscribe(brokerSide, stub, raw)
@@ -330,7 +330,7 @@ func TestHandleRetranscribe_LegacyFinalRowAppendsRevisionWithoutMutation(t *test
 	_ = b.Queue.Append(qrk, &c3types.Inbound{Channel: "telegram", ChatID: -100, TopicID: &tid, MessageID: 6, Text: "other", Timestamp: time.Now()})
 
 	stub := claimedHolder(t, b, key)
-	stub.SetRoute(&key)
+	bindOutputRouteForTest(stub, &key)
 
 	agentSide, brokerSide := newConnPair(t)
 	raw, _ := json.Marshal(ipc.RetranscribeReq{Op: ipc.OpRetranscribe, ID: "3", FileID: "vf", MessageID: 5})
@@ -391,7 +391,7 @@ func TestHandleRetranscribe_DrainedVoiceCollisionDoesNotRewriteOrganicMessage(t 
 	}
 
 	stub := claimedHolder(t, b, key)
-	stub.SetRoute(&key)
+	bindOutputRouteForTest(stub, &key)
 	agentSide, brokerSide := newConnPair(t)
 	raw, _ := json.Marshal(ipc.RetranscribeReq{Op: ipc.OpRetranscribe, ID: "collision", FileID: "V1", MessageID: 5})
 	go b.handleRetranscribe(brokerSide, stub, raw)
@@ -431,7 +431,7 @@ func TestHandleRetranscribe_BoundsCallerWaitWithoutCancelingLease(t *testing.T) 
 		return "", ctx.Err()
 	})
 	stub := &Stub{CLI: "claude"}
-	stub.SetRoute(&RouteKey{Channel: "telegram", ChatID: -100, HasTopic: true, TopicID: 914})
+	bindOutputRouteForTest(stub, &RouteKey{Channel: "telegram", ChatID: -100, HasTopic: true, TopicID: 914})
 
 	agentSide, brokerSide := newConnPair(t)
 	raw, _ := json.Marshal(ipc.RetranscribeReq{Op: ipc.OpRetranscribe, ID: "9", FileID: "vf"})
@@ -481,8 +481,8 @@ func TestHandleInboundDelivered_MergedBatchConsumesAllCovered(t *testing.T) {
 	b.Workers.mu.Unlock()
 	w.recordCoveredByPush(3, "", recordIDs[:3])
 	stub := claimedHolder(t, b, key)
-	stub.SetRoute(&key)
-	stub.MarkRouteConfirmed() // live-push ack consume requires a confirmed claim (§5 tripwire)
+	bindOutputRouteForTest(stub, &key)
+	confirmOutputRouteForTest(stub) // live-push ack consume requires a confirmed claim (§5 tripwire)
 	// The other half of the synthetic push: the ack is routed by the route the
 	// push went out on, recorded on the stub at push time (see Stub.pushRoutes).
 	// Without it this fabricated ack matches no push and consumes nothing.
@@ -534,7 +534,7 @@ func TestHandleFetchQueue_WorkerStall_ReturnsErrorNotWedge(t *testing.T) {
 	tid := int64(914)
 	key := MakeRouteKey("telegram", -100, &tid)
 	stub := claimedHolder(t, b, key)
-	stub.SetRoute(&key)
+	bindOutputRouteForTest(stub, &key)
 
 	// Park the route's single worker on the blocking reply so the peek job that
 	// handleFetchQueue submits to the SAME route is never serviced.
@@ -597,8 +597,8 @@ func TestHandleFetchQueue_AckTrue_TimeoutCancelsConsume(t *testing.T) {
 		_ = b.Queue.Append(qrk, &c3types.Inbound{Channel: "telegram", ChatID: -100, TopicID: &tid, MessageID: i, Text: "m", Timestamp: time.Now()})
 	}
 	stub := claimedHolder(t, b, key)
-	stub.SetRoute(&key)
-	stub.MarkRouteConfirmed() // destructive Ack=true fetch requires a confirmed claim (§5 tripwire)
+	bindOutputRouteForTest(stub, &key)
+	confirmOutputRouteForTest(stub) // destructive Ack=true fetch requires a confirmed claim (§5 tripwire)
 
 	// Park the route's single worker on the blocking reply so the Ack=true fetch
 	// queued behind it is not serviced until we release the worker.

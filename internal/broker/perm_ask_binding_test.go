@@ -39,7 +39,7 @@ func bindingSession(t *testing.T, b *Broker, key RouteKey, cli string, pid int, 
 	if _, ok := b.Routes.Claim(key, stub); !ok {
 		t.Fatalf("test setup: %s/%d could not claim the route", cli, pid)
 	}
-	stub.SetRoute(&key)
+	bindOutputRouteForTest(stub, &key)
 	return stub, ipc.NewConn(agentSide)
 }
 
@@ -437,7 +437,7 @@ func TestResolveAsk_AnswerOnlyToTheAskingSession(t *testing.T) {
 
 // ─── the registration window (TOCTOU 1) ────────────────────────────────────
 //
-// Both registration sites resolve the requesting session FIRST (stub.CurrentRoute)
+// Both registration sites resolve the requesting session's held set FIRST
 // and only then register the pending record. Deriving the owner at REGISTER time
 // re-read the routes table across that gap, so anything that changed hands in it —
 // a user-confirmed force_steal, a holder exiting and another session attaching —

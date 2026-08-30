@@ -111,7 +111,7 @@ func TestAttachBare_RecoverableSessionAttachment_SilentClaim(t *testing.T) {
 	stub.SetStableSessionID("sess-1")
 
 	ack := captureAttached(t, func(c *ipc.Conn) {
-		b.attachBare(c, stub, "telegram", "/anywhere", "", false, false)
+		b.attachBare(c, stub, "telegram", "/anywhere", "", false, false, false)
 	})
 	if !ack.OK {
 		t.Fatalf("recoverable session attachment must silent-claim; got Err=%q Proposal=%+v", ack.Err, ack.Proposal)
@@ -128,7 +128,7 @@ func TestAttachBare_RecoverableSessionAttachment_SilentClaim(t *testing.T) {
 	other := b.Stubs.Register("claude", 2, "/anywhere", struct{}{})
 	other.SetStableSessionID("sess-2")
 	ack2 := captureAttached(t, func(c *ipc.Conn) {
-		b.attachBare(c, other, "telegram", "/anywhere", "", false, false)
+		b.attachBare(c, other, "telegram", "/anywhere", "", false, false, false)
 	})
 	if ack2.OK {
 		t.Fatalf("a different sid must NOT resolve another session's attachment; got OK Name=%q", ack2.Name)
@@ -155,7 +155,7 @@ func TestAttachBare_TombstonedThenExplicitReenablesResume(t *testing.T) {
 	stub := b.Stubs.Register("claude", 1, "/proj", struct{}{})
 	stub.SetStableSessionID("sess-1")
 	ack := captureAttached(t, func(c *ipc.Conn) {
-		b.attachBare(c, stub, "telegram", "/proj", "", false, false)
+		b.attachBare(c, stub, "telegram", "/proj", "", false, false, false)
 	})
 	if ack.OK {
 		t.Fatalf("tombstoned attachment must not silent-resume; got OK Name=%q", ack.Name)
@@ -170,7 +170,7 @@ func TestAttachBare_TombstonedThenExplicitReenablesResume(t *testing.T) {
 	// (b) An EXPLICIT attach clears the tombstone (persistMapping upserts a fresh
 	// session attachment) and claims c3.
 	exp := captureAttached(t, func(c *ipc.Conn) {
-		b.attachByName(c, stub, "telegram", "c3", "/proj", "", false, false, false)
+		b.attachByName(c, stub, "telegram", "c3", "/proj", "", false, false, false, false)
 	})
 	if !exp.OK || exp.Name != "c3" {
 		t.Fatalf("explicit attach c3 should succeed and clear the tombstone; got %+v", exp)
@@ -187,7 +187,7 @@ func TestAttachBare_TombstonedThenExplicitReenablesResume(t *testing.T) {
 	fresh := b.Stubs.Register("claude", 3, "/proj", struct{}{})
 	fresh.SetStableSessionID("sess-1")
 	resume := captureAttached(t, func(c *ipc.Conn) {
-		b.attachBare(c, fresh, "telegram", "/proj", "", false, false)
+		b.attachBare(c, fresh, "telegram", "/proj", "", false, false, false)
 	})
 	if !resume.OK || resume.Name != "c3" {
 		t.Fatalf("after the tombstone is cleared, a fresh bare attach must silent-resume c3; got %+v", resume)
@@ -216,7 +216,7 @@ func TestAttachBare_OwnRouteHeldByAnotherLiveSession_ShowsPicker(t *testing.T) {
 	stub := b.Stubs.Register("claude", 1, "/proj", struct{}{})
 	stub.SetStableSessionID("sess-1")
 	ack := captureAttached(t, func(c *ipc.Conn) {
-		b.attachBare(c, stub, "telegram", "/proj", "", false, false)
+		b.attachBare(c, stub, "telegram", "/proj", "", false, false, false)
 	})
 	if ack.OK {
 		t.Fatalf("recover must skip a route held by another live session; got OK Name=%q", ack.Name)

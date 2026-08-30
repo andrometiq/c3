@@ -166,21 +166,37 @@ type Mapping struct {
 	LastAttachedAt time.Time `json:"last_attached_at,omitempty"`
 }
 
-// SessionAttachment records the last topic a CLI session was attached to,
+// RouteRef is the persisted and IPC-safe identity of one route. It is
+// additive wherever embedded: older records omit route sets and continue to
+// use SessionAttachment's legacy single-route fields.
+type RouteRef struct {
+	Channel string `json:"channel"`
+	ChatID  int64  `json:"chat_id"`
+	TopicID *int64 `json:"topic_id,omitempty"`
+	Name    string `json:"name,omitempty"`
+	Group   string `json:"group,omitempty"`
+}
+
+// SessionAttachment records the routes a CLI session was attached to,
 // keyed by CLI family and the host's stable session id, so a resumed session
-// re-attaches automatically regardless of its launch dir.
-// TopicID is a pointer so a DM route (no topic) is representable as nil.
+// re-attaches automatically regardless of its launch dir. Routes preserves
+// claim order and Output identifies the outbound default. The legacy
+// Channel/ChatID/TopicID/Name/Group fields continue to mirror Output so older
+// brokers and pickers recover a useful single route. TopicID is a pointer so a
+// DM route (no topic) is representable as nil.
 // Detached is a tombstone: a deliberate `detach` sets it so the resumed session
 // stays unattached until it attaches again (which clears it).
 type SessionAttachment struct {
-	Channel        string    `json:"channel"`
-	ChatID         int64     `json:"chat_id"`
-	TopicID        *int64    `json:"topic_id,omitempty"`
-	Name           string    `json:"name,omitempty"`
-	Group          string    `json:"group,omitempty"`
-	CWD            string    `json:"cwd,omitempty"`
-	LastAttachedAt time.Time `json:"last_attached_at"`
-	Detached       bool      `json:"detached,omitempty"`
+	Channel        string     `json:"channel"`
+	ChatID         int64      `json:"chat_id"`
+	TopicID        *int64     `json:"topic_id,omitempty"`
+	Name           string     `json:"name,omitempty"`
+	Group          string     `json:"group,omitempty"`
+	CWD            string     `json:"cwd,omitempty"`
+	LastAttachedAt time.Time  `json:"last_attached_at"`
+	Detached       bool       `json:"detached,omitempty"`
+	Routes         []RouteRef `json:"routes,omitempty"`
+	Output         *RouteRef  `json:"output,omitempty"`
 }
 
 // Recoverable reports whether this attachment may be auto-restored on resume:

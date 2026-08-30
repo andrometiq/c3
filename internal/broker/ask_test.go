@@ -33,7 +33,7 @@ func TestResolveAsk_SingleSelect(t *testing.T) {
 	if _, ok := b.Routes.Claim(key, stub); !ok {
 		t.Fatal("claim failed")
 	}
-	stub.SetRoute(&key)
+	bindOutputRouteForTest(stub, &key)
 
 	options := []string{"A", "B", "C"}
 	b.Asks.register(&pendingAsk{askID: "abc12345", route: key, question: "Pick one", options: options, messageID: 77, owner: stub})
@@ -227,7 +227,7 @@ func TestHandleAskRegister_RejectsNonKeyboardChannel(t *testing.T) {
 	if _, ok := b.Routes.Claim(key, stub); !ok {
 		t.Fatal("claim failed")
 	}
-	stub.SetRoute(&key)
+	bindOutputRouteForTest(stub, &key)
 
 	raw, err := json.Marshal(ipc.AskRegisterReq{
 		Op: ipc.OpAskRegister, AskID: "nokbd123", Question: "Pick one", Options: []string{"A", "B"},
@@ -303,7 +303,7 @@ func TestResolveAsk_MultiSelect_ToggleThenDone(t *testing.T) {
 	if _, ok := b.Routes.Claim(key, stub); !ok {
 		t.Fatal("claim failed")
 	}
-	stub.SetRoute(&key)
+	bindOutputRouteForTest(stub, &key)
 
 	options := []string{"A", "B", "C"}
 	b.Asks.register(&pendingAsk{
@@ -412,7 +412,7 @@ func TestResolveAsk_Skip(t *testing.T) {
 	if _, ok := b.Routes.Claim(key, stub); !ok {
 		t.Fatal("claim failed")
 	}
-	stub.SetRoute(&key)
+	bindOutputRouteForTest(stub, &key)
 
 	b.Asks.register(&pendingAsk{
 		askID: "skip1234", route: key, question: "Pick or skip", options: []string{"A", "B"},

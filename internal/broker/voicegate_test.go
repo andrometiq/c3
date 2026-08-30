@@ -304,7 +304,7 @@ func brokerWithProbe(t *testing.T, pc *probeChannel) *Broker {
 func retranscribeOn(t *testing.T, b *Broker, fileID string) ipc.RetranscribeResp {
 	t.Helper()
 	stub := &Stub{CLI: "claude"}
-	stub.SetRoute(&RouteKey{Channel: "telegram", ChatID: -100, HasTopic: true, TopicID: 914})
+	bindOutputRouteForTest(stub, &RouteKey{Channel: "telegram", ChatID: -100, HasTopic: true, TopicID: 914})
 	agentSide, brokerSide := newConnPair(t)
 	raw, _ := json.Marshal(ipc.RetranscribeReq{Op: ipc.OpRetranscribe, ID: "1", FileID: fileID})
 	go b.handleRetranscribe(brokerSide, stub, raw)
@@ -741,7 +741,7 @@ func TestHandleRetranscribe_RevisionPreservesFinalRichMessage(t *testing.T) {
 	})
 
 	stub := claimedHolder(t, b, key)
-	stub.SetRoute(&key)
+	bindOutputRouteForTest(stub, &key)
 
 	agentSide, brokerSide := newConnPair(t)
 	raw, _ := json.Marshal(ipc.RetranscribeReq{Op: ipc.OpRetranscribe, ID: "1", FileID: "V1", MessageID: 5})
@@ -790,7 +790,7 @@ func TestHandleRetranscribe_DoesNotOverwriteACaptionThatLooksLikeATranscript(t *
 	})
 
 	stub := claimedHolder(t, b, key)
-	stub.SetRoute(&key)
+	bindOutputRouteForTest(stub, &key)
 	agentSide, brokerSide := newConnPair(t)
 	raw, _ := json.Marshal(ipc.RetranscribeReq{Op: ipc.OpRetranscribe, ID: "1", FileID: "V1", MessageID: 5})
 	go b.handleRetranscribe(brokerSide, stub, raw)
@@ -832,7 +832,7 @@ func TestHandleRetranscribe_RefusesAMessageThatDoesNotCarryThatVoice(t *testing.
 	})
 
 	stub := claimedHolder(t, b, key)
-	stub.SetRoute(&key)
+	bindOutputRouteForTest(stub, &key)
 	agentSide, brokerSide := newConnPair(t)
 	// A perfectly valid voice file_id — for a voice this message does not carry.
 	raw, _ := json.Marshal(ipc.RetranscribeReq{Op: ipc.OpRetranscribe, ID: "1", FileID: "V-ELSEWHERE", MessageID: 5})
@@ -879,7 +879,7 @@ func TestHandleRetranscribe_RepeatedManualRequestsAppendRevisions(t *testing.T) 
 	})
 
 	stub := claimedHolder(t, b, key)
-	stub.SetRoute(&key)
+	bindOutputRouteForTest(stub, &key)
 	agentSide, brokerSide := newConnPair(t)
 
 	for i, id := range []string{"1", "2"} {

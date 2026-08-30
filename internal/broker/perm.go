@@ -89,7 +89,7 @@ type pendingPerm struct {
 
 	// owner is the SESSION this prompt was relayed FOR — the requesting stub
 	// ITSELF, stamped by handlePermissionRequest, which already holds it (it
-	// routed via stub.CurrentRoute()). A verdict authorises THAT session's tool
+	// routed via the stub's held route set). A verdict authorises THAT session's tool
 	// call, so it must reach that session and no other — without this the
 	// recipient could be re-derived from the routes table after the TAP-time
 	// ownerRecipient check, and a route that changed hands in between (a confirmed

@@ -88,6 +88,11 @@ type FetchJob struct {
 	Limit int
 	All   bool
 	Ack   bool
+	// Owner is the session authorized to consume this route. It is set by
+	// fetch_queue; internal read-only fetches leave it nil. The worker re-checks
+	// the authoritative holder and per-route confirmation immediately around the
+	// destructive queue mutation.
+	Owner *Stub
 	// RespID is the correlation id the response will echo VERBATIM
 	// (docs/ADAPTERS.md: "Generate it yourself; the broker echoes it back"), and
 	// the adapter picks it — so it is caller-controlled length that lands in the
@@ -105,9 +110,10 @@ type FetchJob struct {
 
 // FetchResult carries the pulled messages + remaining count back to the handler.
 type FetchResult struct {
-	Messages  []c3types.Inbound
-	Remaining int
-	Err       error
+	Messages   []c3types.Inbound
+	Remaining  int
+	SkipReason string
+	Err        error
 }
 
 // fetchLease makes "caller timed out" and "destructive Consume started" mutually
@@ -167,6 +173,10 @@ type ConsumeJob struct {
 	MessageID int64
 	Token     string
 	Count     int
+	// Owner is the session whose live push is being acknowledged. The worker
+	// applies the same authoritative ownership + confirmation gate as fetch_queue
+	// before removing any covered records.
+	Owner *Stub
 }
 
 // OutboundJob is a queued tool-call dispatched to a channel.
@@ -1238,7 +1248,7 @@ func (w *RouteWorker) forwardOrFallbackCovering(_ context.Context, in *c3types.I
 		// Typing relay (P5): an inbound was just delivered to the claimed
 		// holder, so the agent is about to work this turn. Arm the typing
 		// ticker — but ONLY if this holder has already replied at least once
-		// (the deterministic "in Telegram mode" gate; see Stub.hasReplied) and
+		// (the deterministic per-route reply gate; see Stub.HasReplied) and
 		// the channel supports typing. armTyping enforces both gates.
 		w.armTyping(holder)
 		// Silent-loss net: this push was acked-as-delivered and its durable copy
@@ -1739,50 +1749,69 @@ func (w *RouteWorker) handleFetch(_ context.Context, job *FetchJob) {
 	}
 	var notices []c3types.Inbound // stand-ins for records moved out of the queue
 	var msgs []c3types.Inbound
+	var skipReason string
 	effectiveAck := job.Ack
 	if effectiveAck {
 		if job.Lease == nil || job.Lease.beginConsume() {
 			func() {
 				defer job.Lease.finishConsume()
-				// A head record too large for any frame blocks everything behind
-				// it. Move it aside (see setAsideOversize for the ruling) and look
-				// again; each pass provably removes one record, so this ends.
-				for len(cand) > 0 {
-					var headFit int
-					headFit, err = fetchFrameFitReserved(job.RespID, total, cand[:1], job.FrameReserve)
-					if err != nil || headFit > 0 {
-						break // envelope is unsendable (reported below), or the head is deliverable
+				consume := func() {
+					// A head record too large for an EMPTY frame blocks everything
+					// behind it. A normal record that only fails the remaining budget
+					// of a multi-route response stays queued for the next fetch.
+					for len(cand) > 0 {
+						var headFit int
+						headFit, err = fetchFrameFitReserved(job.RespID, total, cand[:1], job.FrameReserve)
+						if err != nil || headFit > 0 {
+							break // envelope is unsendable (reported below), or the head is deliverable
+						}
+						var emptyFit int
+						emptyFit, err = fetchFrameFitReserved(job.RespID, total, cand[:1], 0)
+						if err != nil || emptyFit > 0 {
+							break // deliverable in a fresh response: leave it queued
+						}
+						var notice c3types.Inbound
+						if notice, err = w.setAsideOversize(qrk, cand[0], encodedSize(cand[0])); err != nil {
+							return
+						}
+						notices = append(notices, notice)
+						total--
+						if cand, err = w.broker.Queue.Peek(qrk, n); err != nil {
+							return
+						}
 					}
-					var notice c3types.Inbound
-					if notice, err = w.setAsideOversize(qrk, cand[0], encodedSize(cand[0])); err != nil {
+					if err != nil {
 						return
 					}
-					notices = append(notices, notice)
-					total--
-					if cand, err = w.broker.Queue.Peek(qrk, n); err != nil {
+					// Budget the notices alongside the records: they ride in the same
+					// frame, so room taken by a notice is room a record cannot have.
+					var fit int
+					if fit, err = fetchFrameFitReserved(job.RespID, total, append(append(make([]c3types.Inbound, 0, len(notices)+len(cand)), notices...), cand...), job.FrameReserve); err != nil {
 						return
 					}
+					take := fit - len(notices)
+					if take < 0 {
+						take = 0
+					}
+					msgs, err = w.broker.Queue.Consume(qrk, take)
 				}
-				if err != nil {
+				if job.Owner == nil {
+					consume()
 					return
 				}
-				// Budget the notices alongside the records: they ride in the same
-				// frame, so room taken by a notice is room a record cannot have.
-				var fit int
-				if fit, err = fetchFrameFitReserved(job.RespID, total, append(append(make([]c3types.Inbound, 0, len(notices)+len(cand)), notices...), cand...), job.FrameReserve); err != nil {
-					return
+				if authorized, reason := w.broker.Routes.withConfirmedHolder(w.key, job.Owner, consume); !authorized {
+					skipReason = reason
 				}
-				take := fit - len(notices)
-				if take < 0 {
-					take = 0
-				}
-				msgs, err = w.broker.Queue.Consume(qrk, take)
 			}()
 		} else {
 			effectiveAck = false
 			log.Printf("fetch_queue chan=%s chat=%d topic=%s: caller left before consume; downgraded ack=true to peek",
 				w.key.Channel, w.key.ChatID, TopicKeyStr(w.key))
 		}
+	}
+	if skipReason != "" {
+		job.ResultCh <- FetchResult{SkipReason: skipReason}
+		return
 	}
 	if err != nil {
 		job.ResultCh <- FetchResult{Err: err}
@@ -1889,38 +1918,48 @@ func (w *RouteWorker) handleConsume(_ context.Context, job *ConsumeJob) {
 		// Event / zero-covered ack: nothing to consume. Skip rather than consume 1.
 		return
 	}
-	qrk := queueRouteKey(w.key)
+	consume := func() {
+		qrk := queueRouteKey(w.key)
 
-	// Preferred path: remove the lines this push ACTUALLY covered, by identity.
-	// Dropping n lines off the head is only equivalent when the queue held nothing
-	// but this push's own lines; when older undelivered backlog sits ahead of them
-	// the head-drop destroys messages nobody ever saw AND leaves the delivered one
-	// queued for re-delivery. RemoveIDs snapshots to .trash before rewriting and is
-	// idempotent, so an id already evicted/consumed simply matches nothing.
-	if ids := w.takeCoveredByPush(job.MessageID, job.Token); len(ids) > 0 {
-		removed, err := w.broker.Queue.RemoveRecordIDs(qrk, ids)
-		if err != nil {
-			log.Printf("queue consume(live-ack, by-record) FAIL chan=%s chat=%d topic=%s msg=%d ids=%d: %v",
-				w.key.Channel, w.key.ChatID, TopicKeyStr(w.key), job.MessageID, len(ids), err)
+		// Preferred path: remove the lines this push ACTUALLY covered, by identity.
+		// Dropping n lines off the head is only equivalent when the queue held nothing
+		// but this push's own lines; when older undelivered backlog sits ahead of them
+		// the head-drop destroys messages nobody ever saw AND leaves the delivered one
+		// queued for re-delivery. RemoveIDs snapshots to .trash before rewriting and is
+		// idempotent, so an id already evicted/consumed simply matches nothing.
+		if ids := w.takeCoveredByPush(job.MessageID, job.Token); len(ids) > 0 {
+			removed, err := w.broker.Queue.RemoveRecordIDs(qrk, ids)
+			if err != nil {
+				log.Printf("queue consume(live-ack, by-record) FAIL chan=%s chat=%d topic=%s msg=%d ids=%d: %v",
+					w.key.Channel, w.key.ChatID, TopicKeyStr(w.key), job.MessageID, len(ids), err)
+				return
+			}
+			if len(removed) != len(ids) {
+				// Not an error: a covered line can legitimately have been evicted by the
+				// retention cap or drained away between push and ack. Logged so a
+				// systematic mismatch is visible rather than silent.
+				log.Printf("queue consume(live-ack, by-record) chan=%s chat=%d topic=%s msg=%d: covered=%d removed=%d (rest already gone)",
+					w.key.Channel, w.key.ChatID, TopicKeyStr(w.key), job.MessageID, len(ids), len(removed))
+			}
 			return
 		}
-		if len(removed) != len(ids) {
-			// Not an error: a covered line can legitimately have been evicted by the
-			// retention cap or drained away between push and ack. Logged so a
-			// systematic mismatch is visible rather than silent.
-			log.Printf("queue consume(live-ack, by-record) chan=%s chat=%d topic=%s msg=%d: covered=%d removed=%d (rest already gone)",
-				w.key.Channel, w.key.ChatID, TopicKeyStr(w.key), job.MessageID, len(ids), len(removed))
-		}
+
+		// No identity record means we cannot prove which lines this ack covered. Never
+		// guess by consuming the queue head: older undelivered backlog may sit there,
+		// which is the exact release-blocking loss this path was changed to prevent.
+		// Leaving the delivered line queued may duplicate it on a later fetch, but
+		// that is visible and recoverable; deleting an unrelated line is not.
+		log.Printf("queue consume(live-ack) SKIP chan=%s chat=%d topic=%s msg=%d count=%d: covered identity unavailable; leaving queue intact",
+			w.key.Channel, w.key.ChatID, TopicKeyStr(w.key), job.MessageID, n)
+	}
+	if job.Owner == nil {
+		consume()
 		return
 	}
-
-	// No identity record means we cannot prove which lines this ack covered. Never
-	// guess by consuming the queue head: older undelivered backlog may sit there,
-	// which is the exact release-blocking loss this path was changed to prevent.
-	// Leaving the delivered line queued may duplicate it on a later fetch, but
-	// that is visible and recoverable; deleting an unrelated line is not.
-	log.Printf("queue consume(live-ack) SKIP chan=%s chat=%d topic=%s msg=%d count=%d: covered identity unavailable; leaving queue intact",
-		w.key.Channel, w.key.ChatID, TopicKeyStr(w.key), job.MessageID, n)
+	if authorized, reason := w.broker.Routes.withConfirmedHolder(w.key, job.Owner, consume); !authorized {
+		log.Printf("inbound_delivered update=%d count=%d route=%s: consume SKIPPED: %s (Count lines remain as backlog)",
+			job.MessageID, job.Count, w.broker.routeLabel(w.key), reason)
+	}
 }
 
 // recordCoveredByPush remembers which durable lines a live push covered, keyed
@@ -2282,7 +2321,7 @@ func (w *RouteWorker) dispatchOutbound(_ context.Context, job *OutboundJob) {
 		w.pendingAck = nil
 		if job.Tool == "reply" {
 			if holder, ok := w.broker.Routes.Holder(w.key); ok {
-				holder.MarkReplied()
+				holder.MarkReplied(w.key)
 			}
 			w.disarmTyping()
 		} else if holder, ok := w.broker.Routes.Holder(w.key); ok {
@@ -2302,7 +2341,7 @@ func (w *RouteWorker) dispatchOutbound(_ context.Context, job *OutboundJob) {
 // a network call. An already-armed ticker is left running (re-arm = no-op while
 // armed) so the cadence stays steady across a turn's tool calls.
 func (w *RouteWorker) armTyping(holder *Stub) {
-	if holder == nil || !holder.HasReplied() {
+	if holder == nil || !holder.HasReplied(w.key) {
 		return
 	}
 	if w.broker == nil {

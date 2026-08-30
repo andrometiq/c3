@@ -73,7 +73,7 @@ func TestSendWelcome_RendersResolvedSubdir(t *testing.T) {
 	stub := &Stub{CLI: "claude", PID: 7, CWD: parent}
 	tid := int64(281)
 	key := MakeRouteKey("telegram", -100, &tid)
-	if !b.tryClaim(nil, stub, key, "c3", false, false) {
+	if !b.tryClaim(nil, stub, key, "c3", false, false, false) {
 		t.Fatal("claim failed")
 	}
 

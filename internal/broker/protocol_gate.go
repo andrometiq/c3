@@ -33,7 +33,16 @@ func refuseIncompatibleStateChange(conn *ipc.Conn, stub *Stub, op ipc.Op, raw []
 		return true
 	case ipc.OpRelease:
 		refuse()
-		_ = conn.WriteJSON(ipc.ErrorMsg{Op: ipc.OpError, Err: reason})
+		var req ipc.ReleaseReq
+		if json.Unmarshal(raw, &req) == nil && req.Target != "" {
+			_ = conn.WriteJSON(ipc.ReleaseResp{Op: ipc.OpReleaseResult, Err: reason})
+		} else {
+			_ = conn.WriteJSON(ipc.ErrorMsg{Op: ipc.OpError, Err: reason})
+		}
+		return true
+	case ipc.OpSetOutputRoute:
+		refuse()
+		_ = conn.WriteJSON(ipc.SetOutputRouteResp{Op: ipc.OpSetOutputRouteResult, Err: reason})
 		return true
 	case ipc.OpFetchQueue:
 		var req ipc.FetchQueueReq

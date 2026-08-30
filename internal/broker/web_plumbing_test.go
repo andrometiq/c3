@@ -134,7 +134,7 @@ func TestAttachResolutionWithTelegramAndWeb(t *testing.T) {
 	defer b.Shutdown()
 	stub := &Stub{CLI: "claude", PID: 1}
 	telegramRoute := MakeRouteKey("telegram", -100, ptrI64Val(281))
-	stub.SetRoute(&telegramRoute)
+	bindOutputRouteForTest(stub, &telegramRoute)
 
 	cases := []struct {
 		name string
@@ -455,7 +455,7 @@ func TestWebHeldCopyAndKeyboardlessPermissionNotice(t *testing.T) {
 	if _, ok := b.Routes.Claim(key, stub); !ok {
 		t.Fatal("claim web")
 	}
-	stub.SetRoute(&key)
+	bindOutputRouteForTest(stub, &key)
 	b.handlePermissionRequest(nil, stub, mustMarshalJSON(t, ipc.PermissionReq{
 		Op: ipc.OpPermissionRequest, RequestID: "perm-web", ToolName: "Bash", Preview: "go test ./...",
 	}))

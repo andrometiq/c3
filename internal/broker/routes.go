@@ -258,6 +258,25 @@ func (r *Routes) Holder(key RouteKey) (*Stub, bool) {
 	return s, ok
 }
 
+// withConfirmedHolder runs consume only while key is authoritatively held by
+// stub and that exact claim is confirmed. Keeping the read lock across consume
+// prevents a release or steal from landing between the ownership check and the
+// destructive queue mutation. This is the shared authorization gate for both
+// fetch_queue(ack=true) and live-push acknowledgements.
+func (r *Routes) withConfirmedHolder(key RouteKey, stub *Stub, consume func()) (bool, string) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	holder, held := r.m[key]
+	if !held || holder != stub {
+		return false, "route is no longer held by this session"
+	}
+	if !stub.RouteConfirmed(key) {
+		return false, "route not confirmed by an explicit claim"
+	}
+	consume()
+	return true, ""
+}
+
 // Snapshot returns a slice of (key, stub) pairs for diagnostics.
 func (r *Routes) Snapshot() []RouteEntry {
 	r.mu.RLock()

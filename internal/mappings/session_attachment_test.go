@@ -129,6 +129,39 @@ func TestSessionAttachment_OmitemptyAndRoundTrip(t *testing.T) {
 	}
 }
 
+func TestSessionAttachmentRouteSetAndLegacyRoundTrip(t *testing.T) {
+	topicID := int64(281)
+	telegram := RouteRef{Channel: "telegram", ChatID: -100, TopicID: &topicID, Name: "c3", Group: "main"}
+	web := RouteRef{Channel: "web", ChatID: 42, Name: "web"}
+	withSet := &MappingsFile{SchemaVersion: 1}
+	withSet.UpsertSessionAttachment("claude", "multi", SessionAttachment{
+		Channel: "web", ChatID: 42, Name: "web", LastAttachedAt: time.Now().UTC(),
+		Routes: []RouteRef{telegram, web}, Output: &web,
+	})
+	raw, err := json.Marshal(withSet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded MappingsFile
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	got, ok := decoded.LookupSessionAttachment("claude", "multi")
+	if !ok || len(got.Routes) != 2 || got.Output == nil || got.Output.Channel != "web" {
+		t.Fatalf("route-set roundtrip=%+v ok=%v", got, ok)
+	}
+
+	legacyRaw := []byte(`{"schema_version":1,"channels":{},"mappings":{},"session_attachments_by_cli":{"claude":{"legacy":{"channel":"telegram","chat_id":-100,"topic_id":281,"name":"c3","last_attached_at":"2026-08-30T00:00:00Z"}}}}`)
+	var legacy MappingsFile
+	if err := json.Unmarshal(legacyRaw, &legacy); err != nil {
+		t.Fatal(err)
+	}
+	legacyAttachment, ok := legacy.LookupSessionAttachment("claude", "legacy")
+	if !ok || legacyAttachment.Channel != "telegram" || legacyAttachment.TopicID == nil || len(legacyAttachment.Routes) != 0 || legacyAttachment.Output != nil {
+		t.Fatalf("legacy record changed on decode: %+v ok=%v", legacyAttachment, ok)
+	}
+}
+
 func TestSessionAttachment_SameHostIDIsIndependentAcrossCLIFamilies(t *testing.T) {
 	now := time.Now().UTC()
 	mf := &MappingsFile{}

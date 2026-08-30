@@ -624,7 +624,7 @@ func TestTryClaim_FreshClaimTriggersWelcome(t *testing.T) {
 	stub := &Stub{CLI: "claude", PID: 1, CWD: "/home/u/proj"}
 	tid := int64(914)
 	key := MakeRouteKey("telegram", -100, &tid)
-	if !b.tryClaim(nil, stub, key, "c3", false, false) {
+	if !b.tryClaim(nil, stub, key, "c3", false, false, false) {
 		t.Fatal("fresh claim should succeed (nil conn is OK because we won't hit the collision branch)")
 	}
 
@@ -661,7 +661,7 @@ func TestTryClaim_SameLogicalSessionReclaimSuppressesWelcome(t *testing.T) {
 
 	// First claim by stub#1.
 	stub1 := &Stub{CLI: "claude", PID: 99, CWD: "/home/u/proj"}
-	if !b.tryClaim(nil, stub1, key, "c3", false, false) {
+	if !b.tryClaim(nil, stub1, key, "c3", false, false, false) {
 		t.Fatal("first claim should succeed")
 	}
 	// Wait for the welcome to land.
@@ -674,7 +674,7 @@ func TestTryClaim_SameLogicalSessionReclaimSuppressesWelcome(t *testing.T) {
 	// Simulate an adapter reconnect — same logical session (CLI+PID+CWD),
 	// different ConnID.
 	stub2 := &Stub{CLI: "claude", PID: 99, CWD: "/home/u/proj"}
-	if !b.tryClaim(nil, stub2, key, "c3", false, false) {
+	if !b.tryClaim(nil, stub2, key, "c3", false, false, false) {
 		t.Fatal("re-claim by same logical session should succeed")
 	}
 	time.Sleep(50 * time.Millisecond)
@@ -900,7 +900,7 @@ func TestSendWelcome_FreshUserAttachJustAfterBrokerStartup_Fires(t *testing.T) {
 	stub := &Stub{CLI: "claude", PID: 1, CWD: "/home/u/proj"}
 	tid := int64(914)
 	key := MakeRouteKey("telegram", -100, &tid)
-	if !b.tryClaim(nil, stub, key, "c3", false, false /*replay*/) {
+	if !b.tryClaim(nil, stub, key, "c3", false, false /*replay*/, false /*add*/) {
 		t.Fatal("fresh claim should succeed")
 	}
 	deadline := time.Now().Add(500 * time.Millisecond)
@@ -931,7 +931,7 @@ func TestTryClaim_ReplayFlagSuppressesWelcomeAfterBrokerBounce(t *testing.T) {
 	tid := int64(914)
 	key := MakeRouteKey("telegram", -100, &tid)
 
-	if !b.tryClaim(nil, stub, key, "c3", false /*steal*/, true /*replay*/) {
+	if !b.tryClaim(nil, stub, key, "c3", false /*steal*/, true /*replay*/, false /*add*/) {
 		t.Fatal("replay claim against an empty Routes map should still succeed")
 	}
 	time.Sleep(50 * time.Millisecond)
@@ -986,7 +986,7 @@ func TestTryClaim_FailedSwitchKeepsOldRoute(t *testing.T) {
 	// look like an idempotent self-reclaim instead of a cross-session
 	// collision.
 	stubA := b.Stubs.Register("claude", 1, "/a", nil)
-	if !b.tryClaim(nil, stubA, dmKey, "DM", false, false) {
+	if !b.tryClaim(nil, stubA, dmKey, "DM", false, false, false) {
 		t.Fatal("stubA: DM claim should succeed")
 	}
 
@@ -994,20 +994,20 @@ func TestTryClaim_FailedSwitchKeepsOldRoute(t *testing.T) {
 	// PID is a real live process, so the collision in step 3 is a LIVE
 	// collision (not a dead-holder displacement that would succeed).
 	stubB := b.Stubs.Register("codex", os.Getpid(), "/b", nil)
-	if !b.tryClaim(nil, stubB, c3Key, "c3", false, false) {
+	if !b.tryClaim(nil, stubB, c3Key, "c3", false, false, false) {
 		t.Fatal("stubB: c3 claim should succeed")
 	}
 
 	// 3. stubA tries to SWITCH to c3 without steal → live collision, false.
 	conn := drainedConn(t)
-	if b.tryClaim(conn, stubA, c3Key, "c3", false, false) {
+	if b.tryClaim(conn, stubA, c3Key, "c3", false, false, false) {
 		t.Fatal("stubA: switch to held c3 (steal=false) must fail with a collision")
 	}
 
 	// 4. The failed switch must leave stubA's OLD route fully intact — both the
 	// stub's recorded route and the routes-table claim.
-	if got := stubA.CurrentRoute(); got == nil || *got != dmKey {
-		t.Errorf("stubA.CurrentRoute()=%v, want DM key %v (old route dropped on failed switch)", got, dmKey)
+	if got := stubA.OutputRoute(); got == nil || *got != dmKey {
+		t.Errorf("stubA.OutputRoute()=%v, want DM key %v (old route dropped on failed switch)", got, dmKey)
 	}
 	if h, ok := b.Routes.Holder(dmKey); !ok || h != stubA {
 		t.Errorf("Routes.Holder(DM)=%v ok=%v, want stubA — failed switch released the old claim", h, ok)
@@ -1029,19 +1029,19 @@ func TestTryClaim_SuccessfulSwitchReleasesOld(t *testing.T) {
 	c3Key := MakeRouteKey("telegram", -100, &tid)
 
 	stubA := b.Stubs.Register("claude", 1, "/a", nil)
-	if !b.tryClaim(nil, stubA, dmKey, "DM", false, false) {
+	if !b.tryClaim(nil, stubA, dmKey, "DM", false, false, false) {
 		t.Fatal("stubA: DM claim should succeed")
 	}
 
 	// Switch to an UNHELD topic → succeeds.
-	if !b.tryClaim(nil, stubA, c3Key, "c3", false, false) {
+	if !b.tryClaim(nil, stubA, c3Key, "c3", false, false, false) {
 		t.Fatal("stubA: switch to unheld c3 should succeed")
 	}
 
 	// Single-claim invariant: stubA now holds c3, and the old DM route is free
 	// (no double-hold).
-	if got := stubA.CurrentRoute(); got == nil || *got != c3Key {
-		t.Errorf("stubA.CurrentRoute()=%v, want c3 key %v", got, c3Key)
+	if got := stubA.OutputRoute(); got == nil || *got != c3Key {
+		t.Errorf("stubA.OutputRoute()=%v, want c3 key %v", got, c3Key)
 	}
 	if h, ok := b.Routes.Holder(c3Key); !ok || h != stubA {
 		t.Errorf("Routes.Holder(c3)=%v ok=%v, want stubA", h, ok)
@@ -1198,7 +1198,7 @@ func TestPing_MultipleStubsAtCWD_TargetsMostRecent(t *testing.T) {
 	older := b.Stubs.Register("claude", 1001, cwd, nil)
 	tid1 := int64(281)
 	key1 := MakeRouteKey("telegram", -100, &tid1)
-	if !b.tryClaim(nil, older, key1, "c3", false, false) {
+	if !b.tryClaim(nil, older, key1, "c3", false, false, false) {
 		t.Fatal("older stub: claim failed")
 	}
 
@@ -1207,7 +1207,7 @@ func TestPing_MultipleStubsAtCWD_TargetsMostRecent(t *testing.T) {
 	newer := b.Stubs.Register("codex", 1002, cwd, nil)
 	tid2 := int64(412)
 	key2 := MakeRouteKey("telegram", -200, &tid2)
-	if !b.tryClaim(nil, newer, key2, "feature-x", false, false) {
+	if !b.tryClaim(nil, newer, key2, "feature-x", false, false, false) {
 		t.Fatal("newer stub: claim failed")
 	}
 	if newer.ConnID <= older.ConnID {

@@ -133,10 +133,15 @@ func TestPresenceNotifierConnDropPublishesRelease(t *testing.T) {
 	}
 	waitForPresenceCalls(t, notifier, 1)
 	closeConn()
-	released := waitForPresenceCalls(t, notifier, 2)[1]
-	if released.holder != nil {
-		t.Fatalf("conn-drop holder=%+v, want nil", released.holder)
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		calls := notifier.snapshot()
+		if len(calls) > 0 && calls[len(calls)-1].holder == nil {
+			return
+		}
+		time.Sleep(time.Millisecond)
 	}
+	t.Fatalf("conn-drop never published a final release: %+v", notifier.snapshot())
 }
 
 func TestPresenceNotifierRegistrationReplaysExistingClaim(t *testing.T) {

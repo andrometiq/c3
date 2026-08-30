@@ -58,8 +58,8 @@ func TestHandleInboundDelivered_EventAckLeavesBacklogIntact(t *testing.T) {
 		_ = b.Queue.Append(qrk, &c3types.Inbound{Channel: "telegram", ChatID: -100, TopicID: &tid, MessageID: i, Text: "m", Timestamp: time.Now()})
 	}
 	stub := claimedHolder(t, b, key)
-	stub.SetRoute(&key)
-	stub.MarkRouteConfirmed() // confirmed claim, so the Count=0 no-op is proven by the Count<1 branch, not the §5 tripwire
+	bindOutputRouteForTest(stub, &key)
+	confirmOutputRouteForTest(stub) // confirmed claim, so the Count=0 no-op is proven by the Count<1 branch, not the §5 tripwire
 
 	// An event push acked with Count=0 (its Covered) — must be a no-op consume.
 	raw, _ := json.Marshal(ipc.InboundDeliveredMsg{Op: ipc.OpInboundDelivered, UpdateID: 50, OK: true, Count: 0})
@@ -336,8 +336,8 @@ func TestFlushInbounds_MixedBatchCoveredCountsActualAppends(t *testing.T) {
 
 	// And the ack of Count=1 must consume exactly one (the new line + the pre-seed
 	// = 2 queued; consuming 1 leaves 1).
-	stub.SetRoute(&key)
-	stub.MarkRouteConfirmed() // live-push ack consume requires a confirmed claim (§5 tripwire)
+	bindOutputRouteForTest(stub, &key)
+	confirmOutputRouteForTest(stub) // live-push ack consume requires a confirmed claim (§5 tripwire)
 	ackRaw, _ := json.Marshal(ipc.InboundDeliveredMsg{Op: ipc.OpInboundDelivered, UpdateID: 2, OK: true, Count: msg.Covered})
 	b.handleInboundDelivered(stub, ackRaw)
 	deadline := time.Now().Add(2 * time.Second)
@@ -563,8 +563,8 @@ func TestHandleInboundDelivered_DispatchesConsume(t *testing.T) {
 		t.Fatal(err)
 	}
 	stub := claimedHolder(t, b, key)
-	stub.SetRoute(&key)
-	stub.MarkRouteConfirmed() // live-push ack consume requires a confirmed claim (§5 tripwire)
+	bindOutputRouteForTest(stub, &key)
+	confirmOutputRouteForTest(stub) // live-push ack consume requires a confirmed claim (§5 tripwire)
 	b.Workers.mu.Lock()
 	w := b.Workers.spawnLocked(key)
 	b.Workers.mu.Unlock()

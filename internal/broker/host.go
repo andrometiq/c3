@@ -229,13 +229,6 @@ func (b *Broker) broadcastSystemEvent(sysev *c3types.SystemEvent) {
 	if sysev == nil {
 		return
 	}
-	in := c3types.Inbound{
-		Channel: sysev.Source,
-		Kind:    c3types.InboundSystem,
-		Event:   &c3types.InboundEvent{System: sysev},
-		// No ChatID/Sender/Text — this is broker-originated, not a routed
-		// user message.
-	}
 	delivered := 0
 	for _, s := range b.Stubs.Snapshot() {
 		// Skip the transient CLI clients (status/topics/etc.) — they're not
@@ -243,19 +236,36 @@ func (b *Broker) broadcastSystemEvent(sysev *c3types.SystemEvent) {
 		if s.CLI == "c3-broker-cli" {
 			continue
 		}
-		conn, ok := s.ConnValue().(*ipc.Conn)
-		if !ok || conn == nil {
-			continue
+		if b.sendSystemEventTo(s, sysev) {
+			delivered++
 		}
-		if err := conn.WriteJSON(ipc.InboundMsg{Op: ipc.OpInbound, Inbound: in}); err != nil {
-			log.Printf("health-broadcast: write to cli=%s pid=%d conn=%d failed: %v",
-				s.CLI, s.PID, s.ConnID, err)
-			continue
-		}
-		delivered++
 	}
 	log.Printf("health-broadcast: system advisory %q delivered to %d live CLI session(s)",
 		sysev.Title, delivered)
+}
+
+// sendSystemEventTo directly writes one trusted broker-originated advisory to
+// a live stub. It never routes through a channel or the durable queue and never
+// carries user content. Callers on ownership paths must invoke it asynchronously
+// so a slow or dead peer cannot block a claim.
+func (b *Broker) sendSystemEventTo(stub *Stub, sysev *c3types.SystemEvent) bool {
+	if stub == nil || sysev == nil {
+		return false
+	}
+	conn, ok := stub.ConnValue().(*ipc.Conn)
+	if !ok || conn == nil {
+		return false
+	}
+	in := c3types.Inbound{
+		Channel: sysev.Source,
+		Kind:    c3types.InboundSystem,
+		Event:   &c3types.InboundEvent{System: sysev},
+	}
+	if err := conn.WriteJSON(ipc.InboundMsg{Op: ipc.OpInbound, Inbound: in}); err != nil {
+		log.Printf("system-event: write to cli=%s pid=%d conn=%d failed: %v", stub.CLI, stub.PID, stub.ConnID, err)
+		return false
+	}
+	return true
 }
 
 // channelRegistration entries inside the broker.
