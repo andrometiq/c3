@@ -65,6 +65,26 @@ Phase 1 is drive-only. Web has no Allow/Deny buttons and cannot answer `ask`.
 Permission prompts and questions must be answered at the laptop, so an on-the-go
 drive should use permissions that were deliberately pre-approved.
 
+## On-the-go mode
+
+Say **“start on-the-go mode”** or **“switch to the web chat”**
+(or run `/c3:on-the-go`). The agent treats that as an explicit output-mode
+request: it remembers the Telegram topic it currently holds, attaches the
+`web` route, switches to reply-tool (“Telegram”) mode so replies land in the
+browser, and announces the switch in one line. The attach response sends or
+confirms the Telegram DM login link as usual.
+
+When **🔊 Voice** is turned on or off, the web chat sends the agent a system
+notice saying **“Spoken replies ON”** or **“Spoken replies OFF.”** While it is
+on, the agent follows the channel's spoken-reply guidance and writes short,
+speakable prose; when it is off, normal rich-text guidance applies.
+
+Say **“end on-the-go mode,” “back to Telegram,”** or **“back to the topic”**
+(or run `/c3:off-the-go`) to re-attach the Telegram topic held before the
+switch. If the agent no longer knows that topic, it asks instead of guessing,
+then announces the restored route and output mode. Permission prompts and
+`ask` remain laptop-side throughout on-the-go mode.
+
 ## Sign-in flow
 
 1. After a successful `attach web`, the broker checks for a live browser

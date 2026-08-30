@@ -280,7 +280,7 @@ func wireGoldens() []wireGolden {
 		{
 			name: "Capabilities",
 			value: Capabilities{
-				Channel: "telegram", RichText: true,
+				Channel: "telegram", RichText: true, SpokenReplies: true,
 				MaxMessageRunes: 4096, MaxMessageRunesSource: 3500, MaxCaptionRunes: 1024,
 				AutoChunks:      true,
 				MediaKinds:      []MediaKind{MediaPhoto, MediaFile},
@@ -294,7 +294,7 @@ func wireGoldens() []wireGolden {
 				Stream:  StreamCaps{StreamViaEdit: false, MinEditInterval: time.Second},
 			},
 			keys: []string{
-				"Channel", "RichText", "MaxMessageRunes", "MaxMessageRunesSource",
+				"Channel", "RichText", "SpokenReplies", "MaxMessageRunes", "MaxMessageRunesSource",
 				"MaxCaptionRunes", "AutoChunks", "MediaKinds", "CompressedPhoto",
 				"OriginalFile", "Albums", "MaxSendBytes", "Polls", "Reactions",
 				"ReactionsSingle", "EditMessages", "Threads", "Typing",

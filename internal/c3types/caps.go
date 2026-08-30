@@ -22,6 +22,10 @@ type Capabilities struct {
 	// RichText reports whether the channel renders markdown markup.
 	RichText bool `json:"RichText"`
 
+	// SpokenReplies reports whether the channel can read replies aloud when the
+	// operator turns voice on; the agent is told by a system notice when that happens.
+	SpokenReplies bool `json:"SpokenReplies"`
+
 	// MaxMessageRunes is the maximum length of a single text message,
 	// measured in the units the channel counts (Telegram counts UTF-16
 	// code units). AutoChunks reports whether longer text is split

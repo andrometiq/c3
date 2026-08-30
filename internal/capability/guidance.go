@@ -174,6 +174,10 @@ func GuidanceFor(c c3types.Capabilities) string {
 		b.WriteString("- Streaming of reasoning: NOT available on this channel.\n")
 	}
 
+	if c.SpokenReplies {
+		b.WriteString("- Spoken replies: POSSIBLE — the operator can turn voice on in the web chat; a system notice \"Spoken replies ON/OFF\" tells you the current state. WHILE VOICE IS ON: lead with the answer in one or two sentences; plain prose — no headers, bullets, tables, backticks or emoji (they are read aloud as symbols); speak lists as \"first… second…\"; summarise code, commands and paths instead of dictating them (\"I changed the retry limit to three\"); expand symbols and avoid IDs/SHAs (\"the latest commit\"); short sentences; say when something is not speakable (\"the full log is in the chat\"). When voice is OFF, normal rich-text guidance applies.\n")
+	}
+
 	return b.String()
 }
 

@@ -155,6 +155,7 @@ func webAttachGuidance(delivery webLoginDelivery, err error, tlsEnabled bool) st
 	guidance := []string{
 		prefix,
 		"Use reply-tool (\"Telegram\") mode so `reply` lands on the claimed web route.",
+		"Turn on 🔊 Voice on the page to hear replies; a system notice tells you when it is on.",
 		"Permission prompts and `ask` must be answered at the laptop; use pre-approved permissions for an on-the-go drive.",
 	}
 	if tlsEnabled {

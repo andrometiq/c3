@@ -97,6 +97,7 @@ func TestServerInfoName(t *testing.T) {
 	for _, want := range []string{
 		"CHANNEL CAPABILITIES",
 		"Typing: shown automatically",
+		"ON-THE-GO MODE (phone, web chat)",
 	} {
 		if !strings.Contains(params.Instructions, want) {
 			t.Errorf("instructions missing capability-guidance phrase %q:\n%s", want, params.Instructions)

@@ -65,6 +65,7 @@ import (
 
 	"github.com/Andrometiq/c3/internal/broker"
 	"github.com/Andrometiq/c3/internal/c3types"
+	"github.com/Andrometiq/c3/internal/capability"
 	"github.com/Andrometiq/c3/internal/ipc"
 	"github.com/Andrometiq/c3/internal/mcptools"
 	"github.com/Andrometiq/c3/internal/mode"
@@ -206,6 +207,11 @@ type adapter struct {
 
 	helloAck      ipc.HelloAckMsg
 	brokerVersion atomic.Int64
+	// initGuidanceChannel is the channel whose capability guidance was rendered
+	// into the MCP initialize instructions. It stays fixed even when a later
+	// attach refreshes helloAck.Capabilities; toolAttach uses it to avoid
+	// repeating guidance the agent already holds.
+	initGuidanceChannel string
 
 	// Last successful attach request — replayed on broker reconnect so a
 	// session that survives a broker restart auto-reclaims its route (D3 /
@@ -624,8 +630,7 @@ func (a *adapter) currentTopicName() string {
 }
 
 // isBareAttachReq reports whether an attach request carried no explicit target
-// (no Target, Name, TopicID, or Create — Codex has no Expr arg). Mirrors the
-// Claude adapter.
+// (no Expr, Target, Name, TopicID, or Create). Mirrors the Claude adapter.
 func isBareAttachReq(req ipc.AttachReq) bool {
 	return req.Expr == "" && req.Target == "" && req.Name == "" && req.TopicID == nil && !req.Create
 }
@@ -1026,6 +1031,9 @@ func (a *adapter) buildMCPServer() *mcp.Server {
 }
 
 func (a *adapter) buildInstructions() string {
+	caps := a.capsOrDefault()
+	a.initGuidanceChannel = caps.Channel
+
 	var head string
 	switch {
 	case a.helloAck.NoConfig:
@@ -1039,7 +1047,7 @@ func (a *adapter) buildInstructions() string {
 	default:
 		head = "C3 connected. Use `attach` to claim a Telegram topic, `fetch_queue` to read held/new inbound, `reply` to send. Codex doesn't render unsolicited MCP notifications today; call `fetch_queue` when you see a 'new Telegram message' nudge or periodically."
 	}
-	return head + mode.Combined(a.capsOrDefault())
+	return head + mode.Combined(caps)
 }
 
 // capsOrDefault returns the channel capability manifest the broker delivered
@@ -1066,10 +1074,11 @@ func (a *adapter) registerTools(srv *mcp.Server) {
 		{
 			tool: &mcp.Tool{
 				Name:        "attach",
-				Description: "Attach this Codex session to a Telegram topic. Same proposal-flow semantics as Claude Code's attach. If your CLI host's policy layer rejects this call (e.g. Codex approvals_reviewer=auto_review surfacing 'unacceptable risk rejection'), re-invoke with `policy_rejected=true` so the user sees the actionable next-step (tenant admin approval) rather than a silent failure.",
+				Description: "Attach this Codex session to a Telegram topic or the web route. Either pass `expr` (the raw selector string the broker parses, including 'web') or structured args. Same proposal-flow semantics as Claude Code's attach. If your CLI host's policy layer rejects this call (e.g. Codex approvals_reviewer=auto_review surfacing 'unacceptable risk rejection'), re-invoke with `policy_rejected=true` so the user sees the actionable next-step (tenant admin approval) rather than a silent failure.",
 				InputSchema: map[string]any{
 					"type": "object",
 					"properties": map[string]any{
+						"expr":            map[string]any{"type": "string"},
 						"target":          map[string]any{"type": "string"},
 						"name":            map[string]any{"type": "string"},
 						"topic_id":        map[string]any{"type": "integer"},
@@ -1257,6 +1266,9 @@ func (a *adapter) toolAttach(ctx context.Context, req *mcp.CallToolRequest) (*mc
 		cwd, _ = os.Getwd()
 	}
 	attachReq := ipc.AttachReq{Op: ipc.OpAttach, CWD: cwd}
+	if v, ok := args["expr"].(string); ok {
+		attachReq.Expr = v
+	}
 	if v, ok := args["target"].(string); ok {
 		attachReq.Target = v
 	}
@@ -1334,6 +1346,18 @@ func (a *adapter) toolAttach(ctx context.Context, req *mcp.CallToolRequest) (*mc
 			termtitle.EmitAttach(&attached)
 		}
 		text := ipc.FormatAttached(&attached)
+		// A successful attach can switch channels after initialize. Surface the
+		// just-attached manifest immediately only when it differs from the channel
+		// whose guidance the agent already received (or that channel was unknown).
+		if attached.OK && attached.Capabilities != nil {
+			attachedChannel := attached.Channel
+			if attachedChannel == "" {
+				attachedChannel = attached.Capabilities.Channel
+			}
+			if a.initGuidanceChannel == "" || attachedChannel != a.initGuidanceChannel {
+				text += "\n\n" + capability.GuidanceFor(*attached.Capabilities)
+			}
+		}
 		// Backlog summary on attach (spec Component 6): if the just-claimed route
 		// has held inbound, tell the agent to call fetch_queue. Handles the
 		// broker's degraded count-only case (QueuedCount>0 with empty

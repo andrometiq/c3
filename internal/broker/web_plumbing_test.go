@@ -38,7 +38,7 @@ func (f *slowTelegramChannel) SendReply(args c3types.ReplyArgs) (int64, error) {
 
 func (f *webFakeChannel) Name() string { return "web" }
 func (f *webFakeChannel) Capabilities() c3types.Capabilities {
-	return c3types.Capabilities{Channel: "web", EditMessages: true}
+	return c3types.Capabilities{Channel: "web", SpokenReplies: true, EditMessages: true}
 }
 func (f *webFakeChannel) HasLiveSession(int64) bool {
 	f.loginMu.Lock()
@@ -176,8 +176,11 @@ func TestAttachWebClaimsOperatorRouteAndSendsLoginLink(t *testing.T) {
 	if !attached.OK || attached.Channel != "web" || attached.ChatID != 42 || attached.TopicID != nil {
 		t.Fatalf("attach web = %+v", attached)
 	}
-	if !strings.Contains(attached.Notice, "sent to your Telegram DM") || !strings.Contains(attached.Notice, "reply-tool") || !strings.Contains(attached.Notice, "laptop") {
+	if !strings.Contains(attached.Notice, "sent to your Telegram DM") || !strings.Contains(attached.Notice, "reply-tool") || !strings.Contains(attached.Notice, "Turn on 🔊 Voice on the page to hear replies; a system notice tells you when it is on.") || !strings.Contains(attached.Notice, "laptop") {
 		t.Fatalf("attach web guidance incomplete: %q", attached.Notice)
+	}
+	if attached.Capabilities == nil || !attached.Capabilities.SpokenReplies {
+		t.Fatalf("attach web capabilities = %+v, want SpokenReplies=true", attached.Capabilities)
 	}
 	if _, ok := b.Routes.Holder(MakeRouteKey("web", 42, nil)); !ok {
 		t.Fatal("web operator route was not claimed")
