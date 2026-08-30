@@ -282,11 +282,27 @@ because bot DM is the login-link delivery path.
 **Status: fixed.** `Expr` is parsed before channel resolution; the exact `web`
 and `telegram` tokens are channel selectors. An explicit selector wins. DM,
 topic name, and topic id go to the unique registered, enabled topic-capable
-channel. Bare attach first preserves the current route or recovers only the
-session's own recorded route. Two live topic-capable channels with no selector
+channel. Bare attach first preserves the current held set or recovers only the
+session's own recorded set. Two live topic-capable channels with no selector
 still fail closed instead of coin-flipping. Telegram remains primary for
 unmapped hello capabilities, observe, and the topic picker; the picker also
 offers the line “web — on-the-go chat (`attach web`)” when web is live.
+
+A session may hold several routes, with exactly one output route. An explicit
+target normally switches (claim it and release the others); a leading `+` or
+structured `add=true` keeps the prior routes and makes the new route output.
+`output(target=…)` moves only the output role, and `detach(target=…)` releases
+one route while bare detach releases all. When more than one route is held,
+adapter-delivered inbound is prefixed with its origin (`[web]` or
+`[telegram · <topic>]`). Unqualified outbound uses the output route;
+`reply`, `edit_message`, and `react` accept `channel=<held-route>` for one
+message, and the broker refuses selectors outside the held set. Raw
+`chat_id`/`topic_id` destination overrides remain forbidden.
+
+Channel capabilities apply to the selected route, not just the output route.
+For example, an agent with output=web may still send Telegram-only media,
+polls, reactions, or keyboards via `channel=telegram` (or a held topic name),
+while the same kind sent to web is refused by the web capability gate.
 
 Install a broker containing this resolver before adding `channels.web` to
 `mappings.json`. An older broker sees two configured channels but cannot parse

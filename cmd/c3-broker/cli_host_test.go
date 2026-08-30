@@ -276,6 +276,11 @@ func TestEnsureCodexAgentsMd_CreatesFileWhenAbsent(t *testing.T) {
 	if !strings.Contains(string(got), "ON-THE-GO MODE (phone, web chat)") {
 		t.Errorf("file missing OnTheGoProtocol body:\n%s", got)
 	}
+	for _, want := range []string{`attach with expr "+web"`, "`output` tool", "NEVER auto-switch"} {
+		if !strings.Contains(string(got), want) {
+			t.Errorf("file missing multi-route mode phrase %q:\n%s", want, got)
+		}
+	}
 }
 
 func TestEnsureCodexAgentsMd_ReplacesExistingBlock(t *testing.T) {

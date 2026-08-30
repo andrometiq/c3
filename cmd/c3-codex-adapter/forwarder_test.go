@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/Andrometiq/c3/internal/c3types"
+	"github.com/Andrometiq/c3/internal/ipc"
 	"github.com/gorilla/websocket"
 )
 
@@ -98,6 +99,96 @@ func TestForwardInboundToCodexAppServerStartsTurn(t *testing.T) {
 	// header. formatInboundTurnText delegates to c3types.RenderQueuedInbound.
 	if text != "[Transcribed voice]: Hello my testing 1 2 3\nfrom=@alice message_id=1491" {
 		t.Fatalf("turn text = %q", text)
+	}
+}
+
+func captureCodexForwardedText(t *testing.T, req codexForwardReq) string {
+	t.Helper()
+	textCh := make(chan string, 1)
+	upgrader := websocket.Upgrader{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		for {
+			var msg map[string]any
+			if err := conn.ReadJSON(&msg); err != nil {
+				return
+			}
+			id, hasID := msg["id"]
+			if !hasID {
+				continue
+			}
+			if msg["method"] == "turn/start" {
+				params, _ := msg["params"].(map[string]any)
+				input, _ := params["input"].([]any)
+				if len(input) > 0 {
+					item, _ := input[0].(map[string]any)
+					text, _ := item["text"].(string)
+					textCh <- text
+				}
+			}
+			if err := conn.WriteJSON(map[string]any{"id": id, "result": map[string]any{"ok": true}}); err != nil {
+				return
+			}
+		}
+	}))
+	defer server.Close()
+
+	if err := forwardInboundToCodexAppServerWithPrefix(context.Background(), &req.inbound, req.originTag, codexForwardConfig{
+		WSURL:    "ws" + server.URL[len("http"):],
+		ThreadID: "thread-test",
+		Timeout:  time.Second,
+	}); err != nil {
+		t.Fatalf("forward live inbound: %v", err)
+	}
+	select {
+	case text := <-textCh:
+		return text
+	case <-time.After(time.Second):
+		t.Fatal("turn/start text was not captured")
+		return ""
+	}
+}
+
+func TestHandleInboundForwarderOriginRouteTags(t *testing.T) {
+	t.Setenv("C3_CODEX_ALLOW_MANUAL_FORWARD", "1")
+	t.Setenv("C3_CODEX_REMOTE_BRIDGE", "")
+	topicID := int64(281)
+	telegram := ipc.RouteRef{Channel: "telegram", ChatID: -100, TopicID: &topicID, Name: "c3"}
+	web := ipc.RouteRef{Channel: "web", ChatID: 42, Name: "web"}
+
+	for _, tc := range []struct {
+		name   string
+		routes []ipc.RouteRef
+		output ipc.RouteRef
+		in     c3types.Inbound
+		prefix string
+	}{
+		{name: "single-route", routes: []ipc.RouteRef{telegram}, output: telegram, in: c3types.Inbound{Channel: "telegram", ChatID: -100, TopicID: &topicID, MessageID: 1, Text: "hello"}},
+		{name: "multi-telegram", routes: []ipc.RouteRef{telegram, web}, output: web, in: c3types.Inbound{Channel: "telegram", ChatID: -100, TopicID: &topicID, MessageID: 2, Text: "hello"}, prefix: "[telegram · c3] "},
+		{name: "multi-web", routes: []ipc.RouteRef{telegram, web}, output: web, in: c3types.Inbound{Channel: "web", ChatID: 42, MessageID: 3, Text: "hello"}, prefix: "[web] "},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a := &adapter{forwardCh: make(chan codexForwardReq, 1)}
+			a.setRouteState(tc.routes, &tc.output)
+			raw, err := json.Marshal(ipc.InboundMsg{Op: ipc.OpInbound, Inbound: tc.in})
+			if err != nil {
+				t.Fatal(err)
+			}
+			a.handleInbound(raw)
+			var req codexForwardReq
+			select {
+			case req = <-a.forwardCh:
+			case <-time.After(time.Second):
+				t.Fatal("handleInbound did not enqueue the live forward")
+			}
+			if got, want := captureCodexForwardedText(t, req), tc.prefix+formatInboundTurnText(&tc.in); got != want {
+				t.Fatalf("forwarded turn text=%q, want %q", got, want)
+			}
+		})
 	}
 }
 

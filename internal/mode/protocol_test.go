@@ -32,9 +32,14 @@ func TestModeProtocol_HasCanonicalKeyPhrases(t *testing.T) {
 		"OUTPUT MODE PROTOCOL",
 		"CLI mode (DEFAULT)",
 		"Telegram mode",
+		"Drive mode",
+		"OUTPUT route",
+		"channel=<that route>",
+		"`output` tool",
 		"reply", // the tool name we tell agents NOT to call by default
 		"switch to Telegram",
 		"switch to CLI",
+		"NEVER auto-switch",
 	} {
 		if !strings.Contains(ModeProtocol, want) {
 			t.Errorf("ModeProtocol missing %q:\n%s", want, ModeProtocol)
@@ -64,10 +69,12 @@ func TestOnTheGoProtocol_HasCanonicalKeyPhrases(t *testing.T) {
 		"ON-THE-GO MODE (phone, web chat)",
 		"start on-the-go mode",
 		"switch to the web chat",
-		"attach with expr \"web\"",
+		"attach with expr \"+web\"",
+		"KEEPS the Telegram topic",
+		"detach with target \"web\"",
 		"Spoken replies ON",
 		"back to Telegram",
-		"topic you held before",
+		"nothing to re-attach",
 		"answered at the laptop",
 		"On the web page an HTML file you send opens in a sandboxed viewer inside the page",
 		`media: [{kind:"file", path, caption}]`,

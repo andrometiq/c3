@@ -21,6 +21,11 @@ func TestBuildInstructions_Default(t *testing.T) {
 	if !strings.Contains(out, "Use the `attach` tool") {
 		t.Fatalf("default head missing attach hint: %q", out)
 	}
+	for _, want := range []string{`attach with expr "+web"`, "`output` tool", "NEVER auto-switch"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("default instructions missing %q: %q", want, out)
+		}
+	}
 }
 
 func TestInstanceIDFromEnv(t *testing.T) {

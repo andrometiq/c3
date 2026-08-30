@@ -109,7 +109,7 @@ func answerPeek(t *testing.T, a *adapter, peer *ipc.Conn, returned, remaining in
 // not the stored at-recover text.
 func TestFlushPendingRecoverNotice_LivePeekEmitsLiveCount(t *testing.T) {
 	a, peer, _, emitted := newFlushTestAdapter(t)
-	a.setAttachedTopic("myproject")
+	setTestOutputRoute(a, "myproject")
 	a.setPendingRecoverNotice("STORED-FALLBACK should not be used")
 
 	done := make(chan struct{})
@@ -138,7 +138,7 @@ func TestFlushPendingRecoverNotice_LivePeekEmitsLiveCount(t *testing.T) {
 // returns 0 held messages emits the bare re-attach note (no fetch_queue nudge).
 func TestFlushPendingRecoverNotice_ZeroCountEmitsBareReattach(t *testing.T) {
 	a, peer, _, emitted := newFlushTestAdapter(t)
-	a.setAttachedTopic("myproject")
+	setTestOutputRoute(a, "myproject")
 	a.setPendingRecoverNotice("stored")
 
 	done := make(chan struct{})
@@ -162,7 +162,7 @@ func TestFlushPendingRecoverNotice_FallsBackToStoredOnTimeout(t *testing.T) {
 	defer func() { livePeekTimeout = old }()
 
 	a, peer, _, emitted := newFlushTestAdapter(t)
-	a.setAttachedTopic("myproject")
+	setTestOutputRoute(a, "myproject")
 	const stored = "STORED-FALLBACK notice text"
 	a.setPendingRecoverNotice(stored)
 
@@ -197,7 +197,7 @@ func TestFlushPendingRecoverNotice_OnceOnly(t *testing.T) {
 	defer func() { livePeekTimeout = old }()
 
 	a, peer, rawPeer, emitted := newFlushTestAdapter(t)
-	a.setAttachedTopic("myproject")
+	setTestOutputRoute(a, "myproject")
 	a.setPendingRecoverNotice("stored")
 
 	done := make(chan struct{})
@@ -225,7 +225,7 @@ func TestFlushPendingRecoverNotice_OnceOnly(t *testing.T) {
 // longer matters.
 func TestFlushPendingRecoverNotice_NoTTLDropAfterDelay(t *testing.T) {
 	a, peer, _, emitted := newFlushTestAdapter(t)
-	a.setAttachedTopic("myproject")
+	setTestOutputRoute(a, "myproject")
 	a.setPendingRecoverNotice("stored fallback")
 
 	time.Sleep(20 * time.Millisecond)

@@ -182,9 +182,10 @@ func TestRunStatusPrintsWebListener(t *testing.T) {
 	oldHealth, oldClaims := statusFetchHealth, statusFetchClaims
 	statusFetchHealth = func() (*ipc.HealthListMsg, error) { return &ipc.HealthListMsg{}, nil }
 	statusFetchClaims = func() (*ipc.ClaimsListMsg, error) {
-		return &ipc.ClaimsListMsg{Claims: []ipc.ClaimEntry{{
-			Channel: "web", ChatID: 42, HolderCLI: "claude", HolderPID: 7, ConnID: 9, Connected: true,
-		}}}, nil
+		return &ipc.ClaimsListMsg{Claims: []ipc.ClaimEntry{
+			{Channel: "web", ChatID: 42, HolderCLI: "claude", HolderPID: 7, ConnID: 9, Connected: true, IsOutput: true},
+			{Channel: "telegram", ChatID: -100, HasTopic: true, TopicID: 281, TopicName: "c3", HolderCLI: "claude", HolderPID: 7, ConnID: 9, Connected: true},
+		}}, nil
 	}
 	t.Cleanup(func() { statusFetchHealth, statusFetchClaims = oldHealth, oldClaims })
 	out := captureStdout(t, func() {
@@ -192,7 +193,7 @@ func TestRunStatusPrintsWebListener(t *testing.T) {
 			t.Errorf("runStatus: %v", err)
 		}
 	})
-	for _, want := range []string{"web", `listen="127.0.0.1:8371"`, `public_url="https://device.ts.net"`, "web/42/dm", "held by claude pid 7"} {
+	for _, want := range []string{"web", `listen="127.0.0.1:8371"`, `public_url="https://device.ts.net"`, "web/42/dm", "held by claude pid 7", "[output]", "[input]"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("status missing %q:\n%s", want, out)
 		}

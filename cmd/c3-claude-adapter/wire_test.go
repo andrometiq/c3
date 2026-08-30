@@ -115,7 +115,7 @@ func TestServerInfoName(t *testing.T) {
 		t.Fatalf("ListTools: %v", err)
 	}
 	wantTools := []string{
-		"attach", "detach", "topics", "reply", "react",
+		"attach", "detach", "output", "topics", "reply", "react",
 		"edit_message", "poll", "ask", "download_attachment",
 	}
 	got := map[string]bool{}
@@ -201,6 +201,84 @@ func TestHandleInboundEndToEnd(t *testing.T) {
 	meta := params["meta"].(map[string]any)
 	if _, isString := meta["chat_id"].(string); !isString {
 		t.Errorf("meta.chat_id = %T; want string per docs", meta["chat_id"])
+	}
+}
+
+func captureClaudeInboundFrame(t *testing.T, a *adapter, in c3types.Inbound) []byte {
+	t.Helper()
+	var buf safeBuffer
+	a.notifyTx = newNotifyTransport(&mcp.IOTransport{
+		Reader: nopCloseReader{strings.NewReader("")},
+		Writer: nopCloseWriter{&buf},
+	})
+	if _, err := a.notifyTx.Connect(context.Background()); err != nil {
+		t.Fatalf("notifyTx.Connect: %v", err)
+	}
+	raw, err := json.Marshal(ipc.InboundMsg{Op: ipc.OpInbound, Inbound: in})
+	if err != nil {
+		t.Fatalf("marshal inbound: %v", err)
+	}
+	a.handleInbound(context.Background(), raw)
+	return buf.Bytes()
+}
+
+func captureClaudeGoldenFrame(t *testing.T, in c3types.Inbound) []byte {
+	t.Helper()
+	var buf safeBuffer
+	tx := newNotifyTransport(&mcp.IOTransport{
+		Reader: nopCloseReader{strings.NewReader("")},
+		Writer: nopCloseWriter{&buf},
+	})
+	if _, err := tx.Connect(context.Background()); err != nil {
+		t.Fatalf("notifyTx.Connect: %v", err)
+	}
+	if err := tx.Notify(context.Background(), "notifications/claude/channel", buildClaudeChannelFrame(&in)); err != nil {
+		t.Fatalf("Notify: %v", err)
+	}
+	return buf.Bytes()
+}
+
+func claudeFrameContent(t *testing.T, raw []byte) string {
+	t.Helper()
+	var frame struct {
+		Params struct {
+			Content string `json:"content"`
+		} `json:"params"`
+	}
+	if err := json.Unmarshal(bytes.TrimSpace(raw), &frame); err != nil {
+		t.Fatalf("unmarshal channel frame: %v\n%s", err, raw)
+	}
+	return frame.Params.Content
+}
+
+func TestHandleInboundOriginRouteTags(t *testing.T) {
+	topicID := int64(281)
+	telegram := ipc.RouteRef{Channel: "telegram", ChatID: -100, TopicID: &topicID, Name: "c3"}
+	web := ipc.RouteRef{Channel: "web", ChatID: 42, Name: "web"}
+
+	single := newAdapter()
+	single.setRouteState([]ipc.RouteRef{telegram}, &telegram)
+	singleInbound := c3types.Inbound{Channel: "telegram", ChatID: -100, TopicID: &topicID, MessageID: 1, Text: "hello"}
+	gotSingle := captureClaudeInboundFrame(t, single, singleInbound)
+	if wantSingle := captureClaudeGoldenFrame(t, singleInbound); !bytes.Equal(gotSingle, wantSingle) {
+		t.Fatalf("single-route handleInbound frame changed\ngot:  %s\nwant: %s", gotSingle, wantSingle)
+	}
+
+	for _, tc := range []struct {
+		name string
+		in   c3types.Inbound
+		want string
+	}{
+		{name: "telegram", in: c3types.Inbound{Channel: "telegram", ChatID: -100, TopicID: &topicID, MessageID: 2, Text: "hello"}, want: "[telegram · c3] hello"},
+		{name: "web", in: c3types.Inbound{Channel: "web", ChatID: 42, MessageID: 3, Text: "hello"}, want: "[web] hello"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a := newAdapter()
+			a.setRouteState([]ipc.RouteRef{telegram, web}, &web)
+			if got := claudeFrameContent(t, captureClaudeInboundFrame(t, a, tc.in)); got != tc.want {
+				t.Fatalf("live channel content=%q, want %q", got, tc.want)
+			}
+		})
 	}
 }
 

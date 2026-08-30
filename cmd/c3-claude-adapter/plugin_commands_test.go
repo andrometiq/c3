@@ -14,11 +14,15 @@ func TestOnTheGoCommandFiles(t *testing.T) {
 	}{
 		{
 			name: "on-the-go.md",
-			want: []string{"mcp__plugin_c3_c3__attach", "`expr` set to `web`", "reply-tool", "answered at the laptop", "start on-the-go mode", "switch to the web chat", "do not treat the bare phrase"},
+			want: []string{"mcp__plugin_c3_c3__attach", "`expr` set to `+web`", "KEEPS the Telegram topic", "Drive mode", "answered at the laptop", "start on-the-go mode", "switch to the web chat", "do not treat the bare phrase"},
 		},
 		{
 			name: "off-the-go.md",
-			want: []string{"mcp__plugin_c3_c3__attach", "held immediately before", "If it is unknown, ask", "currently in Telegram mode"},
+			want: []string{"mcp__plugin_c3_c3__detach", "`target` set to `web`", "never released", "currently in Telegram mode"},
+		},
+		{
+			name: "output.md",
+			want: []string{"mcp__plugin_c3_c3__output", "user's argument as `target`", "verbatim"},
 		},
 	}
 	for _, test := range tests {

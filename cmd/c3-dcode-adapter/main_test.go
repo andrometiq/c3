@@ -301,6 +301,37 @@ func TestInboundInjectThenAck(t *testing.T) {
 	}
 }
 
+func TestInjectedPromptOriginRouteTags(t *testing.T) {
+	topicID := int64(281)
+	telegram := ipc.RouteRef{Channel: "telegram", ChatID: -100, TopicID: &topicID, Name: "c3"}
+	web := ipc.RouteRef{Channel: "web", ChatID: 42, Name: "web"}
+
+	for _, tc := range []struct {
+		name   string
+		routes []ipc.RouteRef
+		output ipc.RouteRef
+		in     c3types.Inbound
+		prefix string
+	}{
+		{name: "single-route", routes: []ipc.RouteRef{telegram}, output: telegram, in: c3types.Inbound{Channel: "telegram", ChatID: -100, TopicID: &topicID, MessageID: 51, Text: "hello"}},
+		{name: "multi-telegram", routes: []ipc.RouteRef{telegram, web}, output: web, in: c3types.Inbound{Channel: "telegram", ChatID: -100, TopicID: &topicID, MessageID: 52, Text: "hello"}, prefix: "[telegram · c3] "},
+		{name: "multi-web", routes: []ipc.RouteRef{telegram, web}, output: web, in: c3types.Inbound{Channel: "web", ChatID: 42, MessageID: 53, Text: "hello"}, prefix: "[web] "},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			tui := newFakeEventTUI(t, dir)
+			a := newAdapter()
+			a.eventPath = filepath.Join(dir, "events.sock")
+			a.setRouteState(tc.routes, &tc.output)
+			msg := &ipc.InboundMsg{Op: ipc.OpInbound, Inbound: tc.in}
+			a.handleInbound(context.Background(), msg)
+			if got, want := tui.payload(t, 0), tc.prefix+renderInjectedPrompt(msg); got != want {
+				t.Fatalf("injected prompt=%q, want %q", got, want)
+			}
+		})
+	}
+}
+
 // A synthesized EVENT (Kind non-empty) covers zero stored lines and must
 // NEVER be acked — acking one would consume a real queued message the event
 // never delivered. It is still injected so the agent sees it.
@@ -460,7 +491,7 @@ func TestMCPServerNameAndTools(t *testing.T) {
 		"attach": false, "topics": false, "fetch_queue": false,
 		"retranscribe": false, "reply": false, "react": false,
 		"edit_message": false, "poll": false, "stop_poll": false,
-		"download_attachment": false, "detach": false,
+		"download_attachment": false, "detach": false, "output": false,
 	}
 	for _, tool := range listResult.Tools {
 		if _, ok := want[tool.Name]; ok {

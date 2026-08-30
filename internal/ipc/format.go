@@ -32,6 +32,23 @@ func FormatAttached(a *AttachedMsg) string {
 		if a.Notice != "" {
 			s += "\n" + a.Notice
 		}
+		if len(a.Routes) > 1 {
+			labels := make([]string, 0, len(a.Routes))
+			if a.Output != nil {
+				labels = append(labels, routeRefLabel(*a.Output))
+			}
+			for _, route := range a.Routes {
+				if a.Output != nil && routeRefsEqual(route, *a.Output) {
+					continue
+				}
+				labels = append(labels, routeRefLabel(route))
+			}
+			output := "unknown"
+			if a.Output != nil {
+				output = routeRefLabel(*a.Output)
+			}
+			s += "\nholding: " + strings.Join(labels, ", ") + " · output: " + output
+		}
 		return s
 	}
 	if a.NeedsConfirmation && a.Proposal != nil {
@@ -112,6 +129,73 @@ func FormatAttached(a *AttachedMsg) string {
 		return "attach failed: " + a.Err
 	}
 	return "attach: unspecified failure"
+}
+
+// FormatRouteRef returns the short route label adapters use in tool results.
+func FormatRouteRef(route RouteRef) string {
+	return routeRefLabel(route)
+}
+
+// FormatSetOutputRoute renders a successful output-route change.
+func FormatSetOutputRoute(resp SetOutputRouteResp) string {
+	if resp.Err != "" {
+		return resp.Err
+	}
+	if !resp.OK || resp.Output == nil {
+		return "output route: unspecified failure"
+	}
+	return "output route → " + routeRefLabel(*resp.Output)
+}
+
+// FormatRelease renders the complete route set returned by a targeted release.
+func FormatRelease(target string, resp ReleaseResp) string {
+	if resp.Err != "" {
+		return resp.Err
+	}
+	if !resp.OK {
+		return "release: unspecified failure"
+	}
+	if len(resp.Routes) == 0 {
+		return "released " + target + "; no routes held"
+	}
+	labels := make([]string, 0, len(resp.Routes))
+	if resp.Output != nil {
+		labels = append(labels, routeRefLabel(*resp.Output))
+	}
+	for _, route := range resp.Routes {
+		if resp.Output != nil && routeRefsEqual(route, *resp.Output) {
+			continue
+		}
+		labels = append(labels, routeRefLabel(route))
+	}
+	output := "unknown"
+	if resp.Output != nil {
+		output = routeRefLabel(*resp.Output)
+	}
+	return "released " + target + "; still holding " + strings.Join(labels, ", ") + "; replies go to " + output
+}
+
+func routeRefLabel(route RouteRef) string {
+	if route.Channel == "web" {
+		return "web"
+	}
+	if route.Name != "" {
+		return route.Name
+	}
+	if route.TopicID != nil {
+		return fmt.Sprintf("topic-%d", *route.TopicID)
+	}
+	if route.Channel != "" {
+		return route.Channel
+	}
+	return "unknown"
+}
+
+func routeRefsEqual(a, b RouteRef) bool {
+	if a.Channel != b.Channel || a.ChatID != b.ChatID || (a.TopicID == nil) != (b.TopicID == nil) {
+		return false
+	}
+	return a.TopicID == nil || *a.TopicID == *b.TopicID
 }
 
 // formatPickTopic renders a "pick_topic" proposal (spec §4) — the bare-attach

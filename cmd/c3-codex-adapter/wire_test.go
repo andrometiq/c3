@@ -97,7 +97,7 @@ func TestServerInfoName(t *testing.T) {
 		t.Fatalf("ListTools: %v", err)
 	}
 	wantTools := []string{
-		"attach", "topics", "fetch_queue", "retranscribe", "reply", "react",
+		"attach", "detach", "output", "topics", "fetch_queue", "retranscribe", "reply", "react",
 		"edit_message", "poll", "download_attachment", "codex_forward",
 	}
 	got := map[string]bool{}

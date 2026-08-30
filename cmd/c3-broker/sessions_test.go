@@ -93,3 +93,12 @@ func TestRenderSessionsTable_AttachedAndUnattachedFormatting(t *testing.T) {
 		t.Errorf("attached row should render label: %q", got)
 	}
 }
+
+func TestRenderSessionsTable_MultiRouteAttachedTo(t *testing.T) {
+	got := renderSessionsTable([]ipc.SessionEntry{{
+		CLI: "claude", PID: 1, CWD: "/p", AttachedTo: "web, c3 (main)",
+	}})
+	if !strings.Contains(got, "web, c3 (main)") {
+		t.Fatalf("multi-route AttachedTo was not rendered verbatim:\n%s", got)
+	}
+}

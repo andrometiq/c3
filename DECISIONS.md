@@ -3,6 +3,25 @@
 Entries are newest first. This is the public architecture record: it records
 rulings and rationale, never private operational details.
 
+## D029: Multi-channel attach — route set + output route
+
+**Date:** 2026-08-30
+
+**Decision:** A session holds a set of channel routes and exactly one output
+route. A bare explicit attach keeps switch semantics; `+X` or `add=true` adds X
+to the held set and makes it output. The `output` tool moves the output role
+without changing the held set. Message tools may name a held route with the
+symbolic `channel` selector; the broker resolves it against that session's held
+set, refuses unheld names, and continues to reject raw destination ids. When a
+session holds more than one route, inbound is tagged with its channel and, for
+Telegram, its held topic name.
+
+**Why:** The operator needs to drive a session from a phone without releasing
+the live Telegram topic that still supplies context and input. Separating
+membership from the outbound default makes that state explicit, while a
+broker-enforced held-route selector fails closed under ambiguous or injected
+destinations and still permits deliberate one-message cross-route replies.
+
 ## D028: Agent HTML opens in a sandboxed in-page viewer
 
 **Date:** 2026-08-30
