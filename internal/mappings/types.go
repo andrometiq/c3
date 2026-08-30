@@ -103,6 +103,7 @@ type ChannelConfig struct {
 	Enabled             *bool                  `json:"enabled,omitempty"`
 	Listen              string                 `json:"listen,omitempty"`
 	PublicURL           string                 `json:"public_url,omitempty"`
+	TLS                 bool                   `json:"tls,omitempty"`
 	BotToken            string                 `json:"bot_token,omitempty"`
 	DefaultGroup        string                 `json:"default_group,omitempty"`
 	Groups              map[string]GroupConfig `json:"groups,omitempty"`

@@ -211,11 +211,13 @@ message ids overlap Telegram therefore cannot pop Telegram's offset seam.
 
 The user-visible failure is nasty because it is delayed: your channel works, the operator attaches a session to some unrelated topic, and your channel silently fails to start after the next restart. And `host.Config(name, &cfg)` round-trips through the same struct, so it can only ever hand you the subset of keys `ChannelConfig` declares, however the file was written.
 
-`ChannelConfig` now declares `enabled`, `listen`, and `public_url`. `enabled`
+`ChannelConfig` now declares `enabled`, `listen`, `public_url`, and `tls`. `enabled`
 is a deep-copied `*bool` (absent means enabled), `listen` is validated as
 host:port, and `public_url` must be an HTTPS origin with a host and no
-path/query/fragment. A non-loopback, non-`*.ts.net` public host is warned at
-startup. Operator identity remains solely under `channels.telegram`.
+path/query/fragment. TLS additionally requires `public_url` and restricts the
+listener to loopback or Tailscale address ranges. A non-loopback,
+non-`*.ts.net` public host is warned at startup. Operator identity remains
+solely under `channels.telegram`.
 
 ### 4. Identifier shape — accepted for web phase 1
 
@@ -297,18 +299,21 @@ The broker-side web stanza is typed as:
   "channels": {
     "web": {
       "enabled": true,
-      "listen": "127.0.0.1:8371",
-      "public_url": "https://device.example.ts.net"
+      "listen": "100.100.10.20:8371",
+      "public_url": "https://100.100.10.20:8371",
+      "tls": true
     }
   }
 }
 ```
 
 `enabled` is optional and defaults on. Empty `listen` means
-`127.0.0.1:8371` in the web transport. `public_url` is optional and, when set,
-must be exactly an HTTPS origin. Do not put `master_user_id` in this stanza;
-web reads `channels.telegram.master_user_id` and `dm_chat_id` as the one
-operator identity and login-delivery source of truth.
+`127.0.0.1:8371` in the web transport. `tls` defaults off. When it is on,
+`public_url` is required, must be exactly an HTTPS origin, and `listen` must be
+loopback or an address in `100.64.0.0/10` or `fd7a:115c:a1e0::/48`. Do not put
+`master_user_id` in this stanza; web reads
+`channels.telegram.master_user_id` and `dm_chat_id` as the one operator
+identity and login-delivery source of truth.
 
 ### Connectivity notifications
 

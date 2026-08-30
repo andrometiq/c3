@@ -566,7 +566,7 @@ func (b *Broker) attachWeb(conn *ipc.Conn, stub *Stub, steal, replay bool) {
 		Op: ipc.OpAttached, OK: true, Status: ipc.AttachStatusOK,
 		Channel: "web", ChatID: key.ChatID, Name: "web",
 		Capabilities: b.capsForChannel("web"),
-		Notice:       webAttachGuidance(delivery, linkErr),
+		Notice:       webAttachGuidance(delivery, linkErr, b.webTLSEnabled()),
 	}))
 }
 

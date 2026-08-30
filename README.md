@@ -106,7 +106,7 @@ Telegram and a private, text-only web chat ship in the broker.
 | Channel | Status | Carries |
 |---|---|---|
 | Telegram | shipping | Markdown, quote-replies, six media kinds, edits, reactions, polls, inline buttons |
-| Web | shipping (phase 1) | Plain text, typing, edits, held/system notices; magic-link login through the Telegram operator DM |
+| Web | shipping | Private-CA HTTPS on the tailnet; plain text, typing, edits, held/system notices; magic-link login through the Telegram operator DM |
 
 Each CLI session drives one claimed route at a time: use `attach web` on the go and attach
 back to a Telegram topic at the desk. The web surface is private-first and intentionally

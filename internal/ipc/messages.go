@@ -456,6 +456,20 @@ type WebLoginLinkReply struct {
 	Err string `json:"err,omitempty"`
 }
 
+// WebCAReq asks the running broker to deliver the web private-CA certificate
+// through the configured Telegram operator DM.
+type WebCAReq struct {
+	Op Op `json:"op"` // = OpWebCA
+}
+
+// WebCAReply reports whether the public CA certificate was delivered.
+type WebCAReply struct {
+	Op          Op     `json:"op"` // = OpWebCAReply
+	OK          bool   `json:"ok"`
+	Err         string `json:"err,omitempty"`
+	Fingerprint string `json:"fingerprint,omitempty"`
+}
+
 // HealthListMsg is the broker's response to ListHealthReq. One entry per channel
 // that has reported at least one health edge. Renders into the `c3-broker
 // status` "Channel health:" section.
@@ -466,6 +480,9 @@ type HealthListMsg struct {
 	// startup and kept running in loud-degrade mode. Additive + omitempty lets
 	// an older status client ignore it and preserves the healthy/legacy frame.
 	QueueDegraded bool `json:"queue_degraded,omitempty"`
+	// WebCAFingerprint is present when the registered web channel terminates
+	// TLS with its private CA. It lets status render the live trust anchor.
+	WebCAFingerprint string `json:"web_ca_fingerprint,omitempty"`
 }
 
 // HealthEntry is one channel's last-known fetch-health for status rendering.

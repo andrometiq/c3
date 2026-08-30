@@ -85,6 +85,8 @@ func runStatus() error {
 		}
 	}
 
+	healthList, healthErr := statusFetchHealth()
+
 	// Channels (config-only since this is read-only against a running daemon).
 	if mf != nil {
 		fmt.Fprintln(&b, "Channels:")
@@ -94,8 +96,12 @@ func runStatus() error {
 				if listen == "" {
 					listen = "127.0.0.1:8371"
 				}
-				fmt.Fprintf(&b, "  - %-10s enabled=%v listen=%q public_url=%q\n",
-					name, cc.EnabledOrDefault(), listen, cc.PublicURL)
+				fmt.Fprintf(&b, "  - %-10s enabled=%v listen=%q public_url=%q tls=%v",
+					name, cc.EnabledOrDefault(), listen, cc.PublicURL, cc.TLS)
+				if cc.TLS && healthList != nil && healthList.WebCAFingerprint != "" {
+					fmt.Fprintf(&b, " ca_sha256=%s", healthList.WebCAFingerprint)
+				}
+				fmt.Fprintln(&b)
 				continue
 			}
 			tokenSet := cc.BotToken != ""
@@ -141,8 +147,8 @@ func runStatus() error {
 	// reported yet)".
 	fmt.Fprintln(&b)
 	fmt.Fprintln(&b, "Channel health:")
-	if healthList, err := statusFetchHealth(); err != nil {
-		fmt.Fprintf(&b, "  (broker unreachable: %v)\n", err)
+	if healthErr != nil {
+		fmt.Fprintf(&b, "  (broker unreachable: %v)\n", healthErr)
 	} else {
 		if healthList.QueueDegraded {
 			fmt.Fprintln(&b, "  ⚠ durable queue: DISABLED — messages arriving without an attached session are not saved and cannot be recovered")

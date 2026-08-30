@@ -66,6 +66,8 @@ func TestValidate_WebConfig(t *testing.T) {
 		{Listen: "127.0.0.1:8371"},
 		{Listen: "[::1]:8371", PublicURL: "https://device.example"},
 		{PublicURL: "https://device.example:8443"},
+		{Listen: "100.100.10.20:8371", PublicURL: "https://100.100.10.20:8371", TLS: true},
+		{Listen: "[fd7a:115c:a1e0::20]:8371", PublicURL: "https://[fd7a:115c:a1e0::20]:8371", TLS: true},
 	}
 	for _, config := range valid {
 		mf := newTestFile()
@@ -96,6 +98,11 @@ func TestValidate_WebConfig(t *testing.T) {
 		{"web default group", ChannelConfig{DefaultGroup: "main"}},
 		{"web groups", ChannelConfig{Groups: map[string]GroupConfig{"main": {ChatID: -1}}}},
 		{"web topics", ChannelConfig{Topics: []Topic{{ChatID: -1, TopicID: 2, Name: "x"}}}},
+		{"tls without public url", ChannelConfig{Listen: "127.0.0.1:8371", TLS: true}},
+		{"tls all ipv4 interfaces", ChannelConfig{Listen: "0.0.0.0:8371", PublicURL: "https://100.100.10.20:8371", TLS: true}},
+		{"tls all ipv6 interfaces", ChannelConfig{Listen: "[::]:8371", PublicURL: "https://[fd7a:115c:a1e0::20]:8371", TLS: true}},
+		{"tls empty listen host", ChannelConfig{Listen: ":8371", PublicURL: "https://100.100.10.20:8371", TLS: true}},
+		{"tls ordinary lan", ChannelConfig{Listen: "192.168.1.20:8371", PublicURL: "https://192.168.1.20:8371", TLS: true}},
 	}
 	for _, tc := range invalid {
 		t.Run(tc.name, func(t *testing.T) {
@@ -110,12 +117,40 @@ func TestValidate_WebConfig(t *testing.T) {
 }
 
 func TestWebPublicURLIsPrivate(t *testing.T) {
-	for _, raw := range []string{"", "https://127.0.0.1", "https://[::1]:8443", "https://device.ts.net"} {
+	for _, raw := range []string{
+		"",
+		"https://127.0.0.1",
+		"https://[::1]:8443",
+		"https://device.ts.net",
+		"https://100.64.0.1:8371",
+		"https://100.127.255.254:8371",
+		"https://[fd7a:115c:a1e0::20]:8371",
+	} {
 		if !WebPublicURLIsPrivate(raw) {
 			t.Errorf("WebPublicURLIsPrivate(%q)=false, want true", raw)
 		}
 	}
-	if WebPublicURLIsPrivate("https://chat.example.com") {
-		t.Fatal("ordinary public host was classified private")
+	for _, raw := range []string{
+		"https://chat.example.com",
+		"https://100.63.255.255:8371",
+		"https://100.128.0.1:8371",
+		"https://[fd7a:115c:a1df:ffff::1]:8371",
+	} {
+		if WebPublicURLIsPrivate(raw) {
+			t.Errorf("WebPublicURLIsPrivate(%q)=true, want false", raw)
+		}
+	}
+}
+
+func TestWebTLSListenHostAllowed(t *testing.T) {
+	for _, host := range []string{"localhost", "LOCALHOST.", "127.0.0.1", "::1", "100.64.0.1", "100.127.255.254", "fd7a:115c:a1e0::20"} {
+		if !WebTLSListenHostAllowed(host) {
+			t.Errorf("WebTLSListenHostAllowed(%q)=false, want true", host)
+		}
+	}
+	for _, host := range []string{"", "0.0.0.0", "::", "device.example", "192.168.1.20", "100.63.255.255", "100.128.0.1", "fd7a:115c:a1df:ffff::1"} {
+		if WebTLSListenHostAllowed(host) {
+			t.Errorf("WebTLSListenHostAllowed(%q)=true, want false", host)
+		}
 	}
 }

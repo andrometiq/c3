@@ -24,8 +24,9 @@ Keep the Telegram stanza as the identity and login-delivery source of truth:
     },
     "web": {
       "enabled": true,
-      "listen": "127.0.0.1:8371",
-      "public_url": "https://your-device.your-tailnet.ts.net"
+      "listen": "100.100.10.20:8371",
+      "public_url": "https://100.100.10.20:8371",
+      "tls": true
     }
   },
   "allowlist": {"users": [123456789]}
@@ -33,11 +34,13 @@ Keep the Telegram stanza as the identity and login-delivery source of truth:
 ```
 
 `enabled` defaults to `true`. `listen` defaults to `127.0.0.1:8371`; C3 never
-defaults to all interfaces. `public_url` is optional and must be one exact HTTPS
-origin with no path, query, fragment, or user information. Web refuses to start
-unless Telegram is already registered and `master_user_id` is nonzero and in
-`allowlist.users`. Only `enabled`, `listen`, and `public_url` are legal in the
-web stanza. `c3-broker status` prints the configured listener and public URL.
+defaults to all interfaces. `public_url` must be one exact HTTPS origin with no
+path, query, fragment, or user information when `tls` is enabled. A TLS listener
+may bind only loopback or a Tailscale address (`100.64.0.0/10` or
+`fd7a:115c:a1e0::/48`). Web refuses to start unless Telegram is already
+registered and `master_user_id` is nonzero and in `allowlist.users`. Only
+`enabled`, `listen`, `public_url`, and `tls` are legal in the web stanza.
+`c3-broker status` prints them and the live CA fingerprint when TLS is on.
 
 ## Attach and use it
 
@@ -69,8 +72,8 @@ drive should use permissions that were deliberately pre-approved.
    sends it to the configured Telegram operator DM with previews disabled.
 2. The link opens `/auth`; its secret is after `#`, so it never reaches the
    server in the request URL, logs, referrer, or a preview fetch.
-3. If the page opened inside Telegram, choose **Open in browser** first. In-app
-   browsers commonly use a separate cookie jar. Then tap **Continue**.
+3. Choose **Open in browser** from Telegram. In-app browsers commonly use a
+   separate cookie jar and do not trust user-installed CAs. Then tap **Continue**.
 4. Continue exchanges the secret with a same-origin POST, clears it from the
    address bar, and stores an HttpOnly, SameSite=Lax session cookie.
 
@@ -80,23 +83,22 @@ It never accepts a user id from the browser. The endpoint allows one successful
 request per minute and five per hour. The local command `c3-broker web link`
 also asks the running broker to mint and DM a link; it never prints the secret.
 
-## Phone access with Tailscale Serve
+## Phone access over the tailnet (private CA)
 
-Keep C3 bound to loopback and let Tailscale terminate HTTPS on the same device:
+1. Set the tailnet `listen` address, matching HTTPS `public_url`, and `tls: true`.
+2. Restart the broker; confirm `c3-broker status` shows `tls=true` and `ca_sha256`.
+3. Run `c3-broker web ca` (or download unauthenticated `GET /ca.crt`).
+4. Android: open the file and install it as a CA certificate; the monitoring notice is expected.
+5. iPhone: install the profile, then enable full trust under Certificate Trust Settings.
+6. Open the Telegram magic link with **Open in browser**; in-app browsers do not trust user CAs.
+7. Open `public_url` and expect a normal padlock with no certificate interstitial.
+8. If the tailnet IP changes, update `listen` and `public_url`, then restart; the leaf reissues and the CA stays.
 
-```sh
-tailscale serve --bg http://127.0.0.1:8371
-tailscale serve status
-```
+Tailnets that issue certificates can instead keep C3 on loopback and use
+Tailscale Serve as the HTTPS terminator. Set Serve's `*.ts.net` origin as
+`public_url`, leave `tls` off, and keep Funnel off.
 
-Use the HTTPS `*.ts.net` origin reported by Serve as `channels.web.public_url`,
-reload/restart C3, and keep Funnel off. This makes the browser surface available
-to devices in the maintainer's tailnet without creating a public listener. If
-the local Tailscale version prints different Serve syntax, follow its displayed
-command help while preserving the same topology: tailnet HTTPS to the broker's
-loopback HTTP listener.
-
-## Security model (T1–T12)
+## Security model (T1–T18)
 
 1. The send body contains only `text` and `client_id`. C3 rejects extra JSON and
    stamps channel, route, operator, message kind, version, and time itself before
@@ -128,6 +130,20 @@ loopback HTTP listener.
 12. The cookie is an **agent-driving credential**: a holder can prompt a CLI
     whose tools act on the laptop. The surface is tailnet-private by design, not
     a public chat service.
+13. The private CA and leaf keys are ECDSA P-256 PKCS#8 files, mode 0600, under
+    `$XDG_STATE_HOME/c3/web/` (or `~/.local/state/c3/web/`); no private key is
+    logged, served, or sent through Telegram.
+14. IP literals are encoded as `iPAddress` SANs. The leaf also covers
+    `localhost`, both loopback IPs, the configured listener and public hosts,
+    and the machine hostname.
+15. C3 creates the CA only when both CA files are absent. A missing, corrupt, or
+    mismatched half is a startup refusal, never an automatic trust-anchor swap.
+16. With `tls` enabled every listener, including the loopback twin, is HTTPS;
+    C3 never leaves a plaintext listener beside it.
+17. C3 sends no HSTS header. A stale private-IP HSTS entry could strand the
+    phone after an address or certificate change.
+18. TLS refuses empty-host, `0.0.0.0`, and `::` listeners; the agent-driving
+    surface is never bound to every interface.
 
 ## Transport behavior and limitations
 
@@ -145,15 +161,19 @@ the last 200 reply/edit events held in memory. Typing and status notices are not
 replayed. If the requested point is older than that ring, or the broker restarted
 and the ring is empty, the page says **history may be incomplete**.
 
-Other phase-1 limits: browser sessions and reply history disappear on broker
-restart; there is one web conversation per operator; text only (no media,
-polls, reactions, buttons, or remote permission verdicts); and a CLI session
-can claim only one Telegram or web route at once.
+The private CA must be installed once in each phone's normal browser trust
+store; Telegram's in-app browser may still reject it. A changed tailnet IP
+requires a config update and restart so the leaf SANs can be reissued, but does
+not require reinstalling the CA. Other limits remain: one web conversation per
+operator; text only (no media, polls, reactions, buttons, or remote permission
+verdicts); and one Telegram or web claim per CLI session.
 
 ## Phone verification checklist
 
-- Confirm `c3-broker status` shows web enabled, loopback listener, and the exact
-  `*.ts.net` public URL.
+- Install the CA from `c3-broker web ca` in the phone's system CA trust store.
+- Confirm its SHA-256 fingerprint matches `c3-broker status`, then expect a padlock.
+- Confirm `c3-broker status` shows web enabled, `tls=true`, the tailnet listener,
+  and the exact HTTPS public URL.
 - On mobile data, open the tailnet URL and request a fresh link.
 - Tap the DM link once inside Telegram, then repeat with **Open in browser**;
   confirm the normal browser retains the session and the used link is denied.

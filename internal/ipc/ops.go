@@ -52,6 +52,7 @@ const (
 	// the pending keyboard and never produces a verdict or synchronous reply.
 	OpPermissionSettled Op = "permission_settled"
 	OpWebLoginLink      Op = "web_login_link"
+	OpWebCA             Op = "web_ca"
 	OpBye               Op = "bye"
 
 	// broker → adapter
@@ -91,5 +92,6 @@ const (
 	// on it — a never-delivered verdict just leaves CC waiting in the TUI).
 	OpPermissionVerdict Op = "permission_verdict"
 	OpWebLoginLinkReply Op = "web_login_link_reply"
+	OpWebCAReply        Op = "web_ca_reply"
 	OpError             Op = "error"
 )

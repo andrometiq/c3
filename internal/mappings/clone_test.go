@@ -114,6 +114,16 @@ func TestClone_DeepCopiesChannelEnabled(t *testing.T) {
 	}
 }
 
+func TestClone_PreservesWebTLS(t *testing.T) {
+	original := &MappingsFile{
+		SchemaVersion: 1,
+		Channels:      map[string]ChannelConfig{"web": {TLS: true}},
+	}
+	if !original.Clone().Channels["web"].TLS {
+		t.Fatal("clone dropped ChannelConfig.TLS")
+	}
+}
+
 func TestClone_NilSafe(t *testing.T) {
 	var mf *MappingsFile
 	if got := mf.Clone(); got != nil {

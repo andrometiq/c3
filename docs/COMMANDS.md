@@ -18,6 +18,7 @@ support.
 | `status`        | `c3-broker status` (CLI)          | pure shell    | Daemon liveness, socket reachability, mappings.json validation, channel state, **live route claims** (via OpListClaims). |
 | `topics`        | `c3-broker topics` (CLI)          | pure shell    | List every topic in mappings.json + which session (if any) currently claims it.                                       |
 | `web link`      | `c3-broker web link` (CLI)         | pure shell    | Ask the running broker to mint a fresh web login link and deliver it through the configured Telegram operator DM. The token is not printed on the local IPC response. |
+| `web ca`        | `c3-broker web ca` (CLI)           | pure shell    | Send the web channel's public private-CA certificate and SHA-256 fingerprint to the configured Telegram operator DM. No private key leaves the broker state directory. |
 | `build`         | core `go install` package set (shell) | pure shell | Rebuild C3's ten core binaries; the PATH-shadowing Codex launcher remains opt-in. |
 | `update`        | `c3-broker update [--check]` (CLI) | pure shell    | Checks the latest GitHub release and performs checksum-verified on-disk binary replacement; does not touch the running broker. |
 | `setup`         | `c3-broker setup …` (CLI)         | agent-guided / interactive | Configure C3. Primary path: the `/c3:setup` slash command drives the phased subcommands one step at a time — `setup token` (validate via getMe + record), `setup pair dm` / `setup pair group` (code-based id discovery: a 4-digit code sent in Telegram discovers the user id / group chat id — no id hunting), `setup stt`, `setup finish` (host integrations + broker restart). Bare `c3-broker setup` is the full interactive TTY flow (fallback for a plain terminal). Writes mappings.json (mode 0600). |
@@ -186,6 +187,7 @@ rest of the surface is the MCP tools plus `c3-broker` subcommands, as on Codex.
 | `status`        | `/c3:status` (`commands/status.md`)             | `c3-broker status` (shell)              | `c3-broker status` (shell)                   |
 | `topics`        | `/c3:topics` + `topics` MCP tool                | `topics` MCP tool · `c3-broker topics`  | `/skill:c3-topics` + `topics` MCP tool       |
 | `web link`      | `c3-broker web link` (shell)                    | `c3-broker web link` (shell)            | `c3-broker web link` (shell)                 |
+| `web ca`        | `c3-broker web ca` (shell)                      | `c3-broker web ca` (shell)              | `c3-broker web ca` (shell)                   |
 | `build`         | `/c3:build` (`commands/build.md`)               | core `go install` package set (shell)   | core `go install` package set (shell)        |
 | `setup`         | `/c3:setup` (`commands/setup.md`)               | `c3-broker setup` (TTY)                 | `c3-broker setup` (TTY)                      |
 | `reload-config` | `/c3:reload-config`                             | `pkill -HUP c3-broker`                  | `pkill -HUP c3-broker`                       |

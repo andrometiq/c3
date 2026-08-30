@@ -3,6 +3,8 @@ package broker
 import (
 	"fmt"
 	"log"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -91,6 +93,19 @@ func (b *Broker) sendWebLoginLink(stub *Stub, requestedBy string, skipLive, debo
 	return webLoginSent, nil
 }
 
+func (b *Broker) webTLSEnabled() bool {
+	webChannel, err := b.Channel("web")
+	if err != nil {
+		return false
+	}
+	provider, ok := webChannel.(channel.CertificateProvider)
+	if !ok {
+		return false
+	}
+	_, _, err = provider.CACertificatePEM()
+	return err == nil
+}
+
 func (b *Broker) rollbackWebLoginLinkTimestamp(userID int64, reservedAt, previous time.Time, hadPrevious bool) {
 	b.loginLinkMu.Lock()
 	defer b.loginLinkMu.Unlock()
@@ -124,7 +139,7 @@ func webLoginLinkText(stub *Stub, requestedBy, link string) string {
 		cli, cwd, sessionID, link)
 }
 
-func webAttachGuidance(delivery webLoginDelivery, err error) string {
+func webAttachGuidance(delivery webLoginDelivery, err error, tlsEnabled bool) string {
 	prefix := ""
 	switch {
 	case err != nil:
@@ -137,11 +152,15 @@ func webAttachGuidance(delivery webLoginDelivery, err error) string {
 	default:
 		prefix = "A web login link was sent to your Telegram DM."
 	}
-	return strings.Join([]string{
+	guidance := []string{
 		prefix,
 		"Use reply-tool (\"Telegram\") mode so `reply` lands on the claimed web route.",
 		"Permission prompts and `ask` must be answered at the laptop; use pre-approved permissions for an on-the-go drive.",
-	}, " ")
+	}
+	if tlsEnabled {
+		guidance = append(guidance, `Phone browsers need the C3 web CA installed once — run "c3-broker web ca" to send it.`)
+	}
+	return strings.Join(guidance, " ")
 }
 
 func (b *Broker) handleWebLoginLink(conn *ipc.Conn) {
@@ -151,4 +170,57 @@ func (b *Broker) handleWebLoginLink(conn *ipc.Conn) {
 		resp.Err = err.Error()
 	}
 	_ = conn.WriteJSON(resp)
+}
+
+func (b *Broker) handleWebCA(conn *ipc.Conn) {
+	_, dmChatID, err := b.webOperatorRoute()
+	if err != nil {
+		_ = conn.WriteJSON(ipc.WebCAReply{Op: ipc.OpWebCAReply, Err: err.Error()})
+		return
+	}
+	webChannel, err := b.Channel("web")
+	if err != nil {
+		_ = conn.WriteJSON(ipc.WebCAReply{Op: ipc.OpWebCAReply, Err: "web tls is not enabled"})
+		return
+	}
+	provider, ok := webChannel.(channel.CertificateProvider)
+	if !ok {
+		_ = conn.WriteJSON(ipc.WebCAReply{Op: ipc.OpWebCAReply, Err: "web tls is not enabled"})
+		return
+	}
+	certificatePEM, fingerprint, err := provider.CACertificatePEM()
+	if err != nil {
+		_ = conn.WriteJSON(ipc.WebCAReply{Op: ipc.OpWebCAReply, Err: "web tls is not enabled"})
+		return
+	}
+	directory, err := os.MkdirTemp("", "c3-web-ca-*")
+	if err != nil {
+		_ = conn.WriteJSON(ipc.WebCAReply{Op: ipc.OpWebCAReply, Err: fmt.Sprintf("create temporary CA directory: %v", err)})
+		return
+	}
+	defer os.RemoveAll(directory)
+	path := filepath.Join(directory, "c3-web-ca.crt")
+	if err := os.WriteFile(path, certificatePEM, 0o644); err != nil {
+		_ = conn.WriteJSON(ipc.WebCAReply{Op: ipc.OpWebCAReply, Err: fmt.Sprintf("write temporary CA certificate: %v", err)})
+		return
+	}
+	publicURL := b.Mappings().Channels["web"].PublicURL
+	caption := fmt.Sprintf(`C3 web certificate — SHA-256 %s. Install it once per phone. Android: open the file, install as a CA certificate (the "network may be monitored" notice is expected). iPhone: install the profile, then Settings → General → About → Certificate Trust Settings → enable full trust. Then open %s. If you did not request this, ignore it.`, fingerprint, publicURL)
+	telegramChannel, err := b.Channel("telegram")
+	if err != nil {
+		_ = conn.WriteJSON(ipc.WebCAReply{Op: ipc.OpWebCAReply, Err: fmt.Sprintf("telegram channel is required to deliver the web CA: %v", err)})
+		return
+	}
+	if _, err := telegramChannel.SendReply(c3types.ReplyArgs{
+		Channel: "telegram",
+		ChatID:  dmChatID,
+		Markup:  c3types.MarkupNone,
+		Media: []c3types.MediaItem{{
+			Kind: c3types.MediaFile, Path: path, Caption: caption,
+		}},
+	}); err != nil {
+		_ = conn.WriteJSON(ipc.WebCAReply{Op: ipc.OpWebCAReply, Err: fmt.Sprintf("send web CA through telegram: %v", err)})
+		return
+	}
+	_ = conn.WriteJSON(ipc.WebCAReply{Op: ipc.OpWebCAReply, OK: true, Fingerprint: fingerprint})
 }
