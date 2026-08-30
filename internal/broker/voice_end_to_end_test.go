@@ -115,6 +115,7 @@ func TestVoiceEndToEndRestartReparksPendingOutageRow(t *testing.T) {
 	if err := b2.RegisterChannel(g2); err != nil {
 		t.Fatalf("register recovery channel: %v", err)
 	}
+	b2.StartVoiceRecovery()
 	push := waitInboundPush(t, pushes)
 	if !strings.Contains(push.Inbound.Text, "after restart") {
 		t.Fatalf("restart recovery push=%+v", push)
@@ -165,6 +166,7 @@ func TestVoiceEndToEndShutdownMidSTTRestartsWithoutLossOrDuplicate(t *testing.T)
 	if err := b2.RegisterChannel(newGateChannel(100, nil)); err != nil {
 		t.Fatalf("register restarted channel: %v", err)
 	}
+	b2.StartVoiceRecovery()
 	push := waitInboundPush(t, pushes)
 	if !strings.Contains(push.Inbound.Text, "survived restart") {
 		t.Fatalf("post-restart push=%+v", push)

@@ -72,10 +72,11 @@ type Broker struct {
 	Queue *queue.Store
 	Voice *VoiceScheduler
 
-	// voiceRecoveryOnce runs the store-wide pending-voice scan after the first
-	// channel has registered, when both plugin callbacks and channel cache/fetch
-	// capabilities are available. C3 has one channel today; the scan itself is
-	// store-wide so future channel rows are not hidden.
+	// voiceRecoveryOnce runs the store-wide pending-voice scan once, from
+	// StartVoiceRecovery, after EVERY configured channel has registered: a
+	// pending web voice note resolves its audio through the web channel, so a
+	// scan fired after the first (Telegram) registration reported
+	// local_audio_unavailable for notes sent during a restart.
 	voiceRecoveryOnce sync.Once
 
 	// drains is the per-SOURCE in-flight drain guard (drain.go, amendment A1/B8):
@@ -260,7 +261,6 @@ func (b *Broker) RegisterChannel(ch channel.Channel) error {
 	b.chMu.Lock()
 	b.channels[ch.Name()] = &channelRegistration{Channel: ch, Host: host}
 	b.chMu.Unlock()
-	b.voiceRecoveryOnce.Do(b.Voice.RecoverPending)
 	// Degraded mode is announced HERE, not in New(): New() has no channel to speak
 	// through and no session to speak to, so its loud log line is the only trace —
 	// and a log nobody tails is exactly how this stayed silent. This is the first
@@ -302,6 +302,15 @@ func (b *Broker) announceQueueDegraded(ch channel.Channel) {
 }
 
 // Channel returns the registered channel implementation by name.
+// StartVoiceRecovery scans the durable queue once for voice notes whose
+// transcription was pending when the broker last stopped and re-schedules
+// them. Call it after every configured channel has registered — the scan
+// resolves channel-owned audio (a web note's local file) through the live
+// channel registry.
+func (b *Broker) StartVoiceRecovery() {
+	b.voiceRecoveryOnce.Do(b.Voice.RecoverPending)
+}
+
 func (b *Broker) Channel(name string) (channel.Channel, error) {
 	b.chMu.RLock()
 	defer b.chMu.RUnlock()

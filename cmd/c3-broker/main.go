@@ -79,6 +79,7 @@ func registerConfiguredChannels(br *broker.Broker, mf *mappings.MappingsFile, te
 			fmt.Fprintf(os.Stderr, "c3-broker: channel %s failed to start: %v — continuing\n", registration.name, err)
 		}
 	}
+	br.StartVoiceRecovery()
 }
 
 // Exit codes follow BSD sysexits(3) where applicable so shell scripts can
