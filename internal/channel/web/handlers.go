@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -26,6 +28,7 @@ func (c *Channel) routes() http.Handler {
 	mux.HandleFunc("POST /speak", c.handleSpeak)
 	mux.HandleFunc("GET /audio/unlock", c.handleAudioUnlock)
 	mux.HandleFunc("GET /audio/{token}", c.handleAudio)
+	mux.HandleFunc("GET /files/{token}", c.handleFile)
 	mux.HandleFunc("GET /manifest.webmanifest", handleWebManifest)
 	mux.HandleFunc("GET /icon.svg", handleWebIcon)
 	mux.HandleFunc("GET /apple-touch-icon.png", handleAppleTouchIcon)
@@ -34,7 +37,72 @@ func (c *Channel) routes() http.Handler {
 	mux.HandleFunc("GET /sw.js", handleServiceWorker)
 	mux.HandleFunc("GET /healthz", c.handleHealth)
 	mux.HandleFunc("GET /ca.crt", c.handleCACertificate)
-	return mux
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if (r.Method == http.MethodGet || r.Method == http.MethodHead) && strings.HasPrefix(r.URL.Path, "/files/") {
+			r.SetPathValue("token", strings.TrimPrefix(r.URL.Path, "/files/"))
+			c.handleFile(w, r)
+			return
+		}
+		mux.ServeHTTP(w, r)
+	})
+}
+
+const documentContentSecurityPolicy = "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; font-src data:; media-src data:; base-uri 'none'; form-action 'none'; frame-ancestors 'self'; sandbox allow-scripts"
+
+func (c *Channel) handleFile(w http.ResponseWriter, r *http.Request) {
+	if _, _, ok := c.authenticate(r, false); !ok {
+		http.Error(w, "authentication required", http.StatusUnauthorized)
+		return
+	}
+	path, err := c.localFilePath(r.PathValue("token"))
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	file, err := os.OpenFile(path, os.O_RDONLY|openNoFollow, 0)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil || !info.Mode().IsRegular() {
+		http.NotFound(w, r)
+		return
+	}
+	name := c.documentResponseName(r.PathValue("token"), filepath.Base(path))
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Content-Disposition", fmt.Sprintf("inline; filename=%q", name))
+	w.Header().Set("Content-Security-Policy", documentContentSecurityPolicy)
+	w.Header().Set("Referrer-Policy", "no-referrer")
+	http.ServeContent(w, r, name, info.ModTime(), file)
+}
+
+func (c *Channel) documentResponseName(token, fallback string) string {
+	url := "/files/" + token
+	name := ""
+	c.replayMu.Lock()
+	for index := len(c.replay) - 1; index >= 0; index-- {
+		attachment := c.replay[index].payload.Attachment
+		if attachment != nil && attachment.URL == url {
+			name = attachment.Name
+			break
+		}
+	}
+	c.replayMu.Unlock()
+	name = filepath.Base(strings.ReplaceAll(name, `\`, "/"))
+	name = strings.Map(func(character rune) rune {
+		if character < 0x20 || character == 0x7f || character == '"' || character == '\\' {
+			return '_'
+		}
+		return character
+	}, name)
+	if name == "" || name == "." {
+		return fallback
+	}
+	return name
 }
 
 func (c *Channel) handleCACertificate(w http.ResponseWriter, r *http.Request) {

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -12,24 +13,32 @@ import (
 )
 
 type streamPayload struct {
-	MessageID       int64      `json:"message_id,omitempty"`
-	ReplyTo         int64      `json:"reply_to,omitempty"`
-	ClientID        string     `json:"client_id,omitempty"`
-	Text            string     `json:"text,omitempty"`
-	Timestamp       *time.Time `json:"timestamp,omitempty"`
-	Active          bool       `json:"active,omitempty"`
-	Voice           *bool      `json:"voice,omitempty"`
-	DurationSeconds float64    `json:"duration_seconds,omitempty"`
-	URL             string     `json:"url,omitempty"`
-	Bytes           int        `json:"bytes,omitempty"`
-	Provider        string     `json:"provider,omitempty"`
-	Replay          bool       `json:"replay,omitempty"`
-	Attached        *bool      `json:"attached,omitempty"`
-	CLI             string     `json:"cli,omitempty"`
-	CWD             string     `json:"cwd,omitempty"`
-	PID             int        `json:"pid,omitempty"`
-	SessionID       string     `json:"session_id,omitempty"`
-	Since           string     `json:"since,omitempty"`
+	MessageID       int64       `json:"message_id,omitempty"`
+	ReplyTo         int64       `json:"reply_to,omitempty"`
+	ClientID        string      `json:"client_id,omitempty"`
+	Text            string      `json:"text,omitempty"`
+	Timestamp       *time.Time  `json:"timestamp,omitempty"`
+	Active          bool        `json:"active,omitempty"`
+	Voice           *bool       `json:"voice,omitempty"`
+	DurationSeconds float64     `json:"duration_seconds,omitempty"`
+	URL             string      `json:"url,omitempty"`
+	Bytes           int         `json:"bytes,omitempty"`
+	Provider        string      `json:"provider,omitempty"`
+	Replay          bool        `json:"replay,omitempty"`
+	Attached        *bool       `json:"attached,omitempty"`
+	CLI             string      `json:"cli,omitempty"`
+	CWD             string      `json:"cwd,omitempty"`
+	PID             int         `json:"pid,omitempty"`
+	SessionID       string      `json:"session_id,omitempty"`
+	Since           string      `json:"since,omitempty"`
+	Attachment      *attachment `json:"attachment,omitempty"`
+}
+
+type attachment struct {
+	Kind  string `json:"kind"`
+	URL   string `json:"url"`
+	Name  string `json:"name"`
+	Bytes int    `json:"bytes"`
 }
 
 type streamEvent struct {
@@ -52,8 +61,11 @@ func (c *Channel) SendReply(args c3types.ReplyArgs) (int64, error) {
 	if err := c.checkDestination(args.Channel, args.ChatID, args.TopicID); err != nil {
 		return 0, err
 	}
-	if args.Poll != nil || len(args.Media) != 0 || len(args.Buttons) != 0 {
+	if args.Poll != nil || len(args.Buttons) != 0 {
 		return 0, fmt.Errorf("%w: rich outbound content", errUnsupported)
+	}
+	if len(args.Media) != 0 {
+		return c.sendDocument(args)
 	}
 	if args.ReplyTo != nil && *args.ReplyTo > 0 && isVoiceReadbackNotice(args.Text) {
 		voice := true
@@ -75,6 +87,41 @@ func (c *Channel) SendReply(args c3types.ReplyArgs) (int64, error) {
 	if event.kind == "message" && c.hasVoiceSession() {
 		c.enqueueSpeech(speechJob{messageID: messageID, text: args.Text})
 	}
+	return messageID, nil
+}
+
+func (c *Channel) sendDocument(args c3types.ReplyArgs) (int64, error) {
+	if len(args.Media) != 1 {
+		return 0, errors.New("web: exactly one document may be sent per reply")
+	}
+	item := args.Media[0]
+	if item.Kind != c3types.MediaFile {
+		return 0, fmt.Errorf("web: media kind %q is not supported; send an HTML file", item.Kind)
+	}
+	if item.Path == "" {
+		return 0, errors.New("web: document requires a local path; URL-only media is not supported")
+	}
+	if item.URL != "" {
+		return 0, errors.New("web: document must use a local path, not a URL")
+	}
+	name := filepath.Base(item.Path)
+	token, byteCount, err := c.storeDocument(item.Path, name)
+	if err != nil {
+		return 0, err
+	}
+	messageID := c.nextReplyMessageID()
+	payload := streamPayload{
+		MessageID: messageID,
+		Text:      item.Caption,
+		Timestamp: streamTimestamp(c.now()),
+		Attachment: &attachment{
+			Kind: "html", URL: "/files/" + token, Name: name, Bytes: byteCount,
+		},
+	}
+	if args.ReplyTo != nil && *args.ReplyTo > 0 {
+		payload.ReplyTo = *args.ReplyTo
+	}
+	c.publish(streamEvent{kind: "message", payload: payload})
 	return messageID, nil
 }
 

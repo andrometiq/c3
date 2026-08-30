@@ -69,6 +69,9 @@ func TestOnTheGoProtocol_HasCanonicalKeyPhrases(t *testing.T) {
 		"back to Telegram",
 		"topic you held before",
 		"answered at the laptop",
+		"On the web page an HTML file you send opens in a sandboxed viewer inside the page",
+		`media: [{kind:"file", path, caption}]`,
+		"never put secrets in it",
 	} {
 		if !strings.Contains(OnTheGoProtocol, want) {
 			t.Errorf("OnTheGoProtocol missing %q:\n%s", want, OnTheGoProtocol)

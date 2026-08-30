@@ -147,6 +147,30 @@ func TestPersistenceRoundTrip(t *testing.T) {
 	}
 }
 
+func TestReplayReloadsAttachment(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	first := startPersistentChannel(t, persistentHost(), nil)
+	source := writeDocumentSource(t, t.TempDir(), "replay.html", "<!doctype html><p>replay</p>")
+	if _, err := first.SendReply(c3types.ReplyArgs{Channel: Name, ChatID: 42, Media: []c3types.MediaItem{{
+		Kind: c3types.MediaFile, Path: source, Caption: "Replay document",
+	}}}); err != nil {
+		t.Fatal(err)
+	}
+	want := first.replay[0].payload.Attachment
+	if err := first.Stop(); err != nil {
+		t.Fatal(err)
+	}
+
+	second := startPersistentChannel(t, persistentHost(), nil)
+	defer second.Stop()
+	if len(second.replay) != 1 || second.replay[0].kind != "message" || second.replay[0].payload.Attachment == nil {
+		t.Fatalf("reloaded replay=%+v", second.replay)
+	}
+	if got := second.replay[0].payload.Attachment; *got != *want || second.replay[0].payload.Text != "Replay document" {
+		t.Fatalf("reloaded attachment/text=%+v/%q, want %+v/%q", got, second.replay[0].payload.Text, want, "Replay document")
+	}
+}
+
 func TestStatusOnlyReplyIDSurvivesRestart(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	first := startPersistentChannel(t, persistentHost(), nil)

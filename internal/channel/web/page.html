@@ -81,6 +81,14 @@
     #presence-details { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: .45rem .8rem; margin: .85rem 0 .2rem; }
     #presence-details dt { color: #9ba7b4; }
     #presence-details dd { min-width: 0; margin: 0; overflow-wrap: anywhere; font-family: ui-monospace, monospace; }
+    #doc-viewer { position: fixed; z-index: 20; inset: 0; background: #0b0d10; }
+    #doc-viewer[hidden] { display: none; }
+    #doc-viewer-dialog { width: 100%; height: 100%; display: grid; grid-template-rows: auto minmax(0, 1fr); }
+    #doc-viewer-header { display: flex; align-items: center; gap: .75rem; padding: max(.65rem, env(safe-area-inset-top)) max(.75rem, env(safe-area-inset-right)) .65rem max(.75rem, env(safe-area-inset-left)); border-bottom: 1px solid #2d333b; background: #11151a; }
+    #doc-viewer-title { min-width: 0; margin: 0; overflow: hidden; font-size: 1rem; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+    #doc-viewer-close { min-width: 2.6rem; min-height: 2.6rem; border: 1px solid #46515e; border-radius: 50%; background: #222b35; color: #fff; font: 700 1.1rem/1 system-ui, sans-serif; }
+    #doc-viewer-frame { min-height: 0; background: #fff; }
+    #doc-viewer-frame iframe { width: 100%; height: 100%; display: block; border: 0; background: #fff; }
     #messages { position: relative; min-height: 0; overflow-y: auto; padding: 1rem; scroll-padding-block: 4rem 9rem; }
     #message-list { min-height: 1px; }
     #load-earlier { display: block; min-height: 2.6rem; margin: 0 auto 1rem; border: 1px solid #46515e; border-radius: 999px; padding: .35rem .9rem; background: #1a2027; color: #d9e1e9; font: inherit; }
@@ -117,6 +125,15 @@
     .body th, .body td { padding: .35rem .55rem; border: 1px solid #46515e; text-align: left; }
     .body th { background: #111820; }
     .meta { display: flex; gap: .45rem; margin-top: .3rem; color: #9ba7b4; font-size: .76rem; }
+    .doc-card { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: .65rem; margin-top: .65rem; padding: .7rem; border: 1px solid #46515e; border-radius: .7rem; background: #111820; }
+    .doc-card.expired { opacity: .68; }
+    .doc-icon { font-size: 1.6rem; line-height: 1.2; }
+    .doc-details { min-width: 0; }
+    .doc-name { overflow: hidden; font-weight: 700; text-overflow: ellipsis; white-space: nowrap; }
+    .doc-size, .doc-status { color: #aeb8c4; font-size: .82rem; }
+    .doc-actions { display: flex; flex-wrap: wrap; gap: .5rem; margin-top: .55rem; }
+    .doc-actions button { min-height: 2.5rem; border: 1px solid #596b7d; border-radius: .5rem; padding: .35rem .7rem; background: #173756; color: #fff; font: 700 .9rem/1 system-ui, sans-serif; }
+    .doc-actions button:disabled { opacity: .5; }
     .message-audio { min-width: 2rem; min-height: 2rem; margin: -.25rem 0 -.25rem auto; border: 1px solid #46515e; border-radius: 50%; background: #111820; color: #f4f6f8; font: 700 .9rem/1 system-ui, sans-serif; }
     .delivery.retrying { color: #f2c94c; }
     .delivery.failed { color: #ff6b6b; }
@@ -229,6 +246,15 @@
       <dt>Session ID</dt><dd id="presence-session-id"></dd>
       <dt>Since</dt><dd id="presence-since"></dd>
     </dl>
+  </section>
+</div>
+<div id="doc-viewer" hidden>
+  <section id="doc-viewer-dialog" role="dialog" aria-modal="true" aria-labelledby="doc-viewer-title">
+    <div id="doc-viewer-header">
+      <h2 id="doc-viewer-title">Document</h2>
+      <button id="doc-viewer-close" type="button" aria-label="Close document">×</button>
+    </div>
+    <div id="doc-viewer-frame"></div>
   </section>
 </div>
 <script>
@@ -384,6 +410,10 @@
   const presencePID = document.getElementById('presence-pid');
   const presenceSessionID = document.getElementById('presence-session-id');
   const presenceSince = document.getElementById('presence-since');
+  const documentViewer = document.getElementById('doc-viewer');
+  const documentViewerTitle = document.getElementById('doc-viewer-title');
+  const documentViewerClose = document.getElementById('doc-viewer-close');
+  const documentViewerFrame = document.getElementById('doc-viewer-frame');
   const rows = new Map();
   const pendingRows = new Map();
   let typingTimer;
@@ -403,6 +433,8 @@
   let driveAudioActivationPromise;
   let lastReplyText = '';
   let lastReplyMessageID = 0;
+  let lastReplyAttachment = null;
+  let lastReplyHasSpeech = false;
   let newestAgentReplyID = 0;
   let lastAudioPlayedMessageID = 0;
   let lastTranscriptText = '';
@@ -425,6 +457,8 @@
   let streamOpenedOnce = false;
   let reconnectCatchUpPending = false;
   let reconnectCatchUpTimer;
+  let documentViewerReturnFocus = null;
+  const announcedDocumentMessageIDs = new Set();
 
   const stateLabels = {
     idle: '○ idle',
@@ -500,14 +534,16 @@
     return /[\p{L}\p{N}]/u.test(value) ? value : '';
   }
 
-  function updateDriveReply(text, messageID) {
+  function updateDriveReply(text, messageID, attachmentValue) {
     const nextMessageID = Number(messageID || 0);
     if (nextMessageID && newestAgentReplyID && nextMessageID < newestAgentReplyID) return;
     lastReplyText = String(text || '');
     lastReplyMessageID = nextMessageID;
+    lastReplyAttachment = normaliseDocumentAttachment(attachmentValue);
+    lastReplyHasSpeech = Boolean(toSpeakableText(lastReplyText));
     newestAgentReplyID = Math.max(newestAgentReplyID, lastReplyMessageID);
-    driveLastReply.textContent = toSpeakableText(lastReplyText);
-    driveReplyPlayButton.hidden = !lastReplyMessageID;
+    driveLastReply.textContent = lastReplyAttachment ? '1 document · ' + lastReplyAttachment.name : toSpeakableText(lastReplyText);
+    driveReplyPlayButton.hidden = !lastReplyMessageID || !lastReplyHasSpeech;
     updateMessageAudioButtons();
   }
 
@@ -1071,6 +1107,115 @@
     }
   }
 
+  function normaliseDocumentAttachment(value) {
+    if (!value || value.kind !== 'html') return null;
+    const url = String(value.url || '');
+    if (!/^\/files\/[0-9a-f]{32}$/.test(url)) return null;
+    return {
+      kind: 'html',
+      url,
+      name: String(value.name || 'document.html'),
+      bytes: Math.max(0, Number(value.bytes || 0))
+    };
+  }
+
+  function formatDocumentSize(bytes) {
+    const value = Math.max(0, Number(bytes || 0));
+    if (value >= 1024 * 1024) return (value / (1024 * 1024)).toFixed(value >= 10 * 1024 * 1024 ? 0 : 1) + ' MB';
+    return Math.max(1, Math.ceil(value / 1024)) + ' KB';
+  }
+
+  function markDocumentExpired(card, openButton, status) {
+    card.classList.add('expired');
+    openButton.disabled = true;
+    status.textContent = 'expired';
+  }
+
+  async function documentIsAvailable(card, openButton, status, url) {
+    try {
+      const response = await fetch(url, {method: 'HEAD'});
+      if (response.status === 404) {
+        markDocumentExpired(card, openButton, status);
+        return false;
+      }
+      if (!response.ok) throw new Error('document unavailable');
+      status.textContent = '';
+      return true;
+    } catch (_) {
+      status.textContent = 'unavailable';
+      return false;
+    }
+  }
+
+  function openDocumentViewer(attachmentValue, returnFocus) {
+    const attachment = normaliseDocumentAttachment(attachmentValue);
+    if (!attachment) return;
+    documentViewerReturnFocus = returnFocus;
+    documentViewerTitle.textContent = attachment.name;
+    documentViewerFrame.textContent = '';
+    const frame = document.createElement('iframe');
+    frame.setAttribute('title', attachment.name);
+    frame.setAttribute('sandbox', 'allow-scripts');
+    frame.setAttribute('referrerpolicy', 'no-referrer');
+    frame.setAttribute('src', attachment.url);
+    documentViewerFrame.append(frame);
+    documentViewer.hidden = false;
+    documentViewerClose.focus();
+  }
+
+  function closeDocumentViewer() {
+    if (documentViewer.hidden) return;
+    documentViewer.hidden = true;
+    documentViewerFrame.textContent = '';
+    const returnFocus = documentViewerReturnFocus;
+    documentViewerReturnFocus = null;
+    if (returnFocus && returnFocus.focus) returnFocus.focus();
+  }
+
+  function createDocumentCard(attachmentValue) {
+    const attachment = normaliseDocumentAttachment(attachmentValue);
+    if (!attachment) return null;
+    const card = document.createElement('section');
+    card.className = 'doc-card';
+    const icon = document.createElement('span');
+    icon.className = 'doc-icon';
+    icon.setAttribute('aria-hidden', 'true');
+    icon.textContent = '📄';
+    const details = document.createElement('div');
+    details.className = 'doc-details';
+    const name = document.createElement('div');
+    name.className = 'doc-name';
+    name.textContent = attachment.name;
+    const size = document.createElement('div');
+    size.className = 'doc-size';
+    size.textContent = formatDocumentSize(attachment.bytes);
+    const status = document.createElement('div');
+    status.className = 'doc-status';
+    status.setAttribute('aria-live', 'polite');
+    const actions = document.createElement('div');
+    actions.className = 'doc-actions';
+    const openButton = document.createElement('button');
+    openButton.type = 'button';
+    openButton.textContent = 'Open';
+    openButton.addEventListener('click', async () => {
+      if (await documentIsAvailable(card, openButton, status, attachment.url)) {
+        openDocumentViewer(attachment, openButton);
+      }
+    });
+    actions.append(openButton);
+    details.append(name, size, actions, status);
+    card.append(icon, details);
+    return card;
+  }
+
+  function announceDocumentReceived(data) {
+    const attachment = normaliseDocumentAttachment(data.attachment);
+    const messageID = Number(data.message_id || 0);
+    if (!attachment || data.replay || currentView !== 'drive' || announcedDocumentMessageIDs.has(messageID)) return;
+    announcedDocumentMessageIDs.add(messageID);
+    speakLocalNotice('document received');
+  }
+
   function transcriptFoldParts(text) {
     if (text.length <= TRANSCRIPT_FOLD_THRESHOLD) return null;
     const lines = text.replace(/\r\n?/g, '\n').split('\n');
@@ -1151,6 +1296,8 @@
     if (kind === 'agent') renderText(body, data.text || '');
     else if (kind === 'mine' && data.voice) renderVoice(body, data);
     else renderLiteral(body, data.text || '');
+    const documentAttachment = kind === 'agent' ? normaliseDocumentAttachment(data.attachment) : null;
+    if (documentAttachment) body.append(createDocumentCard(documentAttachment));
     const meta = document.createElement('div');
     meta.className = 'meta';
     const timestamp = document.createElement('time');
@@ -1163,15 +1310,16 @@
       meta.append(delivery);
       row.delivery = delivery;
     }
-    if (kind === 'agent' && id) meta.append(createMessageAudioButton(id));
+    if (kind === 'agent' && id && String(data.text || '')) meta.append(createMessageAudioButton(id));
     row.append(body, meta);
     row.bodyNode = body;
     row.metaNode = meta;
     row.replyText = String(data.text || '');
+    row.attachment = documentAttachment;
     row.voiceDuration = Number(data.duration_seconds || 0);
     if (settings.before) messageList.insertBefore(row, settings.before);
     else messageList.append(row);
-    if (kind === 'agent') updateDriveReply(data.text || '', id);
+    if (kind === 'agent') updateDriveReply(data.text || '', id, documentAttachment);
     if (kind === 'mine' && data.voice) {
       if (!id || id >= lastTranscriptMessageID) {
         lastTranscriptMessageID = id;
@@ -1220,7 +1368,7 @@
     for (let index = replayHistoryEntries.length - 1; index >= 0; index -= 1) {
       const entry = replayHistoryEntries[index];
       if (!lastReplyMessageID && entry.kind === 'agent') {
-        updateDriveReply(entry.data.text || '', entry.data.message_id);
+        updateDriveReply(entry.data.text || '', entry.data.message_id, entry.data.attachment);
       }
       if (!lastTranscriptText && entry.kind === 'mine' && entry.data.voice) {
         const duration = Number(entry.data.duration_seconds || 0);
@@ -1654,7 +1802,7 @@
   }
 
   function updateReplayButtons() {
-    const disabled = !lastReplyMessageID;
+    const disabled = !lastReplyMessageID || !lastReplyHasSpeech;
     replayAudioButton.disabled = disabled;
     driveReplayButton.disabled = disabled;
   }
@@ -2111,6 +2259,11 @@
     if (!handsFreeEnabled || state !== 'thinking' || data.replay || !awaitingMessageID || activeReplyID) return;
     const replyTo = Number(data.reply_to || 0);
     if (replyTo !== 0 && replyTo !== awaitingMessageID) return;
+    if (normaliseDocumentAttachment(data.attachment)) {
+      resetReplyTracking();
+      setState('listening');
+      return;
+    }
     activeReplyID = Number(data.message_id || 0);
     if (!activeReplyID) return;
     window.clearTimeout(replyTimer);
@@ -2128,6 +2281,11 @@
     if (handsFreeEnabled || state !== 'thinking' || data.replay || !awaitingMessageID || activeReplyID) return;
     const replyTo = Number(data.reply_to || 0);
     if (replyTo !== 0 && replyTo !== awaitingMessageID) return;
+    if (normaliseDocumentAttachment(data.attachment)) {
+      resetReplyTracking();
+      setState('idle');
+      return;
+    }
     activeReplyID = Number(data.message_id || 0);
     if (!activeReplyID) return;
     window.clearTimeout(replyTimer);
@@ -2572,6 +2730,7 @@
       }
       if (freshHistoryPending) finishFreshHistory();
       addMessage('agent', data);
+      announceDocumentReceived(data);
       handleHandsFreeReply(data);
       handleDriveReply(data);
       scheduleReconnectCatchUp();
@@ -2639,8 +2798,9 @@
         if (row) {
           row.replyText = String(data.text || '');
           renderText(row.bodyNode, data.text || '');
+          if (row.attachment) row.bodyNode.append(createDocumentCard(row.attachment));
         } else if (!updateHiddenReplayEntry('agent', data)) addMessage('agent', data);
-        if (messageID === lastReplyMessageID) updateDriveReply(data.text || '', data.message_id);
+        if (messageID === lastReplyMessageID) updateDriveReply(data.text || '', data.message_id, row && row.attachment);
       }
       scheduleReconnectCatchUp();
     });
@@ -2919,6 +3079,7 @@
   presenceSheetBackdrop.addEventListener('click', event => {
     if (event.target === presenceSheetBackdrop) closePresenceSheet();
   });
+  documentViewerClose.addEventListener('click', closeDocumentViewer);
   loadEarlierButton.addEventListener('click', loadEarlierHistory);
   newMessagesButton.addEventListener('click', scrollBottom);
   messages.addEventListener('scroll', () => {
@@ -2927,6 +3088,11 @@
   });
 
   document.addEventListener('keydown', event => {
+    if (event.key === 'Escape' && !documentViewer.hidden) {
+      event.preventDefault();
+      closeDocumentViewer();
+      return;
+    }
     if (event.key === 'Escape' && !presenceSheetBackdrop.hidden) {
       event.preventDefault();
       closePresenceSheet();

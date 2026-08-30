@@ -1040,6 +1040,7 @@ func TestEmbeddedPagesAreSelfContainedAndUseTextContent(t *testing.T) {
 	for _, marker := range []string{
 		`id="view-drive"`, `id="view-chat"`, `id="drive-circle"`, `id="drive-word"`, `id="drive-chip"`,
 		`id="presence-sheet"`, `role="dialog"`, `events.addEventListener('presence'`,
+		`id="doc-viewer"`, `className = 'doc-card'`, `frame.setAttribute('referrerpolicy', 'no-referrer')`,
 		`id="drive-mute"`, `id="drive-chat"`, `id="drive-live"`, `id="drive-replay"`,
 		`id="drive-last-reply"`, `id="drive-reply-play"`, `id="drive-transcript"`, `id="drive-lock-hint"`,
 		`id="load-earlier"`, `id="message-list"`, `id="new-messages"`,
@@ -1063,6 +1064,11 @@ func TestEmbeddedPagesAreSelfContainedAndUseTextContent(t *testing.T) {
 	} {
 		if !strings.Contains(pageText, marker) {
 			t.Fatalf("page is missing renderer/state marker %q", marker)
+		}
+	}
+	for _, forbidden := range []string{"New tab", "window.open"} {
+		if strings.Contains(pageText, forbidden) {
+			t.Fatalf("page contains rejected top-level document control %q", forbidden)
 		}
 	}
 	for _, stateName := range []string{"idle", "listening", "recording", "sending", "thinking", "speaking"} {
@@ -1309,9 +1315,18 @@ func TestDocumentHeadersDenyFraming(t *testing.T) {
 	}
 }
 
+func TestParentPageCSPUnchanged(t *testing.T) {
+	w := httptest.NewRecorder()
+	setPageHeaders(w)
+	const csp = "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; img-src 'self'; media-src 'self'; worker-src 'self'; manifest-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
+	if got := w.Header().Get("Content-Security-Policy"); got != csp {
+		t.Fatalf("parent Content-Security-Policy=%q", got)
+	}
+}
+
 func TestCapabilities(t *testing.T) {
 	caps := New().Capabilities()
-	if caps.Channel != Name || !caps.RichText || !caps.RichTables || caps.MaxMessageRunes != maxMessageRunes || caps.MaxMessageRunesSource != 0 || !caps.Typing || !caps.EditMessages || caps.InlineKeyboards || caps.Polls || caps.Reactions || len(caps.MediaKinds) != 0 {
+	if caps.Channel != Name || !caps.RichText || !caps.RichTables || caps.MaxMessageRunes != maxMessageRunes || caps.MaxMessageRunesSource != 0 || !caps.Typing || !caps.EditMessages || caps.InlineKeyboards || caps.Polls || caps.Reactions || len(caps.MediaKinds) != 1 || caps.MediaKinds[0] != c3types.MediaFile || !caps.OriginalFile || caps.MaxSendBytes != maxDocumentBytes {
 		t.Fatalf("capabilities=%+v", caps)
 	}
 }

@@ -166,3 +166,146 @@ process.stdout.write(JSON.stringify(results));
 		t.Errorf("failure fallback/errors=%s/%s", got, rendered["renderErrors"])
 	}
 }
+
+func TestPageDocumentCard(t *testing.T) {
+	nodePath, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node is not on PATH; the executable document-card test requires Node.js")
+	}
+	page, err := pages.ReadFile("page.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	functionPattern := regexp.MustCompile(`(?s)(function normaliseDocumentAttachment\(value\) \{.*\n  \})\n\n  function announceDocumentReceived`)
+	match := functionPattern.FindSubmatch(page)
+	if len(match) != 2 {
+		t.Fatal("could not extract document-card functions from page.html")
+	}
+
+	const harness = `
+class TextNode {
+  constructor(value) { this.nodeType = 3; this.value = String(value); }
+  get textContent() { return this.value; }
+}
+class ClassList {
+  constructor(owner) { this.owner = owner; }
+  values() { return new Set(this.owner.className.split(/\s+/).filter(Boolean)); }
+  add(...names) { const values = this.values(); names.forEach(name => values.add(name)); this.owner.className = Array.from(values).join(' '); }
+  contains(name) { return this.values().has(name); }
+}
+class ElementNode {
+  constructor(tag) {
+    this.nodeType = 1;
+    this.tagName = tag;
+    this.children = [];
+    this.attributes = {};
+    this.attributeOrder = [];
+    this.className = '';
+    this.classList = new ClassList(this);
+    this.listeners = {};
+    this.hidden = false;
+    this.disabled = false;
+    this.focused = false;
+  }
+  append(...children) { children.forEach(child => this.children.push(typeof child === 'string' ? new TextNode(child) : child)); }
+  set textContent(value) { this.children = []; if (String(value)) this.children.push(new TextNode(value)); }
+  get textContent() { return this.children.map(child => child.textContent).join(''); }
+  setAttribute(name, value) { this.attributes[name] = String(value); this.attributeOrder.push(name); }
+  addEventListener(name, listener) { (this.listeners[name] ||= []).push(listener); }
+  async dispatch(name, event = {}) { await Promise.all((this.listeners[name] || []).map(listener => listener(event))); }
+  focus() { this.focused = true; }
+}
+const document = { createElement(tag) { return new ElementNode(tag); } };
+const documentViewer = new ElementNode('div');
+documentViewer.hidden = true;
+const documentViewerTitle = new ElementNode('h2');
+const documentViewerClose = new ElementNode('button');
+const documentViewerFrame = new ElementNode('div');
+let documentViewerReturnFocus = null;
+let fetchResult = {status: 200, ok: true};
+async function fetch() { return fetchResult; }
+function escaped(value) { return String(value).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); }
+function serialise(node) {
+  if (node.nodeType === 3) return escaped(node.value);
+  const attributes = Object.assign({}, node.attributes);
+  if (node.className) attributes.class = node.className;
+  const renderedAttributes = Object.keys(attributes).sort().map(key => ' ' + key + '="' + escaped(attributes[key]) + '"').join('');
+  return '<' + node.tagName + renderedAttributes + '>' + node.children.map(serialise).join('') + '</' + node.tagName + '>';
+}
+function findButtons(node, found = []) {
+  if (node.nodeType === 1 && node.tagName === 'button') found.push(node);
+  (node.children || []).forEach(child => findButtons(child, found));
+  return found;
+}
+`
+	const cases = `
+(async () => {
+  const attachment = {kind: 'html', url: '/files/0123456789abcdef0123456789abcdef', name: '<img onerror=alert(1)>', bytes: 1536};
+  const card = createDocumentCard(attachment);
+  const buttons = findButtons(card);
+  const safeCard = serialise(card);
+  fetchResult = {status: 404, ok: false};
+  await buttons[0].dispatch('click');
+  const expired = card.classList.contains('expired') && buttons[0].disabled && card.textContent.includes('expired');
+  const openCard = createDocumentCard(attachment);
+  fetchResult = {status: 200, ok: true};
+  await findButtons(openCard)[0].dispatch('click');
+  const frame = documentViewerFrame.children[0];
+  process.stdout.write(JSON.stringify({
+    safeCard,
+    buttonCount: buttons.length,
+    expired,
+    sandbox: frame.attributes.sandbox,
+    referrerPolicy: frame.attributes.referrerpolicy,
+    src: frame.attributes.src,
+    attributeOrder: frame.attributeOrder,
+    viewerOpen: !documentViewer.hidden
+  }));
+})().catch(error => { process.stderr.write(String(error)); process.exit(1); });
+`
+	command := exec.Command(nodePath, "-e", harness+"\n"+string(match[1])+cases)
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("node document-card execution failed: %v\n%s", err, output)
+	}
+	var result struct {
+		SafeCard       string   `json:"safeCard"`
+		ButtonCount    int      `json:"buttonCount"`
+		Expired        bool     `json:"expired"`
+		Sandbox        string   `json:"sandbox"`
+		ReferrerPolicy string   `json:"referrerPolicy"`
+		Src            string   `json:"src"`
+		AttributeOrder []string `json:"attributeOrder"`
+		ViewerOpen     bool     `json:"viewerOpen"`
+	}
+	if err := json.Unmarshal(output, &result); err != nil {
+		t.Fatalf("decode node document-card output: %v\n%s", err, output)
+	}
+	if strings.Contains(result.SafeCard, "<img ") || !strings.Contains(result.SafeCard, "&lt;img onerror=alert(1)&gt;") {
+		t.Fatalf("agent-controlled document name was not rendered as text: %s", result.SafeCard)
+	}
+	if !strings.Contains(result.SafeCard, `class="doc-card"`) || !strings.Contains(result.SafeCard, ">Open</button>") || result.ButtonCount != 1 {
+		t.Fatalf("document card missing DOM-built controls: %s", result.SafeCard)
+	}
+	if !result.Expired {
+		t.Fatal("404 did not mark the card expired and disable Open")
+	}
+	if result.Sandbox != "allow-scripts" || result.ReferrerPolicy != "no-referrer" || result.Src != "/files/0123456789abcdef0123456789abcdef" || !result.ViewerOpen {
+		t.Fatalf("viewer sandbox/referrer-policy/src/open=%q/%q/%q/%v", result.Sandbox, result.ReferrerPolicy, result.Src, result.ViewerOpen)
+	}
+	sandboxIndex, referrerPolicyIndex, sourceIndex := -1, -1, -1
+	for index, name := range result.AttributeOrder {
+		if name == "sandbox" {
+			sandboxIndex = index
+		}
+		if name == "referrerpolicy" {
+			referrerPolicyIndex = index
+		}
+		if name == "src" {
+			sourceIndex = index
+		}
+	}
+	if sandboxIndex < 0 || referrerPolicyIndex < 0 || sourceIndex < 0 || sandboxIndex >= sourceIndex || referrerPolicyIndex >= sourceIndex {
+		t.Fatalf("iframe attributes set in unsafe order: %v", result.AttributeOrder)
+	}
+}

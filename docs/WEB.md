@@ -151,7 +151,7 @@ the phone screen on, in a cradle or on loudspeaker. The wake lock supports that
 pattern but does not make iOS background audio work; iOS suspends microphone
 and Web Audio capture when the app is backgrounded or the screen locks.
 
-## Security model (T1–T18)
+## Security model (T1–T19)
 
 1. The send body contains only `text` and `client_id`. C3 rejects extra JSON and
    stamps channel, route, operator, message kind, version, and time itself before
@@ -204,6 +204,17 @@ and Web Audio capture when the app is backgrounded or the screen locks.
     phone after an address or certificate change.
 18. TLS refuses empty-host, `0.0.0.0`, and `::` listeners; the agent-driving
     surface is never bound to every interface.
+19. An agent-supplied document `path` may name any broker-readable local HTML
+    file. C3 accepts and audit-logs that path under the same trusted-local-agent
+    model as Telegram file sends, then persists a private copy for the web page.
+    This is a real local-file read and on-screen disclosure boundary: do not
+    point it at secrets. The web channel limits the new exposure to regular
+    `.html`/`.htm` files of at most 5 MiB, stores copies and their directory as
+    0600/0700, retains only the newest 200 documents, cookie-gates reads, and
+    renders them with the document sandbox and CSP described below. It does not
+    claim that an extension check identifies harmless content. Exploiting the
+    files-directory symlink TOCTOU between its `Lstat` and the `O_NOFOLLOW` file
+    open requires write access to the state parent, normally as the broker uid.
 
 ## Transport behavior and limitations
 
@@ -239,6 +250,41 @@ channel advertises both `RichText` and `RichTables`; tables render in a
 horizontal-scroll wrapper. Link targets are created only for
 `http:`, `https:`, `mailto:`, and `tel:` schemes. Operator messages and status
 notices remain literal text with line breaks.
+
+## Documents in the page
+
+An agent can create a self-contained HTML report, diagram, or explainer on the
+shared host and send it to the web route with the reply tool:
+
+```text
+media: [{kind:"file", path:"/path/to/report.html", caption:"Report"}]
+```
+
+Use the caption as the one-line description. A reply containing only that media
+item becomes one agent row; when text and a file are sent together, the normal
+capability gate emits the text row first and the document card as the next row.
+The card shows the filename and size with an **Open** control that uses a
+full-screen viewer inside the current page. Opening in a new tab is rejected:
+as a top-level document it would be outside the parent page's CSP box, and its
+response sandbox would not stop it from navigating itself to an attacker page.
+
+Documents must keep CSS and JavaScript inline and use `data:` URLs for images,
+fonts, and media. The iframe has exactly `sandbox="allow-scripts"`, without
+same-origin, forms, popups, downloads, or navigation permissions. The document
+response repeats that sandbox in CSP and sets `default-src 'none'`, no
+connections, no base URL, no forms, and only inline script/style plus `data:`
+assets. Consequently document script runs in an opaque origin: it cannot read
+the session cookie or parent DOM, call same-origin C3 endpoints, fetch the
+network, navigate the operator page, open popups, or persist origin storage.
+These guarantees depend on the browser enforcing iframe sandboxing and Content
+Security Policy; do not put secrets in agent-generated HTML.
+
+The web channel accepts only regular `.html` and `.htm` files up to 5 MiB. It
+copies them under the web state directory with a random 128-bit token, a 0700
+directory, and 0600 file mode. The file store and conversation replay each keep
+their newest 200 entries independently. A replayed card can therefore outlive
+its file; Open performs a HEAD check, marks a missing file **expired**, and
+disables the card rather than opening a broken viewer.
 
 ## Drive view
 
@@ -430,11 +476,12 @@ requires a config update and restart so the leaf SANs can be reissued, but does
 not require reinstalling the CA.
 
 Other current limits: there is one web conversation per operator; voice notes
-are the only inbound media (no files, photos, polls, reactions, buttons, or
-remote permission verdicts); and a CLI session can claim only one Telegram or
-web route at once. Synthesized audio is intentionally transient rather than
-conversation history. Two open tabs sharing one browser session both receive
-the live audio event and play each spoken reply.
+are the only inbound media, while agent outbound media is limited to HTML
+documents (no photos, polls, reactions, buttons, or remote permission
+verdicts); and a CLI session can claim only one Telegram or web route at once.
+Synthesized audio is intentionally transient rather than conversation history.
+Two open tabs sharing one browser session both receive the live audio event and
+play each spoken reply.
 
 ## Phone verification checklist
 
