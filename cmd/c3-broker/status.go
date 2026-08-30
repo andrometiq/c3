@@ -10,6 +10,7 @@ import (
 	"github.com/Andrometiq/c3/internal/broker"
 	"github.com/Andrometiq/c3/internal/mappings"
 	"github.com/Andrometiq/c3/internal/plugin/builtins/stt"
+	"github.com/Andrometiq/c3/internal/plugin/builtins/tts"
 	"github.com/Andrometiq/c3/internal/version"
 )
 
@@ -126,10 +127,18 @@ func runStatus() error {
 		if h.Detail != "" {
 			fmt.Fprintf(&b, "               %s\n", h.Detail)
 		}
+		if raw, ok := mf.Plugins[tts.Name]; ok {
+			enabled, isSet := raw["enabled"].(bool)
+			fmt.Fprintf(&b, "  - %-10s enabled=%v", tts.Name, !isSet || enabled)
+			if handler, _ := raw["handler_path"].(string); handler != "" {
+				fmt.Fprintf(&b, " handler=%s", handler)
+			}
+			fmt.Fprintln(&b)
+		}
 		// Anything else under plugins.* is a config bag for a plugin that is not
 		// compiled in — say so rather than implying it does something.
 		for name, cfg := range mf.Plugins {
-			if name == stt.Name {
+			if name == stt.Name || name == tts.Name {
 				continue
 			}
 			enabled, ok := cfg["enabled"].(bool)
