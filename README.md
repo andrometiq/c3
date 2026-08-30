@@ -115,19 +115,21 @@ drive-only in phase 1; permission prompts remain at the laptop. See
 
 ## Bundled plugins
 
-One, compiled into the broker: `stt`.
+Two, compiled into the broker: `stt` and `tts`.
 
 | Plugin | Does | Default | Needs |
 |---|---|---|---|
 | `stt` | Transcribes Telegram voice notes into `[Transcribed voice]: …` | on | `python3`, an API key for at least one provider, and `ffmpeg` for the pre-send silence gate (optional) |
+| `tts` | Synthesizes speakable reply text as MP3 for voice-capable surfaces | on | `python3`, an API key for at least one provider, and `ffmpeg` for the OpenRouter fallback |
 
-It's a Go hook that shells out to a bundled Python chain. Four providers ship on disk and
-run in order until one returns a transcript: OpenRouter Gemini 3 Flash, Soniox Async v5,
-ElevenLabs Scribe v2, then Sarvam Saaras v3. Providers without keys skip immediately;
-`C3_STT_CHAIN` overrides the order. The handler resolves through an explicit config path,
-Claude Code's plugin root, a source checkout, or the runtime bundle beside release
-binaries; `install-desktop` records the resolved path for non-plugin hosts. Disable it with
-`plugins.stt.enabled = false`.
+The STT Go hook shells out to four bundled Python providers until one returns a transcript:
+OpenRouter Gemini 3 Flash, Soniox Async v5, ElevenLabs Scribe v2, then Sarvam Saaras v3;
+`C3_STT_CHAIN` overrides that order. The TTS Go hook shells out until one provider returns
+MP3 audio: Sarvam Bulbul v3, ElevenLabs Flash v2.5, then OpenRouter Gemini TTS;
+`C3_TTS_CHAIN` overrides that order. Both handlers resolve through an explicit config path,
+Claude Code's plugin root, a source checkout, or the runtime bundle beside release binaries;
+`install-desktop` records the resolved paths for non-plugin hosts. Disable either with
+`plugins.<name>.enabled = false`.
 
 External or loadable plugins are not implemented: `plugins.<name>` in the config is a
 settings bag for built-ins, not a loader. See [`docs/PLUGINS.md`](docs/PLUGINS.md).

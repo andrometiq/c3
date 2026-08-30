@@ -33,7 +33,7 @@ tool finishing, a Telegram tap can still render as effective even though the
 host drops it; only an upstream `permission_resolved` notification can close
 that window.
 
-## D021: Web channel phase 1 contract (D1–D11)
+## D021: Web channel phase 1 and TTS phase 3a contracts
 
 **Date:** 2026-08-30
 
@@ -72,6 +72,14 @@ DNS-01 introduces DNS credentials and renewal machinery. A stable local CA won
 because it keeps reach private, needs one explicit trust installation per
 phone, and lets the broker reissue address-correct leaves without changing the
 trusted root.
+
+**TTS phase 3a:** Live provider probes on 2026-08-30 made Sarvam Bulbul v3 and
+ElevenLabs Flash v2.5 the first two defaults: both round-tripped mixed Tamil and
+English through the STT chain word-for-word. Three Gemini preview probes instead
+returned 1.2–2.1-second clips containing only “Hello”, while a plain-English
+probe repeated its first sentence three times and omitted the second; OpenRouter
+also accepted only 24 kHz mono PCM, requiring local MP3 transcoding. Gemini stays
+as the last fallback, and `C3_TTS_CHAIN` remains the explicit order override.
 
 ## D019: dcode adapter — live push via the external-event socket; slash commands as user skills
 

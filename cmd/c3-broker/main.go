@@ -36,6 +36,7 @@ import (
 	"github.com/Andrometiq/c3/internal/osutil"
 	"github.com/Andrometiq/c3/internal/plugin"
 	"github.com/Andrometiq/c3/internal/plugin/builtins/stt"
+	"github.com/Andrometiq/c3/internal/plugin/builtins/tts"
 	"github.com/Andrometiq/c3/internal/sessionhandoff"
 )
 
@@ -44,6 +45,7 @@ import (
 // runs them in slice order.
 var builtinPlugins = []broker.BuiltinPlugin{
 	{Name: stt.Name, Register: func(h plugin.Host) error { return stt.Register(h) }},
+	{Name: tts.Name, Register: func(h plugin.Host) error { return tts.Register(h) }},
 }
 
 type channelFactory func() channel.Channel
@@ -114,6 +116,12 @@ func main() {
 		case "web":
 			if err := runWeb(os.Args[2:]); err != nil {
 				fmt.Fprintf(os.Stderr, "c3-broker web: %v\n", err)
+				os.Exit(exitFailure)
+			}
+			return
+		case "tts":
+			if err := runTTS(os.Args[2:]); err != nil {
+				fmt.Fprintf(os.Stderr, "c3-broker tts: %v\n", err)
 				os.Exit(exitFailure)
 			}
 			return
@@ -351,6 +359,12 @@ func runDaemon() (err error) {
 		fmt.Fprintf(os.Stderr, "c3-broker: WARNING embedded STT repair failed: %v\n", repairErr)
 	} else if repaired {
 		log.Printf("c3-broker: installed embedded STT runtime into the user-data fallback")
+	}
+	if repaired, repairErr := ensureEmbeddedReleaseTTS(); repairErr != nil {
+		log.Printf("c3-broker: WARNING embedded TTS repair failed: %v", repairErr)
+		fmt.Fprintf(os.Stderr, "c3-broker: WARNING embedded TTS repair failed: %v\n", repairErr)
+	} else if repaired {
+		log.Printf("c3-broker: installed embedded TTS runtime into the user-data fallback")
 	}
 
 	mfPath, err := mappings.DefaultPath()

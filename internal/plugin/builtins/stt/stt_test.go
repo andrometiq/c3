@@ -39,7 +39,9 @@ func (h *fakeHost) OnVoiceReceived(fn func(context.Context, c3types.VoicePayload
 func (h *fakeHost) OnOutbound(fn func(context.Context, *c3types.Outbound) (*c3types.Outbound, bool)) {
 }
 func (h *fakeHost) OnAttach(fn func(*plugin.Stub, *plugin.Mapping)) {}
-func (h *fakeHost) RegisterTools(fn func(*plugin.ToolRegistry))     {}
+func (h *fakeHost) RegisterSynthesizer(fn func(context.Context, c3types.SpeechRequest) (c3types.SpeechResult, error)) {
+}
+func (h *fakeHost) RegisterTools(fn func(*plugin.ToolRegistry)) {}
 
 func (h *fakeHost) Config(name string, target any) error {
 	if name != Name {
