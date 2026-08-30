@@ -3,6 +3,21 @@
 Entries are newest first. This is the public architecture record: it records
 rulings and rationale, never private operational details.
 
+## D025: Headless Cursor runs cannot claim routes by default
+
+**Date:** 2026-08-30
+
+**Decision:** Background Cursor review and tool runs must not be able to claim
+an operator's topic. The Cursor adapter refuses explicit attach and session
+recovery auto-attach when a `cursor-agent` or `cursor` ancestor has a headless
+output flag, unless `C3_ALLOW_HEADLESS_ATTACH=1` explicitly opts the run in.
+
+**Why:** Cursor loads every configured MCP server for non-interactive runs, so a
+background agent can discover and call `attach` even though it cannot render
+channel pushes. The guard belongs in the adapter because the broker sees only a
+Cursor connection and cannot distinguish the interactive TUI from a headless
+process.
+
 ## D024: Hands-free uses local energy VAD; the web app caches nothing
 
 **Date:** 2026-08-30
