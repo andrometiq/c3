@@ -1043,6 +1043,8 @@ func TestEmbeddedPagesAreSelfContainedAndUseTextContent(t *testing.T) {
 		`id="doc-viewer"`, `className = 'doc-card'`, `frame.setAttribute('referrerpolicy', 'no-referrer')`,
 		`id="drive-mute"`, `id="drive-chat"`, `id="drive-live"`, `id="drive-replay"`,
 		`id="drive-last-reply"`, `id="drive-reply-play"`, `id="drive-transcript"`, `id="drive-lock-hint"`,
+		`id="drive-cancel"`, `id="drive-cancel-zone"`, `id="drive-draft-offer"`, `id="chat-draft-offer"`,
+		`id="haptics-toggle"`,
 		`id="load-earlier"`, `id="message-list"`, `id="new-messages"`,
 		"return 'mine:' + id", "return 'agent:' + id", "return 'status:' + id",
 		"createElement('table')", "createElement('blockquote')", "createElement('span')",
@@ -1102,7 +1104,7 @@ func TestHandsFreePageStateMachineRules(t *testing.T) {
 		"startHandsFreeUploadDeadline(pending);",
 		"pending.handsFreeDeadline = window.setTimeout(() => {\n      if (pending.controller) pending.controller.abort();\n      failVoiceUpload(pending, 'upload timed out');\n    }, HANDS_FREE_UPLOAD_TIMEOUT_MS);",
 		"setDelivery(pending.row, 'not sent — ' + reason, 'failed');",
-		"setState('listening', true);\n    playEarcon('error');",
+		"setState('listening', true);\n    localNotice('error');",
 		"const EARCON_ATTACK_MS = 5;",
 		"gain.gain.setValueAtTime(0.0001, begins);",
 		"gain.gain.linearRampToValueAtTime(EARCON_GAIN, begins + EARCON_ATTACK_MS / 1000);",
@@ -1122,7 +1124,10 @@ func TestHandsFreePageStateMachineRules(t *testing.T) {
 		t.Error("forced recording stop bypasses the delayed microphone tail")
 	}
 	if got := strings.Count(text, "finishHandsFreeRecording(true, VAD_RECORDER_STOP_DELAY_MS)"); got != 2 {
-		t.Errorf("delayed forced recording stops=%d, want 60-second cap and hidden-page stop", got)
+		t.Errorf("delayed forced recording stops=%d, want 60-second cap plus shared hide preservation", got)
+	}
+	if got := strings.Count(text, "preserveVoiceWorkOnHide();"); got != 2 {
+		t.Errorf("hide preservation calls=%d, want visibilitychange and pagehide", got)
 	}
 	if got := strings.Count(text, "startHandsFreeUploadDeadline(pending);"); got != 1 {
 		t.Errorf("hands-free upload deadline starts=%d, want one shared deadline in deliverVoice", got)
@@ -1144,12 +1149,15 @@ func TestDriveViewPageRules(t *testing.T) {
 		"const GESTURE_VERTICAL_CANCEL_PX = 30;",
 		"const DRIVE_HOLD_CANCEL_PX = 30;",
 		"const DRIVE_LOCK_DISTANCE_PX = 60;",
-		"const DRIVE_CANCEL_DISTANCE_PX = 60;",
+		"const DRIVE_CANCEL_ARM_PX = 96;",
+		"const DRIVE_CANCEL_CONFIRM_MS = 5000;",
 		"const DRIVE_LOCKED_CANCEL_MS = 700;",
 		"const DRIVE_LIVE_HOLD_MS = 700;",
 		"const DRIVE_LIVE_SEND_DELAY_MS = 1200;",
+		"const MEDIA_RECORDER_TIMESLICE_MS = 1000;",
 		"const DRIVE_CLICK_GUARD_MS = 400;",
 		"const VIEW_TRANSITION_MS = 150;",
+		"const HAPTICS_STORAGE_KEY = 'c3-haptics';",
 		"transition: transform 150ms ease",
 		"transition: background-color 150ms linear",
 		"@media (prefers-reduced-motion: reduce)",
@@ -1160,15 +1168,21 @@ func TestDriveViewPageRules(t *testing.T) {
 		"localStorage.setItem(key, value)",
 		"driveCircle.addEventListener('pointerdown'",
 		"driveCircle.addEventListener('pointerup'",
-		"if (driveHold.mode === 'locked-action' || driveHold.locked) return;",
-		"if (upward >= DRIVE_LOCK_DISTANCE_PX && upward >= horizontal)",
-		"if (vertical < DRIVE_CANCEL_DISTANCE_PX && horizontal < DRIVE_CANCEL_DISTANCE_PX) return;",
+		"if (driveHold.mode === 'locked-send' || driveHold.locked) return;",
+		"if (!armed && upward >= DRIVE_LOCK_DISTANCE_PX && upward >= horizontal) return 'lock';",
+		"const insideCancelZone = downward >= DRIVE_CANCEL_ARM_PX && downward >= horizontal;",
+		"if (released) return armed && insideCancelZone && insideZone ? 'cancel' : 'none';",
+		"const rect = driveCancelZone.getBoundingClientRect();",
+		"driveHold.cancelZoneRect = {left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom};",
+		"const insideZone = pointInsideRect(event.clientX, event.clientY, hold.cancelZoneRect);",
+		"if (releaseDecision === 'cancel' && (hold.mode === 'ptt' || hold.mode === 'live')) {",
 		"}, DRIVE_LOCKED_CANCEL_MS);",
 		"hint = driveLocked ? '🔒 LOCKED' : '';",
 		"showDriveLockHint(upward >= DRIVE_HOLD_CANCEL_PX && upward >= horizontal);",
 		"cancelDriveHoldRecording('recording-cancelled');",
 		"cancelLiveSendBeat(true);",
-		"}, DRIVE_LIVE_SEND_DELAY_MS);",
+		"deliverLiveSendBeat(id), DRIVE_LIVE_SEND_DELAY_MS);",
+		"if (action === 'deliver-live-beat') {\n      deliverLiveSendBeat();",
 		"driveLiveButton.addEventListener('pointerdown'",
 		"showDriveTranscriptNotice('hold to switch live'",
 		"if (event.clientX <= VIEW_EDGE_START_PX)",
@@ -1178,9 +1192,37 @@ func TestDriveViewPageRules(t *testing.T) {
 		"event.key === 'ArrowLeft'", "event.key === 'ArrowRight'",
 		"function toSpeakableText(text)",
 		"window.speechSynthesis.speak(new SpeechSynthesisUtterance(text));",
+		"if (!hapticsEnabled) return;",
 		"if (navigator.vibrate) navigator.vibrate(pattern);",
 		"String(data.text || '').startsWith('⏸ Permission')",
-		"'permission-held': ['Permission held', 'error', 30]",
+		"'permission-held': {earcon: 'leaving', vibe: [50, 80, 50], speak: 'Permission held', safety: true}",
+		"connected: {earcon: 'reconnect', vibe: [15, 40, 15], speak: 'Connected', safety: false}",
+		"if (noticeShouldSpeak(notice, voiceEnabled, driveMuted)) speakLocalNotice(notice.speak);",
+		"kind === 'accepted' ? [[990, 70]]",
+		"kind === 'reply' ? [[560, 90]]",
+		"kind === 'endspeak' ? [[660, 55], [440, 55]]",
+		"kind === 'entering' ? [[520, 45], [760, 45]]",
+		"kind === 'reconnect' ? [[520, 40], [700, 40]]",
+		"kind === 'leaving' ? [[320, 60, 60], [320, 60]]",
+		"kind === 'document' ? [[1040, 60]]",
+		"function hasUnsentWork()",
+		"undurableDraft: Boolean(driveDraft && !driveDraftDurable)",
+		"draftWriteInFlight: driveDraftWriteInFlight > 0",
+		"window.addEventListener('beforeunload'",
+		"window.addEventListener('pagehide'",
+		"function preserveVoiceWorkOnHide()",
+		"preserveUnreleasedRecordingAsDraft(false);",
+		"if (hasUnsentWork() && !window.confirm('You have an unsent voice note. Leave and lose it?')) return;",
+		"database.createObjectStore(DRIVE_DRAFT_STORE_NAME, {keyPath: 'slot'});",
+		"database.addEventListener('versionchange', () => database.close());",
+		"transaction.objectStore(DRIVE_DRAFT_STORE_NAME).put({",
+		"console.error('web: drive draft load failed', error);",
+		"if (pending.fromDraft && (!driveDraft || driveDraft.clientID === pending.fromDraft.clientID)) keepDriveDraft(pending.fromDraft, false);",
+		"deleteStoredDriveDraft().catch(error => console.error('web: drive draft delete after send failed', error));",
+		"fromDraft: draft",
+		"recorder.start(MEDIA_RECORDER_TIMESLICE_MS);",
+		"globalThis.c3FeedbackTest = {feedbackFor, feedbackKinds, noticeShouldSpeak, cancelDecision, unsentWork, draftDecision, hideVoiceAction};",
+		"vibrate(15);\n    replayLast();",
 		"return currentView === 'drive' || voiceEnabled || handsFreeEnabled;",
 		"await changeVoicePreference(false, true);",
 		"if (handsFreeEnabled || currentView === 'drive') enterHandsFreeSpeaking();",
@@ -1199,6 +1241,21 @@ func TestDriveViewPageRules(t *testing.T) {
 	}
 	if !strings.Contains(text, "performance.now() - lastDriveReleaseAt <= DRIVE_CLICK_GUARD_MS") {
 		t.Error("Drive circle click listener is not the 400 ms post-release guard")
+	}
+	if strings.Contains(text, "if (vertical < DRIVE_CANCEL_DISTANCE_PX && horizontal < DRIVE_CANCEL_DISTANCE_PX)") {
+		t.Error("Drive still contains the old symmetric movement-cancel rule")
+	}
+	if got := strings.Count(text, "recorder.start(MEDIA_RECORDER_TIMESLICE_MS);"); got != 2 {
+		t.Errorf("timesliced recorder starts=%d, want push-to-talk and hands-free", got)
+	}
+	if got := strings.Count(text, "localNotice('cancel-armed');"); got != 2 {
+		t.Errorf("cancel-arm ticks=%d, want gesture arm and locked-cancel arm only", got)
+	}
+	if got := strings.Count(text, "deleteStoredDriveDraft()"); got != 3 {
+		t.Errorf("draft slot deletion sites=%d, want definition, explicit discard, and accepted resend only", got)
+	}
+	if strings.Contains(text, "navigator.vibrate(15)") {
+		t.Error("replay bypasses the gated vibration helper")
 	}
 }
 

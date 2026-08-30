@@ -19,7 +19,7 @@
     #view-shell { width: 200vw; height: 100dvh; display: flex; transform: translateX(0); transition: transform 150ms ease; }
     #view-shell.show-chat { transform: translateX(-50%); }
     .view-panel { width: 100vw; height: 100dvh; min-width: 0; flex: 0 0 100vw; }
-    #view-drive { --drive-colour: #14181d; position: relative; display: grid; grid-template-rows: auto minmax(0, 1fr) auto; overflow: hidden; padding: max(.65rem, env(safe-area-inset-top)) max(.75rem, env(safe-area-inset-right)) max(.75rem, env(safe-area-inset-bottom)) max(.75rem, env(safe-area-inset-left)); background: var(--drive-colour); color: #fff; transition: background-color 150ms linear; touch-action: none; }
+    #view-drive { --drive-colour: #14181d; --drive-cancel: #b3261e; position: relative; display: grid; grid-template-rows: auto minmax(0, 1fr) auto; overflow: hidden; padding: max(.65rem, env(safe-area-inset-top)) max(.75rem, env(safe-area-inset-right)) max(.75rem, env(safe-area-inset-bottom)) max(.75rem, env(safe-area-inset-left)); background: var(--drive-colour); color: #fff; transition: background-color 150ms linear; touch-action: none; }
     #view-drive.lamp-recording { --drive-colour: #b3261e; }
     #view-drive.lamp-wait { --drive-colour: #8a5a00; }
     #view-drive.lamp-speaking { --drive-colour: #1e6b3a; }
@@ -34,17 +34,30 @@
     #drive-chip { max-width: min(56vw, 19rem); overflow: hidden; border: 1px solid rgba(255,255,255,.5); border-radius: 999px; padding: .45rem .8rem; background: rgba(0,0,0,.22); color: #fff; font: 700 22px/1.2 system-ui, sans-serif; text-align: center; text-overflow: ellipsis; white-space: nowrap; }
     #drive-chip.held { border-color: #ffd36a; color: #fff4d2; animation: held-pulse 1.6s ease-in-out infinite; }
     @keyframes held-pulse { 50% { background: rgba(97,61,0,.66); } }
-    .drive-centre { min-height: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: .5rem 0; }
+    .drive-centre { position: relative; min-height: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: .5rem 0; }
+    #drive-lock-row { min-height: 4rem; margin-bottom: .35rem; display: flex; align-items: center; justify-content: center; gap: .6rem; }
     #drive-lock-hint { min-height: 1.5rem; margin-bottom: .35rem; border-radius: 999px; padding: .2rem .65rem; background: rgba(0,0,0,.18); color: rgba(255,255,255,.68); font: 700 16px/1.2 system-ui, sans-serif; opacity: 0; transform: translateY(.35rem); transition: color 120ms linear, opacity 120ms linear, transform 120ms ease; }
     #drive-lock-hint.visible { opacity: 1; }
     #drive-lock-hint.approaching, #drive-lock-hint.locked { background: rgba(0,0,0,.38); color: #fff; transform: translateY(0); }
     #drive-circle { width: clamp(220px, 64vmin, 340px); height: clamp(220px, 64vmin, 340px); border: 3px solid rgba(255,255,255,.72); border-radius: 50%; display: flex; flex: 0 0 auto; flex-direction: column; align-items: center; justify-content: center; padding: 1rem; background: rgba(0,0,0,.16); box-shadow: inset 0 0 0 1px rgba(0,0,0,.18); color: #fff; touch-action: none; user-select: none; }
     #drive-circle.drive-pressed { animation: none; transform: scale(.96); }
+    #drive-circle.cancel-armed { border-color: #fff; box-shadow: 0 0 0 7px rgba(179,38,30,.78), inset 0 0 0 1px rgba(0,0,0,.18); }
+    #drive-cancel { min-width: 64px; min-height: 64px; border: 2px solid #fff; border-radius: 1rem; padding: .3rem .55rem; background: var(--drive-cancel); color: #fff; font: 700 15px/1.1 system-ui, sans-serif; }
+    #drive-cancel[hidden] { display: none; }
+    #drive-cancel.holding { animation: cancel-hold 700ms linear forwards; }
+    @keyframes cancel-hold { to { box-shadow: inset 0 -64px 0 rgba(0,0,0,.42); } }
     #view-drive.lamp-recording #drive-circle, #view-drive.lamp-listening #drive-circle { animation: drive-breathe 1.8s ease-in-out infinite; }
     #view-drive.lamp-recording #drive-circle.drive-pressed, #view-drive.lamp-listening #drive-circle.drive-pressed { animation: none; transform: scale(.96); }
     @keyframes drive-breathe { 50% { transform: scale(1.02); } }
     #drive-word { font: 700 clamp(36px, 9vw, 40px)/1 system-ui, sans-serif; letter-spacing: .02em; text-align: center; }
     #drive-hint { min-height: 1.3em; margin-top: .65rem; font: 500 16px/1.3 system-ui, sans-serif; }
+    #drive-cancel-zone { position: absolute; z-index: 2; left: 50%; bottom: .35rem; min-width: min(88vw, 22rem); min-height: 3.4rem; display: flex; align-items: center; justify-content: center; gap: .45rem; border: 2px solid rgba(255,255,255,.9); border-radius: 999px; padding: .5rem 1rem; background: rgba(179,38,30,.9); color: #fff; font: 800 18px/1.1 system-ui, sans-serif; opacity: 0; transform: translate(-50%, .55rem); visibility: hidden; transition: opacity 120ms linear, transform 120ms ease; }
+    #drive-cancel-zone.armed { opacity: 1; transform: translate(-50%, 0); visibility: visible; }
+    .draft-offer { width: min(92vw, 42rem); margin: .55rem 0 0; display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: .45rem; border: 1px solid #70b7ff; border-radius: .7rem; padding: .55rem; background: rgba(0,0,0,.3); }
+    .draft-offer[hidden] { display: none; }
+    .draft-offer button { min-height: 2.8rem; border: 1px solid rgba(255,255,255,.6); border-radius: .55rem; padding: .45rem .7rem; background: #173756; color: #fff; font: 700 .9rem/1.1 system-ui, sans-serif; }
+    .draft-offer .draft-discard { background: #6e1414; }
+    #chat-draft-offer { width: auto; margin: 0 .8rem .55rem; }
     #drive-last-reply-block { width: min(92vw, 42rem); min-height: 1.5rem; margin: .8rem 0 0; display: flex; align-items: center; justify-content: center; gap: .45rem; }
     #drive-last-reply { min-width: 0; max-width: 100%; overflow: hidden; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 4; border: 0; padding: 0; background: transparent; color: #fff; font: 500 18px/1.35 system-ui, sans-serif; text-align: center; overflow-wrap: anywhere; }
     #drive-reply-play { min-width: 2.6rem; min-height: 2.6rem; flex: 0 0 2.6rem; border: 1px solid rgba(255,255,255,.55); border-radius: 50%; background: rgba(0,0,0,.24); color: #fff; font: 700 18px/1 system-ui, sans-serif; }
@@ -81,6 +94,10 @@
     #presence-details { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: .45rem .8rem; margin: .85rem 0 .2rem; }
     #presence-details dt { color: #9ba7b4; }
     #presence-details dd { min-width: 0; margin: 0; overflow-wrap: anywhere; font-family: ui-monospace, monospace; }
+    #presence-settings { margin-top: 1rem; padding-top: .85rem; border-top: 1px solid #46515e; }
+    #presence-settings h3 { margin: 0 0 .55rem; font-size: .95rem; }
+    #haptics-toggle { width: 100%; min-height: 3rem; display: flex; align-items: center; justify-content: space-between; gap: 1rem; border: 1px solid #596b7d; border-radius: .65rem; padding: .55rem .75rem; background: #1a2027; color: #fff; font: 700 1rem/1.2 system-ui, sans-serif; }
+    #haptics-toggle[aria-pressed="true"] { border-color: #70b7ff; background: #173756; }
     #doc-viewer { position: fixed; z-index: 20; inset: 0; background: #0b0d10; }
     #doc-viewer[hidden] { display: none; }
     #doc-viewer-dialog { width: 100%; height: 100%; display: grid; grid-template-rows: auto minmax(0, 1fr); }
@@ -171,6 +188,8 @@
       #drive-lock-hint, .transcript-middle { transition: none; }
       #drive-chip.held, #view-drive.lamp-recording #drive-circle, #view-drive.lamp-listening #drive-circle { animation: none; }
       #drive-circle.drive-pressed, #view-drive.lamp-recording #drive-circle.drive-pressed, #view-drive.lamp-listening #drive-circle.drive-pressed { transform: none; }
+      #drive-cancel.holding { animation: none; }
+      #drive-cancel-zone { transition: none; }
     }
   </style>
 </head>
@@ -183,11 +202,19 @@
       <button id="drive-chat" class="drive-control" type="button" aria-label="Open Chat"><span class="drive-icon">💬</span>Chat</button>
     </div>
     <div class="drive-centre">
-      <div id="drive-lock-hint" aria-hidden="true">▲ lock</div>
+      <div id="drive-lock-row">
+        <div id="drive-lock-hint" aria-hidden="true">▲ lock</div>
+        <button id="drive-cancel" type="button" aria-label="Hold to cancel locked recording" hidden><span aria-hidden="true">✕</span> Cancel</button>
+      </div>
       <button id="drive-circle" type="button" aria-label="Hold to talk">
         <span id="drive-word">TALK</span>
         <span id="drive-hint">hold to talk</span>
       </button>
+      <div id="drive-cancel-zone" role="status" aria-live="polite" aria-hidden="true"><span aria-hidden="true">✕</span> release to cancel</div>
+      <div id="drive-draft-offer" class="draft-offer" role="group" aria-label="Unsent recording draft" hidden>
+        <button id="drive-draft-resend" type="button">⤴ Resend draft</button>
+        <button id="drive-draft-discard" class="draft-discard" type="button" aria-label="Discard unsent recording draft">✕ Discard</button>
+      </div>
       <div id="drive-last-reply-block">
         <button id="drive-reply-play" type="button" aria-label="Play last reply" hidden>▶</button>
         <button id="drive-last-reply" type="button" aria-label="Open last reply in Chat"></button>
@@ -220,6 +247,10 @@
       <div>
         <div id="typing" aria-live="polite"></div>
         <div id="voice-status" aria-live="polite"></div>
+        <div id="chat-draft-offer" class="draft-offer" role="group" aria-label="Unsent recording draft" hidden>
+          <button id="chat-draft-resend" type="button">⤴ Resend draft</button>
+          <button id="chat-draft-discard" class="draft-discard" type="button" aria-label="Discard unsent recording draft">✕ Discard</button>
+        </div>
         <form id="composer">
           <div class="compose-field">
             <textarea id="text" aria-label="Message" placeholder="Message the attached session" maxlength="16000" required></textarea>
@@ -235,8 +266,8 @@
 <div id="presence-sheet-backdrop" hidden>
   <section id="presence-sheet" role="dialog" aria-modal="true" aria-labelledby="presence-sheet-title" tabindex="-1">
     <div id="presence-sheet-header">
-      <h2 id="presence-sheet-title">Session presence</h2>
-      <button id="presence-sheet-close" type="button" aria-label="Close session presence">×</button>
+      <h2 id="presence-sheet-title">Session &amp; settings</h2>
+      <button id="presence-sheet-close" type="button" aria-label="Close session and settings">×</button>
     </div>
     <p id="presence-empty">No session attached.</p>
     <dl id="presence-details" hidden>
@@ -246,6 +277,10 @@
       <dt>Session ID</dt><dd id="presence-session-id"></dd>
       <dt>Since</dt><dd id="presence-since"></dd>
     </dl>
+    <div id="presence-settings">
+      <h3>Settings</h3>
+      <button id="haptics-toggle" type="button" aria-label="Haptics" aria-pressed="true"><span>Haptics</span><span id="haptics-status">On</span></button>
+    </div>
   </section>
 </div>
 <div id="doc-viewer" hidden>
@@ -331,6 +366,8 @@
   const REPLY_AUDIO_WAIT_MS = 10000;
   // All hands-free upload attempts share one 60-second deadline.
   const HANDS_FREE_UPLOAD_TIMEOUT_MS = 60000;
+  // Periodic recorder data keeps most captured audio available before stop fires.
+  const MEDIA_RECORDER_TIMESLICE_MS = 1000;
   // Earcons ramp up over five milliseconds to avoid an audible click.
   const EARCON_ATTACK_MS = 5;
   // A view swipe must begin within 24 px of a physical screen edge.
@@ -343,9 +380,11 @@
   const DRIVE_HOLD_CANCEL_PX = 30;
   // An upward 60 px slide locks a push-to-talk recording.
   const DRIVE_LOCK_DISTANCE_PX = 60;
-  // A downward or sideways 60 px slide cancels an unlocked recording.
-  const DRIVE_CANCEL_DISTANCE_PX = 60;
-  // Holding the circle for 700 ms while locked cancels instead of sending.
+  // A down-dominant 96 px slide arms cancellation until release.
+  const DRIVE_CANCEL_ARM_PX = 96;
+  // A cancellation keeps recordings of at least five seconds as a draft.
+  const DRIVE_CANCEL_CONFIRM_MS = 5000;
+  // Holding the explicit locked-cancel target for 700 ms commits cancellation.
   const DRIVE_LOCKED_CANCEL_MS = 700;
   // The Live target requires a 700 ms hold.
   const DRIVE_LIVE_HOLD_MS = 700;
@@ -367,6 +406,87 @@
   const TRANSCRIPT_FOLD_LINE_CHARS = 72;
   const VIEW_STORAGE_KEY = 'c3-web-view';
   const DRIVE_MUTE_STORAGE_KEY = 'c3-drive-muted';
+  const HAPTICS_STORAGE_KEY = 'c3-haptics';
+  const DRIVE_DRAFT_DATABASE_NAME = 'c3-drive-draft';
+  const DRIVE_DRAFT_STORE_NAME = 'drafts';
+  const DRIVE_DRAFT_SLOT = 'latest';
+
+  // This table is the only definition of local sound, vibration, and speech cues.
+  const feedbackNotices = {
+    'no-session': {earcon: 'leaving', vibe: [50, 80, 50], speak: 'No session', safety: true},
+    'session-returned': {earcon: 'entering', vibe: [20, 40, 20], speak: 'Session', safety: true},
+    'permission-held': {earcon: 'leaving', vibe: [50, 80, 50], speak: 'Permission held', safety: true},
+    'permission-returned': {earcon: 'entering', vibe: [20, 40, 20], speak: 'Permission returned', safety: true},
+    connected: {earcon: 'reconnect', vibe: [15, 40, 15], speak: 'Connected', safety: false},
+    disconnected: {earcon: 'leaving', vibe: [50, 80, 50], speak: '', safety: false},
+    reconnected: {earcon: 'reconnect', vibe: [15, 40, 15], speak: '', safety: false},
+    'live-on': {earcon: 'entering', vibe: [20, 40, 20], speak: 'Live on', safety: false},
+    'live-off': {earcon: 'endspeak', vibe: [20, 40, 20], speak: 'Live off', safety: false},
+    muted: {earcon: 'endspeak', vibe: 30, speak: 'Muted', safety: true},
+    unmuted: {earcon: 'entering', vibe: 30, speak: 'Unmuted', safety: true},
+    'hold-start': {earcon: '', vibe: 15, speak: '', safety: false},
+    locked: {earcon: 'entering', vibe: [20, 40, 20], speak: '', safety: false},
+    sending: {earcon: 'sending', vibe: 30, speak: '', safety: false},
+    sent: {earcon: 'accepted', vibe: [20, 30, 20], speak: '', safety: false},
+    'reply-ready': {earcon: 'reply', vibe: [30, 60, 30], speak: '', safety: false},
+    'speaking-start': {earcon: '', vibe: 20, speak: '', safety: false},
+    'speaking-end': {earcon: 'endspeak', vibe: 15, speak: '', safety: false},
+    'listening-start': {earcon: 'armed', vibe: 15, speak: '', safety: false},
+    'speech-end': {earcon: 'sending', vibe: 20, speak: '', safety: false},
+    'barge-in': {earcon: 'armed', vibe: [30, 30], speak: '', safety: false},
+    'reply-timeout': {earcon: 'endspeak', vibe: [50, 80, 50], speak: 'No reply', safety: true},
+    document: {earcon: 'document', vibe: [10, 30, 10, 30, 10], speak: 'Document received', safety: false},
+    'cancel-armed': {earcon: '', vibe: 20, speak: '', safety: false},
+    'send-cancelled': {earcon: 'error', vibe: [60, 40, 60], speak: 'Send cancelled', safety: true},
+    'recording-cancelled': {earcon: 'error', vibe: [60, 40, 60], speak: 'Cancelled', safety: true},
+    'draft-saved': {earcon: 'accepted', vibe: [20, 30, 20], speak: 'Saved as draft', safety: true},
+    'draft-found': {earcon: 'accepted', vibe: [20, 30, 20], speak: 'Unsent recording found', safety: true},
+    'send-refused': {earcon: 'error', vibe: [40, 60, 40, 60, 40], speak: 'Send refused', safety: true},
+    error: {earcon: 'error', vibe: [40, 60, 40, 60, 40], speak: '', safety: false}
+  };
+
+  function feedbackFor(kind) {
+    return feedbackNotices[kind] || null;
+  }
+
+  function feedbackKinds() {
+    return Object.keys(feedbackNotices);
+  }
+
+  function noticeShouldSpeak(notice, spokenReplies, muted) {
+    return Boolean(notice && notice.speak && (notice.safety || (spokenReplies && !muted)));
+  }
+
+  function pointInsideRect(x, y, rect) {
+    return Boolean(rect && x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom);
+  }
+
+  function cancelDecision({upward, downward, horizontal, armed, released, insideZone}) {
+    const insideCancelZone = downward >= DRIVE_CANCEL_ARM_PX && downward >= horizontal;
+    if (released) return armed && insideCancelZone && insideZone ? 'cancel' : 'none';
+    if (!armed && upward >= DRIVE_LOCK_DISTANCE_PX && upward >= horizontal) return 'lock';
+    if (insideCancelZone) return armed ? 'none' : 'arm';
+    if (armed) return 'disarm';
+    return 'none';
+  }
+
+  function unsentWork({recording, recordingStarting, handsFree, liveSendBeat, pendingCount, undurableDraft, draftWriteInFlight}) {
+    return Boolean(recording || recordingStarting || handsFree || liveSendBeat || pendingCount > 0 || undurableDraft || draftWriteInFlight);
+  }
+
+  function draftDecision(milliseconds) {
+    return milliseconds >= DRIVE_CANCEL_CONFIRM_MS ? 'draft' : 'discard';
+  }
+
+  function hideVoiceAction({liveSendBeat, handsFree}) {
+    if (liveSendBeat) return 'deliver-live-beat';
+    if (handsFree) return 'finish-hands-free';
+    return 'preserve-recording';
+  }
+
+  if (globalThis.C3FeedbackTestShim) {
+    globalThis.c3FeedbackTest = {feedbackFor, feedbackKinds, noticeShouldSpeak, cancelDecision, unsentWork, draftDecision, hideVoiceAction};
+  }
 
   const messages = document.getElementById('messages');
   const messageList = document.getElementById('message-list');
@@ -389,6 +509,8 @@
   const chatView = document.getElementById('view-chat');
   const driveCircle = document.getElementById('drive-circle');
   const driveLockHint = document.getElementById('drive-lock-hint');
+  const driveCancelButton = document.getElementById('drive-cancel');
+  const driveCancelZone = document.getElementById('drive-cancel-zone');
   const driveWord = document.getElementById('drive-word');
   const driveHint = document.getElementById('drive-hint');
   const driveChip = document.getElementById('drive-chip');
@@ -400,6 +522,12 @@
   const driveReplyPlayButton = document.getElementById('drive-reply-play');
   const driveLastReply = document.getElementById('drive-last-reply');
   const driveTranscript = document.getElementById('drive-transcript');
+  const driveDraftOffer = document.getElementById('drive-draft-offer');
+  const driveDraftResend = document.getElementById('drive-draft-resend');
+  const driveDraftDiscard = document.getElementById('drive-draft-discard');
+  const chatDraftOffer = document.getElementById('chat-draft-offer');
+  const chatDraftResend = document.getElementById('chat-draft-resend');
+  const chatDraftDiscard = document.getElementById('chat-draft-discard');
   const presenceSheetBackdrop = document.getElementById('presence-sheet-backdrop');
   const presenceSheet = document.getElementById('presence-sheet');
   const presenceSheetClose = document.getElementById('presence-sheet-close');
@@ -410,6 +538,8 @@
   const presencePID = document.getElementById('presence-pid');
   const presenceSessionID = document.getElementById('presence-session-id');
   const presenceSince = document.getElementById('presence-since');
+  const hapticsToggle = document.getElementById('haptics-toggle');
+  const hapticsStatus = document.getElementById('haptics-status');
   const documentViewer = document.getElementById('doc-viewer');
   const documentViewerTitle = document.getElementById('doc-viewer-title');
   const documentViewerClose = document.getElementById('doc-viewer-close');
@@ -429,6 +559,7 @@
   let state = 'idle';
   let currentView = storedView();
   let driveMuted = storedDriveMuted();
+  let hapticsEnabled = storedHaptics();
   let driveAudioPending = false;
   let driveAudioActivationPromise;
   let lastReplyText = '';
@@ -442,7 +573,12 @@
   let driveTranscriptTimer;
   let liveSendBeat;
   let drivePendingRecordingAction = '';
+  let preserveRecordingWhenStarted = '';
   let driveLocked = false;
+  let driveDraft = null;
+  let driveDraftDurable = false;
+  let driveDraftWriteInFlight = 0;
+  let draftFoundAnnounced = false;
   const replayHistoryEntries = [];
   const replayHistoryByKey = new Map();
   let replayHistoryVisibleStart = 0;
@@ -485,6 +621,14 @@
     }
   }
 
+  function storedHaptics() {
+    try {
+      return localStorage.getItem(HAPTICS_STORAGE_KEY) !== 'off';
+    } catch (_) {
+      return true;
+    }
+  }
+
   function storeValue(key, value) {
     try { localStorage.setItem(key, value); } catch (_) {}
   }
@@ -493,6 +637,12 @@
     driveMuted = Boolean(muted);
     storeValue(DRIVE_MUTE_STORAGE_KEY, String(driveMuted));
     renderDrive();
+  }
+
+  function setHapticsEnabled(enabled) {
+    hapticsEnabled = Boolean(enabled);
+    storeValue(HAPTICS_STORAGE_KEY, hapticsEnabled ? 'on' : 'off');
+    renderPresenceSheet();
   }
 
   function driveIsHeld() {
@@ -562,6 +712,7 @@
   }
 
   function vibrate(pattern) {
+    if (!hapticsEnabled) return;
     try {
       if (navigator.vibrate) navigator.vibrate(pattern);
     } catch (_) {}
@@ -575,23 +726,12 @@
   }
 
   function localNotice(kind) {
-    const notices = {
-      'no-session': ['No session', 'error', 30],
-      'permission-held': ['Permission held', 'error', 30],
-      connected: ['Connected', 'armed', 15],
-      'live-on': ['Live on', 'armed', [20, 40, 20]],
-      'live-off': ['Live off', 'sending', [20, 40, 20]],
-      muted: ['Muted', 'error', 30],
-      'send-cancelled': ['Send cancelled', 'error', 30],
-      'recording-cancelled': ['Cancelled', 'error', 30],
-      'send-refused': ['Send refused', 'error', 30]
-    };
-    const notice = notices[kind];
+    const notice = feedbackFor(kind);
     if (!notice) return;
     try { createAudioContext(); } catch (_) {}
-    playEarcon(notice[1]);
-    vibrate(notice[2]);
-    speakLocalNotice(notice[0]);
+    if (notice.earcon) playEarcon(notice.earcon);
+    vibrate(notice.vibe);
+    if (noticeShouldSpeak(notice, voiceEnabled, driveMuted)) speakLocalNotice(notice.speak);
   }
 
   function shortenHome(path) {
@@ -619,30 +759,12 @@
     return parts.length ? '● ' + parts.join(' · ') : '● connected';
   }
 
-  function presenceDirectoryName(path) {
-    const parts = String(path || '').replace(/[\\/]+$/, '').split(/[\\/]/);
-    return parts[parts.length - 1] || '';
-  }
-
   function presenceSignature(data) {
     return [Boolean(data.attached), data.cli || '', data.cwd || '', Number(data.pid || 0), data.session_id || '', data.since || ''].join('\u0000');
   }
 
-  function announcePresenceChange() {
-    try { createAudioContext(); } catch (_) {}
-    if (!presence.attached) {
-      playEarcon('error');
-      vibrate(30);
-      speakLocalNotice('no session');
-      return;
-    }
-    playEarcon('armed');
-    vibrate(15);
-    const directory = presenceDirectoryName(presence.cwd);
-    let notice = 'connected';
-    if (presence.cli) notice += ' to ' + presence.cli;
-    if (directory) notice += ' in ' + directory;
-    speakLocalNotice(notice);
+  function announcePresenceChange(kind) {
+    localNotice(kind);
   }
 
   function renderPresenceSheet() {
@@ -658,6 +780,9 @@
       if (!Number.isNaN(parsed.getTime())) since = parsed.toLocaleString();
     }
     presenceSince.textContent = since;
+    hapticsToggle.hidden = !('vibrate' in navigator);
+    hapticsToggle.setAttribute('aria-pressed', String(hapticsEnabled));
+    hapticsStatus.textContent = hapticsEnabled ? 'On' : 'Off';
   }
 
   function openPresenceSheet() {
@@ -706,7 +831,8 @@
     driveView.className = 'view-panel lamp-' + lamp;
     driveWord.textContent = word;
     driveHint.textContent = hint;
-    driveCircle.setAttribute('aria-label', driveLocked ? 'Send locked recording; hold to cancel' : word === 'TALK' ? 'Hold to talk' : word.toLowerCase());
+    driveCircle.setAttribute('aria-label', driveLocked ? 'Send locked recording' : word === 'TALK' ? 'Hold to talk' : word.toLowerCase());
+    driveCancelButton.hidden = !driveLocked;
     driveLiveButton.setAttribute('aria-pressed', String(handsFreeEnabled));
     driveMuteButton.setAttribute('aria-pressed', String(driveMuted));
     driveMuteButton.setAttribute('aria-label', driveMuted ? 'Unmute spoken replies' : 'Mute spoken replies');
@@ -719,7 +845,7 @@
     if (driveLocked) {
       driveLockHint.className = 'locked';
       driveLockHint.textContent = '🔒 locked';
-      vibrate([20, 40, 20]);
+      localNotice('locked');
     } else {
       driveLockHint.className = '';
       driveLockHint.textContent = '▲ lock';
@@ -736,6 +862,180 @@
   function hideDriveLockHint() {
     if (driveLocked) return;
     driveLockHint.className = '';
+  }
+
+  function showDriveCancelZone(armed) {
+    driveCancelZone.className = armed ? 'armed' : '';
+    driveCancelZone.setAttribute('aria-hidden', String(!armed));
+    driveCircle.classList.toggle('cancel-armed', armed);
+  }
+
+  function openDriveDraftDatabase() {
+    return new Promise((resolve, reject) => {
+      if (!window.indexedDB) {
+        reject(new Error('draft storage unavailable'));
+        return;
+      }
+      const request = window.indexedDB.open(DRIVE_DRAFT_DATABASE_NAME, 1);
+      request.addEventListener('upgradeneeded', () => {
+        const database = request.result;
+        if (!database.objectStoreNames.contains(DRIVE_DRAFT_STORE_NAME)) {
+          database.createObjectStore(DRIVE_DRAFT_STORE_NAME, {keyPath: 'slot'});
+        }
+      });
+      request.addEventListener('success', () => {
+        const database = request.result;
+        database.addEventListener('versionchange', () => database.close());
+        resolve(database);
+      });
+      request.addEventListener('error', () => reject(request.error || new Error('draft storage failed')));
+      request.addEventListener('blocked', () => reject(new Error('draft storage blocked')));
+    });
+  }
+
+  async function readStoredDriveDraft() {
+    const database = await openDriveDraftDatabase();
+    try {
+      return await new Promise((resolve, reject) => {
+        const transaction = database.transaction(DRIVE_DRAFT_STORE_NAME, 'readonly');
+        const request = transaction.objectStore(DRIVE_DRAFT_STORE_NAME).get(DRIVE_DRAFT_SLOT);
+        request.addEventListener('success', () => resolve(request.result || null));
+        request.addEventListener('error', () => reject(request.error || new Error('draft read failed')));
+      });
+    } finally {
+      database.close();
+    }
+  }
+
+  async function writeStoredDriveDraft(draft) {
+    const database = await openDriveDraftDatabase();
+    try {
+      await new Promise((resolve, reject) => {
+        const transaction = database.transaction(DRIVE_DRAFT_STORE_NAME, 'readwrite');
+        transaction.objectStore(DRIVE_DRAFT_STORE_NAME).put({
+          slot: DRIVE_DRAFT_SLOT,
+          blob: draft.blob,
+          mimeType: draft.mimeType,
+          duration: draft.duration,
+          clientID: draft.clientID,
+          source: draft.source
+        });
+        transaction.addEventListener('complete', resolve);
+        transaction.addEventListener('abort', () => reject(transaction.error || new Error('draft write aborted')));
+        transaction.addEventListener('error', () => reject(transaction.error || new Error('draft write failed')));
+      });
+    } finally {
+      database.close();
+    }
+  }
+
+  async function deleteStoredDriveDraft() {
+    const database = await openDriveDraftDatabase();
+    try {
+      await new Promise((resolve, reject) => {
+        const transaction = database.transaction(DRIVE_DRAFT_STORE_NAME, 'readwrite');
+        transaction.objectStore(DRIVE_DRAFT_STORE_NAME).delete(DRIVE_DRAFT_SLOT);
+        transaction.addEventListener('complete', resolve);
+        transaction.addEventListener('abort', () => reject(transaction.error || new Error('draft delete aborted')));
+        transaction.addEventListener('error', () => reject(transaction.error || new Error('draft delete failed')));
+      });
+    } finally {
+      database.close();
+    }
+  }
+
+  function announceDraftFound() {
+    if (!driveDraft || currentView !== 'drive' || draftFoundAnnounced) return;
+    draftFoundAnnounced = true;
+    localNotice('draft-found');
+  }
+
+  function renderDriveDraftOffer() {
+    const hidden = !driveDraft;
+    driveDraftOffer.hidden = hidden;
+    chatDraftOffer.hidden = hidden;
+    if (hidden) return;
+    const seconds = Math.max(1, Math.round(Number(driveDraft.duration || 0)));
+    driveDraftResend.textContent = '⤴ Resend draft (' + seconds + 's)';
+    chatDraftResend.textContent = '⤴ Resend draft (' + seconds + 's)';
+    announceDraftFound();
+  }
+
+  async function keepDriveDraft(draft, announce) {
+    driveDraft = draft;
+    driveDraftDurable = false;
+    draftFoundAnnounced = true;
+    renderDriveDraftOffer();
+    driveDraftWriteInFlight += 1;
+    try {
+      await writeStoredDriveDraft(draft);
+      if (driveDraft === draft) driveDraftDurable = true;
+      if (announce) localNotice('draft-saved');
+    } catch (error) {
+      showDriveTranscriptNotice('could not save draft', 4000);
+      localNotice('error');
+      console.error('web: drive draft save failed', error);
+    } finally {
+      driveDraftWriteInFlight -= 1;
+    }
+  }
+
+  async function loadDriveDraft() {
+    try {
+      const draft = await readStoredDriveDraft();
+      if (!draft || !(draft.blob instanceof Blob) || !draft.blob.size) return;
+      driveDraft = {
+        blob: draft.blob,
+        mimeType: String(draft.mimeType || draft.blob.type || 'audio/webm'),
+        duration: Math.max(0, Number(draft.duration || 0)),
+        clientID: String(draft.clientID || clientID()),
+        source: draft.source === 'chat' ? 'chat' : 'drive'
+      };
+      driveDraftDurable = true;
+      draftFoundAnnounced = false;
+      renderDriveDraftOffer();
+    } catch (error) {
+      console.error('web: drive draft load failed', error);
+    }
+  }
+
+  function discardDriveDraft() {
+    if (!driveDraft) return;
+    driveDraft = null;
+    driveDraftDurable = false;
+    renderDriveDraftOffer();
+    deleteStoredDriveDraft().catch(() => {});
+    localNotice('recording-cancelled');
+  }
+
+  function resendDriveDraft() {
+    if (!driveDraft) return;
+    const draft = driveDraft;
+    driveDraft = null;
+    driveDraftDurable = false;
+    renderDriveDraftOffer();
+    const row = addMessage('mine', {
+      voice: true,
+      duration_seconds: draft.duration,
+      timestamp: new Date().toISOString()
+    }, 'sending', {forceScroll: true});
+    pendingRows.set(draft.clientID, row);
+    const drive = draft.source === 'drive';
+    if (drive) {
+      resetReplyTracking();
+      awaitingClientID = draft.clientID;
+      setState('sending', true);
+      localNotice('sending');
+    }
+    deliverVoice({
+      blob: draft.blob,
+      mimeType: draft.mimeType,
+      clientID: draft.clientID,
+      row,
+      attempt: 0,
+      drive,
+      fromDraft: draft
+    });
   }
 
   function activateDriveAudio() {
@@ -772,6 +1072,7 @@
         if (audioUnlocked) activateDriveAudio();
         else driveAudioPending = true;
       }
+      announceDraftFound();
     } else {
       input.focus({preventScroll: true});
     }
@@ -794,8 +1095,8 @@
     renderConnection();
     renderDrive();
     if (!handsFreeEnabled || previous === state || quiet) return;
-    if (state === 'listening') playEarcon('armed');
-    if (state === 'sending') playEarcon('sending');
+    if (state === 'listening') localNotice('listening-start');
+    if (state === 'sending') localNotice('speech-end');
   }
 
   function setConnection(text, className) {
@@ -1213,7 +1514,7 @@
     const messageID = Number(data.message_id || 0);
     if (!attachment || data.replay || currentView !== 'drive' || announcedDocumentMessageIDs.has(messageID)) return;
     announcedDocumentMessageIDs.add(messageID);
-    speakLocalNotice('document received');
+    localNotice('document');
   }
 
   function transcriptFoldParts(text) {
@@ -1503,6 +1804,7 @@
 
   function failVoiceUpload(pending, reason) {
     if (!settleVoiceUpload(pending)) return;
+    if (pending.fromDraft && (!driveDraft || driveDraft.clientID === pending.fromDraft.clientID)) keepDriveDraft(pending.fromDraft, false);
     pendingRows.delete(pending.clientID);
     setDelivery(pending.row, 'not sent — ' + reason, 'failed');
     finishVoiceUpload();
@@ -1510,7 +1812,7 @@
     if (pending.drive) {
       resetReplyTracking();
       setState(handsFreeEnabled ? 'listening' : 'idle', true);
-      playEarcon('error');
+      localNotice('error');
     }
   }
 
@@ -1547,6 +1849,9 @@
         pendingRows.delete(pending.clientID);
         setDelivery(pending.row, 'sent', '');
         finishVoiceUpload();
+        if (pending.fromDraft && (!driveDraft || driveDraft.clientID === pending.fromDraft.clientID)) {
+          deleteStoredDriveDraft().catch(error => console.error('web: drive draft delete after send failed', error));
+        }
         if (pending.handsFree) handsFreeUploadAccepted(pending.clientID, messageID);
         if (pending.drive) driveUploadAccepted(pending.clientID, messageID);
         return;
@@ -1575,17 +1880,47 @@
   let recording;
   let recordingStarting = false;
 
+  function hasUnsentWork() {
+    return unsentWork({
+      recording: Boolean(recording && recording.recorder.state !== 'inactive'),
+      recordingStarting,
+      handsFree: Boolean(handsFreeCapture),
+      liveSendBeat: Boolean(liveSendBeat),
+      pendingCount: pendingRows.size,
+      undurableDraft: Boolean(driveDraft && !driveDraftDurable),
+      draftWriteInFlight: driveDraftWriteInFlight > 0
+    });
+  }
+
+  function preserveUnreleasedRecordingAsDraft(announce) {
+    const notice = announce ? 'draft-saved' : '';
+    if (recording && recording.recorder.state !== 'inactive') {
+      if (!recording.saveAsDraft) stopRecording(false, false, notice, true);
+      return true;
+    }
+    if (recordingStarting) {
+      preserveRecordingWhenStarted = notice || 'quiet';
+      return true;
+    }
+    return false;
+  }
+
   function recorderMimeType() {
     const choices = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4'];
     if (!MediaRecorder.isTypeSupported) return '';
     return choices.find(type => MediaRecorder.isTypeSupported(type)) || '';
   }
 
-  function stopRecording(discard, refuse, cancelNotice) {
+  function recordingMilliseconds(capture) {
+    return capture ? Math.max(0, performance.now() - capture.started) : 0;
+  }
+
+  function stopRecording(discard, refuse, cancelNotice, saveAsDraft) {
     if (!recording || recording.recorder.state === 'inactive') return;
     recording.discard = Boolean(discard);
     recording.refuse = Boolean(refuse);
     recording.cancelNotice = cancelNotice || '';
+    recording.saveAsDraft = Boolean(saveAsDraft);
     if (recording.source === 'drive') setDriveLocked(false);
     window.clearTimeout(recording.autoStop);
     window.clearInterval(recording.clock);
@@ -1593,7 +1928,7 @@
     micButton.setAttribute('aria-pressed', 'false');
     micButton.disabled = true;
     micButton.textContent = 'uploading…';
-    if (recording.source === 'drive' && !recording.discard && !recording.refuse) setState('sending');
+    if (recording.source === 'drive' && !recording.discard && !recording.refuse && !recording.saveAsDraft) setState('sending');
   }
 
   async function startRecording(source) {
@@ -1614,7 +1949,7 @@
       const mimeType = recorderMimeType();
       const recorder = mimeType ? new MediaRecorder(stream, {mimeType}) : new MediaRecorder(stream);
       const started = performance.now();
-      const capture = {recorder, stream, started, chunks: [], failed: false, source: recordingSource, discard: false, refuse: false};
+      const capture = {recorder, stream, started, chunks: [], failed: false, source: recordingSource, discard: false, refuse: false, saveAsDraft: false};
       recording = capture;
       recorder.addEventListener('dataavailable', event => {
         if (event.data && event.data.size) capture.chunks.push(event.data);
@@ -1623,6 +1958,29 @@
         if (recording === capture) recording = null;
         capture.stream.getTracks().forEach(track => track.stop());
         if (capture.failed) return;
+        const milliseconds = recordingMilliseconds(capture);
+        if (capture.saveAsDraft) {
+          finishVoiceUpload();
+          if (capture.source === 'drive') {
+            setState(handsFreeEnabled ? 'listening' : 'idle', true);
+            setDriveTranscript('saved as draft');
+          }
+          const actualType = capture.recorder.mimeType || (capture.chunks[0] && capture.chunks[0].type) || 'audio/webm';
+          const blob = new Blob(capture.chunks, {type: actualType});
+          if (blob.size) {
+            keepDriveDraft({
+              blob,
+              mimeType: actualType,
+              duration: milliseconds / 1000,
+              clientID: clientID(),
+              source: capture.source
+            }, capture.cancelNotice === 'draft-saved');
+          } else {
+            setVoiceStatus('could not save recording draft', 4000);
+            localNotice('error');
+          }
+          return;
+        }
         if (capture.discard || capture.refuse) {
           finishVoiceUpload();
           if (capture.source === 'drive') {
@@ -1632,7 +1990,6 @@
           }
           return;
         }
-        const milliseconds = performance.now() - capture.started;
         if (milliseconds < 400) {
           finishVoiceUpload();
           setVoiceStatus('too short', 3000);
@@ -1662,7 +2019,7 @@
         if (capture.source === 'drive') setState(handsFreeEnabled ? 'listening' : 'idle', true);
         if (capture.source === 'drive') setDriveLocked(false);
       }, {once: true});
-      recorder.start();
+      recorder.start(MEDIA_RECORDER_TIMESLICE_MS);
       recordingStarting = false;
       micButton.disabled = false;
       micButton.setAttribute('aria-pressed', 'true');
@@ -1672,10 +2029,14 @@
         if (recording) micButton.textContent = '● ' + formatDuration((performance.now() - recording.started) / 1000);
       }, 250);
       recording.autoStop = window.setTimeout(() => stopRecording(false, capture.source === 'drive' && driveIsHeld()), 5 * 60 * 1000);
-      if (capture.source === 'drive' && drivePendingRecordingAction) {
+      if (preserveRecordingWhenStarted) {
+        const notice = preserveRecordingWhenStarted === 'draft-saved' ? 'draft-saved' : '';
+        preserveRecordingWhenStarted = '';
+        window.setTimeout(() => stopRecording(false, false, notice, true), 0);
+      } else if (capture.source === 'drive' && drivePendingRecordingAction) {
         const action = drivePendingRecordingAction;
         drivePendingRecordingAction = '';
-        window.setTimeout(() => stopRecording(action === 'cancel' || action === 'cancel-locked', action === 'refuse', action === 'cancel-locked' ? 'recording-cancelled' : ''), 0);
+        window.setTimeout(() => stopRecording(action === 'cancel-locked', action === 'refuse', action === 'cancel-locked' ? 'recording-cancelled' : ''), 0);
       }
     } catch (_) {
       if (stream) stream.getTracks().forEach(track => track.stop());
@@ -1684,6 +2045,7 @@
       finishVoiceUpload();
       setVoiceStatus('microphone unavailable — check browser permission', 5000);
       drivePendingRecordingAction = '';
+      preserveRecordingWhenStarted = '';
       if (recordingSource === 'drive') setState(handsFreeEnabled ? 'listening' : 'idle', true);
       if (recordingSource === 'drive') setDriveLocked(false);
     }
@@ -1909,7 +2271,7 @@
       queueMessageAudio(item, replaceCurrent);
     } catch (_) {
       setVoiceStatus('Spoken reply unavailable.', 4000);
-      playEarcon('error');
+      localNotice('error');
     }
   }
 
@@ -1933,9 +2295,16 @@
     audioContext.resume().catch(() => {});
     const tones = kind === 'armed' ? [[EARCON_ARM_HZ, EARCON_ARM_MS]] :
       kind === 'sending' ? [[EARCON_SEND_LOW_HZ, EARCON_SEND_TONE_MS], [EARCON_SEND_HIGH_HZ, EARCON_SEND_TONE_MS]] :
+      kind === 'accepted' ? [[990, 70]] :
+      kind === 'reply' ? [[560, 90]] :
+      kind === 'endspeak' ? [[660, 55], [440, 55]] :
+      kind === 'entering' ? [[520, 45], [760, 45]] :
+      kind === 'reconnect' ? [[520, 40], [700, 40]] :
+      kind === 'leaving' ? [[320, 60, 60], [320, 60]] :
+      kind === 'document' ? [[1040, 60]] :
       [[EARCON_ERROR_HZ, EARCON_ERROR_MS]];
     let begins = audioContext.currentTime + 0.01;
-    tones.forEach(([frequency, milliseconds]) => {
+    tones.forEach(([frequency, milliseconds, gap]) => {
       const oscillator = audioContext.createOscillator();
       const gain = audioContext.createGain();
       const ends = begins + milliseconds / 1000;
@@ -1947,7 +2316,7 @@
       gain.connect(audioContext.destination);
       oscillator.start(begins);
       oscillator.stop(ends);
-      begins = ends;
+      begins = ends + Number(gap || 0) / 1000;
     });
     analysisMutedUntil = performance.now() + (begins - audioContext.currentTime) * 1000 + EARCON_ANALYSIS_MUTE_MS;
   }
@@ -2086,7 +2455,7 @@
       recorder = mimeType ? new MediaRecorder(recordingDestination.stream, {mimeType}) : new MediaRecorder(recordingDestination.stream);
     } catch (_) {
       setState('listening', true);
-      playEarcon('error');
+      localNotice('error');
       setVoiceStatus('microphone recording failed', 4000);
       return;
     }
@@ -2101,6 +2470,8 @@
       finishing: false,
       forceUpload: false,
       discard: false,
+      saveAsDraft: false,
+      cancelNotice: '',
       failed: false,
       unmuteTimer: 0,
       stopTimer: 0
@@ -2116,7 +2487,7 @@
       window.clearTimeout(capture.unmuteTimer);
       if (recordingGain) recordingGain.gain.value = 1;
       setState(handsFreeEnabled ? 'listening' : 'idle', true);
-      playEarcon('error');
+      localNotice('error');
       setVoiceStatus('microphone recording failed', 4000);
     }, {once: true});
     recorder.addEventListener('stop', () => completeHandsFreeRecording(capture), {once: true});
@@ -2129,13 +2500,13 @@
       recordingGain.gain.value = 1;
     }
     try {
-      recorder.start();
+      recorder.start(MEDIA_RECORDER_TIMESLICE_MS);
     } catch (_) {
       handsFreeCapture = null;
       window.clearTimeout(capture.unmuteTimer);
       recordingGain.gain.value = 1;
       setState('listening', true);
-      playEarcon('error');
+      localNotice('error');
       setVoiceStatus('microphone recording failed', 4000);
       return;
     }
@@ -2157,7 +2528,26 @@
     window.clearTimeout(capture.stopTimer);
     window.clearTimeout(capture.unmuteTimer);
     if (recordingGain) recordingGain.gain.value = 1;
-    if (capture.failed || capture.discard || !handsFreeEnabled) return;
+    if (capture.failed) return;
+    if (capture.saveAsDraft) {
+      const actualType = capture.recorder.mimeType || (capture.chunks[0] && capture.chunks[0].type) || 'audio/webm';
+      const blob = new Blob(capture.chunks, {type: actualType});
+      setState(handsFreeEnabled ? 'listening' : 'idle', true);
+      setDriveTranscript('saved as draft');
+      if (blob.size) {
+        keepDriveDraft({
+          blob,
+          mimeType: actualType,
+          duration: recordingMilliseconds(capture) / 1000,
+          clientID: clientID(),
+          source: 'drive'
+        }, capture.cancelNotice === 'draft-saved');
+      } else {
+        localNotice('error');
+      }
+      return;
+    }
+    if (capture.discard || !handsFreeEnabled) return;
     const speechMilliseconds = Math.max(0, capture.lastSpeechAt - capture.speechStarted + VAD_SAMPLE_MS);
     if (!capture.forceUpload && speechMilliseconds < VAD_MIN_UTTERANCE_MS) {
       setState('listening', true);
@@ -2167,7 +2557,7 @@
     const blob = new Blob(capture.chunks, {type: actualType});
     if (!blob.size) {
       setState('listening', true);
-      playEarcon('error');
+      localNotice('error');
       setVoiceStatus('microphone recording failed', 4000);
       return;
     }
@@ -2183,22 +2573,26 @@
     }, 'sending', {forceScroll: true});
     const id = clientID();
     pendingRows.set(id, row);
-    liveSendBeat = {blob, mimeType, clientID: id, row, timer: 0};
-    liveSendBeat.timer = window.setTimeout(() => {
-      const pending = liveSendBeat;
-      if (!pending || pending.clientID !== id) return;
-      liveSendBeat = null;
-      resetReplyTracking();
-      awaitingClientID = id;
-      deliverVoice({
-        blob: pending.blob,
-        mimeType: pending.mimeType,
-        clientID: pending.clientID,
-        row: pending.row,
-        attempt: 0,
-        handsFree: true
-      });
-    }, DRIVE_LIVE_SEND_DELAY_MS);
+    liveSendBeat = {blob, mimeType, duration, clientID: id, row, timer: 0};
+    liveSendBeat.timer = window.setTimeout(() => deliverLiveSendBeat(id), DRIVE_LIVE_SEND_DELAY_MS);
+  }
+
+  function deliverLiveSendBeat(expectedClientID) {
+    const pending = liveSendBeat;
+    if (!pending || (expectedClientID && pending.clientID !== expectedClientID)) return false;
+    window.clearTimeout(pending.timer);
+    liveSendBeat = null;
+    resetReplyTracking();
+    awaitingClientID = pending.clientID;
+    deliverVoice({
+      blob: pending.blob,
+      mimeType: pending.mimeType,
+      clientID: pending.clientID,
+      row: pending.row,
+      attempt: 0,
+      handsFree: true
+    });
+    return true;
   }
 
   function cancelLiveSendBeat(announce) {
@@ -2207,12 +2601,38 @@
     window.clearTimeout(pending.timer);
     liveSendBeat = null;
     pendingRows.delete(pending.clientID);
-    setDelivery(pending.row, 'not sent — cancelled', 'failed');
     resetReplyTracking();
     setState(handsFreeEnabled ? 'listening' : 'idle', true);
-    setDriveTranscript('cancelled');
-    if (announce !== false) localNotice('send-cancelled');
+    if (draftDecision(pending.duration * 1000) === 'draft') {
+      setDelivery(pending.row, 'not sent — saved as draft', 'failed');
+      setDriveTranscript('saved as draft');
+      keepDriveDraft({
+        blob: pending.blob,
+        mimeType: pending.mimeType,
+        duration: pending.duration,
+        clientID: pending.clientID,
+        source: 'drive'
+      }, announce !== false);
+    } else {
+      setDelivery(pending.row, 'not sent — cancelled', 'failed');
+      setDriveTranscript('cancelled');
+      if (announce !== false) localNotice('send-cancelled');
+    }
     return true;
+  }
+
+  function preserveVoiceWorkOnHide() {
+    const action = hideVoiceAction({
+      liveSendBeat: Boolean(liveSendBeat),
+      handsFree: Boolean(handsFreeCapture)
+    });
+    if (action === 'deliver-live-beat') {
+      deliverLiveSendBeat();
+    } else if (action === 'finish-hands-free') {
+      finishHandsFreeRecording(true, VAD_RECORDER_STOP_DELAY_MS);
+    } else {
+      preserveUnreleasedRecordingAsDraft(false);
+    }
   }
 
   function resetReplyTracking() {
@@ -2230,10 +2650,12 @@
     if (!handsFreeEnabled || id !== awaitingClientID || !messageID) return;
     awaitingMessageID = messageID;
     setState('thinking');
+    localNotice('sent');
     replyTimer = window.setTimeout(() => {
       if (!handsFreeEnabled || state !== 'thinking' || activeReplyID) return;
       resetReplyTracking();
       setState('listening');
+      localNotice('reply-timeout');
     }, REPLY_TIMEOUT_MS);
   }
 
@@ -2241,10 +2663,12 @@
     if (id !== awaitingClientID || !messageID) return;
     awaitingMessageID = messageID;
     setState('thinking');
+    localNotice('sent');
     replyTimer = window.setTimeout(() => {
       if (state !== 'thinking' || activeReplyID) return;
       resetReplyTracking();
       setState(handsFreeEnabled ? 'listening' : 'idle');
+      localNotice('reply-timeout');
     }, REPLY_TIMEOUT_MS);
   }
 
@@ -2252,7 +2676,7 @@
     if (!handsFreeEnabled || id !== awaitingClientID) return;
     resetReplyTracking();
     setState('listening', true);
-    playEarcon('error');
+    localNotice('error');
   }
 
   function handleHandsFreeReply(data) {
@@ -2266,6 +2690,7 @@
     }
     activeReplyID = Number(data.message_id || 0);
     if (!activeReplyID) return;
+    localNotice('reply-ready');
     window.clearTimeout(replyTimer);
     replyTimer = null;
     lateAudioUntil = Date.now() + REPLY_TIMEOUT_MS;
@@ -2288,6 +2713,7 @@
     }
     activeReplyID = Number(data.message_id || 0);
     if (!activeReplyID) return;
+    localNotice('reply-ready');
     window.clearTimeout(replyTimer);
     replyTimer = null;
     lateAudioUntil = Date.now() + REPLY_TIMEOUT_MS;
@@ -2354,6 +2780,7 @@
     if (!handsFreeEnabled || state !== 'speaking' || handsFreeCapture) return;
     if (!interruptCurrentReply()) return;
     startHandsFreeRecording(true);
+    localNotice('barge-in');
   }
 
   function handleMicrophoneLost() {
@@ -2368,7 +2795,7 @@
     releaseMicrophone();
     micButton.disabled = false;
     setState('idle', true);
-    playEarcon('error');
+    localNotice('error');
     setVoiceStatus('microphone lost — tap hands-free to resume');
     updateWakeLock();
   }
@@ -2410,7 +2837,7 @@
       handsFreeEnabled = false;
       updateHandsFreeButton();
       setState('idle', true);
-      playEarcon('error');
+      localNotice('error');
       const denied = error && (error.name === 'NotAllowedError' || error.name === 'SecurityError');
       setVoiceStatus(denied ? 'Microphone permission denied — allow it in browser settings, then tap hands-free.' : 'Hands-free microphone unavailable — check browser permission.');
     } finally {
@@ -2452,6 +2879,7 @@
   }
 
   function stopPlayback() {
+    const wasSpeaking = state === 'speaking';
     suppressPlaybackPauseUntil = performance.now() + 500;
     player.pause();
     currentAudio = null;
@@ -2461,6 +2889,7 @@
     updateMessageAudioButtons();
     if (handsFreeEnabled) setState('listening');
     else if (currentView === 'drive' && state === 'speaking') setState('idle');
+    if (wasSpeaking) localNotice('speaking-end');
   }
 
   function mutePlaybackNow() {
@@ -2587,12 +3016,14 @@
   stopAudioButton.addEventListener('click', stopPlayback);
   replayAudioButton.addEventListener('click', replayLast);
   function enterHandsFreeSpeaking() {
+    const wasSpeaking = state === 'speaking';
     window.clearTimeout(audioWaitTimer);
     audioWaitTimer = null;
     speakingStartedAt = performance.now();
     playbackFloor = noiseFloor;
     bargeAboveMilliseconds = 0;
     setState('speaking');
+    if (!wasSpeaking) localNotice('speaking-start');
   }
 
   player.addEventListener('play', () => {
@@ -2605,12 +3036,18 @@
     if (unlockingAudio || performance.now() < suppressPlaybackPauseUntil) return;
     stopAudioButton.hidden = true;
     updateMessageAudioButtons();
-    if (handsFreeEnabled && state === 'speaking') setState('listening');
-    else if (currentView === 'drive' && state === 'speaking') setState('idle');
+    if (handsFreeEnabled && state === 'speaking') {
+      setState('listening');
+      localNotice('speaking-end');
+    } else if (currentView === 'drive' && state === 'speaking') {
+      setState('idle');
+      localNotice('speaking-end');
+    }
   });
 
   function finishPlayback() {
     if (unlockingAudio) return;
+    const wasSpeaking = state === 'speaking';
     currentAudio = null;
     stopAudioButton.hidden = true;
     clearPlayerSource();
@@ -2619,8 +3056,10 @@
       playNext();
     } else if (handsFreeEnabled) {
       setState('listening');
+      if (wasSpeaking) localNotice('speaking-end');
     } else if (currentView === 'drive') {
       setState('idle');
+      if (wasSpeaking) localNotice('speaking-end');
     }
   }
 
@@ -2679,6 +3118,7 @@
       setConnection(detached ? 'no session attached — reconnected' : '● connected', detached ? 'detached' : 'connected');
       if (handsFreeEnabled && awaitingMessageID && !activeReplyID && state === 'listening') setState('thinking');
       if (reconnected) {
+        localNotice('reconnected');
         reconnectCatchUpPending = true;
         scheduleReconnectCatchUp();
       } else {
@@ -2687,7 +3127,9 @@
     };
     events.onerror = () => {
       const closed = events.readyState === EventSource.CLOSED;
+      const firstClosedNotice = closed && connectionClass !== 'disconnected';
       setConnection(closed ? 'disconnected — reload to sign in' : 'reconnecting…', closed ? 'disconnected' : '');
+      if (firstClosedNotice) localNotice('disconnected');
       if (closed && handsFreeEnabled && state === 'thinking') {
         resetReplyTracking();
         setState('listening');
@@ -2703,6 +3145,9 @@
     }
     events.addEventListener('presence', event => {
       const data = JSON.parse(event.data);
+      const wasPresenceKnown = presenceKnown;
+      const wasDetached = detached;
+      const wasPermissionHeld = permissionHeld;
       const signature = presenceSignature(data);
       const changed = signature !== lastPresenceSignature;
       lastPresenceSignature = signature;
@@ -2716,10 +3161,14 @@
         since: String(data.since || '')
       };
       detached = !presence.attached;
-      if (presence.attached && changed) permissionHeld = false;
+      if (presence.attached) permissionHeld = false;
       setConnection(presenceShortText(), presence.attached ? 'connected' : 'detached');
       renderPresenceSheet();
-      if (changed && !data.replay) announcePresenceChange();
+      if (!data.replay) {
+        if (!presence.attached && changed) announcePresenceChange('no-session');
+        else if (presence.attached && wasPermissionHeld) announcePresenceChange('permission-returned');
+        else if (presence.attached && (wasDetached || !wasPresenceKnown)) announcePresenceChange('session-returned');
+      }
     });
     events.addEventListener('message', event => {
       markConnected();
@@ -2841,6 +3290,7 @@
   }
 
   let driveHold;
+  let lockedCancelHold;
   let lastDriveReleaseAt = -DRIVE_CLICK_GUARD_MS;
   let liveHold;
   let edgeSwipe;
@@ -2854,27 +3304,38 @@
   }
 
   function cancelDriveHoldRecording(noticeKind) {
-    const notice = noticeKind || 'send-cancelled';
+    const notice = noticeKind || 'recording-cancelled';
     setDriveLocked(false);
     if (recording && recording.source === 'drive') {
-      stopRecording(true, false, notice);
+      if (draftDecision(recordingMilliseconds(recording)) === 'draft') {
+        stopRecording(false, false, 'draft-saved', true);
+      } else {
+        stopRecording(true, false, notice);
+      }
       return;
     }
     if (recordingStarting) {
-      drivePendingRecordingAction = notice === 'recording-cancelled' ? 'cancel-locked' : 'cancel';
+      drivePendingRecordingAction = 'cancel-locked';
       return;
     }
     const capture = handsFreeCapture;
     if (!capture || capture.recorder.state === 'inactive') return;
-    capture.discard = true;
+    if (draftDecision(recordingMilliseconds(capture)) === 'draft') {
+      capture.saveAsDraft = true;
+      capture.cancelNotice = 'draft-saved';
+    } else {
+      capture.discard = true;
+    }
     capture.finishing = true;
     window.clearTimeout(capture.stopTimer);
     window.clearTimeout(capture.unmuteTimer);
     if (recordingGain) recordingGain.gain.value = 1;
     capture.recorder.stop();
-    setState(handsFreeEnabled ? 'listening' : 'idle', true);
-    setDriveTranscript('cancelled');
-    localNotice(notice);
+    if (!capture.saveAsDraft) {
+      setState(handsFreeEnabled ? 'listening' : 'idle', true);
+      setDriveTranscript('cancelled');
+      localNotice(notice);
+    }
   }
 
   driveCircle.addEventListener('pointerdown', event => {
@@ -2885,24 +3346,17 @@
         pointerID: event.pointerId,
         startX: event.clientX,
         startY: event.clientY,
-        mode: 'locked-action',
-        cancelled: false,
+        mode: 'locked-send',
+        cancelArmed: false,
         locked: true,
         timer: 0
       };
       driveCircle.classList.add('drive-pressed');
       capturePointer(driveCircle, event.pointerId);
-      vibrate(15);
-      driveHold.timer = window.setTimeout(() => {
-        if (!driveHold || driveHold.pointerID !== event.pointerId || driveHold.mode !== 'locked-action') return;
-        driveHold.cancelled = true;
-        driveCircle.classList.remove('drive-pressed');
-        cancelDriveHoldRecording('recording-cancelled');
-      }, DRIVE_LOCKED_CANCEL_MS);
       return;
     }
     if (liveSendBeat) {
-      driveHold = {pointerID: event.pointerId, startX: event.clientX, startY: event.clientY, mode: 'cancelled-send', cancelled: false, locked: false, timer: 0};
+      driveHold = {pointerID: event.pointerId, startX: event.clientX, startY: event.clientY, mode: 'cancelled-send', cancelArmed: false, locked: false, timer: 0};
       driveCircle.classList.add('drive-pressed');
       capturePointer(driveCircle, event.pointerId);
       cancelLiveSendBeat(true);
@@ -2911,6 +3365,7 @@
     if (!driveIsHeld() && (state === 'recording' || state === 'sending' || state === 'thinking')) return;
     if (recording || recordingStarting || handsFreeCapture) return;
     let mode = '';
+    let holdNotice = 'hold-start';
     if (driveIsHeld()) {
       mode = 'ptt';
       startRecording('drive');
@@ -2918,9 +3373,11 @@
       if (handsFreeEnabled) {
         mode = 'live';
         bargeIn();
+        holdNotice = '';
       } else if (interruptCurrentReply()) {
         mode = 'ptt';
         startRecording('drive');
+        holdNotice = 'barge-in';
       }
     } else if (handsFreeEnabled && state === 'listening') {
       mode = 'live';
@@ -2930,33 +3387,42 @@
       startRecording('drive');
     }
     if (!mode) return;
-    driveHold = {pointerID: event.pointerId, startX: event.clientX, startY: event.clientY, mode, cancelled: false, locked: false, timer: 0};
+    driveHold = {pointerID: event.pointerId, startX: event.clientX, startY: event.clientY, mode, cancelArmed: false, cancelZoneRect: null, locked: false, timer: 0};
     driveCircle.classList.add('drive-pressed');
     if (mode === 'ptt') showDriveLockHint(false);
     capturePointer(driveCircle, event.pointerId);
-    vibrate(15);
+    if (holdNotice) localNotice(holdNotice);
     activateDriveAudio();
   });
 
   driveCircle.addEventListener('pointermove', event => {
-    if (!driveHold || driveHold.pointerID !== event.pointerId || driveHold.cancelled) return;
-    if (driveHold.mode === 'locked-action' || driveHold.locked) return;
+    if (!driveHold || driveHold.pointerID !== event.pointerId) return;
+    if (driveHold.mode === 'locked-send' || driveHold.locked) return;
     const horizontal = Math.abs(event.clientX - driveHold.startX);
-    const vertical = event.clientY - driveHold.startY;
-    const upward = -vertical;
+    const downward = event.clientY - driveHold.startY;
+    const upward = -downward;
+    const decision = cancelDecision({upward, downward, horizontal, armed: driveHold.cancelArmed, released: false});
     if (driveHold.mode === 'ptt') {
       showDriveLockHint(upward >= DRIVE_HOLD_CANCEL_PX && upward >= horizontal);
-      if (upward >= DRIVE_LOCK_DISTANCE_PX && upward >= horizontal) {
+      if (decision === 'lock') {
         driveHold.locked = true;
+        showDriveCancelZone(false);
         setDriveLocked(true);
         return;
       }
     }
-    if (vertical < DRIVE_CANCEL_DISTANCE_PX && horizontal < DRIVE_CANCEL_DISTANCE_PX) return;
-    driveHold.cancelled = true;
-    driveCircle.classList.remove('drive-pressed');
-    hideDriveLockHint();
-    if (driveHold.mode === 'ptt' || driveHold.mode === 'live') cancelDriveHoldRecording();
+    if (decision === 'arm') {
+      driveHold.cancelArmed = true;
+      hideDriveLockHint();
+      showDriveCancelZone(true);
+      const rect = driveCancelZone.getBoundingClientRect();
+      driveHold.cancelZoneRect = {left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom};
+      localNotice('cancel-armed');
+    } else if (decision === 'disarm') {
+      driveHold.cancelArmed = false;
+      driveHold.cancelZoneRect = null;
+      showDriveCancelZone(false);
+    }
   });
 
   function releaseDriveCircle(event, cancelled) {
@@ -2965,39 +3431,76 @@
     driveHold = null;
     window.clearTimeout(hold.timer);
     driveCircle.classList.remove('drive-pressed');
+    showDriveCancelZone(false);
     lastDriveReleaseAt = performance.now();
     if (!hold.locked) hideDriveLockHint();
-    if (cancelled || hold.cancelled) return;
-    if (hold.mode === 'locked-action') {
+    if (cancelled) {
+      if (!hold.locked && hold.mode === 'ptt') preserveUnreleasedRecordingAsDraft(true);
+      return;
+    }
+    const horizontal = Math.abs(event.clientX - hold.startX);
+    const downward = event.clientY - hold.startY;
+    const upward = -downward;
+    const insideZone = pointInsideRect(event.clientX, event.clientY, hold.cancelZoneRect);
+    const releaseDecision = cancelDecision({upward, downward, horizontal, armed: hold.cancelArmed, released: true, insideZone});
+    if (releaseDecision === 'cancel' && (hold.mode === 'ptt' || hold.mode === 'live')) {
+      cancelDriveHoldRecording('recording-cancelled');
+      return;
+    }
+    if (hold.mode === 'locked-send') {
       setDriveLocked(false);
       if (recording && recording.source === 'drive') {
-        vibrate(30);
+        if (!driveIsHeld()) localNotice('sending');
         stopRecording(false, driveIsHeld());
       } else if (recordingStarting) {
-        vibrate(30);
+        if (!driveIsHeld()) localNotice('sending');
         drivePendingRecordingAction = driveIsHeld() ? 'refuse' : 'send';
       }
       return;
     }
     if (hold.locked || hold.mode !== 'ptt') return;
     if (recording && recording.source === 'drive') {
-      if (!driveIsHeld()) vibrate(30);
+      if (!driveIsHeld()) localNotice('sending');
       stopRecording(false, driveIsHeld());
     } else if (recordingStarting) {
-      if (!driveIsHeld()) vibrate(30);
+      if (!driveIsHeld()) localNotice('sending');
       drivePendingRecordingAction = driveIsHeld() ? 'refuse' : 'send';
     }
   }
 
   driveCircle.addEventListener('pointerup', event => releaseDriveCircle(event, false));
-  driveCircle.addEventListener('pointercancel', event => {
-    if (driveHold && driveHold.mode !== 'locked-action' && !driveHold.locked) cancelDriveHoldRecording();
-    releaseDriveCircle(event, true);
-  });
+  driveCircle.addEventListener('pointercancel', event => releaseDriveCircle(event, true));
   driveCircle.addEventListener('click', event => {
     if (performance.now() - lastDriveReleaseAt <= DRIVE_CLICK_GUARD_MS) event.stopPropagation();
     event.preventDefault();
   });
+
+  driveCancelButton.addEventListener('pointerdown', event => {
+    if (event.button !== 0 || !event.isPrimary || currentView !== 'drive' || !driveLocked || lockedCancelHold) return;
+    event.preventDefault();
+    lockedCancelHold = {pointerID: event.pointerId, timer: 0};
+    driveCancelButton.classList.add('holding');
+    capturePointer(driveCancelButton, event.pointerId);
+    localNotice('cancel-armed');
+    lockedCancelHold.timer = window.setTimeout(() => {
+      if (!lockedCancelHold || lockedCancelHold.pointerID !== event.pointerId) return;
+      lockedCancelHold = null;
+      driveCancelButton.classList.remove('holding');
+      cancelDriveHoldRecording('recording-cancelled');
+    }, DRIVE_LOCKED_CANCEL_MS);
+  });
+
+  function releaseLockedCancel(event) {
+    if (!lockedCancelHold || lockedCancelHold.pointerID !== event.pointerId) return;
+    const hold = lockedCancelHold;
+    lockedCancelHold = null;
+    window.clearTimeout(hold.timer);
+    driveCancelButton.classList.remove('holding');
+  }
+
+  driveCancelButton.addEventListener('pointerup', releaseLockedCancel);
+  driveCancelButton.addEventListener('pointercancel', releaseLockedCancel);
+  driveCancelButton.addEventListener('click', event => event.preventDefault());
 
   driveLiveButton.addEventListener('pointerdown', event => {
     if (event.button !== 0 || !event.isPrimary || currentView !== 'drive' || liveHold || driveIsHeld()) return;
@@ -3053,6 +3556,7 @@
     } else {
       setDriveMuted(false);
       await activateDriveAudio();
+      localNotice('unmuted');
     }
   });
 
@@ -3067,6 +3571,11 @@
     playMessageAudio(lastReplyMessageID, true, true);
   });
 
+  driveDraftResend.addEventListener('click', resendDriveDraft);
+  chatDraftResend.addEventListener('click', resendDriveDraft);
+  driveDraftDiscard.addEventListener('click', discardDriveDraft);
+  chatDraftDiscard.addEventListener('click', discardDriveDraft);
+
   driveChatButton.addEventListener('click', () => switchView('chat'));
   chatDriveButton.addEventListener('click', () => switchView('drive'));
   driveLastReply.addEventListener('click', () => switchView('chat'));
@@ -3075,6 +3584,10 @@
     openPresenceSheet();
   });
   presenceSheetClose.addEventListener('click', closePresenceSheet);
+  hapticsToggle.addEventListener('click', event => {
+    event.stopPropagation();
+    setHapticsEnabled(!hapticsEnabled);
+  });
   presenceSheet.addEventListener('click', closePresenceSheet);
   presenceSheetBackdrop.addEventListener('click', event => {
     if (event.target === presenceSheetBackdrop) closePresenceSheet();
@@ -3141,12 +3654,21 @@
   document.addEventListener('pointercancel', () => { edgeSwipe = null; }, true);
 
   document.getElementById('logout').addEventListener('click', async () => {
+    if (hasUnsentWork() && !window.confirm('You have an unsent voice note. Leave and lose it?')) return;
     const response = await fetch('/logout', {method: 'POST'});
     if (response.ok || response.status === 401) location.assign('/login');
   });
+  window.addEventListener('beforeunload', event => {
+    if (!hasUnsentWork()) return;
+    event.preventDefault();
+    event.returnValue = '';
+  });
+  window.addEventListener('pagehide', () => {
+    preserveVoiceWorkOnHide();
+  });
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'hidden') {
-      if (state === 'recording' && handsFreeCapture) finishHandsFreeRecording(true, VAD_RECORDER_STOP_DELAY_MS);
+      preserveVoiceWorkOnHide();
       stopVAD();
       return;
     }
@@ -3164,6 +3686,7 @@
   updateHandsFreeButton();
   updateReplayButtons();
   switchView(currentView, false);
+  loadDriveDraft();
   connect();
   if (currentView === 'chat') input.focus({preventScroll: true});
 })();

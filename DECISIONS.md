@@ -3,6 +3,30 @@
 Entries are newest first. This is the public architecture record: it records
 rulings and rationale, never private operational details.
 
+## D029: Drive feedback is centralized and deliberate cancellation preserves long audio
+
+**Date:** 2026-08-30
+
+**Decision:** Every driver-invisible state cue is defined in one local notice
+table and dispatched through one sound, vibration, and fixed-speech sink. A
+local Haptics preference gates only vibration. Unlocked recording cancellation
+requires a down-dominant 96 px drag followed by release inside the visible
+cancel zone; locked recording can be cancelled only by holding its separate
+target for 700 ms. A committed cancel keeps audio of at least five seconds in a
+single IndexedDB draft slot. The same slot is used when page hiding interrupts
+an unreleased push-to-talk capture, and the next load offers resend or discard
+without auto-sending. One unsent-work predicate drives the browser leave prompt
+and logout confirmation.
+
+**Why:** Push-to-talk otherwise has no audible progress in Drive, and a small
+sideways or downward wobble could discard the only copy of a recording during
+movement. A learned set of short multimodal cues keeps state legible without a
+glance; release-to-commit and a dedicated locked-cancel target make destructive
+intent explicit. IndexedDB is the native browser store suitable for a binary
+blob that may exceed local-storage limits, while a single replaceable slot
+keeps recovery bounded. The page-hide save remains best effort because mobile
+browsers may terminate recorder or database work before completion.
+
 ## D028: Agent HTML opens in a sandboxed in-page viewer
 
 **Date:** 2026-08-30
