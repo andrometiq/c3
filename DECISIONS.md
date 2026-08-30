@@ -49,7 +49,7 @@ that window.
 8. Authentication is a short-lived, single-use magic link delivered through the allowlisted operator's bot DM; private reach is the default.
 9. Phase 1 is drive-only: keyboard-less routes show a laptop-permission notice and create no remote verdict path.
 10. Browser transport is SSE out and POST in, with no external page resources or HTML injection.
-11. Web advertises plain-text, bounded-message capabilities and no keyboards, media, reactions, or polls.
+11. Web advertises bounded rich text and native GFM tables, rendered client-side with safe DOM construction; it still advertises no keyboards, media, reactions, or polls.
 
 **Why:** These rulings close the cross-channel loss, ambiguity, startup, and
 trust-boundary holes before the HTTP transport lands. The accepted windows are
@@ -80,6 +80,16 @@ returned 1.2–2.1-second clips containing only “Hello”, while a plain-Engli
 probe repeated its first sentence three times and omitted the second; OpenRouter
 also accepted only 24 kHz mono PCM, requiring local MP3 transcoding. Gemini stays
 as the last fallback, and `C3_TTS_CHAIN` remains the explicit order override.
+
+**Phase 2 addendum:** Persist browser sessions by the SHA-256 hash of the cookie,
+never the credential itself, and persist the sequenced 200-event replay ring so
+cookies, history, and reply ids survive broker restarts. Web now advertises rich
+text and rich tables because its self-contained page renders the supported
+Markdown client-side with safe DOM construction, a scrollable table wrapper,
+and a link-scheme allowlist. The Telegram
+`mdToTelegramHTML` converter was not reused: it is package-private, emits
+Telegram-specific markup, and deliberately does not validate browser URL
+schemes.
 
 ## D019: dcode adapter — live push via the external-event socket; slash commands as user skills
 

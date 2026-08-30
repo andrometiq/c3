@@ -122,8 +122,9 @@ func newHandlerChannel() (*Channel, *fakeHost, *http.Cookie) {
 		"http://localhost:8371": true,
 	}
 	now := c.now()
-	c.sessions["session-one"] = &session{userID: 42, username: "operator", created: now, lastSeen: now}
-	return c, host, &http.Cookie{Name: sessionCookieName, Value: "session-one"}
+	cookieValue := "session-one"
+	c.sessions[sessionKey(cookieValue)] = &session{userID: 42, username: "operator", created: now, lastSeen: now, savedLastSeen: now}
+	return c, host, &http.Cookie{Name: sessionCookieName, Value: cookieValue}
 }
 
 func request(method, path, body string, cookie *http.Cookie, withOrigin bool) *http.Request {
@@ -430,7 +431,7 @@ func TestSessionAuthOriginLogoutAndExpiry(t *testing.T) {
 	}
 
 	c.authMu.Lock()
-	c.sessions[cookie.Value].lastSeen = c.now().Add(-sessionIdleTTL)
+	c.sessions[sessionKey(cookie.Value)].lastSeen = c.now().Add(-sessionIdleTTL)
 	c.authMu.Unlock()
 	expired := httptest.NewRecorder()
 	c.routes().ServeHTTP(expired, request(http.MethodGet, "/", "", cookie, false))
@@ -594,6 +595,27 @@ func TestFreshEventsReplayOwnAndAgentHistory(t *testing.T) {
 	<-resumedDone
 }
 
+func TestInboundAndReplyIDsHaveSeparateCounters(t *testing.T) {
+	c, _, cookie := newHandlerChannel()
+	inbound := sendRequest(c, cookie, `{"text":"question","client_id":"counter-test"}`)
+	if inbound.Code != http.StatusAccepted {
+		t.Fatalf("send status=%d body=%s", inbound.Code, inbound.Body.String())
+	}
+	var result struct {
+		MessageID int64 `json:"message_id"`
+	}
+	if err := json.Unmarshal(inbound.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	replyID, err := c.SendReply(c3types.ReplyArgs{Channel: Name, ChatID: 42, Text: "answer"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.MessageID != 1 || replyID != 1 {
+		t.Fatalf("independent inbound/reply ids=%d/%d, want 1/1", result.MessageID, replyID)
+	}
+}
+
 func TestEventsReplayStaleHeartbeatTypingAndEdit(t *testing.T) {
 	c, _, cookie := newHandlerChannel()
 	first, _ := c.SendReply(c3types.ReplyArgs{Channel: Name, ChatID: 42, Text: "first"})
@@ -618,7 +640,7 @@ func TestEventsReplayStaleHeartbeatTypingAndEdit(t *testing.T) {
 	longRing.host = c.host
 	longRing.operatorID = 42
 	longRing.allowedOrigin = c.allowedOrigin
-	longRing.sessions[cookie.Value] = &session{userID: 42, username: "operator", created: longRing.now(), lastSeen: longRing.now()}
+	longRing.sessions[sessionKey(cookie.Value)] = &session{userID: 42, username: "operator", created: longRing.now(), lastSeen: longRing.now()}
 	for index := 0; index < replayLimit+1; index++ {
 		_, _ = longRing.SendReply(c3types.ReplyArgs{Channel: Name, ChatID: 42, Text: fmt.Sprintf("ring-%d", index)})
 	}
@@ -641,7 +663,7 @@ func TestEventsReplayStaleHeartbeatTypingAndEdit(t *testing.T) {
 	empty.host = c.host
 	empty.operatorID = 42
 	empty.allowedOrigin = c.allowedOrigin
-	empty.sessions[cookie.Value] = &session{userID: 42, username: "operator", created: empty.now(), lastSeen: empty.now()}
+	empty.sessions[sessionKey(cookie.Value)] = &session{userID: 42, username: "operator", created: empty.now(), lastSeen: empty.now()}
 	staleRecorder, staleCancel, staleDone := startSSE(empty, cookie, "7", "")
 	waitFor(t, func() bool {
 		_, body := staleRecorder.snapshot()
@@ -655,7 +677,7 @@ func TestEventsReplayStaleHeartbeatTypingAndEdit(t *testing.T) {
 	live.operatorID = 42
 	live.allowedOrigin = c.allowedOrigin
 	live.heartbeatInterval = 2 * time.Millisecond
-	live.sessions[cookie.Value] = &session{userID: 42, username: "operator", created: live.now(), lastSeen: live.now()}
+	live.sessions[sessionKey(cookie.Value)] = &session{userID: 42, username: "operator", created: live.now(), lastSeen: live.now()}
 	heartbeat, heartbeatCancel, heartbeatDone := startSSE(live, cookie, "", "")
 	waitFor(t, func() bool {
 		_, body := heartbeat.snapshot()
@@ -734,6 +756,7 @@ func (listener *fakeListener) Addr() net.Addr { return listener.address }
 
 func startWithFakeListener(t *testing.T, config Config, mutateHost func(*fakeHost)) (*Channel, *fakeHost, string) {
 	t.Helper()
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	host := &fakeHost{
 		webConfig: config, telegram: telegramConfig{MasterUserID: 42, DMChatID: 42},
 		registered: true, allowed: true,
@@ -760,7 +783,7 @@ func TestStartListenerWarningsValidationAndSeed(t *testing.T) {
 		if listened != defaultListen || strings.Contains(host.logText(), "non-loopback") {
 			t.Fatalf("listen/log=%q/%q", listened, host.logText())
 		}
-		if got := c.nextID(); got != 78 {
+		if got := c.nextInboundMessageID(); got != 78 {
 			t.Fatalf("seeded next id=%d, want 78", got)
 		}
 	})
@@ -822,6 +845,7 @@ func TestStartRefusesMissingTrustPrerequisites(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
 			host := &fakeHost{telegram: telegramConfig{MasterUserID: 42, DMChatID: 42}, registered: true, allowed: true}
 			test.mutate(host)
 			c := New()
@@ -886,7 +910,12 @@ func TestEmbeddedPagesAreSelfContainedAndUseTextContent(t *testing.T) {
 			t.Fatal(err)
 		}
 		text := string(contents)
-		if strings.Contains(text, "inner"+"HTML") || strings.Contains(text, "http://") || strings.Contains(text, "https://") {
+		for _, unsafe := range []string{"inner" + "HTML", "outer" + "HTML", "insertAdjacent" + "HTML", "document." + "write"} {
+			if strings.Contains(text, unsafe) {
+				t.Fatalf("%s contains unsafe DOM sink %q", name, unsafe)
+			}
+		}
+		if strings.Contains(text, "http://") || strings.Contains(text, "https://") {
 			t.Fatalf("%s contains an unsafe DOM sink or external resource", name)
 		}
 		if !strings.Contains(text, "textContent") {
@@ -895,6 +924,33 @@ func TestEmbeddedPagesAreSelfContainedAndUseTextContent(t *testing.T) {
 		if strings.Contains(text, "\t") {
 			t.Fatalf("%s inline JavaScript contains a tab", name)
 		}
+	}
+	page, err := pages.ReadFile("page.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pageText := string(page)
+	const allowlist = "const allowedSchemes = ['http:', 'https:', 'mailto:', 'tel:'];"
+	if !strings.Contains(pageText, allowlist) {
+		t.Fatal("page does not contain the exact safe link-scheme allowlist")
+	}
+	for _, scheme := range []string{"javascript:", "data:", "vbscript:"} {
+		if strings.Contains(allowlist, scheme) {
+			t.Fatalf("unsafe scheme %q appears in renderer href allowlist", scheme)
+		}
+	}
+	for _, marker := range []string{
+		"return 'mine:' + id", "return 'agent:' + id", "return 'status:' + id",
+		"createElement('table')", "createElement('blockquote')", "createElement('span')",
+		"setAttribute('aria-label', 'spoiler')", "console.error('web: markdown render failed'",
+		"let detached = false", "detached ? 'no session attached — reconnected'", "detached = false",
+	} {
+		if !strings.Contains(pageText, marker) {
+			t.Fatalf("page is missing renderer/state marker %q", marker)
+		}
+	}
+	if got := strings.Count(pageText, "markConnected();"); got != 3 {
+		t.Fatalf("page marks %d event kinds connected, want message/typing/edit only", got)
 	}
 }
 
@@ -908,7 +964,7 @@ func TestPageHeadersDenyFraming(t *testing.T) {
 
 func TestCapabilities(t *testing.T) {
 	caps := New().Capabilities()
-	if caps.Channel != Name || caps.RichText || caps.MaxMessageRunes != maxMessageRunes || !caps.Typing || !caps.EditMessages || caps.InlineKeyboards || caps.Polls || caps.Reactions || len(caps.MediaKinds) != 0 {
+	if caps.Channel != Name || !caps.RichText || !caps.RichTables || caps.MaxMessageRunes != maxMessageRunes || caps.MaxMessageRunesSource != 0 || !caps.Typing || !caps.EditMessages || caps.InlineKeyboards || caps.Polls || caps.Reactions || len(caps.MediaKinds) != 0 {
 		t.Fatalf("capabilities=%+v", caps)
 	}
 }

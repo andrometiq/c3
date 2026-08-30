@@ -14,14 +14,31 @@
     h1 { margin: 0; font-size: 1.05rem; flex: 1; }
     #connection { color: #f2c94c; font-size: .88rem; text-decoration: none; }
     #connection.connected { color: #77d68c; }
+    #connection.detached { color: #9fb3c8; }
     #connection.disconnected { color: #ff6b6b; text-decoration: underline; }
     #logout { border: 0; padding: .25rem; background: transparent; color: #aeb8c4; text-decoration: underline; font: inherit; font-size: .82rem; }
     #messages { min-height: 0; overflow-y: auto; padding: 1rem; scroll-padding-bottom: 9rem; }
     .message { max-width: 88%; margin: 0 0 1rem; padding: .72rem .85rem; border-radius: .9rem; background: #1a2027; box-shadow: 0 1px 0 #303842; }
     .message.mine { margin-left: auto; background: #173756; }
     .message.status { max-width: 100%; margin: .5rem 0 1rem; padding: .25rem .1rem; background: transparent; box-shadow: none; color: #aeb8c4; font-size: .9rem; }
-    .body { white-space: pre-wrap; overflow-wrap: anywhere; }
-    .body pre { margin: .4rem 0; padding: .6rem; overflow-x: auto; border-radius: .4rem; background: #0c1014; color: #e6edf3; font: .9rem/1.45 ui-monospace, monospace; white-space: pre-wrap; }
+    .body { overflow-wrap: anywhere; }
+    .body.literal { white-space: pre-wrap; }
+    .body p { margin: 0 0 .65rem; }
+    .body p:last-child { margin-bottom: 0; }
+    .body .heading { font-size: 1.08rem; font-weight: 700; }
+    .body pre { margin: .4rem 0 .7rem; padding: .6rem; overflow-x: auto; border-radius: .4rem; background: #0c1014; color: #e6edf3; font: .9rem/1.45 ui-monospace, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
+    .body code { padding: .08rem .25rem; border-radius: .25rem; background: #0c1014; color: #e6edf3; font: .9em ui-monospace, monospace; }
+    .body pre code { padding: 0; background: transparent; font: inherit; }
+    .body a { color: #70b7ff; text-decoration-thickness: .08em; text-underline-offset: .12em; }
+    .body .spoiler { border-radius: .2rem; background: #d6dde5; color: transparent; text-shadow: 0 0 .45rem #050607; cursor: pointer; }
+    .body .spoiler.revealed { background: transparent; color: inherit; text-shadow: none; cursor: text; }
+    .body ul, .body ol { margin: .35rem 0 .7rem; padding-left: 1.55rem; }
+    .body blockquote { margin: .35rem 0 .7rem; padding: .1rem .7rem; border-left: .22rem solid #596b7d; color: #c5ced8; }
+    .body hr { height: 1px; margin: .75rem 0; border: 0; background: #46515e; }
+    .table-scroll { max-width: 100%; margin: .4rem 0 .7rem; overflow-x: auto; }
+    .body table { border-collapse: collapse; white-space: nowrap; }
+    .body th, .body td { padding: .35rem .55rem; border: 1px solid #46515e; text-align: left; }
+    .body th { background: #111820; }
     .meta { display: flex; gap: .45rem; margin-top: .3rem; color: #9ba7b4; font-size: .76rem; }
     .delivery.retrying { color: #f2c94c; }
     .delivery.failed { color: #ff6b6b; }
@@ -66,42 +83,285 @@
   const rows = new Map();
   const pendingRows = new Map();
   let typingTimer;
+  let detached = false;
 
   function scrollBottom() {
     requestAnimationFrame(() => { messages.scrollTop = messages.scrollHeight; });
   }
 
   function renderText(node, text) {
-    node.textContent = '';
-    const lines = String(text).split('\n');
-    let fenced = false;
-    let buffer = [];
-    function flush() {
-      if (!buffer.length) return;
-      const part = document.createElement(fenced ? 'pre' : 'span');
-      part.textContent = buffer.join('\n') + '\n';
-      node.append(part);
-      buffer = [];
+    function renderLiteral(node, text) {
+      node.textContent = String(text);
+      node.classList.add('literal');
     }
-    for (const line of lines) {
-      if (line.trim().startsWith('```')) {
-        flush();
-        fenced = !fenced;
-      } else {
-        buffer.push(line);
+
+    try {
+      node.textContent = '';
+      node.classList.remove('literal');
+      const lines = String(text).split('\n');
+      let index = 0;
+
+    function appendLink(parent, label, href) {
+      const separator = href.indexOf(':');
+      const scheme = separator < 0 ? '' : href.slice(0, separator + 1).toLowerCase();
+      const allowedSchemes = ['http:', 'https:', 'mailto:', 'tel:'];
+      if (!allowedSchemes.includes(scheme)) return false;
+      const link = document.createElement('a');
+      link.setAttribute('href', href);
+      link.setAttribute('rel', 'noopener noreferrer');
+      link.setAttribute('target', '_blank');
+      link.textContent = label;
+      parent.append(link);
+      return true;
+    }
+
+    function appendInline(parent, source) {
+      const pattern = /(`[^`\n]+`|\[[^\]\n]+\]\([^\s)]+\)|https?:\/\/[^\s<]+|\|\|[^|\n]+\|\||\*\*[^*\n]+\*\*|(?<![A-Za-z0-9])__[^_\n]+__(?![A-Za-z0-9])|~~[^~\n]+~~|\*[^*\n]+\*|(?<![A-Za-z0-9])_[^_\n]+_(?![A-Za-z0-9]))/gi;
+      let offset = 0;
+      for (const match of source.matchAll(pattern)) {
+        if (match.index > offset) parent.append(document.createTextNode(source.slice(offset, match.index)));
+        const token = match[0];
+        const markdownLink = token.match(/^\[([^\]\n]+)\]\(([^\s)]+)\)$/);
+        if (token.startsWith('`')) {
+          const code = document.createElement('code');
+          code.textContent = token.slice(1, -1);
+          parent.append(code);
+        } else if (markdownLink) {
+          if (!appendLink(parent, markdownLink[1], markdownLink[2])) parent.append(document.createTextNode(token));
+        } else if (/^https?:\/\//i.test(token)) {
+          let href = token;
+          let suffix = '';
+          while (/[.,!?;:)]$/.test(href)) {
+            suffix = href.slice(-1) + suffix;
+            href = href.slice(0, -1);
+          }
+          appendLink(parent, href, href);
+          if (suffix) parent.append(document.createTextNode(suffix));
+        } else if (token.startsWith('||')) {
+          const spoiler = document.createElement('span');
+          spoiler.className = 'spoiler';
+          spoiler.setAttribute('tabindex', '0');
+          spoiler.setAttribute('role', 'button');
+          spoiler.setAttribute('aria-label', 'spoiler');
+          spoiler.textContent = token.slice(2, -2);
+          const reveal = () => { spoiler.classList.add('revealed'); };
+          spoiler.addEventListener('click', reveal);
+          spoiler.addEventListener('keydown', event => {
+            if (event.key !== 'Enter' && event.key !== ' ') return;
+            event.preventDefault();
+            reveal();
+          });
+          parent.append(spoiler);
+        } else {
+          const element = document.createElement(token.startsWith('**') || token.startsWith('__') ? 'strong' : token.startsWith('~~') ? 's' : 'em');
+          appendInline(element, token.slice(token.startsWith('**') || token.startsWith('__') || token.startsWith('~~') ? 2 : 1, token.startsWith('**') || token.startsWith('__') || token.startsWith('~~') ? -2 : -1));
+          parent.append(element);
+        }
+        offset = match.index + token.length;
       }
+      if (offset < source.length) parent.append(document.createTextNode(source.slice(offset)));
     }
-    flush();
+
+    function appendLines(parent, blockLines) {
+      blockLines.forEach((line, lineIndex) => {
+        if (lineIndex) parent.append(document.createElement('br'));
+        appendInline(parent, line);
+      });
+    }
+
+    function tableCells(line) {
+      const value = line.trim();
+      const cells = [];
+      let cell = '';
+      let hasSeparator = false;
+      let trailingSeparator = false;
+      for (let cellIndex = 0; cellIndex < value.length; cellIndex += 1) {
+        if (value[cellIndex] === '\\' && value[cellIndex + 1] === '|') {
+          cell += '|';
+          cellIndex += 1;
+          trailingSeparator = false;
+        } else if (value[cellIndex] === '|') {
+          cells.push(cell.trim());
+          cell = '';
+          hasSeparator = true;
+          trailingSeparator = true;
+        } else {
+          cell += value[cellIndex];
+          trailingSeparator = false;
+        }
+      }
+      cells.push(cell.trim());
+      if (!hasSeparator) return null;
+      if (value.startsWith('|')) cells.shift();
+      if (trailingSeparator) cells.pop();
+      return cells;
+    }
+
+    function isTable(at) {
+      if (at + 1 >= lines.length) return false;
+      const header = tableCells(lines[at]);
+      const separator = tableCells(lines[at + 1]);
+      return header && separator && header.length === separator.length && separator.every(cell => /^:?-{1,}:?$/.test(cell));
+    }
+
+    function isBlockStart(at) {
+      const line = lines[at];
+      return /^```/.test(line) || /^#{1,6}\s+/.test(line) || /^[-*+]\s+/.test(line) || /^\d+\.\s+/.test(line) || /^>\s?/.test(line) || /^(---|\*\*\*)\s*$/.test(line) || isTable(at);
+    }
+
+    while (index < lines.length) {
+      if (!lines[index].trim()) {
+        index += 1;
+        continue;
+      }
+
+      const fence = lines[index].match(/^```\s*([A-Za-z0-9_+-]*)\s*$/);
+      if (fence) {
+        index += 1;
+        const codeLines = [];
+        while (index < lines.length && !/^```\s*$/.test(lines[index])) {
+          codeLines.push(lines[index]);
+          index += 1;
+        }
+        if (index < lines.length) index += 1;
+        const pre = document.createElement('pre');
+        const code = document.createElement('code');
+        code.textContent = codeLines.join('\n');
+        if (fence[1]) code.setAttribute('data-language', fence[1]);
+        pre.append(code);
+        node.append(pre);
+        continue;
+      }
+
+      if (isTable(index)) {
+        const header = tableCells(lines[index]);
+        index += 2;
+        const wrapper = document.createElement('div');
+        wrapper.className = 'table-scroll';
+        const table = document.createElement('table');
+        const head = document.createElement('thead');
+        const headRow = document.createElement('tr');
+        header.forEach(value => {
+          const cell = document.createElement('th');
+          appendInline(cell, value);
+          headRow.append(cell);
+        });
+        head.append(headRow);
+        table.append(head);
+        const body = document.createElement('tbody');
+        while (index < lines.length && lines[index].trim()) {
+          const values = tableCells(lines[index]);
+          if (!values) break;
+          const row = document.createElement('tr');
+          header.forEach((_, cellIndex) => {
+            const cell = document.createElement('td');
+            appendInline(cell, values[cellIndex] || '');
+            row.append(cell);
+          });
+          body.append(row);
+          index += 1;
+        }
+        table.append(body);
+        wrapper.append(table);
+        node.append(wrapper);
+        continue;
+      }
+
+      const heading = lines[index].match(/^#{1,6}\s+(.+)$/);
+      if (heading) {
+        const paragraph = document.createElement('p');
+        paragraph.className = 'heading';
+        appendInline(paragraph, heading[1]);
+        node.append(paragraph);
+        index += 1;
+        continue;
+      }
+
+      if (/^(---|\*\*\*)\s*$/.test(lines[index])) {
+        node.append(document.createElement('hr'));
+        index += 1;
+        continue;
+      }
+
+      const bullet = lines[index].match(/^[-*+]\s+(.+)$/);
+      if (bullet) {
+        const list = document.createElement('ul');
+        while (index < lines.length) {
+          const itemMatch = lines[index].match(/^[-*+]\s+(.+)$/);
+          if (!itemMatch) break;
+          const item = document.createElement('li');
+          appendInline(item, itemMatch[1]);
+          list.append(item);
+          index += 1;
+        }
+        node.append(list);
+        continue;
+      }
+
+      const numbered = lines[index].match(/^(\d+)\.\s+(.+)$/);
+      if (numbered) {
+        const list = document.createElement('ol');
+        list.setAttribute('start', numbered[1]);
+        while (index < lines.length) {
+          const itemMatch = lines[index].match(/^\d+\.\s+(.+)$/);
+          if (!itemMatch) break;
+          const item = document.createElement('li');
+          appendInline(item, itemMatch[1]);
+          list.append(item);
+          index += 1;
+        }
+        node.append(list);
+        continue;
+      }
+
+      if (/^>\s?/.test(lines[index])) {
+        const quote = document.createElement('blockquote');
+        const quoteLines = [];
+        while (index < lines.length && /^>\s?/.test(lines[index])) {
+          quoteLines.push(lines[index].replace(/^>\s?/, ''));
+          index += 1;
+        }
+        appendLines(quote, quoteLines);
+        node.append(quote);
+        continue;
+      }
+
+      const paragraphLines = [];
+      while (index < lines.length && lines[index].trim() && (!paragraphLines.length || !isBlockStart(index))) {
+        paragraphLines.push(lines[index]);
+        index += 1;
+      }
+      const paragraph = document.createElement('p');
+      appendLines(paragraph, paragraphLines);
+      node.append(paragraph);
+    }
+    } catch (error) {
+      console.error('web: markdown render failed', error);
+      renderLiteral(node, text);
+    }
+  }
+
+  function renderLiteral(node, text) {
+    node.textContent = String(text);
+    node.classList.add('literal');
+  }
+
+  function rowKey(kind, id) {
+    if (kind === 'mine') return 'mine:' + id;
+    if (kind === 'status') return 'status:' + id;
+    return 'agent:' + id;
   }
 
   function addMessage(kind, data, deliveryText) {
     const id = Number(data.message_id || 0);
-    if (id && rows.has(id)) return rows.get(id);
+    const key = rowKey(kind, id);
+    if (id && rows.has(key)) return rows.get(key);
     const row = document.createElement('article');
     row.className = 'message ' + (kind === 'mine' ? 'mine' : kind === 'status' ? 'status' : 'agent');
     const body = document.createElement('div');
     body.className = 'body';
-    renderText(body, data.text || '');
+    if (kind === 'agent') renderText(body, data.text || '');
+    else renderLiteral(body, data.text || '');
     const meta = document.createElement('div');
     meta.className = 'meta';
     const timestamp = document.createElement('time');
@@ -119,7 +379,7 @@
     messages.append(row);
     if (id) {
       row.dataset.messageId = String(id);
-      rows.set(id, row);
+      rows.set(key, row);
     }
     scrollBottom();
     return row;
@@ -131,10 +391,10 @@
     row.delivery.className = 'delivery ' + (state || '');
   }
 
-  function recordMessageID(row, id) {
+  function recordMessageID(row, kind, id) {
     if (!id) return;
     row.dataset.messageId = String(id);
-    rows.set(id, row);
+    rows.set(rowKey(kind, id), row);
   }
 
   function clientID() {
@@ -162,7 +422,7 @@
       if (response.status === 202) {
         const result = await response.json();
         const id = Number(result.message_id || 0);
-        recordMessageID(pending.row, id);
+        recordMessageID(pending.row, 'mine', id);
         pendingRows.delete(pending.clientID);
         setDelivery(pending.row, 'sent', '');
         return;
@@ -219,7 +479,7 @@
   function renderOwn(data) {
     const pending = pendingRows.get(data.client_id || '');
     if (pending) {
-      recordMessageID(pending, Number(data.message_id || 0));
+      recordMessageID(pending, 'mine', Number(data.message_id || 0));
       pendingRows.delete(data.client_id);
       setDelivery(pending, 'sent', '');
       return pending;
@@ -232,8 +492,8 @@
     connection.className = '';
     const events = new EventSource('/events');
     events.onopen = () => {
-      connection.textContent = 'connected';
-      connection.className = 'connected';
+      connection.textContent = detached ? 'no session attached — reconnected' : 'connected';
+      connection.className = detached ? 'detached' : 'connected';
       scrollBottom();
     };
     events.onerror = () => {
@@ -241,18 +501,36 @@
       connection.textContent = closed ? 'disconnected — reload to sign in' : 'reconnecting…';
       connection.className = closed ? 'disconnected' : '';
     };
-    events.addEventListener('message', event => addMessage('agent', JSON.parse(event.data)));
+    function markConnected() {
+      detached = false;
+      connection.textContent = 'connected';
+      connection.className = 'connected';
+    }
+    events.addEventListener('message', event => {
+      markConnected();
+      addMessage('agent', JSON.parse(event.data));
+    });
     events.addEventListener('own', event => renderOwn(JSON.parse(event.data)));
-    events.addEventListener('status', event => addMessage('status', JSON.parse(event.data)));
+    events.addEventListener('status', event => {
+      const data = JSON.parse(event.data);
+      addMessage('status', data);
+      if (String(data.text || '').startsWith('📨 Held')) {
+        detached = true;
+        connection.textContent = 'no session attached';
+        connection.className = 'detached';
+      }
+    });
     events.addEventListener('typing', () => {
+      markConnected();
       typing.textContent = 'agent is typing…';
       window.clearTimeout(typingTimer);
       typingTimer = window.setTimeout(() => { typing.textContent = ''; }, 3500);
       scrollBottom();
     });
     events.addEventListener('edit', event => {
+      markConnected();
       const data = JSON.parse(event.data);
-      const row = rows.get(Number(data.message_id || 0));
+      const row = rows.get(rowKey('agent', Number(data.message_id || 0)));
       if (row) renderText(row.bodyNode, data.text || '');
       else addMessage('agent', data);
       scrollBottom();
