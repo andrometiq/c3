@@ -14,8 +14,9 @@ import (
 
 // dispatchTool translates a tool-call (name, args) into a channel method call.
 // Returns the MCP-shape result map (with content[].text or attachment_path
-// fields) and any error. The destination is ALWAYS the claimed route key; a
-// tool call cannot address anything else (see rejectDestinationOverride).
+// fields) and any error. The destination is ALWAYS the broker-selected held
+// route key; a tool call cannot supply raw destination ids (see
+// rejectDestinationOverride).
 func dispatchTool(ch channel.Channel, key RouteKey, tool string, args map[string]any) (res map[string]any, err error) {
 	// SECURITY AUDIT: every agent-initiated outbound records the destination it
 	// actually went to. dispatchTool is the single funnel for every tool call, and

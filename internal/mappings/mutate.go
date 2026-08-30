@@ -108,6 +108,82 @@ func (mf *MappingsFile) TombstoneSessionAttachment(cli, id string) {
 	}
 }
 
+// DropSessionAttachmentRoute removes one route from a namespaced attachment
+// and rewrites its output plus legacy single-route fields from newOutput. It
+// returns false when the record or route is absent. Detaching the final route
+// uses TombstoneSessionAttachment instead, preserving the whole-record barrier.
+func (mf *MappingsFile) DropSessionAttachmentRoute(cli, id string, route RouteRef, newOutput *RouteRef) bool {
+	if mf == nil || cli == "" || id == "" {
+		return false
+	}
+	entries := mf.SessionAttachmentsByCLI[cli]
+	sa, ok := entries[id]
+	if !ok {
+		return false
+	}
+	routes := sa.Routes
+	if len(routes) == 0 {
+		routes = []RouteRef{{
+			Channel: sa.Channel,
+			ChatID:  sa.ChatID,
+			TopicID: sa.TopicID,
+			Name:    sa.Name,
+			Group:   sa.Group,
+		}}
+	}
+	removed := false
+	kept := make([]RouteRef, 0, len(routes))
+	for _, held := range routes {
+		if !removed && sameRouteRef(held, route) {
+			removed = true
+			continue
+		}
+		kept = append(kept, held)
+	}
+	if !removed {
+		return false
+	}
+	sa.Routes = kept
+	sa.Output = cloneRouteRef(newOutput)
+	if newOutput != nil {
+		sa.Channel = newOutput.Channel
+		sa.ChatID = newOutput.ChatID
+		sa.TopicID = cloneInt64(newOutput.TopicID)
+		sa.Name = newOutput.Name
+		sa.Group = newOutput.Group
+	}
+	sa.Detached = false
+	entries[id] = sa
+	return true
+}
+
+func sameRouteRef(a, b RouteRef) bool {
+	if a.Channel != b.Channel || a.ChatID != b.ChatID {
+		return false
+	}
+	if a.TopicID == nil || b.TopicID == nil {
+		return a.TopicID == nil && b.TopicID == nil
+	}
+	return *a.TopicID == *b.TopicID
+}
+
+func cloneRouteRef(ref *RouteRef) *RouteRef {
+	if ref == nil {
+		return nil
+	}
+	copy := *ref
+	copy.TopicID = cloneInt64(ref.TopicID)
+	return &copy
+}
+
+func cloneInt64(value *int64) *int64 {
+	if value == nil {
+		return nil
+	}
+	copy := *value
+	return &copy
+}
+
 // PruneSessionAttachments deletes entries older than ttl (since LastAttachedAt).
 // Returns the count removed. Bounds growth of the store.
 func (mf *MappingsFile) PruneSessionAttachments(now time.Time, ttl time.Duration) int {

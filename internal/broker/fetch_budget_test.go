@@ -32,8 +32,8 @@ func budgetFixture(t *testing.T, chatID int64, topicID int64) (*Broker, *Stub, q
 	key := MakeRouteKey("telegram", chatID, &tid)
 	qrk := queue.RouteKey{Channel: "telegram", ChatID: chatID, TopicID: &tid}
 	stub := claimedHolder(t, b, key)
-	stub.SetRoute(&key)
-	stub.MarkRouteConfirmed() // §5 tripwire: a destructive ack=true fetch needs a confirmed claim
+	bindOutputRouteForTest(stub, &key)
+	confirmOutputRouteForTest(stub) // §5 tripwire: a destructive ack=true fetch needs a confirmed claim
 	return b, stub, qrk, dir, fc
 }
 
@@ -314,6 +314,71 @@ func TestFetchQueue_LimitedFetchIsBudgetedToo(t *testing.T) {
 	for id := int64(1); id <= count; id++ {
 		if !delivered[id] {
 			t.Errorf("MESSAGE LOSS: message %d never reached the caller", id)
+		}
+	}
+}
+
+func TestMultiRouteFetchNeverTrashesSiblingMessage(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("C3_QUEUE_DIR", dir)
+	telegram := &fakeChannel{}
+	web := &webFakeChannel{fakeChannel: &fakeChannel{}}
+	b := New(multiMappings())
+	t.Cleanup(b.Shutdown)
+	registerTestChannel(b, telegram)
+	registerTestChannel(b, web)
+
+	stub := b.Stubs.Register("claude", 11, "/proj", nil)
+	output := MakeRouteKey("telegram", -100, ptrI64Val(281))
+	sibling := MakeRouteKey("web", 42, nil)
+	claimConfirmed(t, b, stub, output)
+	claimConfirmed(t, b, stub, sibling)
+	stub.SetOutputRoute(output)
+	seedQueue(t, b, queueRouteKey(output), 1, 50, 100*1024)
+	const siblingMark = "NORMAL-SIBLING-MESSAGE"
+	if err := b.Queue.Append(queueRouteKey(sibling), &c3types.Inbound{
+		Channel: "web", ChatID: 42, MessageID: 1000,
+		Text: siblingMark + strings.Repeat("s", 512*1024), Timestamp: time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	resp, ok := fetchOverIPC(t, b, stub, ipc.FetchQueueReq{Op: ipc.OpFetchQueue, ID: "multi", All: true, Ack: true})
+	if !ok || resp.Err != "" {
+		t.Fatalf("multi-route drain response=%+v reached=%v", resp, ok)
+	}
+	if len(resp.Messages) == 0 {
+		t.Fatal("fixture did not fill the response from the output route")
+	}
+	for _, msg := range resp.Messages {
+		if msg.MessageID == 1000 {
+			t.Fatal("fixture left enough frame budget for the sibling; regression path was not exercised")
+		}
+	}
+	siblingPending, _ := b.Queue.Pending(queueRouteKey(sibling))
+	outputPending, _ := b.Queue.Pending(queueRouteKey(output))
+	if siblingPending != 1 {
+		t.Fatalf("normal sibling was consumed or set aside: pending=%d", siblingPending)
+	}
+	if resp.Remaining != outputPending+siblingPending {
+		t.Fatalf("remaining=%d, want output %d + sibling %d", resp.Remaining, outputPending, siblingPending)
+	}
+
+	// Queue a read-only worker job behind the destructive fetch so any erroneous
+	// asynchronous oversize notification has completed before it is asserted absent.
+	if _, err := b.fetchHeldRoute(stub, sibling, ipc.FetchQueueReq{Op: ipc.OpFetchQueue, ID: "barrier"}, 0, 0); err != nil {
+		t.Fatal(err)
+	}
+	trash, err := filepath.Glob(filepath.Join(dir, ".trash", "*"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(trash) != 0 {
+		t.Fatalf("normal sibling was moved into .trash: %v", trash)
+	}
+	for _, reply := range append(telegram.sendRepliesSnapshot(), web.sendRepliesSnapshot()...) {
+		if strings.Contains(reply.Text, "too large") || strings.Contains(reply.Text, "Please resend") {
+			t.Fatalf("normal sibling triggered an oversize notice: %+v", reply)
 		}
 	}
 }

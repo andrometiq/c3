@@ -119,10 +119,10 @@ func (b *Broker) resolveTopicRoute(chanName, name, target string, topicID *int64
 // handleObserve services OpObserve: resolve the target read-only, report the
 // current holder, and peek the queue by key (no claim, no consume). Parallels
 // handleFetchQueue's non-destructive branch, but the route comes from resolving
-// the request's own target instead of stub.CurrentRoute — that is the whole
+// the request's own target instead of the stub's output route — that is the whole
 // point: a surface can observe a topic it does not own.
 //
-// This handler NEVER calls Routes.Claim / ForceReleaseKey / Release / SetRoute /
+// This handler NEVER calls Routes.Claim / ForceReleaseKey / Release / AddRoute /
 // MarkRouteConfirmed and NEVER mutates mappings. It is pure read + peek.
 func (b *Broker) handleObserve(conn *ipc.Conn, stub *Stub, raw []byte) {
 	var req ipc.ObserveReq

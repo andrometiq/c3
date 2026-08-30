@@ -120,7 +120,7 @@ func TestRecoverSession_InAppSwitch_NoSavedAttachment_ReleasesAndStaysUnattached
 		t.Fatal("identity switch with no target attachment did not release conversation A's topic")
 	}
 	stubs := b.Stubs.Snapshot()
-	if len(stubs) != 1 || stubs[0].CurrentRoute() != nil {
+	if len(stubs) != 1 || stubs[0].OutputRoute() != nil {
 		t.Fatalf("identity switch with no target attachment retained a live route: stubs=%+v", stubs)
 	}
 	requireSwitchAttachment(t, b, switchSessionA, 281, false)

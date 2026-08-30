@@ -18,7 +18,7 @@ import (
 // Two instances, both in the delivered-ack path:
 //
 //  1. ipc.InboundDeliveredMsg carries no route, so the DESTRUCTIVE consume was
-//     dispatched to stub.CurrentRoute() *at ack time* rather than to the route
+//     dispatched to stub.OutputRoute() *at ack time* rather than to the route
 //     the push actually went out on. A topic switch between push and ack — the
 //     grok adapter acks only after injectWithRetry wins, up to ~2 min of
 //     mid-turn backoff — lands the consume on a worker that never made the push.
@@ -124,8 +124,8 @@ func TestInboundDelivered_TokenPreventsSameMessageIDCrossRouteLoss(t *testing.T)
 	keyB := MakeRouteKey("telegram", -200, &tidB) // group 2 — ids collide across chats
 
 	stub, pushed := liveHolderFrames(t, b, keyA)
-	stub.SetRoute(&keyA)
-	stub.MarkRouteConfirmed()
+	bindOutputRouteForTest(stub, &keyA)
+	confirmOutputRouteForTest(stub)
 
 	// Message 42 arrives on A and is pushed live. The adapter is mid-turn and has
 	// NOT acked yet (grok backs off up to ~2min inside injectWithRetry).
@@ -134,11 +134,11 @@ func TestInboundDelivered_TokenPreventsSameMessageIDCrossRouteLoss(t *testing.T)
 	}
 	pushA := waitInboundPush(t, pushed)
 
-	// Mid-turn, the agent attaches to a topic in ANOTHER group.
+	// Mid-turn, the agent also holds a topic in ANOTHER group.
 	b.Routes.Claim(keyB, stub)
-	b.Routes.Release(keyA, stub.ConnID)
-	stub.SetRoute(&keyB)
-	stub.MarkRouteConfirmed()
+	stub.AddRoute(keyB)
+	stub.MarkRouteConfirmed(keyB)
+	stub.SetOutputRoute(keyB)
 
 	// A message with the SAME id arrives there and is pushed live too.
 	if !b.Workers.Submit(keyB, Job{Kind: JobInbound, Inbound: inboundOn(-200, &tidB, 42, "the-B-message")}) {
@@ -190,17 +190,17 @@ func TestInboundDelivered_LegacyAmbiguousMessageIDKeepsBothRoutes(t *testing.T) 
 	keyB := MakeRouteKey("telegram", -200, &tidB)
 
 	stub, pushed := liveHolderFrames(t, b, keyA)
-	stub.SetRoute(&keyA)
-	stub.MarkRouteConfirmed()
+	bindOutputRouteForTest(stub, &keyA)
+	confirmOutputRouteForTest(stub)
 	if !b.Workers.Submit(keyA, Job{Kind: JobInbound, Inbound: inboundOn(-100, &tidA, 10, "never-rendered-A")}) {
 		t.Fatal("submit inbound on route A")
 	}
 	_ = waitInboundPush(t, pushed)
 
 	b.Routes.Claim(keyB, stub)
-	b.Routes.Release(keyA, stub.ConnID)
-	stub.SetRoute(&keyB)
-	stub.MarkRouteConfirmed()
+	stub.AddRoute(keyB)
+	stub.MarkRouteConfirmed(keyB)
+	stub.SetOutputRoute(keyB)
 	if !b.Workers.Submit(keyB, Job{Kind: JobInbound, Inbound: inboundOn(-200, &tidB, 10, "rendered-B")}) {
 		t.Fatal("submit inbound on route B")
 	}
@@ -237,8 +237,8 @@ func TestInboundDelivered_StrayAckNeverDeletesTheWrongRoutesMergedBatch(t *testi
 	keyB := MakeRouteKey("telegram", -200, &tidB)
 
 	stub, pushed := liveHolder(t, b, keyA)
-	stub.SetRoute(&keyA)
-	stub.MarkRouteConfirmed()
+	bindOutputRouteForTest(stub, &keyA)
+	confirmOutputRouteForTest(stub)
 
 	// A real push of one line on A, un-acked.
 	if !b.Workers.Submit(keyA, Job{Kind: JobInbound, Inbound: inboundOn(-100, &tidA, 42, "the-A-message")}) {
@@ -261,11 +261,11 @@ func TestInboundDelivered_StrayAckNeverDeletesTheWrongRoutesMergedBatch(t *testi
 	b.Workers.mu.Unlock()
 	wB.recordCoveredByPush(42, "", recordIDsB)
 
-	// The agent switches to B mid-turn; A's ack lands afterwards claiming ONE line.
+	// The agent adds B and makes it output mid-turn; A's ack lands afterwards.
 	b.Routes.Claim(keyB, stub)
-	b.Routes.Release(keyA, stub.ConnID)
-	stub.SetRoute(&keyB)
-	stub.MarkRouteConfirmed()
+	stub.AddRoute(keyB)
+	stub.MarkRouteConfirmed(keyB)
+	stub.SetOutputRoute(keyB)
 
 	raw, _ := json.Marshal(ipc.InboundDeliveredMsg{Op: ipc.OpInboundDelivered, UpdateID: 42, OK: true, Count: 1})
 	b.handleInboundDelivered(stub, raw)
@@ -300,8 +300,8 @@ func TestConsume_PushRouteKnownButNoCoveredIdentity_LeavesQueueIntact(t *testing
 		}
 	}
 	stub := claimedHolder(t, b, key)
-	stub.SetRoute(&key)
-	stub.MarkRouteConfirmed()
+	bindOutputRouteForTest(stub, &key)
+	confirmOutputRouteForTest(stub)
 	// The push route IS known — only the covered-line identities are missing (the
 	// push covered lines whose ids the caller could not enumerate, or the worker
 	// was reaped between push and ack).
@@ -356,8 +356,8 @@ func TestHelloReconnect_RebindsClaimOntoNewStub(t *testing.T) {
 	old := stubs[0]
 	// Claim exactly as tryClaim does.
 	b.Routes.Claim(key, old)
-	old.SetRoute(&key)
-	old.MarkRouteConfirmed()
+	bindOutputRouteForTest(old, &key)
+	confirmOutputRouteForTest(old)
 
 	// Same logical session (CLI, PID, CWD) reconnecting on a fresh conn.
 	reconnectHello(t, b, pid, cwd)
@@ -369,10 +369,10 @@ func TestHelloReconnect_RebindsClaimOntoNewStub(t *testing.T) {
 	if holder == old {
 		t.Fatal("setup: the claim was not transferred to the new stub")
 	}
-	if got := holder.CurrentRoute(); got == nil || *got != key {
-		t.Errorf("reconnect transferred the claim in Routes but left the new stub UNBOUND (CurrentRoute=%v, want %v) — every stub-derived path reads stub.CurrentRoute(), so reply/react/poll answer \"no route claimed\" and a bare attach falls through to the picker while inbound keeps arriving on this same stub", got, key)
+	if got := holder.OutputRoute(); got == nil || *got != key {
+		t.Errorf("reconnect transferred the claim in Routes but left the new stub UNBOUND (OutputRoute=%v, want %v)", got, key)
 	}
-	if !holder.RouteConfirmed() {
+	if !holder.RouteConfirmed(key) {
 		t.Errorf("reconnect left routeConfirmed FALSE on the new stub — the §5 tripwire then drops every delivered-ack consume, so delivered lines stay queued and fetch_queue hands them out again with an inflated held count")
 	}
 }
@@ -401,8 +401,8 @@ func TestHelloReconnect_AckForPrereconnectPushStillConsumes(t *testing.T) {
 	}
 	old := stubs[0]
 	b.Routes.Claim(key, old)
-	old.SetRoute(&key)
-	old.MarkRouteConfirmed()
+	bindOutputRouteForTest(old, &key)
+	confirmOutputRouteForTest(old)
 
 	// A live push made on the OLD connection, not yet acked.
 	b.Workers.mu.Lock()
@@ -425,12 +425,9 @@ func TestHelloReconnect_AckForPrereconnectPushStillConsumes(t *testing.T) {
 	}
 }
 
-// A stub holds at most one claim (tryClaim releases the old route before claiming
-// the new one). TransferAllByConnID ranges a map, so if that invariant is ever
-// broken, "bind the first transferred key" would bind a NONDETERMINISTIC one of
-// N — silently, and differently on each run. Report it and leave the route
-// unbound instead.
-func TestHelloReconnect_MultipleClaims_LeavesRouteUnbound(t *testing.T) {
+// Reconnect transfers and rebinds the full ordered set, including per-route
+// confirmation and the selected output route.
+func TestReconnectRebindsFullRouteSet(t *testing.T) {
 	b := brokerWithChannel(t, mfWithTelegram(), &fakeChannel{})
 	defer b.Shutdown()
 
@@ -445,11 +442,13 @@ func TestHelloReconnect_MultipleClaims_LeavesRouteUnbound(t *testing.T) {
 		t.Fatalf("setup: %d stubs registered, want 1", len(stubs))
 	}
 	old := stubs[0]
-	// Deliberately violate single-claim-per-stub.
 	b.Routes.Claim(keyA, old)
 	b.Routes.Claim(keyB, old)
-	old.SetRoute(&keyA)
-	old.MarkRouteConfirmed()
+	old.AddRoute(keyA)
+	old.MarkRouteConfirmed(keyA)
+	old.AddRoute(keyB)
+	old.MarkRouteConfirmed(keyB)
+	old.SetOutputRoute(keyB)
 
 	reconnectHello(t, b, pid, cwd)
 
@@ -457,10 +456,18 @@ func TestHelloReconnect_MultipleClaims_LeavesRouteUnbound(t *testing.T) {
 	if !claimed || holder == old {
 		t.Fatal("setup: the claims were not transferred to a new stub")
 	}
-	if got := holder.CurrentRoute(); got != nil {
-		t.Errorf("reconnect bound one of 2 transferred claims (CurrentRoute=%v) — the choice comes from a map range and is nondeterministic, so a broken single-claim invariant must be reported and left unbound, never guessed at", *got)
+	if got := holder.Routes(); !sameRouteOrder(got, []RouteKey{keyA, keyB}) {
+		t.Fatalf("reconnect routes=%v, want claim order [%v %v]", got, keyA, keyB)
 	}
-	if holder.RouteConfirmed() {
-		t.Error("reconnect confirmed a route it never bound")
+	if got := holder.OutputRoute(); got == nil || *got != keyB {
+		t.Fatalf("reconnect output=%v, want %v", got, keyB)
+	}
+	if !holder.RouteConfirmed(keyA) || !holder.RouteConfirmed(keyB) {
+		t.Fatal("reconnect did not preserve confirmation for both routes")
+	}
+	for _, key := range []RouteKey{keyA, keyB} {
+		if routeHolder, ok := b.Routes.Holder(key); !ok || routeHolder != holder {
+			t.Fatalf("route table did not rebind %v to new stub", key)
+		}
 	}
 }

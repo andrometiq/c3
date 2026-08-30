@@ -33,35 +33,35 @@ type Stub struct {
 	connMu sync.RWMutex
 	Conn   any
 
-	// Route is the currently-claimed route for this stub (one per connection
-	// in v1; re-attach replaces). nil when unclaimed. Set/cleared by the
-	// broker handler under stubMu.
+	// routes is the ordered set of claims held by this stub. output names the
+	// one route used for outbound calls that do not select another held route.
+	// Both are owned by the Stub and guarded by stubMu; the Routes table remains
+	// the authority for route -> holder ownership.
 	//
-	// hasReplied records whether this connection has successfully dispatched at
-	// least one `reply` to its claimed route. It is the deterministic "this
-	// session is in Telegram mode" proxy that gates the typing relay (P5 /
-	// spec R3): typing is only pulsed for a route whose holder has replied,
-	// avoiding "typing…" noise for default CLI-mode sessions that never reply
-	// to Telegram. It lives on the per-connection Stub (NOT the per-RouteKey
-	// RouteWorker, which outlives sessions) so it resets naturally when a new
-	// adapter connects. Guarded by stubMu.
+	// replied records whether this connection has successfully dispatched at
+	// least one `reply` on each held route. It is the deterministic typing-relay
+	// gate: activity on one route must not pulse "typing…" on a sibling route.
+	// It lives on the per-connection Stub (NOT the per-RouteKey RouteWorker,
+	// which outlives sessions) so it resets naturally on reconnect. Guarded by
+	// stubMu.
 	stubMu sync.Mutex
-	Route  *RouteKey
-	// routeConfirmed records that the CURRENT claim (Route) was set by a
+	routes []RouteKey
+	output *RouteKey
+	// confirmed records that each held route was set by a
 	// LEGITIMATE claim site — an explicit/own-recover attach through tryClaim or
 	// recoverSession — as opposed to any future code path that might bind a route
 	// without a real claim. The two destructive consume paths (handleFetchQueue's
 	// Ack=true fetch and handleInboundDelivered's live-push ack) refuse to consume
-	// unless this is set, so a silent-bind regression can never drain a queue the
-	// session didn't choose. It is a property of the current claim, not the
-	// connection: SetRoute(nil) (detach/release) clears it, re-arming the tripwire.
+	// unless the route is present, so a silent-bind regression can never drain a
+	// queue the session didn't choose. It is a property of each claim, not the
+	// connection: removing a route clears its entry, re-arming the tripwire.
 	// Honest scope (spec §5): every legitimate claim sets it via MarkRouteConfirmed,
-	// so today it is always true on a live claim — this is fail-closed insurance
+	// so it is true on every legitimate live claim — this is fail-closed insurance
 	// against a future regression, NOT a cure for a misbehaving LLM courier (§8).
-	// Deliberately NOT set inside SetRoute(&key): binding a route and CONFIRMING it
-	// are separate acts, so a future silent SetRoute leaves the tripwire armed.
+	// Deliberately NOT set inside AddRoute: binding a route and CONFIRMING it are
+	// separate acts, so a future silent AddRoute leaves the tripwire armed.
 	// Guarded by stubMu.
-	routeConfirmed bool
+	confirmed map[RouteKey]bool
 	// cannotRender is set from HelloMsg.CannotRenderChannels: the host silently
 	// drops channel push notifications (a Claude Code session launched without the
 	// development-channels flag — typically a --fork-session background job). When
@@ -94,13 +94,14 @@ type Stub struct {
 	// arrive while the broker still knows no identity. Without this flag the late
 	// RecoverSessionReq finds an untombstoned attachment and re-claims the very
 	// route the user just left — an explicit user action silently undone by a
-	// background process that arrived later. Set by handleRelease; CLEARED by
-	// tryClaim, so a deliberate re-attach on the same connection is honored and
-	// only RECOVERY is blocked; read by recoverSession (the claim site) and by
-	// handleRecoverSession (which upgrades it to the durable tombstone once the
-	// identity finally arrives). Guarded by stubMu.
+	// background process that arrived later. Set by handleRelease only when the
+	// held set becomes empty; releasing one sibling route must not block recovery
+	// of the remainder. CLEARED by tryClaim, so a deliberate re-attach on the same
+	// connection is honored and only RECOVERY is blocked; read by recoverSession
+	// (the claim site) and by handleRecoverSession (which upgrades it to the
+	// durable tombstone once the identity finally arrives). Guarded by stubMu.
 	explicitlyDetached bool
-	hasReplied         bool
+	replied            map[RouteKey]bool
 
 	// pushRoutes records, per outstanding live push, the ROUTE that push went out
 	// on. DeliveryToken is the primary key: unlike MessageID it is unique across
@@ -179,66 +180,159 @@ func (s *Stub) IsAlive() bool {
 
 // isPIDAlive is defined per-OS in pidalive_unix.go / pidalive_windows.go.
 
-// SetRoute atomically sets the stub's current claim. Clearing the route
-// (key==nil, e.g. handleRelease's detach) also clears routeConfirmed — "confirmed"
-// is a property of the CURRENT claim, so a release re-arms the destructive-consume
-// tripwire. Setting a non-nil route deliberately does NOT set routeConfirmed:
-// binding and confirming are separate acts (see MarkRouteConfirmed), so a future
-// code path that binds a route without a legitimate claim stays fail-closed.
-func (s *Stub) SetRoute(key *RouteKey) {
+// RouteSnapshot returns the held routes in claim order and the output route
+// from one locked snapshot. The returned slice and pointer are copies.
+func (s *Stub) RouteSnapshot() ([]RouteKey, *RouteKey) {
 	s.stubMu.Lock()
 	defer s.stubMu.Unlock()
-	if key == nil {
-		s.Route = nil
-		s.routeConfirmed = false
-		return
-	}
-	k := *key
-	s.Route = &k
+	return append([]RouteKey(nil), s.routes...), copyRouteKey(s.output)
 }
 
-// ClearRouteIf clears the stub's route (and routeConfirmed) ONLY IF the current
-// route still equals key. Returns true when it cleared, false when the stub holds
-// a different route (or none). This is the steal-eviction primitive: a stolen
-// holder must have its Route + routeConfirmed zeroed so its next destructive
-// fetch_queue(ack=true) is refused instead of draining a topic it no longer owns —
-// but a victim that was MID-SWITCH to a DIFFERENT topic (its stub Route already
-// re-pointed away from the stolen key) must NOT be zeroed, or it would see a nil
-// CurrentRoute, skip releasing its OLD route, and leak it as an orphaned claim.
-// An unconditional SetRoute(nil) can't tell the two apart; this key-guarded clear
-// can. Guarded by stubMu.
-func (s *Stub) ClearRouteIf(key RouteKey) bool {
+// OutputRoute returns a copy of the route used for outbound calls without a
+// selector, or nil when the stub holds no routes.
+func (s *Stub) OutputRoute() *RouteKey {
+	_, output := s.RouteSnapshot()
+	return output
+}
+
+// Routes returns the held routes in claim order. The returned slice is a copy.
+func (s *Stub) Routes() []RouteKey {
+	routes, _ := s.RouteSnapshot()
+	return routes
+}
+
+// HasRoute reports whether key is in the held set.
+func (s *Stub) HasRoute(key RouteKey) bool {
 	s.stubMu.Lock()
 	defer s.stubMu.Unlock()
-	if s.Route == nil || *s.Route != key {
+	return s.hasRouteLocked(key)
+}
+
+func (s *Stub) hasRouteLocked(key RouteKey) bool {
+	for _, held := range s.routes {
+		if held == key {
+			return true
+		}
+	}
+	return false
+}
+
+// AddRoute appends key to the held set if absent. It deliberately does not mark
+// the route confirmed: binding and confirming remain separate acts so the
+// destructive-consume tripwire stays fail-closed. The first route becomes the
+// output until an explicit output selection is made.
+func (s *Stub) AddRoute(key RouteKey) {
+	s.stubMu.Lock()
+	defer s.stubMu.Unlock()
+	if s.hasRouteLocked(key) {
+		return
+	}
+	s.routes = append(s.routes, key)
+	if s.output == nil {
+		k := key
+		s.output = &k
+	}
+}
+
+// RemoveRoute removes one held route and its per-route state. If it was the
+// output route, the most recently claimed remaining route becomes output.
+func (s *Stub) RemoveRoute(key RouteKey) (removed bool, wasOutput bool, newOutput *RouteKey) {
+	s.stubMu.Lock()
+	defer s.stubMu.Unlock()
+	return s.removeRouteLocked(key)
+}
+
+func (s *Stub) removeRouteLocked(key RouteKey) (removed bool, wasOutput bool, newOutput *RouteKey) {
+	idx := -1
+	for i, held := range s.routes {
+		if held == key {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		return false, false, copyRouteKey(s.output)
+	}
+	wasOutput = s.output != nil && *s.output == key
+	s.routes = append(s.routes[:idx], s.routes[idx+1:]...)
+	delete(s.confirmed, key)
+	delete(s.replied, key)
+	if wasOutput {
+		s.output = nil
+		if len(s.routes) > 0 {
+			k := s.routes[len(s.routes)-1]
+			s.output = &k
+		}
+	}
+	return true, wasOutput, copyRouteKey(s.output)
+}
+
+func copyRouteKey(key *RouteKey) *RouteKey {
+	if key == nil {
+		return nil
+	}
+	k := *key
+	return &k
+}
+
+// SetOutputRoute selects key as output only when it is already held.
+func (s *Stub) SetOutputRoute(key RouteKey) bool {
+	s.stubMu.Lock()
+	defer s.stubMu.Unlock()
+	if !s.hasRouteLocked(key) {
 		return false
 	}
-	s.Route = nil
-	s.routeConfirmed = false
+	k := key
+	s.output = &k
 	return true
 }
 
-// MarkRouteConfirmed records that the stub's current route was set by a legitimate
-// claim (tryClaim / recoverSession). Called immediately after SetRoute(&key) at
-// those two sites. Cleared by SetRoute(nil). See the routeConfirmed field doc for
-// why this is separate from SetRoute. Guarded by stubMu.
-func (s *Stub) MarkRouteConfirmed() {
+// ClearRoutes drops the held set, output, and all per-route confirmation and
+// reply state. Outstanding push-route correlations are intentionally retained,
+// matching the old detach behavior: an in-flight ack still identifies the route
+// it was pushed on, but the cleared confirmation gate prevents consumption.
+func (s *Stub) ClearRoutes() {
 	s.stubMu.Lock()
 	defer s.stubMu.Unlock()
-	s.routeConfirmed = true
+	s.routes = nil
+	s.output = nil
+	s.confirmed = nil
+	s.replied = nil
 }
 
-// RouteConfirmed reports whether the current claim was set by a legitimate claim
-// site. The destructive consume paths gate on this. Guarded by stubMu.
-func (s *Stub) RouteConfirmed() bool {
+// ClearRouteIf removes key only when it is held. This is the steal-eviction
+// primitive: a stolen route and its confirmation must disappear without
+// disturbing sibling claims a victim may already hold or be switching to.
+func (s *Stub) ClearRouteIf(key RouteKey) (removed bool, wasOutput bool, newOutput *RouteKey) {
 	s.stubMu.Lock()
 	defer s.stubMu.Unlock()
-	return s.routeConfirmed
+	return s.removeRouteLocked(key)
+}
+
+// MarkRouteConfirmed records that key was established by a legitimate claim
+// site. It is intentionally a no-op for an unheld route.
+func (s *Stub) MarkRouteConfirmed(key RouteKey) {
+	s.stubMu.Lock()
+	defer s.stubMu.Unlock()
+	if !s.hasRouteLocked(key) {
+		return
+	}
+	if s.confirmed == nil {
+		s.confirmed = make(map[RouteKey]bool)
+	}
+	s.confirmed[key] = true
+}
+
+// RouteConfirmed reports whether key was established by a legitimate claim.
+func (s *Stub) RouteConfirmed(key RouteKey) bool {
+	s.stubMu.Lock()
+	defer s.stubMu.Unlock()
+	return s.confirmed[key]
 }
 
 // SetStableSessionID records the host CLI's stable per-session id, learned from
 // the SessionStart-hook handoff and delivered via RecoverSessionReq. Idempotent;
-// last write wins. Guarded by stubMu like SetRoute.
+// last write wins. Guarded by stubMu like the route-set methods.
 func (s *Stub) SetStableSessionID(id string) {
 	s.stubMu.Lock()
 	defer s.stubMu.Unlock()
@@ -255,7 +349,7 @@ func (s *Stub) StableSessionIDValue() string {
 
 // SetExplicitlyDetached sets (true, from handleRelease) or clears (false, from
 // tryClaim's successful explicit claim) this connection's user-detached barrier.
-// See the explicitlyDetached field doc. Guarded by stubMu like SetRoute.
+// See the explicitlyDetached field doc. Guarded by stubMu like the route set.
 func (s *Stub) SetExplicitlyDetached(v bool) {
 	s.stubMu.Lock()
 	defer s.stubMu.Unlock()
@@ -275,7 +369,7 @@ func (s *Stub) ExplicitlyDetached() bool {
 
 // SetCannotRender records whether this session's host silently drops channel
 // push notifications (from HelloMsg.CannotRenderChannels). Set once at hello,
-// before the stub is claimable. Guarded by stubMu like SetRoute.
+// before the stub is claimable. Guarded by stubMu like the route set.
 func (s *Stub) SetCannotRender(v bool) {
 	s.stubMu.Lock()
 	defer s.stubMu.Unlock()
@@ -305,23 +399,26 @@ func (s *Stub) PeerProtocolVersion() int {
 	return s.peerProtocolVersion
 }
 
-// MarkReplied records that this connection has dispatched ≥1 `reply` to its
-// claimed route. Idempotent. Once set it stays set for the life of the
-// connection — a session that has replied once is "in Telegram mode" and stays
-// eligible for the typing relay across subsequent turns.
-func (s *Stub) MarkReplied() {
+// MarkReplied records that this connection has dispatched at least one reply
+// to key. It is intentionally a no-op for an unheld route.
+func (s *Stub) MarkReplied(key RouteKey) {
 	s.stubMu.Lock()
 	defer s.stubMu.Unlock()
-	s.hasReplied = true
+	if !s.hasRouteLocked(key) {
+		return
+	}
+	if s.replied == nil {
+		s.replied = make(map[RouteKey]bool)
+	}
+	s.replied[key] = true
 }
 
-// HasReplied reports whether this connection has dispatched ≥1 `reply`. The
-// typing relay (P5) arms only when the current holder HasReplied — see the
-// hasReplied field doc.
-func (s *Stub) HasReplied() bool {
+// HasReplied reports whether this connection has replied on key. The typing
+// relay is route-local and must not arm from a reply on a sibling route.
+func (s *Stub) HasReplied(key RouteKey) bool {
 	s.stubMu.Lock()
 	defer s.stubMu.Unlock()
-	return s.hasReplied
+	return s.replied[key]
 }
 
 // RecordPushRoute remembers the route a live push went out on, keyed primarily
@@ -433,17 +530,6 @@ func (s *Stub) AdoptPushRoutes(prev *Stub) {
 		s.pushRoutes[id] = append(recs, s.pushRoutes[id]...)
 	}
 	s.pushOrder = append(order, s.pushOrder...)
-}
-
-// CurrentRoute returns a copy of the stub's current claim, or nil.
-func (s *Stub) CurrentRoute() *RouteKey {
-	s.stubMu.Lock()
-	defer s.stubMu.Unlock()
-	if s.Route == nil {
-		return nil
-	}
-	k := *s.Route
-	return &k
 }
 
 // StubRegistry holds connected adapters keyed by ConnID. Concurrent-safe.

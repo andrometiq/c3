@@ -153,8 +153,8 @@ func TestProtocolMismatch_RefusesDestructiveAndOwnershipChangingOps(t *testing.T
 	if _, ok := b.Routes.Claim(keyA, old); !ok {
 		t.Fatal("seed claim")
 	}
-	old.SetRoute(&keyA)
-	old.MarkRouteConfirmed()
+	bindOutputRouteForTest(old, &keyA)
+	confirmOutputRouteForTest(old)
 
 	qrk := queueRouteKey(keyA)
 	if err := b.Queue.Append(qrk, &c3types.Inbound{
@@ -313,7 +313,7 @@ func TestProtocolMismatch_RefusesDestructiveAndOwnershipChangingOps(t *testing.T
 	if json.Unmarshal(raw, &refused) != nil || refused.Op != ipc.OpError {
 		t.Fatalf("incompatible release was not refused: %s", raw)
 	}
-	if got := holder.CurrentRoute(); got == nil || *got != keyA {
+	if got := holder.OutputRoute(); got == nil || *got != keyA {
 		t.Fatalf("incompatible ownership op changed the inherited route: got %v, want %v", got, keyA)
 	}
 }

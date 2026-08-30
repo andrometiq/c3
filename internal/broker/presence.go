@@ -30,6 +30,26 @@ func (b *Broker) enqueuePresenceChange(change routePresenceChange) {
 	}
 }
 
+// enqueueOutputRoleChange re-emits presence for held routes whose roles changed
+// without a route-table mutation. Duplicate old/new keys are collapsed.
+func (b *Broker) enqueueOutputRoleChange(stub *Stub, oldOutput, newOutput *RouteKey) {
+	if stub == nil {
+		return
+	}
+	seen := make(map[RouteKey]bool, 2)
+	sinceByKey := make(map[RouteKey]time.Time, 2)
+	for _, entry := range b.Routes.Snapshot() {
+		sinceByKey[entry.Key] = entry.Since
+	}
+	for _, key := range []*RouteKey{oldOutput, newOutput} {
+		if key == nil || seen[*key] || !stub.HasRoute(*key) {
+			continue
+		}
+		seen[*key] = true
+		b.enqueuePresenceChange(routePresenceChange{key: *key, stub: stub, since: sinceByKey[*key]})
+	}
+}
+
 func (b *Broker) dispatchPresenceChanges() {
 	for {
 		select {
@@ -75,12 +95,17 @@ func (b *Broker) notifyRouteHolder(change routePresenceChange) {
 		if since.IsZero() {
 			since = time.Now().UTC()
 		}
+		role := "input"
+		if output := change.stub.OutputRoute(); output != nil && *output == change.key {
+			role = "output"
+		}
 		holder = &channel.RouteHolder{
 			CLI:       change.stub.CLI,
 			PID:       change.stub.PID,
 			CWD:       change.stub.CWD,
 			SessionID: change.stub.StableSessionIDValue(),
 			Since:     since,
+			Role:      role,
 		}
 	}
 	defer func() {

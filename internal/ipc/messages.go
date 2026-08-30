@@ -5,7 +5,12 @@ import (
 	"fmt"
 
 	"github.com/Andrometiq/c3/internal/c3types"
+	"github.com/Andrometiq/c3/internal/mappings"
 )
+
+// RouteRef is the additive wire description of one held route. The canonical
+// definition lives with SessionAttachment so persistence and IPC cannot drift.
+type RouteRef = mappings.RouteRef
 
 // InboundMsg is the broker → adapter push for a single normalized inbound
 // message. The adapter translates this into its host CLI's notification
@@ -58,15 +63,20 @@ type ErrorPayload struct {
 }
 
 // FetchQueueReq is the adapter → broker pull of held inbound for the stub's
-// claimed route. Limit caps the batch (default applied by the adapter: 3, max
-// 50); All=true overrides Limit and drains everything. Ack=true consumes
-// (advances the cursor, deletes the files when drained); Ack=false peeks.
+// held routes. Without Channel it visits output first and then claim order;
+// Channel restricts it to one held route. Limit caps the combined batch
+// (default applied by the adapter: 3, max 50); All=true overrides Limit and
+// drains everything. Ack=true consumes; Ack=false peeks.
 type FetchQueueReq struct {
-	Op    Op     `json:"op"` // = OpFetchQueue
-	ID    string `json:"id"`
-	Limit int    `json:"limit,omitempty"`
-	All   bool   `json:"all,omitempty"`
-	Ack   bool   `json:"ack"`
+	Op Op     `json:"op"` // = OpFetchQueue
+	ID string `json:"id"`
+	// Channel optionally restricts the pull to one held route, selected by
+	// channel name or held Telegram topic name. Absent drains all held routes.
+	// Additive + omitempty: older callers retain the broker's default behavior.
+	Channel string `json:"channel,omitempty"`
+	Limit   int    `json:"limit,omitempty"`
+	All     bool   `json:"all,omitempty"`
+	Ack     bool   `json:"ack"`
 }
 
 // FetchQueueResp is the broker → adapter response to FetchQueueReq. Messages
@@ -383,9 +393,24 @@ type Mapping struct {
 	Group   string `json:"group,omitempty"`
 }
 
-// ReleaseReq is sent by the adapter to drop its claim without disconnecting.
+// ReleaseReq is sent by the adapter to drop claims without disconnecting.
+// Target selects one held route by channel or Telegram topic name; absent
+// preserves the legacy detach-all behavior. Additive + omitempty, so no
+// protocol-version bump is required.
 type ReleaseReq struct {
-	Op Op `json:"op"` // = OpRelease
+	Op     Op     `json:"op"` // = OpRelease
+	Target string `json:"target,omitempty"`
+}
+
+// ReleaseResp reports the complete held set after a targeted release. Bare
+// release remains fire-and-forget for backward compatibility. This response
+// and op are additive, so no protocol-version bump is required.
+type ReleaseResp struct {
+	Op     Op         `json:"op"` // = OpReleaseResult
+	OK     bool       `json:"ok,omitempty"`
+	Routes []RouteRef `json:"routes,omitempty"`
+	Output *RouteRef  `json:"output,omitempty"`
+	Err    string     `json:"err,omitempty"`
 }
 
 // ByeReq is sent by the adapter for clean disconnect.
@@ -434,6 +459,9 @@ type ClaimEntry struct {
 	HolderCWD string `json:"holder_cwd,omitempty"`
 	ConnID    uint64 `json:"conn_id"`
 	Connected bool   `json:"connected"`
+	// IsOutput marks the holder's outbound-default route. It is additive and
+	// omitted for input-only routes and older brokers.
+	IsOutput bool `json:"is_output,omitempty"`
 }
 
 // ListHealthReq is sent by a status-style client to fetch a snapshot of the
@@ -605,6 +633,11 @@ type AttachReq struct {
 	// holder.
 	Steal bool `json:"steal,omitempty"`
 
+	// Add keeps the stub's existing routes and makes the newly claimed route
+	// output. Absent/false preserves the legacy switch behavior. This additive,
+	// omitempty field does not require a protocol-version bump.
+	Add bool `json:"add,omitempty"`
+
 	// Replay: set true by the adapter when this attach is being re-sent
 	// after a broker reconnect (see replayLastAttach in
 	// cmd/c3-claude-adapter/main.go). The broker uses this to suppress
@@ -678,6 +711,30 @@ type AttachedMsg struct {
 
 	// Notice is additive post-attach guidance for a channel-specific next step.
 	Notice string `json:"notice,omitempty"`
+
+	// Routes and Output describe the complete held set after this attach while
+	// the legacy fields above continue to describe the route just claimed.
+	// Both are additive + omitempty and therefore require no version bump.
+	Routes []RouteRef `json:"routes,omitempty"`
+	Output *RouteRef  `json:"output,omitempty"`
+}
+
+// SetOutputRouteReq selects which currently held route receives unqualified
+// outbound calls. Target accepts a channel or held Telegram topic name. This is
+// a brand-new additive op and does not require a protocol-version bump.
+type SetOutputRouteReq struct {
+	Op     Op     `json:"op"` // = OpSetOutputRoute
+	Target string `json:"target,omitempty"`
+}
+
+// SetOutputRouteResp reports the validated output route. Output is omitted on
+// failure. This response belongs to a brand-new additive op and does not
+// require a protocol-version bump.
+type SetOutputRouteResp struct {
+	Op     Op        `json:"op"` // = OpSetOutputRouteResult
+	OK     bool      `json:"ok,omitempty"`
+	Output *RouteRef `json:"output,omitempty"`
+	Err    string    `json:"err,omitempty"`
 }
 
 // Proposal describes what the broker would do if the agent confirms.
@@ -782,7 +839,7 @@ type PairModeReplyMsg struct {
 // from the user's shell / slash-command invocation). Used only as a
 // fallback when PID==0 (PPID walk failed — non-Linux / missing /proc /
 // ancestors exited). The broker scans live stubs for one whose CWD
-// matches AND whose CurrentRoute is non-nil; that stub's claim is the
+// matches AND which holds at least one route; that stub's output claim is the
 // target of the ping reply.
 type PingThisSessionReq struct {
 	Op  Op     `json:"op"` // = OpPingThisSession
@@ -843,8 +900,7 @@ type SessionEntry struct {
 	ConnID uint64 `json:"conn_id"`
 	// AttachedTo is the human-formatted topic label — "<name> (<group>)"
 	// for a regular topic, "dm" for a DM route, "topic-<id>" when the
-	// route refers to an unknown topic id, or "" when the stub has no
-	// current route claim.
+	// route refers to an unknown topic id, or "" when the stub holds no routes.
 	AttachedTo string `json:"attached_to,omitempty"`
 	// IsThisSession is true when the stub's PID matches the calling
 	// client's PPID-walk seed — i.e. the user pressed enter on

@@ -11,13 +11,13 @@ import (
 )
 
 // Phase 4 (spec §5): the routeConfirmed tripwire. A route bound WITHOUT a
-// legitimate claim (a bare SetRoute, standing in for a future silent-bind
+// legitimate claim (a bare AddRoute, standing in for a future silent-bind
 // regression) must not be able to drain the queue via either destructive consume
 // path; a real claim (tryClaim / recoverSession) confirms the route and lets both
 // paths through.
 
-// A legitimate claim via tryClaim confirms the route; a bare SetRoute does not.
-func TestRouteConfirmed_SetByTryClaimNotBareSetRoute(t *testing.T) {
+// A legitimate claim via tryClaim confirms the route; a bare AddRoute does not.
+func TestRouteConfirmed_SetByTryClaimNotBareAddRoute(t *testing.T) {
 	t.Setenv("C3_QUEUE_DIR", t.TempDir())
 	b := brokerWithChannel(t, mfWithTelegram(), &fakeChannel{})
 	defer b.Shutdown()
@@ -25,19 +25,19 @@ func TestRouteConfirmed_SetByTryClaimNotBareSetRoute(t *testing.T) {
 	tid := int64(914)
 	key := MakeRouteKey("telegram", -100, &tid)
 
-	// A bare SetRoute (no claim) leaves the tripwire armed — not confirmed.
+	// A bare AddRoute (no claim) leaves the tripwire armed — not confirmed.
 	bare := &Stub{CLI: "claude", PID: 1}
-	bare.SetRoute(&key)
-	if bare.RouteConfirmed() {
-		t.Fatal("bare SetRoute must NOT confirm the route (tripwire must stay armed)")
+	bare.AddRoute(key)
+	if bare.RouteConfirmed(key) {
+		t.Fatal("bare AddRoute must NOT confirm the route (tripwire must stay armed)")
 	}
 
 	// A real claim through tryClaim confirms it.
 	holder := &Stub{CLI: "claude", PID: 2, CWD: "/home/u/proj"}
-	if !b.tryClaim(nil, holder, key, "c3", false /*steal*/, true /*replay: suppress welcome*/) {
+	if !b.tryClaim(nil, holder, key, "c3", false /*steal*/, true /*replay: suppress welcome*/, false /*add*/) {
 		t.Fatal("tryClaim should succeed on a free key")
 	}
-	if !holder.RouteConfirmed() {
+	if !holder.RouteConfirmed(key) {
 		t.Fatal("tryClaim must confirm the route")
 	}
 }
@@ -58,8 +58,8 @@ func TestHandleFetchQueue_AckRefusedUntilRouteConfirmed(t *testing.T) {
 
 	// Route bound but NOT confirmed (simulates a silent-bind regression).
 	stub := claimedHolder(t, b, key)
-	stub.SetRoute(&key)
-	if stub.RouteConfirmed() {
+	bindOutputRouteForTest(stub, &key)
+	if stub.RouteConfirmed(key) {
 		t.Fatal("precondition: route should be unconfirmed")
 	}
 
@@ -75,7 +75,7 @@ func TestHandleFetchQueue_AckRefusedUntilRouteConfirmed(t *testing.T) {
 	}
 
 	// Confirm the route (as a real claim would) — the fetch now proceeds and drains.
-	stub.MarkRouteConfirmed()
+	stub.MarkRouteConfirmed(key)
 	agentSide2, brokerSide2 := newConnPair(t)
 	raw2, _ := json.Marshal(ipc.FetchQueueReq{Op: ipc.OpFetchQueue, ID: "2", All: true, Ack: true})
 	go b.handleFetchQueue(brokerSide2, stub, raw2)
@@ -105,7 +105,7 @@ func TestHandleFetchQueue_PeekAllowedWhenRouteNotConfirmed(t *testing.T) {
 		_ = b.Queue.Append(qrk, &c3types.Inbound{Channel: "telegram", ChatID: -100, TopicID: &tid, MessageID: i, Text: "m", Timestamp: time.Now()})
 	}
 	stub := claimedHolder(t, b, key)
-	stub.SetRoute(&key) // unconfirmed
+	bindOutputRouteForTest(stub, &key) // unconfirmed
 
 	agentSide, brokerSide := newConnPair(t)
 	raw, _ := json.Marshal(ipc.FetchQueueReq{Op: ipc.OpFetchQueue, ID: "1", Limit: 2, Ack: false})
@@ -138,7 +138,7 @@ func TestHandleInboundDelivered_RequiresConfirmedRouteAndDeliveryIdentity(t *tes
 		_ = b.Queue.Append(qrk, &c3types.Inbound{Channel: "telegram", ChatID: -100, TopicID: &tid, MessageID: i, Text: "m", Timestamp: time.Now()})
 	}
 	stub := claimedHolder(t, b, key)
-	stub.SetRoute(&key) // unconfirmed
+	bindOutputRouteForTest(stub, &key) // unconfirmed
 
 	// Ack covering 2 lines — must be DROPPED (route not confirmed).
 	raw, _ := json.Marshal(ipc.InboundDeliveredMsg{Op: ipc.OpInboundDelivered, UpdateID: 2, OK: true, Count: 2})
@@ -153,7 +153,7 @@ func TestHandleInboundDelivered_RequiresConfirmedRouteAndDeliveryIdentity(t *tes
 
 	// Confirm the route. This ack was never tied to an actual broker push, so it
 	// still must not consume from the head.
-	stub.MarkRouteConfirmed()
+	stub.MarkRouteConfirmed(key)
 	b.handleInboundDelivered(stub, raw)
 	deadline = time.Now().Add(300 * time.Millisecond)
 	for time.Now().Before(deadline) {
@@ -168,8 +168,8 @@ func TestHandleInboundDelivered_RequiresConfirmedRouteAndDeliveryIdentity(t *tes
 // user-confirmed steal force-evicts the previous holder, but ForceReleaseKey only
 // removed the ROUTES-table entry — the evicted stub's own Route + routeConfirmed
 // stayed set, so its next destructive fetch_queue(ack=true) would drain a topic it
-// no longer owns. tryClaim must clear the evicted stub's route (SetRoute(nil),
-// which also clears routeConfirmed), so that fetch hits the "no route claimed"
+// no longer owns. tryClaim must remove the evicted stub's route and per-route
+// confirmation, so that fetch hits the "no route claimed"
 // refusal instead.
 func TestSteal_ClearsEvictedStubRouteAndRefusesDestructiveFetch(t *testing.T) {
 	t.Setenv("C3_QUEUE_DIR", t.TempDir())
@@ -185,25 +185,25 @@ func TestSteal_ClearsEvictedStubRouteAndRefusesDestructiveFetch(t *testing.T) {
 
 	// Victim holds + confirms the route (a legitimate claim).
 	victim := b.Stubs.Register("claude", 4242, "/victim", struct{}{})
-	if !b.tryClaim(nil, victim, key, "c3", false /*steal*/, true /*replay*/) {
+	if !b.tryClaim(nil, victim, key, "c3", false /*steal*/, true /*replay*/, false /*add*/) {
 		t.Fatal("victim claim should succeed on a free key")
 	}
-	if victim.CurrentRoute() == nil || !victim.RouteConfirmed() {
+	if victim.OutputRoute() == nil || !victim.RouteConfirmed(key) {
 		t.Fatal("precondition: victim should hold a confirmed route")
 	}
 
 	// Thief steals the same route (user-confirmed steal=true).
 	thief := b.Stubs.Register("codex", 9999, "/thief", struct{}{})
-	if !b.tryClaim(nil, thief, key, "c3", true /*steal*/, true /*replay*/) {
+	if !b.tryClaim(nil, thief, key, "c3", true /*steal*/, true /*replay*/, false /*add*/) {
 		t.Fatal("steal claim should succeed")
 	}
 
 	// The evicted victim's route + confirmation must be cleared.
-	if victim.CurrentRoute() != nil {
-		t.Fatalf("evicted victim still holds a route: %+v", victim.CurrentRoute())
+	if victim.OutputRoute() != nil {
+		t.Fatalf("evicted victim still holds a route: %+v", victim.OutputRoute())
 	}
-	if victim.RouteConfirmed() {
-		t.Fatal("evicted victim's route must be unconfirmed (SetRoute(nil) clears it)")
+	if victim.RouteConfirmed(key) {
+		t.Fatal("evicted victim's route must be unconfirmed")
 	}
 
 	// A destructive fetch by the victim is refused — it no longer owns the topic,
@@ -220,7 +220,7 @@ func TestSteal_ClearsEvictedStubRouteAndRefusesDestructiveFetch(t *testing.T) {
 	}
 
 	// The thief owns the route and can still drain it.
-	if thief.CurrentRoute() == nil || !thief.RouteConfirmed() {
+	if thief.OutputRoute() == nil || !thief.RouteConfirmed(key) {
 		t.Fatal("thief should hold a confirmed route after the steal")
 	}
 }
@@ -235,18 +235,19 @@ func TestHandleRelease_ClearsRouteConfirmed(t *testing.T) {
 	tid := int64(914)
 	key := MakeRouteKey("telegram", -100, &tid)
 	stub := claimedHolder(t, b, key)
-	stub.SetRoute(&key)
-	stub.MarkRouteConfirmed()
-	if !stub.RouteConfirmed() {
+	bindOutputRouteForTest(stub, &key)
+	stub.MarkRouteConfirmed(key)
+	if !stub.RouteConfirmed(key) {
 		t.Fatal("precondition: route should be confirmed")
 	}
 
-	b.handleRelease(stub)
+	raw, _ := json.Marshal(ipc.ReleaseReq{Op: ipc.OpRelease})
+	b.handleRelease(nil, stub, raw)
 
-	if stub.RouteConfirmed() {
+	if stub.RouteConfirmed(key) {
 		t.Fatal("handleRelease must clear routeConfirmed (tripwire must re-arm)")
 	}
-	if stub.CurrentRoute() != nil {
+	if stub.OutputRoute() != nil {
 		t.Fatal("handleRelease must clear the route")
 	}
 }

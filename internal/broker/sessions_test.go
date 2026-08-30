@@ -137,11 +137,11 @@ func TestListSessions_AttachedTo_FormatsTopicLabel(t *testing.T) {
 	b := brokerWithChannel(t, mf, fc)
 	defer b.Shutdown()
 
-	// Register a stub and claim a topic so it has a CurrentRoute.
+	// Register a stub and claim a topic so it has an output route.
 	stub := b.Stubs.Register("claude", 4242, "/projects/c3", nil)
 	tid := int64(281) // topic "c3" in group "main" per mfWithTelegram
 	key := MakeRouteKey("telegram", -100, &tid)
-	if !b.tryClaim(nil, stub, key, "c3", false, false) {
+	if !b.tryClaim(nil, stub, key, "c3", false, false, false) {
 		t.Fatal("setup: tryClaim failed")
 	}
 
@@ -191,7 +191,7 @@ func TestListSessions_DM_AttachedToLabel(t *testing.T) {
 
 	stub := b.Stubs.Register("claude", 4242, "/projects/c3", nil)
 	key := MakeRouteKey("telegram", 42, nil) // DM
-	if !b.tryClaim(nil, stub, key, "dm", false, false) {
+	if !b.tryClaim(nil, stub, key, "dm", false, false, false) {
 		t.Fatal("setup: tryClaim DM failed")
 	}
 

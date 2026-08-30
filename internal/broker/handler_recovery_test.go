@@ -71,11 +71,13 @@ func TestHandleRelease_TombstonesSessionAttachment(t *testing.T) {
 	stub.SetStableSessionID("sess-1")
 	tid := int64(281)
 	b.Routes.Claim(MakeRouteKey("telegram", -100, &tid), stub)
-	stub.SetRoute(func() *RouteKey { k := MakeRouteKey("telegram", -100, &tid); return &k }())
+	key := MakeRouteKey("telegram", -100, &tid)
+	bindOutputRouteForTest(stub, &key)
 
-	b.handleRelease(stub)
+	releaseRaw, _ := json.Marshal(ipc.ReleaseReq{Op: ipc.OpRelease})
+	b.handleRelease(nil, stub, releaseRaw)
 
-	if stub.CurrentRoute() != nil {
+	if stub.OutputRoute() != nil {
 		t.Fatal("release should clear the stub's route")
 	}
 	sa, ok := b.Mappings().LookupSessionAttachment("claude", "sess-1")
@@ -89,7 +91,8 @@ func TestHandleRelease_EmptyStableIDNoOp(t *testing.T) {
 	b := brokerWithChannel(t, mf, &fakeChannel{})
 	defer b.Shutdown()
 	stub := b.Stubs.Register("claude", 1, "/x", nil) // no stable id set
-	b.handleRelease(stub)                            // must not panic; nothing to tombstone
+	releaseRaw, _ := json.Marshal(ipc.ReleaseReq{Op: ipc.OpRelease})
+	b.handleRelease(nil, stub, releaseRaw) // must not panic; nothing to tombstone
 }
 
 func TestConnDrop_DoesNotTombstone(t *testing.T) {

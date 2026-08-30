@@ -41,33 +41,33 @@ func TestStub_ClearRouteIf(t *testing.T) {
 
 	r := NewStubRegistry()
 	s := r.Register("claude", 1, "/x", nil)
-	s.SetRoute(&keyA)
-	s.MarkRouteConfirmed()
+	s.AddRoute(keyA)
+	s.MarkRouteConfirmed(keyA)
 
 	// A no-op: the stub is routed to A, so a steal on B must NOT touch it.
-	if s.ClearRouteIf(keyB) {
+	if removed, _, _ := s.ClearRouteIf(keyB); removed {
 		t.Fatal("ClearRouteIf(B) must return false when the stub holds A")
 	}
-	if s.CurrentRoute() == nil || *s.CurrentRoute() != keyA {
-		t.Fatalf("ClearRouteIf(B) must leave route A intact; got %+v", s.CurrentRoute())
+	if s.OutputRoute() == nil || *s.OutputRoute() != keyA {
+		t.Fatalf("ClearRouteIf(B) must leave route A intact; got %+v", s.OutputRoute())
 	}
-	if !s.RouteConfirmed() {
+	if !s.RouteConfirmed(keyA) {
 		t.Fatal("ClearRouteIf(B) must leave routeConfirmed intact")
 	}
 
 	// The real steal: clearing the held key zeroes route + confirmation.
-	if !s.ClearRouteIf(keyA) {
+	if removed, wasOutput, newOutput := s.ClearRouteIf(keyA); !removed || !wasOutput || newOutput != nil {
 		t.Fatal("ClearRouteIf(A) must return true when the stub holds A")
 	}
-	if s.CurrentRoute() != nil {
-		t.Fatalf("ClearRouteIf(A) must clear the route; got %+v", s.CurrentRoute())
+	if s.OutputRoute() != nil {
+		t.Fatalf("ClearRouteIf(A) must clear the route; got %+v", s.OutputRoute())
 	}
-	if s.RouteConfirmed() {
+	if s.RouteConfirmed(keyA) {
 		t.Fatal("ClearRouteIf(A) must clear routeConfirmed")
 	}
 
 	// Clearing an already-empty stub is a harmless no-op.
-	if s.ClearRouteIf(keyA) {
+	if removed, _, _ := s.ClearRouteIf(keyA); removed {
 		t.Fatal("ClearRouteIf on an unrouted stub must return false")
 	}
 }

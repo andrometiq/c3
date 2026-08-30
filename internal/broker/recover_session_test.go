@@ -227,7 +227,7 @@ func TestHandleRecoverSession_HeldByAnotherLiveSession(t *testing.T) {
 	}
 }
 
-func TestHandleRecoverSession_DualPathRecordsCurrentRoute(t *testing.T) {
+func TestHandleRecoverSession_DualPathRecordsCurrentRoutes(t *testing.T) {
 	// Attach-first: the stub already holds a route (claimed by cwd) BEFORE the
 	// recover op arrives. The recover op must NOT re-claim, but must RECORD the
 	// current route under the stable id (dual-path recording). Uses the DEFAULT

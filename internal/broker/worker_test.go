@@ -560,6 +560,7 @@ func claimedHolder(t *testing.T, b *Broker, key RouteKey) *Stub {
 	t.Helper()
 	s := &Stub{CLI: "claude", PID: os.Getpid(), CWD: "/proj", ConnID: 7, Conn: "live"}
 	b.Routes.Claim(key, s)
+	s.AddRoute(key)
 	return s
 }
 
@@ -582,7 +583,7 @@ func TestTypingRelay_ArmsOnlyWhenHolderRepliedAndTypingCap(t *testing.T) {
 		// goroutine while run is live races the select. Stop cancels run first.
 		w.Stop()
 
-		w.armTyping(holder) // holder.HasReplied() == false
+		w.armTyping(holder) // holder.HasReplied(key) == false
 		if w.typingTicker != nil || w.typingC != nil {
 			t.Fatal("typing must NOT arm before the holder has replied (CLI-mode gate)")
 		}
@@ -593,7 +594,7 @@ func TestTypingRelay_ArmsOnlyWhenHolderRepliedAndTypingCap(t *testing.T) {
 		b := brokerWithGenericChannel(t, mfWithTelegram(), ch)
 		defer b.Shutdown()
 		holder := claimedHolder(t, b, key)
-		holder.MarkReplied()
+		holder.MarkReplied(key)
 		w := newRouteWorker(context.Background(), key, time.Hour, b)
 		// Stop run before driving the relay directly (see the first subtest's note):
 		// armTyping/pulseTyping are worker-goroutine semantics being driven manually.
@@ -616,7 +617,7 @@ func TestTypingRelay_ArmsOnlyWhenHolderRepliedAndTypingCap(t *testing.T) {
 		b := brokerWithGenericChannel(t, mfWithTelegram(), ch)
 		defer b.Shutdown()
 		holder := claimedHolder(t, b, key)
-		holder.MarkReplied()
+		holder.MarkReplied(key)
 		w := newRouteWorker(context.Background(), key, time.Hour, b)
 		// Stop run before driving the relay directly (see the first subtest's note).
 		w.Stop()
@@ -637,7 +638,7 @@ func TestTypingRelay_DisarmIsIdempotentAndStopsTicker(t *testing.T) {
 	b := brokerWithGenericChannel(t, mfWithTelegram(), ch)
 	defer b.Shutdown()
 	holder := claimedHolder(t, b, key)
-	holder.MarkReplied()
+	holder.MarkReplied(key)
 	w := newRouteWorker(context.Background(), key, time.Hour, b)
 	// Stop run before driving the relay directly: arm/disarm and the run loop's
 	// `case <-w.typingC` both touch unlocked worker-goroutine state, so a direct
@@ -665,7 +666,7 @@ func TestTypingRelay_ReArmKeepsCadence(t *testing.T) {
 	b := brokerWithGenericChannel(t, mfWithTelegram(), ch)
 	defer b.Shutdown()
 	holder := claimedHolder(t, b, key)
-	holder.MarkReplied()
+	holder.MarkReplied(key)
 	w := newRouteWorker(context.Background(), key, time.Hour, b)
 	// Stop run before driving the relay directly (see DisarmIsIdempotent's note).
 	w.Stop()
@@ -703,7 +704,7 @@ func TestTypingRelay_IdlesOutWhenNoReply(t *testing.T) {
 	b := brokerWithGenericChannel(t, mfWithTelegram(), ch)
 	defer b.Shutdown()
 	holder := claimedHolder(t, b, key)
-	holder.MarkReplied() // arm gate: holder must have replied at least once
+	holder.MarkReplied(key) // arm gate: holder must have replied at least once
 
 	w := newRouteWorker(context.Background(), key, 150*time.Millisecond, b)
 	w.typingIvl = 20 * time.Millisecond // many pulses fit inside the idle window
@@ -753,7 +754,7 @@ func TestTypingRelay_DisarmsAfterMaxPulses(t *testing.T) {
 	b := brokerWithGenericChannel(t, mfWithTelegram(), ch)
 	defer b.Shutdown()
 	holder := claimedHolder(t, b, key)
-	holder.MarkReplied()
+	holder.MarkReplied(key)
 
 	// Long idle + manual stepping so the run loop's own typing-tick never races
 	// our direct calls (Stop cancels the loop before we touch state).

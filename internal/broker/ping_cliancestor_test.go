@@ -41,7 +41,7 @@ func TestPing_MatchesByCLIAncestorOfStubPID(t *testing.T) {
 	adapter := b.Stubs.Register("claude", 9823, "/p", nil)
 	tid := int64(412)
 	r := MakeRouteKey("telegram", -200, &tid)
-	if !b.tryClaim(nil, adapter, r, "feature-x", false, false) {
+	if !b.tryClaim(nil, adapter, r, "feature-x", false, false, false) {
 		t.Fatal("adapter stub: claim failed")
 	}
 	waitForReplies(fc, 1)
@@ -82,7 +82,7 @@ func TestPing_DirectPIDMatchStillWorks(t *testing.T) {
 	stub := b.Stubs.Register("claude", 9801, "/p", nil)
 	tid := int64(281)
 	r := MakeRouteKey("telegram", -100, &tid)
-	if !b.tryClaim(nil, stub, r, "c3", false, false) {
+	if !b.tryClaim(nil, stub, r, "c3", false, false, false) {
 		t.Fatal("stub: claim failed")
 	}
 	waitForReplies(fc, 1)
@@ -117,7 +117,7 @@ func TestPing_NoPIDMatch_FallsBackToCWD(t *testing.T) {
 	stub := b.Stubs.Register("claude", 100, "/p", nil)
 	tid := int64(281)
 	r := MakeRouteKey("telegram", -100, &tid)
-	if !b.tryClaim(nil, stub, r, "c3", false, false) {
+	if !b.tryClaim(nil, stub, r, "c3", false, false, false) {
 		t.Fatal("stub: claim failed")
 	}
 	waitForReplies(fc, 1)
@@ -149,7 +149,7 @@ func TestPing_NoPIDMatch_NoCWDMatch_NotAttached(t *testing.T) {
 	stub := b.Stubs.Register("claude", 100, "/somewhere-else", nil)
 	tid := int64(281)
 	r := MakeRouteKey("telegram", -100, &tid)
-	if !b.tryClaim(nil, stub, r, "c3", false, false) {
+	if !b.tryClaim(nil, stub, r, "c3", false, false, false) {
 		t.Fatal("stub: claim failed")
 	}
 	waitForReplies(fc, 1)
@@ -180,7 +180,7 @@ func TestPing_CWDFallback_RefusesTwoEmptyCWDs(t *testing.T) {
 	stub := b.Stubs.Register("claude", 100, "", nil)
 	tid := int64(281)
 	r := MakeRouteKey("telegram", -100, &tid)
-	if !b.tryClaim(nil, stub, r, "c3", false, false) {
+	if !b.tryClaim(nil, stub, r, "c3", false, false, false) {
 		t.Fatal("stub: claim failed")
 	}
 	waitForReplies(fc, 1)
@@ -207,7 +207,7 @@ func TestPing_CWDFallback_RefusesIncompleteStubIdentity(t *testing.T) {
 	stub := b.Stubs.Register("", 0, "/shared", nil)
 	tid := int64(281)
 	r := MakeRouteKey("telegram", -100, &tid)
-	if !b.tryClaim(nil, stub, r, "c3", false, false) {
+	if !b.tryClaim(nil, stub, r, "c3", false, false, false) {
 		t.Fatal("stub: claim failed")
 	}
 	waitForReplies(fc, 1)

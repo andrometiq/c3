@@ -242,6 +242,123 @@ func TestAttachReq_PolicyRejectedFieldOmitEmpty(t *testing.T) {
 	}
 }
 
+func TestAttachReqAddOmitEmpty(t *testing.T) {
+	raw, err := json.Marshal(AttachReq{Op: OpAttach})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if containsJSONField(string(raw), "add") {
+		t.Fatalf("Add=false must be omitted: %s", raw)
+	}
+	raw, err = json.Marshal(AttachReq{Op: OpAttach, Add: true})
+	if err != nil || !containsJSONField(string(raw), "add") {
+		t.Fatalf("Add=true missing: %s err=%v", raw, err)
+	}
+}
+
+func TestAttachedMsgRoutesOutputOmitEmpty(t *testing.T) {
+	raw, err := json.Marshal(AttachedMsg{Op: OpAttached, OK: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if containsJSONField(string(raw), "routes") || containsJSONField(string(raw), "output") {
+		t.Fatalf("nil route set must be omitted: %s", raw)
+	}
+	topicID := int64(281)
+	in := AttachedMsg{
+		Op: OpAttached, OK: true,
+		Routes: []RouteRef{{Channel: "telegram", ChatID: -100, TopicID: &topicID, Name: "c3"}, {Channel: "web", ChatID: 42, Name: "web"}},
+		Output: &RouteRef{Channel: "web", ChatID: 42, Name: "web"},
+	}
+	raw, err = json.Marshal(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out AttachedMsg
+	if err := json.Unmarshal(raw, &out); err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Routes) != 2 || out.Output == nil || out.Output.Channel != "web" {
+		t.Fatalf("route set roundtrip=%+v", out)
+	}
+}
+
+func TestReleaseReqTargetOmitEmpty(t *testing.T) {
+	raw, err := json.Marshal(ReleaseReq{Op: OpRelease})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if containsJSONField(string(raw), "target") {
+		t.Fatalf("empty target must be omitted: %s", raw)
+	}
+	raw, err = json.Marshal(ReleaseReq{Op: OpRelease, Target: "telegram"})
+	if err != nil || !containsJSONField(string(raw), "target") {
+		t.Fatalf("target missing: %s err=%v", raw, err)
+	}
+}
+
+func TestReleaseRespRoundTripAndOmitEmpty(t *testing.T) {
+	empty, err := json.Marshal(ReleaseResp{Op: OpReleaseResult})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, field := range []string{"ok", "routes", "output", "err"} {
+		if containsJSONField(string(empty), field) {
+			t.Fatalf("empty %s must be omitted: %s", field, empty)
+		}
+	}
+
+	topicID := int64(281)
+	route := RouteRef{Channel: "telegram", ChatID: -100, TopicID: &topicID, Name: "c3", Group: "main"}
+	in := ReleaseResp{Op: OpReleaseResult, OK: true, Routes: []RouteRef{route}, Output: &route}
+	raw, err := json.Marshal(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out ReleaseResp
+	if err := json.Unmarshal(raw, &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.Op != OpReleaseResult || !out.OK || len(out.Routes) != 1 || out.Output == nil || out.Output.Channel != "telegram" || out.Output.TopicID == nil || *out.Output.TopicID != topicID {
+		t.Fatalf("release response roundtrip=%+v", out)
+	}
+}
+
+func TestSetOutputRouteRoundtrip(t *testing.T) {
+	req := SetOutputRouteReq{Op: OpSetOutputRoute, Target: "c3"}
+	raw, err := json.Marshal(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var reqOut SetOutputRouteReq
+	if err := json.Unmarshal(raw, &reqOut); err != nil || reqOut != req {
+		t.Fatalf("request roundtrip=%+v err=%v", reqOut, err)
+	}
+	resp := SetOutputRouteResp{Op: OpSetOutputRouteResult, OK: true, Output: &RouteRef{Channel: "web", ChatID: 42, Name: "web"}}
+	raw, err = json.Marshal(resp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var respOut SetOutputRouteResp
+	if err := json.Unmarshal(raw, &respOut); err != nil || !respOut.OK || respOut.Output == nil || respOut.Output.Channel != "web" {
+		t.Fatalf("response roundtrip=%+v err=%v", respOut, err)
+	}
+}
+
+func TestClaimEntryIsOutputOmitEmpty(t *testing.T) {
+	raw, err := json.Marshal(ClaimEntry{Channel: "telegram"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if containsJSONField(string(raw), "is_output") {
+		t.Fatalf("IsOutput=false must be omitted: %s", raw)
+	}
+	raw, err = json.Marshal(ClaimEntry{Channel: "telegram", IsOutput: true})
+	if err != nil || !containsJSONField(string(raw), "is_output") {
+		t.Fatalf("IsOutput=true missing: %s err=%v", raw, err)
+	}
+}
+
 // containsJSONField is a coarse substring check that finds `"<k>"` inside
 // the serialized JSON. Good enough for omit-empty assertions.
 func containsJSONField(j, k string) bool {

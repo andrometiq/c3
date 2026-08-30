@@ -53,7 +53,7 @@ func TestAttach_CwdDefault_HeldByDifferentLiveSession_ShowsPicker(t *testing.T) 
 	holder := b.Stubs.Register("claude", 9823, launch, struct{}{})
 	tid := int64(281)
 	key := MakeRouteKey("telegram", -100, &tid)
-	if !b.tryClaim(nil, holder, key, "c3", false, false) {
+	if !b.tryClaim(nil, holder, key, "c3", false, false, false) {
 		t.Fatal("holder's initial claim should succeed")
 	}
 
@@ -196,7 +196,7 @@ func TestAttach_ExplicitName_HeldTopic_StillForceSteal(t *testing.T) {
 	holder := b.Stubs.Register("claude", 9823, launch, struct{}{})
 	tid := int64(281)
 	key := MakeRouteKey("telegram", -100, &tid)
-	if !b.tryClaim(nil, holder, key, "c3", false, false) {
+	if !b.tryClaim(nil, holder, key, "c3", false, false, false) {
 		t.Fatal("holder claim should succeed")
 	}
 
@@ -226,7 +226,7 @@ func TestAttach_ExplicitName_HeldTopic_StillForceSteal(t *testing.T) {
 // TestAttachBare_AlreadyAttached_IdempotentOK reworks the former
 // HeldBySameLogicalSession_NoWarn test for the redesign: a bare attach from a
 // session that is ALREADY attached takes attachBare's idempotent guard —
-// CurrentRoute != nil → report that route (OK=true) with the resolved Name, no
+// a held route → report the set (OK=true) with the resolved Name, no
 // re-claim, no picker. The resolved Name is load-bearing: FormatAttached renders
 // it and the adapter's replay-remember records it.
 func TestAttachBare_AlreadyAttached_IdempotentOK(t *testing.T) {

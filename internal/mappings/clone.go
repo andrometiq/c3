@@ -92,6 +92,25 @@ func cloneSessionAttachment(sa SessionAttachment) SessionAttachment {
 		t := *sa.TopicID
 		sa.TopicID = &t
 	}
+	if sa.Routes != nil {
+		routes := make([]RouteRef, len(sa.Routes))
+		for i, route := range sa.Routes {
+			routes[i] = route
+			if route.TopicID != nil {
+				topicID := *route.TopicID
+				routes[i].TopicID = &topicID
+			}
+		}
+		sa.Routes = routes
+	}
+	if sa.Output != nil {
+		output := *sa.Output
+		if sa.Output.TopicID != nil {
+			topicID := *sa.Output.TopicID
+			output.TopicID = &topicID
+		}
+		sa.Output = &output
+	}
 	return sa
 }
 

@@ -66,7 +66,7 @@ func TestHandleToolCall_WorkerStall_ReturnsError(t *testing.T) {
 	tid := int64(914)
 	key := MakeRouteKey("telegram", -100, &tid)
 	stub := claimedHolder(t, b, key)
-	stub.SetRoute(&key)
+	bindOutputRouteForTest(stub, &key)
 
 	agentSide, brokerSide := newConnPair(t)
 	raw, _ := json.Marshal(ipc.ToolCallReq{Op: ipc.OpToolCall, ID: "1", Name: "reply", Args: map[string]any{"text": "hi"}})

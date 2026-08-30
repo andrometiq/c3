@@ -188,7 +188,7 @@ func TestRetranscribeDeadCallerStillLandsDurablyAndPushes(t *testing.T) {
 	defer b.Shutdown()
 	route := MakeRouteKey("telegram", -100, ptrI64(914))
 	holder, pushes := liveHolderFrames(t, b, route)
-	holder.SetRoute(&route)
+	bindOutputRouteForTest(holder, &route)
 	started := make(chan struct{})
 	release := make(chan struct{})
 	b.Plugins.OnVoiceReceived(func(context.Context, c3types.VoicePayload) (string, error) {

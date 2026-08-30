@@ -178,7 +178,7 @@ func (b *Broker) sessionCounts() (attached, idle int) {
 		if !s.IsAlive() {
 			continue // dead session (disconnected + PID gone): count it as neither
 		}
-		if s.CurrentRoute() != nil {
+		if len(s.Routes()) > 0 {
 			attached++
 		} else {
 			idle++
