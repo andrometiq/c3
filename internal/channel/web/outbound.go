@@ -24,6 +24,12 @@ type streamPayload struct {
 	Bytes           int        `json:"bytes,omitempty"`
 	Provider        string     `json:"provider,omitempty"`
 	Replay          bool       `json:"replay,omitempty"`
+	Attached        *bool      `json:"attached,omitempty"`
+	CLI             string     `json:"cli,omitempty"`
+	CWD             string     `json:"cwd,omitempty"`
+	PID             int        `json:"pid,omitempty"`
+	SessionID       string     `json:"session_id,omitempty"`
+	Since           string     `json:"since,omitempty"`
 }
 
 type streamEvent struct {

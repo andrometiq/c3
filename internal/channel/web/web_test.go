@@ -587,6 +587,48 @@ func TestEventsAuthOriginAndLiveOutbound(t *testing.T) {
 	}
 }
 
+func TestSetRouteHolderPublishesLivePresenceAndStreamOpenReplay(t *testing.T) {
+	c, _, cookie := newHandlerChannel()
+	since := time.Date(2026, time.August, 30, 9, 15, 0, 0, time.FixedZone("test", 5*60*60+30*60))
+	c.SetRouteHolder(42, nil, &channel.RouteHolder{
+		CLI: "claude", PID: 4242, CWD: "/home/operator/workspace/project",
+		SessionID: "session-123", Since: since,
+	})
+	if len(c.replay) != 0 {
+		t.Fatalf("presence was persisted in replay ring: %+v", c.replay)
+	}
+
+	recorder, cancel, done := startSSE(c, cookie, "", "")
+	waitFor(t, func() bool {
+		_, body := recorder.snapshot()
+		return strings.Contains(body, "event: presence") &&
+			strings.Contains(body, `{"replay":true,"attached":true,"cli":"claude","cwd":"/home/operator/workspace/project","pid":4242,"session_id":"session-123","since":"2026-08-30T03:45:00Z"}`)
+	})
+	_, opened := recorder.snapshot()
+	if strings.Index(opened, "event: prefs") > strings.Index(opened, "event: presence") {
+		t.Fatalf("stream-open presence did not follow prefs: %q", opened)
+	}
+
+	c.SetRouteHolder(42, nil, &channel.RouteHolder{
+		CLI: "codex", PID: 5150, CWD: "/workspace/next", SessionID: "session-456", Since: since.Add(time.Minute),
+	})
+	waitFor(t, func() bool {
+		_, body := recorder.snapshot()
+		return strings.Count(body, "event: presence") >= 2 &&
+			strings.Contains(body, `{"attached":true,"cli":"codex","cwd":"/workspace/next","pid":5150,"session_id":"session-456","since":"2026-08-30T03:46:00Z"}`)
+	})
+	c.SetRouteHolder(42, nil, nil)
+	waitFor(t, func() bool {
+		_, body := recorder.snapshot()
+		return strings.Count(body, "event: presence") >= 3 && strings.Contains(body, `{"attached":false}`)
+	})
+	if len(c.replay) != 0 {
+		t.Fatalf("live presence changes entered replay ring: %+v", c.replay)
+	}
+	cancel()
+	<-done
+}
+
 func TestFreshEventsReplayOwnAndAgentHistory(t *testing.T) {
 	c, _, cookie := newHandlerChannel()
 	response := sendRequest(c, cookie, `{"text":"question from browser","client_id":"reload-own"}`)
@@ -997,6 +1039,7 @@ func TestEmbeddedPagesAreSelfContainedAndUseTextContent(t *testing.T) {
 	}
 	for _, marker := range []string{
 		`id="view-drive"`, `id="view-chat"`, `id="drive-circle"`, `id="drive-word"`, `id="drive-chip"`,
+		`id="presence-sheet"`, `role="dialog"`, `events.addEventListener('presence'`,
 		`id="drive-mute"`, `id="drive-chat"`, `id="drive-live"`, `id="drive-replay"`,
 		`id="drive-last-reply"`, `id="drive-reply-play"`, `id="drive-transcript"`, `id="drive-lock-hint"`,
 		`id="load-earlier"`, `id="message-list"`, `id="new-messages"`,

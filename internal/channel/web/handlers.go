@@ -311,6 +311,9 @@ func (c *Channel) handleEvents(w http.ResponseWriter, r *http.Request) {
 	if err := writeSSE(w, streamEvent{kind: "prefs", payload: streamPayload{Voice: &voice}}); err != nil {
 		return
 	}
+	if err := writeSSE(w, c.presenceEvent(true)); err != nil {
+		return
+	}
 	if incomplete {
 		_ = writeSSE(w, streamEvent{kind: "status", payload: streamPayload{Text: "history may be incomplete", Timestamp: streamTimestamp(c.now())}})
 	}

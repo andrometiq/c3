@@ -3,18 +3,48 @@ package broker
 import (
 	"log"
 	"sync"
+	"time"
 )
 
 // Routes is the in-memory ROUTES map. Single-claim-per-route invariant
 // (spec §4.2.1).
 type Routes struct {
-	mu sync.RWMutex
-	m  map[RouteKey]*Stub
+	mu        sync.RWMutex
+	m         map[RouteKey]*Stub
+	claimedAt map[RouteKey]time.Time
+	onChange  func(routePresenceChange)
+}
+
+type routePresenceChange struct {
+	key   RouteKey
+	stub  *Stub
+	since time.Time
 }
 
 // NewRoutes returns an empty routes table.
 func NewRoutes() *Routes {
-	return &Routes{m: map[RouteKey]*Stub{}}
+	return &Routes{
+		m:         map[RouteKey]*Stub{},
+		claimedAt: map[RouteKey]time.Time{},
+	}
+}
+
+// SetPresenceChangeHandler installs the broker's non-blocking ownership-change
+// sink. It is called only after the route map has been updated and while the
+// route mutex still serializes changes, preserving claim/release order.
+func (r *Routes) SetPresenceChangeHandler(handler func(routePresenceChange)) {
+	r.mu.Lock()
+	r.onChange = handler
+	r.mu.Unlock()
+}
+
+// presenceChanged queues a route change while r.mu is held. The handler must
+// not call channel code or re-enter Routes; Broker installs an in-memory queue
+// operation here and invokes the optional channel notifier on another goroutine.
+func (r *Routes) presenceChanged(key RouteKey, stub *Stub, since time.Time) {
+	if r.onChange != nil {
+		r.onChange(routePresenceChange{key: key, stub: stub, since: since})
+	}
 }
 
 // Claim attempts to insert (key → stub). Returns (current_holder, false) if
@@ -45,7 +75,10 @@ func (r *Routes) Claim(key RouteKey, stub *Stub) (*Stub, bool) {
 		if sameLogicalSession(existing, stub) {
 			log.Printf("routes Claim TRANSFER key=%s from conn=%d to conn=%d (same cli=%s pid=%d cwd=%q)",
 				routeKeyStr(key), existing.ConnID, stub.ConnID, stub.CLI, stub.PID, stub.CWD)
+			since := time.Now().UTC()
 			r.m[key] = stub
+			r.claimedAt[key] = since
+			r.presenceChanged(key, stub, since)
 			return stub, true
 		}
 		// Different session. Is the existing holder still alive?
@@ -60,10 +93,15 @@ func (r *Routes) Claim(key RouteKey, stub *Stub) (*Stub, bool) {
 			routeKeyStr(key), existing.CLI, existing.PID, existing.ConnID,
 			stub.CLI, stub.PID, stub.ConnID)
 		delete(r.m, key)
+		delete(r.claimedAt, key)
+		r.presenceChanged(key, nil, time.Time{})
 	}
+	since := time.Now().UTC()
 	r.m[key] = stub
+	r.claimedAt[key] = since
 	log.Printf("routes Claim OK key=%s by cli=%s pid=%d conn=%d cwd=%q",
 		routeKeyStr(key), stub.CLI, stub.PID, stub.ConnID, stub.CWD)
+	r.presenceChanged(key, stub, since)
 	return stub, true
 }
 
@@ -142,8 +180,10 @@ func (r *Routes) ForceReleaseKey(key RouteKey) *Stub {
 		return nil
 	}
 	delete(r.m, key)
+	delete(r.claimedAt, key)
 	log.Printf("routes ForceReleaseKey key=%s evicted cli=%s pid=%d conn=%d (user-confirmed steal)",
 		routeKeyStr(key), existing.CLI, existing.PID, existing.ConnID)
+	r.presenceChanged(key, nil, time.Time{})
 	return existing
 }
 
@@ -157,10 +197,13 @@ func (r *Routes) TransferAllByConnID(oldConnID uint64, newStub *Stub) []RouteKey
 	var transferred []RouteKey
 	for k, s := range r.m {
 		if s.ConnID == oldConnID {
+			since := time.Now().UTC()
 			r.m[k] = newStub
+			r.claimedAt[k] = since
 			transferred = append(transferred, k)
 			log.Printf("routes Transfer key=%s from conn=%d to conn=%d (cli=%s pid=%d)",
 				routeKeyStr(k), oldConnID, newStub.ConnID, newStub.CLI, newStub.PID)
+			r.presenceChanged(k, newStub, since)
 		}
 	}
 	return transferred
@@ -173,8 +216,10 @@ func (r *Routes) Release(key RouteKey, connID uint64) {
 	defer r.mu.Unlock()
 	if existing, ok := r.m[key]; ok && existing.ConnID == connID {
 		delete(r.m, key)
+		delete(r.claimedAt, key)
 		log.Printf("routes Release key=%s conn=%d cli=%s pid=%d",
 			routeKeyStr(key), connID, existing.CLI, existing.PID)
+		r.presenceChanged(key, nil, time.Time{})
 	}
 }
 
@@ -189,7 +234,9 @@ func (r *Routes) ReleaseAllByConnID(connID uint64) []RouteKey {
 			log.Printf("routes ReleaseAllByConnID key=%s conn=%d cli=%s pid=%d",
 				routeKeyStr(k), connID, s.CLI, s.PID)
 			delete(r.m, k)
+			delete(r.claimedAt, k)
 			released = append(released, k)
+			r.presenceChanged(k, nil, time.Time{})
 		}
 	}
 	return released
@@ -217,13 +264,14 @@ func (r *Routes) Snapshot() []RouteEntry {
 	defer r.mu.RUnlock()
 	out := make([]RouteEntry, 0, len(r.m))
 	for k, s := range r.m {
-		out = append(out, RouteEntry{Key: k, Stub: s})
+		out = append(out, RouteEntry{Key: k, Stub: s, Since: r.claimedAt[k]})
 	}
 	return out
 }
 
 // RouteEntry is one row of Routes.Snapshot.
 type RouteEntry struct {
-	Key  RouteKey
-	Stub *Stub
+	Key   RouteKey
+	Stub  *Stub
+	Since time.Time
 }

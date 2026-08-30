@@ -101,8 +101,10 @@ type Channel struct {
 	clientMessages map[clientMessageKey]*clientMessage
 	voiceRetention int
 
-	streamMu sync.Mutex
-	streams  map[string]map[*streamClient]struct{}
+	streamMu   sync.Mutex
+	streams    map[string]map[*streamClient]struct{}
+	presenceMu sync.RWMutex
+	holder     *channel.RouteHolder
 
 	replayMu    sync.Mutex
 	replay      []streamEvent
@@ -138,6 +140,7 @@ type Channel struct {
 
 var _ channel.Channel = (*Channel)(nil)
 var _ channel.LoginLinker = (*Channel)(nil)
+var _ channel.PresenceNotifier = (*Channel)(nil)
 var _ channel.LocalAudioProvider = (*Channel)(nil)
 var _ channel.ReadbackSender = (*Channel)(nil)
 var _ channel.CertificateProvider = (*Channel)(nil)

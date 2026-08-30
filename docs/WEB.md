@@ -61,6 +61,18 @@ claimed web route even if its host UI describes that mode as “Telegram.” A
 session still drives only one route at a time. Messages arriving on the route it
 released are durably held until a session claims it again.
 
+The Drive chip and the Chat header make that ownership primary. An attached
+route shows the CLI name reported by C3 and a shortened working directory, for
+example **`● claude · ~/projects/example`**; a long path is middle-ellipsised.
+It shows **`● connected`** when the route is attached but holder details are not
+yet known, and **`○ no session`** immediately after release. Tap the Drive chip
+to open the session sheet with the CLI, full working directory, PID, stable
+session id, and claim time. The full path is intentionally available: this is
+the authenticated operator's private, agent-driving surface, not content sent
+to a shared channel. Presence is memory-only and live-only; opening an SSE
+stream receives the current value, but it is not written to conversation replay
+or browser-session persistence.
+
 Phase 1 is drive-only. Web has no Allow/Deny buttons and cannot answer `ask`.
 Permission prompts and questions must be answered at the laptop, so an on-the-go
 drive should use permissions that were deliberately pre-approved.
@@ -209,7 +221,8 @@ the last 200 sequenced conversation events: agent replies and edits plus
 accepted operator-message echoes. If its `Last-Event-ID` is older than that
 ring, the page says **history may be incomplete**. Reply ids and SSE sequence
 ids remain monotonic across broker restarts. Typing and status notices are live
-only and are not replayed.
+only and are not replayed. Route presence is also live-only; the server sends a
+current `presence` frame next to `prefs` whenever a stream opens.
 
 On a fresh page, Chat reconciles those replayed messages, own rows, and edits
 in memory, renders only the newest 20 rows, positions the conversation at the
