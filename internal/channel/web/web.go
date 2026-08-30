@@ -20,22 +20,24 @@ import (
 )
 
 const (
-	Name                 = "web"
-	defaultListen        = "127.0.0.1:8371"
-	maxMessageRunes      = 16000
-	postBodyLimit        = 64 << 10
-	loginTokenTTL        = 10 * time.Minute
-	sessionIdleTTL       = 24 * time.Hour
-	clientMessageTTL     = 10 * time.Minute
-	loginLinkDebounce    = 60 * time.Second
-	loginLinkHourlyLimit = 5
-	replayLimit          = 200
-	maxFailedAuthDelay   = 5 * time.Second
+	Name                  = "web"
+	defaultListen         = "127.0.0.1:8371"
+	maxMessageRunes       = 16000
+	postBodyLimit         = 64 << 10
+	loginTokenTTL         = 10 * time.Minute
+	sessionIdleTTL        = 24 * time.Hour
+	clientMessageTTL      = 10 * time.Minute
+	loginLinkDebounce     = 60 * time.Second
+	loginLinkHourlyLimit  = 5
+	replayLimit           = 200
+	maxFailedAuthDelay    = 5 * time.Second
+	defaultVoiceRetention = 200
 )
 
 var errUnsupported = errors.New("web: operation unsupported")
 
-//go:embed *.html
+//go:generate ffmpeg -hide_banner -loglevel error -y -f lavfi -i anullsrc=r=24000:cl=mono -t 0.3 -codec:a libmp3lame -b:a 24k -write_xing 0 -id3v2_version 0 unlock.mp3
+//go:embed *.html unlock.mp3
 var pages embed.FS
 
 // Config is the channels.web stanza.
@@ -67,8 +69,8 @@ type loginDeliveryHost interface {
 	SendWebLoginLink(requestedBy string) (sent bool, err error)
 }
 
-// Channel implements channel.Channel, channel.LoginLinker, and
-// channel.CertificateProvider.
+// Channel implements channel.Channel and the optional browser, local-audio,
+// readback, and certificate capabilities used by the broker.
 type Channel struct {
 	host       channel.Host
 	cfg        Config
@@ -96,6 +98,7 @@ type Channel struct {
 
 	clientMu       sync.Mutex
 	clientMessages map[clientMessageKey]*clientMessage
+	voiceRetention int
 
 	streamMu sync.Mutex
 	streams  map[string]map[*streamClient]struct{}
@@ -115,16 +118,32 @@ type Channel struct {
 	heartbeatInterval  time.Duration
 	listenFunc         func(network, address string) (net.Listener, error)
 
+	speechMu      sync.Mutex
+	speechActive  int
+	speechQueue   []speechJob
+	speechContext context.Context
+	speechCancel  context.CancelFunc
+
+	audioMu    sync.Mutex
+	audioCache map[string]cachedAudio
+	audioBytes int64
+
+	speechErrorMu   sync.Mutex
+	lastSpeechError time.Time
+
 	tlsMu       sync.RWMutex
 	tlsMaterial certificateMaterial
 }
 
 var _ channel.Channel = (*Channel)(nil)
 var _ channel.LoginLinker = (*Channel)(nil)
+var _ channel.LocalAudioProvider = (*Channel)(nil)
+var _ channel.ReadbackSender = (*Channel)(nil)
 var _ channel.CertificateProvider = (*Channel)(nil)
 
 // New returns an unstarted channel.
 func New() *Channel {
+	speechContext, speechCancel := context.WithCancel(context.Background())
 	return &Channel{
 		tokens:             make(map[string]loginToken),
 		sessions:           make(map[string]*session),
@@ -137,6 +156,10 @@ func New() *Channel {
 		heartbeatInterval:  20 * time.Second,
 		allowedOrigin:      make(map[string]bool),
 		listenFunc:         net.Listen,
+		voiceRetention:     defaultVoiceRetention,
+		speechContext:      speechContext,
+		speechCancel:       speechCancel,
+		audioCache:         make(map[string]cachedAudio),
 	}
 }
 
@@ -340,6 +363,9 @@ func (c *Channel) Stop() error {
 	c.listeners = nil
 	c.cancel = nil
 	c.lifecycleMu.Unlock()
+	if c.speechCancel != nil {
+		c.speechCancel()
+	}
 	if cancel != nil {
 		cancel()
 	}
@@ -392,6 +418,15 @@ func (c *Channel) ensureState() {
 	}
 	if c.listenFunc == nil {
 		c.listenFunc = net.Listen
+	}
+	if c.voiceRetention == 0 {
+		c.voiceRetention = defaultVoiceRetention
+	}
+	if c.audioCache == nil {
+		c.audioCache = make(map[string]cachedAudio)
+	}
+	if c.speechContext == nil {
+		c.speechContext, c.speechCancel = context.WithCancel(context.Background())
 	}
 }
 

@@ -1,6 +1,7 @@
 package broker
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -28,6 +29,14 @@ func NewBrokerHost(b *Broker, chanName string) *BrokerHost {
 
 // Compile-time check: BrokerHost implements channel.Host.
 var _ channel.Host = (*BrokerHost)(nil)
+
+// Synthesize delegates browser-requested speech to the registered TTS plugin.
+func (h *BrokerHost) Synthesize(ctx context.Context, request c3types.SpeechRequest) (c3types.SpeechResult, error) {
+	if h == nil || h.broker == nil || h.broker.Plugins == nil {
+		return c3types.SpeechResult{}, c3types.ErrNoSynthesizer
+	}
+	return h.broker.Plugins.Synthesize(ctx, request)
+}
 
 // Config marshals mappings.json:channels.<name> via JSON-roundtrip into target.
 // Returns error if the channel section is missing.

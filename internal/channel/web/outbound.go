@@ -12,11 +12,16 @@ import (
 )
 
 type streamPayload struct {
-	MessageID int64     `json:"message_id,omitempty"`
-	ClientID  string    `json:"client_id,omitempty"`
-	Text      string    `json:"text,omitempty"`
-	Timestamp time.Time `json:"timestamp,omitempty"`
-	Active    bool      `json:"active,omitempty"`
+	MessageID       int64      `json:"message_id,omitempty"`
+	ClientID        string     `json:"client_id,omitempty"`
+	Text            string     `json:"text,omitempty"`
+	Timestamp       *time.Time `json:"timestamp,omitempty"`
+	Active          bool       `json:"active,omitempty"`
+	Voice           *bool      `json:"voice,omitempty"`
+	DurationSeconds float64    `json:"duration_seconds,omitempty"`
+	URL             string     `json:"url,omitempty"`
+	Bytes           int        `json:"bytes,omitempty"`
+	Provider        string     `json:"provider,omitempty"`
 }
 
 type streamEvent struct {
@@ -42,15 +47,25 @@ func (c *Channel) SendReply(args c3types.ReplyArgs) (int64, error) {
 	if args.Poll != nil || len(args.Media) != 0 || len(args.Buttons) != 0 {
 		return 0, fmt.Errorf("%w: rich outbound content", errUnsupported)
 	}
+	if args.ReplyTo != nil && *args.ReplyTo > 0 && isVoiceReadbackNotice(args.Text) {
+		voice := true
+		c.publish(streamEvent{kind: "edit", payload: streamPayload{
+			MessageID: *args.ReplyTo, Text: args.Text, Voice: &voice,
+		}})
+		return *args.ReplyTo, nil
+	}
 	messageID := c.nextReplyMessageID()
 	event := streamEvent{
 		kind:    "message",
-		payload: streamPayload{MessageID: messageID, Text: args.Text, Timestamp: c.now()},
+		payload: streamPayload{MessageID: messageID, Text: args.Text, Timestamp: streamTimestamp(c.now())},
 	}
 	if isStatusText(args.Text) {
 		event.kind = "status"
 	}
 	c.publish(event)
+	if event.kind == "message" && c.hasVoiceSession() {
+		c.enqueueSpeech(speechJob{messageID: messageID, text: args.Text})
+	}
 	return messageID, nil
 }
 
@@ -74,7 +89,7 @@ func (c *Channel) EditMessage(args c3types.EditArgs) (*c3types.EditResult, error
 	}
 	c.publish(streamEvent{
 		kind:    "edit",
-		payload: streamPayload{MessageID: args.MessageID, Text: args.Text, Timestamp: c.now()},
+		payload: streamPayload{MessageID: args.MessageID, Text: args.Text, Timestamp: streamTimestamp(c.now())},
 	})
 	return &c3types.EditResult{MessageID: args.MessageID}, nil
 }
@@ -110,6 +125,13 @@ func (c *Channel) checkDestination(channelName string, chatID int64, topicID *in
 func isStatusText(text string) bool {
 	return strings.HasPrefix(text, "📨 Held") || strings.HasPrefix(text, "⏸ Permission") || strings.HasPrefix(text, "⚠️")
 }
+
+func isVoiceReadbackNotice(text string) bool {
+	return strings.HasPrefix(text, c3types.VoiceTranscriptionFailureNoticePrefix) ||
+		strings.HasPrefix(text, c3types.VoiceDownloadFailureNoticePrefix)
+}
+
+func streamTimestamp(value time.Time) *time.Time { return &value }
 
 func (c *Channel) nextReplyMessageID() int64 {
 	c.idMu.Lock()
@@ -154,6 +176,51 @@ func (c *Channel) broadcast(event streamEvent) {
 	c.streamMu.Lock()
 	defer c.streamMu.Unlock()
 	c.broadcastToClientsLocked(event)
+}
+
+func (c *Channel) broadcastSession(sessionID string, event streamEvent) {
+	c.streamMu.Lock()
+	defer c.streamMu.Unlock()
+	for client := range c.streams[sessionID] {
+		select {
+		case client.events <- event:
+		default:
+			client.close()
+			delete(c.streams[sessionID], client)
+		}
+	}
+	if len(c.streams[sessionID]) == 0 {
+		delete(c.streams, sessionID)
+	}
+}
+
+func (c *Channel) broadcastVoiceSessions(event streamEvent) {
+	enabled := make(map[string]bool)
+	c.authMu.Lock()
+	for sessionID, current := range c.sessions {
+		if current.voice {
+			enabled[sessionID] = true
+		}
+	}
+	c.authMu.Unlock()
+	c.streamMu.Lock()
+	defer c.streamMu.Unlock()
+	for sessionID, clients := range c.streams {
+		if !enabled[sessionID] {
+			continue
+		}
+		for client := range clients {
+			select {
+			case client.events <- event:
+			default:
+				client.close()
+				delete(clients, client)
+			}
+		}
+		if len(clients) == 0 {
+			delete(c.streams, sessionID)
+		}
+	}
 }
 
 func (c *Channel) broadcastToClientsLocked(event streamEvent) {

@@ -36,6 +36,8 @@ import urllib.request
 import importlib.util
 import logging
 import secrets
+import shutil
+import stat
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
@@ -216,6 +218,29 @@ def download_file(token, file_id, dest_path, tg_fn=None):
             except OSError:
                 pass
 
+
+def copy_local_file(source_path, dest_path):
+    """Atomically copy channel-owned local audio into the STT inbox."""
+    os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+    tmp_path = f'{dest_path}.{os.getpid()}-{secrets.token_hex(8)}.part'
+    source_fd = -1
+    try:
+        source_fd = os.open(source_path, os.O_RDONLY | os.O_NOFOLLOW)
+        if not stat.S_ISREG(os.fstat(source_fd).st_mode):
+            raise OSError('local audio is not a regular file')
+        with os.fdopen(source_fd, 'rb') as source:
+            source_fd = -1
+            with open(tmp_path, 'wb') as dest:
+                shutil.copyfileobj(source, dest)
+        os.replace(tmp_path, dest_path)
+    finally:
+        if source_fd >= 0:
+            os.close(source_fd)
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
+
 # ── STT ───────────────────────────────────────────────────────────────────────
 
 def _stderr_snippet(raw, limit=800):
@@ -364,7 +389,16 @@ def main():
     # shim writes "<token>\n" to our stdin before calling Run() (see
     # internal/plugin/builtins/stt/stt.go runHandler).
     token = sys.stdin.readline().rstrip('\n')
-    if not token:
+    local_file = os.environ.get('C3_STT_LOCAL_FILE', '')
+    if local_file:
+        try:
+            local_mode = os.lstat(local_file).st_mode
+        except OSError:
+            local_mode = 0
+        if not stat.S_ISREG(local_mode):
+            logging.error('stt-handler: C3_STT_LOCAL_FILE is not a regular file')
+            sys.exit(1)
+    if not token and not local_file:
         logging.error('stt-handler: empty token on stdin (expected <token>\\n as line 1)')
         sys.exit(1)
 
@@ -386,36 +420,45 @@ def main():
     if cached:
         audio_path = cached
         logging.info(f'Reusing cached audio {audio_path} (skipping download)')
-    for attempt in range(1, 4):
-        if cached:
-            break  # already have the bytes — no fetch needed
+    if not cached and local_file:
         try:
-            download_file(token, file_id, audio_path)
+            copy_local_file(local_file, audio_path)
             fsize = os.path.getsize(audio_path)
-            logging.info(f'Downloaded audio to {audio_path} ({fsize} bytes) [attempt {attempt}]')
-            if fsize > 0:
-                break
-            logging.warning(f'Downloaded file is 0 bytes [attempt {attempt}], retrying after 2s...')
-            time.sleep(2)
-        except PermanentDownloadError as e:
-            # I-9: non-retryable (expired/invalid file_id, >20MB getFile limit).
-            # Exit WITHOUT burning the remaining retries on a guaranteed-permanent
-            # failure. The Go shim sees empty stdout → [STT FAILED] marker, and the
-            # broker sends the human "couldn't transcribe" notice.
-            emit_fetch_error(e)
-            logging.error(f'Download permanently failed (non-retryable): {e}')
-            sys.exit(1)
+            if fsize <= 0:
+                raise OSError('local audio is empty')
+            logging.info(f'Copied local audio to {audio_path} ({fsize} bytes)')
         except Exception as e:
-            logging.warning(f'Download failed [attempt {attempt}]: {e}')
-            if attempt == 3:
+            logging.error(f'Local audio copy failed: {e}')
+            sys.exit(1)
+    elif not cached:
+        for attempt in range(1, 4):
+            try:
+                download_file(token, file_id, audio_path)
+                fsize = os.path.getsize(audio_path)
+                logging.info(f'Downloaded audio to {audio_path} ({fsize} bytes) [attempt {attempt}]')
+                if fsize > 0:
+                    break
+                logging.warning(f'Downloaded file is 0 bytes [attempt {attempt}], retrying after 2s...')
+                time.sleep(2)
+            except PermanentDownloadError as e:
+                # I-9: non-retryable (expired/invalid file_id, >20MB getFile limit).
+                # Exit WITHOUT burning the remaining retries on a guaranteed-permanent
+                # failure. The Go shim sees empty stdout → [STT FAILED] marker, and the
+                # broker sends the human "couldn't transcribe" notice.
                 emit_fetch_error(e)
-                logging.error(f'Download failed after 3 attempts: {e}')
+                logging.error(f'Download permanently failed (non-retryable): {e}')
                 sys.exit(1)
-            time.sleep(2)
-    else:
-        emit_fetch_error('the download produced 0 bytes after 3 attempts')
-        logging.error('Download produced 0 bytes after 3 attempts')
-        sys.exit(1)
+            except Exception as e:
+                logging.warning(f'Download failed [attempt {attempt}]: {e}')
+                if attempt == 3:
+                    emit_fetch_error(e)
+                    logging.error(f'Download failed after 3 attempts: {e}')
+                    sys.exit(1)
+                time.sleep(2)
+        else:
+            emit_fetch_error('the download produced 0 bytes after 3 attempts')
+            logging.error('Download produced 0 bytes after 3 attempts')
+            sys.exit(1)
 
     # Everything past a successful download runs under a finally that always
     # removes the cached .oga (I-10). The file has been written and is about to

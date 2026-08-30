@@ -188,15 +188,25 @@ Two pieces ship together:
 The shim invokes the handler as:
 
 ```
-stdin (line 1):  <bot_token>\n
+stdin (line 1):  <bot_token>\n | \n for local audio
 argv:            <python> <handler_path> <chat_id> <reply_msg_id> <file_id> <message_thread_id|"">
 env:             C3_TELEGRAM_API_URL=<base url>   (only when a proxy base is configured)
                  C3_STT_FETCH_NONCE=<nonce>       (per-invocation shared secret for authenticated fetch-error reports)
+                 C3_STT_LOCAL_FILE=<path>         (non-Telegram local-audio channels only)
                  STT_AUDIO_RETENTION=<n>
                  C3_STT_DEADLINE_SECONDS=<n>      (scaled Go subprocess deadline in seconds)
 ```
 
 **The bot token is on stdin, not argv** — deliberately, so it never appears in `ps`, `/proc/<pid>/cmdline`, or audit logs. A handler that reads a token from `sys.argv` is both broken (every index is shifted by one) and a credential leak. Read line 1 of stdin.
+
+For a channel implementing `channel.LocalAudioProvider`, the shim resolves the
+channel-minted `file_id`, sends an empty first stdin line, and sets
+`C3_STT_LOCAL_FILE` to the trusted local path. The bundled handler requires a
+regular file, atomically copies it into the normal inbox as
+`<millis>-<file_id>.oga`, and skips Telegram `getFile`; cache lookup, provider
+execution, and inbox pruning are otherwise unchanged. The shim strips an
+inherited `C3_STT_LOCAL_FILE` from Telegram invocations so process environment
+cannot replace Telegram audio with an arbitrary local file.
 
 Two more things a handler must tolerate: `C3_TELEGRAM_API_URL` should be honoured for `getFile` and the audio download, because direct `api.telegram.org` is blocked on some networks and ignoring it will simply time out; and on the deadline the shim SIGKILLs the handler's **entire process group**, so any grandchildren it spawned die with it.
 
@@ -208,8 +218,8 @@ Self-update replaces the shipped handler/runner/provider set but preserves regul
 
 Failures are never silent. A transcription-stage failure returns, *as the
 transcript*, `[STT FAILED: <reason> — see <broker log path>]`, with `<reason>`
-one of `handler_missing`, `token_unavailable`, `timeout`, `killed`, `error`,
-`empty`. If the handler cannot fetch the audio, it instead returns
+one of `handler_missing`, `token_unavailable`, `local_audio_unavailable`,
+`timeout`, `killed`, `error`, `empty`. If the handler cannot fetch the audio, it instead returns
 `[STT FETCH FAILED: <server cause>]`. The scheduler parks fail-closed transient
 network failures for automatic retry; permanent failures durably resolve to an
 agent-facing recovery message.
@@ -282,9 +292,10 @@ the handler's MP3 output.
 
 Use `c3-broker tts check` to print the resolved chain, key-file locations, and
 provider availability. Use `c3-broker tts say <text…> > reply.mp3` for a paid
-manual synthesis test. Ordinary text delivery does not incur synthesis cost in
-phase 3a: synthesis runs only when a web voice session asks for it, which is
-wired in the next phase.
+manual synthesis test. Ordinary text delivery does not incur synthesis cost
+unless a non-expired web session has spoken replies enabled. Web audio is
+served from a bounded, 15-minute memory cache and is never persisted or
+replayed.
 
 ## STT provider contract (frozen for v0.1.0)
 

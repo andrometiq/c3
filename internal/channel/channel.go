@@ -66,6 +66,14 @@ type LoginLinker interface {
 	MintLoginLink(userID int64) (string, error)
 }
 
+// LocalAudioProvider is the optional retained-audio bridge implemented by a
+// channel whose voice file IDs resolve to files on the broker's local disk.
+// Implementations must accept only channel-minted IDs and fail closed for
+// paths, unknown IDs, symlinks, and files outside their private audio store.
+type LocalAudioProvider interface {
+	LocalAudioPath(fileID string) (path string, err error)
+}
+
 // CertificateProvider is the optional private-CA export implemented by a
 // channel that terminates TLS itself. The broker uses it only to deliver the
 // public CA certificate and fingerprint to the configured operator.

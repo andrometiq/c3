@@ -22,6 +22,23 @@ trigger phrase as the explicit output-mode request preserves the no-inference
 mode contract, while manifest-driven guidance cannot drift from whether a
 channel can actually read replies aloud.
 
+## D023: Web voice transcodes at the edge; synthesized audio stays transient
+
+**Date:** 2026-08-30
+
+**Decision:** Browser voice notes are converted on receipt from the recorder's
+WebM/Opus or MP4/AAC shape into 48 kHz mono OGG/Opus. The STT shim resolves the
+web channel's retained local file and the Python handler copies it into its
+existing OGG inbox, so providers keep one audio contract. Spoken-reply MP3 is
+held only in a bounded 15-minute memory cache; audio SSE events are live-only
+and are never added to replay or session persistence.
+
+**Why:** Browser recorder formats vary by platform while every shipped STT
+provider already assumes OGG, and duplicating format handling throughout that
+chain would multiply failure modes. Synthesized speech is a paid, ephemeral
+rendering of text already stored in history; persisting or replaying it would
+add stale URLs, disk retention, and unexpected playback after reconnect.
+
 ## D020: Observe Claude transcripts to settle locally-resolved permission prompts
 
 **Date:** 2026-08-30

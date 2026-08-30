@@ -218,7 +218,7 @@ func voiceTooBigNotice(statedSize int64) string {
 	if statedSize > 0 {
 		size = " (" + mbString(statedSize) + ")"
 	}
-	return fmt.Sprintf("⚠️ Couldn't download this voice note%s — it's over the bot server's size limit. Send the same file another way (file drop), or split that same file and resend it.", size)
+	return fmt.Sprintf(c3types.VoiceDownloadFailureNoticePrefix+"%s — it's over the bot server's size limit. Send the same file another way (file drop), or split that same file and resend it.", size)
 }
 
 // voiceFetchFailedAgentText passes a non-size fetch failure through verbatim.
@@ -231,7 +231,7 @@ func voiceFetchFailedAgentText(cause error) string {
 
 // voiceFetchFailedNotice is the human-facing form of the same passthrough.
 func voiceFetchFailedNotice(cause error) string {
-	return fmt.Sprintf("⚠️ Couldn't download this voice note, so it wasn't transcribed: %s", cause.Error())
+	return fmt.Sprintf(c3types.VoiceDownloadFailureNoticePrefix+", so it wasn't transcribed: %s", cause.Error())
 }
 
 // appendVoiceMarker joins the agent surface with a refusal marker. It APPENDS

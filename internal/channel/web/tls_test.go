@@ -595,6 +595,7 @@ func TestTLSStartRefusesUnreachableOrUnsafeListener(t *testing.T) {
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
 			host := tlsTestHost(test.config)
 			c := New()
 			c.listenFunc = func(_, _ string) (net.Listener, error) {

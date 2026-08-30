@@ -973,7 +973,7 @@ func (s *VoiceScheduler) transcribe(ctx context.Context, attempt voiceAttempt) v
 		} else {
 			log.Printf("voice scheduler: cached audio stat failed chan=%s msg=%d file_id=%s path=%s: %v — using inbound size=%d", attempt.key.route.Channel, attempt.key.messageID, att.FileID, cachedPath, err, effectiveSize)
 		}
-	} else {
+	} else if attempt.key.route.Channel == "telegram" {
 		agent, notice, refuse, retryable, probedSize := s.broker.voiceFetchRefusal(attempt.key.route.Channel, att)
 		if refuse {
 			if retryable {

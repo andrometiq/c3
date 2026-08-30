@@ -527,7 +527,7 @@ func lateVoiceOrderNotice(messageID, afterMessageID int64) string {
 // sttFailureNotice is the human-facing line for a voice note that was fetched
 // but not transcribed. Unlike a fetch refusal there is nothing specific to
 // report — the provider's traceback is a log concern, not a chat one.
-const sttFailureNotice = "⚠️ Couldn't transcribe that voice note — see logs / try again."
+const sttFailureNotice = c3types.VoiceTranscriptionFailureNoticePrefix + " — see logs / try again."
 
 // sttFlushTimeout bounds each voice attempt made by the scheduler. STT no longer
 // blocks the route worker, but the outer deadline still must sit ABOVE the

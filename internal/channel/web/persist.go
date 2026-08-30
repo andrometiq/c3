@@ -38,6 +38,7 @@ type persistedSession struct {
 	Username string    `json:"username"`
 	Created  time.Time `json:"created"`
 	LastSeen time.Time `json:"last_seen"`
+	Voice    bool      `json:"voice"`
 }
 
 type persistedClientMessage struct {
@@ -45,6 +46,7 @@ type persistedClientMessage struct {
 	ClientID   string    `json:"client_id"`
 	MessageID  int64     `json:"message_id"`
 	TextSHA256 string    `json:"text_sha256"`
+	Kind       string    `json:"kind,omitempty"`
 	Outcome    string    `json:"outcome"`
 	At         time.Time `json:"at"`
 }
@@ -156,6 +158,7 @@ func (c *Channel) loadSessions(path string, logger stateLogger) (bool, error) {
 		sessions[saved.Key] = &session{
 			userID: saved.UserID, username: saved.Username,
 			created: saved.Created, lastSeen: saved.LastSeen, savedLastSeen: saved.LastSeen,
+			voice: saved.Voice,
 		}
 	}
 
@@ -188,7 +191,7 @@ func (c *Channel) loadSessions(path string, logger stateLogger) (bool, error) {
 		}
 		key := clientMessageKey{sessionID: saved.Session, clientID: saved.ClientID}
 		clientMessages[key] = &clientMessage{
-			messageID: saved.MessageID, textHash: hash, status: status, created: saved.At,
+			messageID: saved.MessageID, textHash: hash, kind: saved.Kind, status: status, created: saved.At,
 		}
 	}
 
@@ -228,7 +231,7 @@ func decodeState(data []byte, stored *persistedState) error {
 	seenClients := make(map[clientMessageKey]bool, len(stored.ClientMessages))
 	for _, saved := range stored.ClientMessages {
 		key := clientMessageKey{sessionID: saved.Session, clientID: saved.ClientID}
-		if !validSHA256(saved.Session) || saved.ClientID == "" || saved.MessageID <= 0 || !validSHA256(saved.TextSHA256) || saved.At.IsZero() || saved.Outcome != "accepted" && saved.Outcome != "forbidden" || seenClients[key] {
+		if !validSHA256(saved.Session) || saved.ClientID == "" || saved.MessageID <= 0 || !validSHA256(saved.TextSHA256) || saved.At.IsZero() || saved.Kind != "" && saved.Kind != "voice" || saved.Outcome != "accepted" && saved.Outcome != "forbidden" || seenClients[key] {
 			return errors.New("invalid client-message record")
 		}
 		seenClients[key] = true
@@ -331,7 +334,7 @@ func (c *Channel) saveSessions() error {
 	for key, current := range c.sessions {
 		stored.Sessions = append(stored.Sessions, persistedSession{
 			Key: key, UserID: current.userID, Username: current.username,
-			Created: current.created, LastSeen: current.lastSeen,
+			Created: current.created, LastSeen: current.lastSeen, Voice: current.voice,
 		})
 		touches[key] = sessionTouch{current: current, lastSeen: current.lastSeen}
 	}
@@ -351,7 +354,7 @@ func (c *Channel) saveSessions() error {
 		if outcome != "" {
 			stored.ClientMessages = append(stored.ClientMessages, persistedClientMessage{
 				Session: key.sessionID, ClientID: key.clientID, MessageID: record.messageID,
-				TextSHA256: hex.EncodeToString(record.textHash[:]), Outcome: outcome, At: record.created,
+				TextSHA256: hex.EncodeToString(record.textHash[:]), Kind: record.kind, Outcome: outcome, At: record.created,
 			})
 		}
 		record.mu.Unlock()

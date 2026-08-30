@@ -243,7 +243,7 @@ sys.exit(1)
 		t.Fatalf("Register: %v", err)
 	}
 
-	got, err := h.voiceCallback(context.Background(), c3types.VoicePayload{MessageID: 1, FileID: "V1"})
+	got, err := h.voiceCallback(context.Background(), c3types.VoicePayload{Channel: "telegram", MessageID: 1, FileID: "V1"})
 	if err != nil {
 		t.Fatalf("callback error: %v", err)
 	}
@@ -276,7 +276,7 @@ sys.exit(1)
 		t.Fatalf("Register: %v", err)
 	}
 
-	got, _ := h.voiceCallback(context.Background(), c3types.VoicePayload{MessageID: 1, FileID: "V1"})
+	got, _ := h.voiceCallback(context.Background(), c3types.VoicePayload{Channel: "telegram", MessageID: 1, FileID: "V1"})
 	if strings.HasPrefix(got, FetchFailedPrefix) {
 		t.Fatalf("marker = %q, want the [STT FAILED: …] form — a provider failure is not a fetch failure and must not borrow its surfaces", got)
 	}
@@ -468,7 +468,7 @@ print('SAW=' + os.environ.get('C3_TELEGRAM_API_URL', '<absent>'))
 		t.Fatalf("Register: %v", err)
 	}
 
-	got, err := h.voiceCallback(context.Background(), c3types.VoicePayload{MessageID: 1, FileID: "V1"})
+	got, err := h.voiceCallback(context.Background(), c3types.VoicePayload{Channel: "telegram", MessageID: 1, FileID: "V1"})
 	if err != nil {
 		t.Fatalf("callback error: %v", err)
 	}
@@ -495,7 +495,7 @@ print('SAW=' + os.environ.get('C3_TELEGRAM_API_URL', '<absent>'))
 		t.Fatalf("Register: %v", err)
 	}
 
-	got, _ := h.voiceCallback(context.Background(), c3types.VoicePayload{MessageID: 1, FileID: "V1"})
+	got, _ := h.voiceCallback(context.Background(), c3types.VoicePayload{Channel: "telegram", MessageID: 1, FileID: "V1"})
 	if got != "SAW=https://live.example" {
 		t.Fatalf("the subprocess saw %q, want the live answer", got)
 	}

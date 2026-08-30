@@ -31,6 +31,18 @@ type fakeHost struct {
 	channel channel.Channel
 }
 
+type localAudioChannel struct {
+	channel.Channel
+	path string
+}
+
+func (c *localAudioChannel) LocalAudioPath(fileID string) (string, error) {
+	if fileID != "local-file" {
+		return "", errors.New("unknown file id")
+	}
+	return c.path, nil
+}
+
 func (h *fakeHost) OnInbound(fn func(context.Context, *c3types.Inbound) (*c3types.Inbound, bool)) {
 }
 func (h *fakeHost) OnVoiceReceived(fn func(context.Context, c3types.VoicePayload) (string, error)) {
@@ -101,7 +113,7 @@ func TestRegister_HandlerMissingAtStartup_StillRegistersCallback(t *testing.T) {
 		t.Fatal("expected OnVoiceReceived to be registered even when handler is missing — bug repro: 2026-05-14, broken symlink silently disabled STT")
 	}
 
-	transcript, err := h.voiceCallback(context.Background(), c3types.VoicePayload{MessageID: 1})
+	transcript, err := h.voiceCallback(context.Background(), c3types.VoicePayload{Channel: "telegram", MessageID: 1})
 	if err != nil {
 		t.Fatalf("callback error: %v", err)
 	}
@@ -129,7 +141,7 @@ func TestRegister_HandlerAppearsAfterStartup_NextCallTranscribes(t *testing.T) {
 	}
 
 	// First call: handler missing → marker.
-	t1, _ := h.voiceCallback(context.Background(), c3types.VoicePayload{MessageID: 1})
+	t1, _ := h.voiceCallback(context.Background(), c3types.VoicePayload{Channel: "telegram", MessageID: 1})
 	if !strings.Contains(t1, "handler_missing") {
 		t.Errorf("first call before handler appears: %q, want handler_missing marker", t1)
 	}
@@ -141,9 +153,50 @@ func TestRegister_HandlerAppearsAfterStartup_NextCallTranscribes(t *testing.T) {
 	}
 
 	// Second call should now run the handler — no broker restart needed.
-	t2, _ := h.voiceCallback(context.Background(), c3types.VoicePayload{MessageID: 2})
+	t2, _ := h.voiceCallback(context.Background(), c3types.VoicePayload{Channel: "telegram", MessageID: 2})
 	if !strings.Contains(t2, "recovered transcript") {
 		t.Errorf("after handler restored: %q, want 'recovered transcript' — graceful recovery without restart", t2)
+	}
+}
+
+func TestRegister_LocalAudioSetsPathAndEmptyTokenLine(t *testing.T) {
+	if _, err := exec.LookPath("python3"); err != nil {
+		t.Skip("python3 not available; local-audio handler contract needs a real interpreter")
+	}
+	directory := t.TempDir()
+	audioPath := filepath.Join(directory, "voice.oga")
+	if err := os.WriteFile(audioPath, []byte("OggS-local"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	handler := filepath.Join(directory, "handler.py")
+	const script = `import json, os, sys
+print(json.dumps({"path": os.environ.get("C3_STT_LOCAL_FILE"), "stdin": sys.stdin.readline()}))
+`
+	if err := os.WriteFile(handler, []byte(script), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	host := &fakeHost{
+		cfg:     Config{Enabled: true, HandlerPath: handler, Timeout: 5},
+		channel: &localAudioChannel{path: audioPath},
+	}
+	if err := Register(host); err != nil {
+		t.Fatal(err)
+	}
+	transcript, err := host.voiceCallback(context.Background(), c3types.VoicePayload{
+		Channel: "web", ChatID: 42, MessageID: 7, FileID: "local-file", Size: 10,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var seen struct {
+		Path  string `json:"path"`
+		Stdin string `json:"stdin"`
+	}
+	if err := json.Unmarshal([]byte(transcript), &seen); err != nil {
+		t.Fatalf("handler output %q: %v", transcript, err)
+	}
+	if seen.Path != audioPath || seen.Stdin != "\n" {
+		t.Fatalf("local handler saw path/stdin=%q/%q, want %q/newline", seen.Path, seen.Stdin, audioPath)
 	}
 }
 
@@ -197,7 +250,7 @@ func TestRunHandler_DeadlineKillsGrandchild(t *testing.T) {
 	start := time.Now()
 	// Returns once the deadline kills the handler (group-killed; WaitDelay
 	// backstops any inherited-pipe hang). We only care about the side effect.
-	_, _ = h.voiceCallback(context.Background(), c3types.VoicePayload{MessageID: 1})
+	_, _ = h.voiceCallback(context.Background(), c3types.VoicePayload{Channel: "telegram", MessageID: 1})
 
 	// Sanity: the handler actually ran (else the test would pass vacuously).
 	if _, err := os.Stat(started); err != nil {
