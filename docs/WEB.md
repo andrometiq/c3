@@ -131,6 +131,9 @@ loopback HTTP listener.
 
 ## Transport behavior and limitations
 
+On a physical keyboard, Enter sends and Shift+Enter inserts a line break; on
+touch devices Enter keeps inserting a newline and the **Send** button sends.
+
 Browser input is accepted synchronously by `POST /send`. A `202` means “sent”:
 the broker accepted it onto the route worker queue, not that it is already on
 disk. A broker crash in the short interval before the worker appends can lose

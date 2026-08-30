@@ -207,6 +207,15 @@
     counter.textContent = length + ' / 16000';
   });
 
+  input.addEventListener('keydown', event => {
+    // Enter sends and Shift+Enter breaks the line on a physical keyboard; touch devices keep
+    // Enter as a newline (no reliable Shift there) and send with the button.
+    if (event.key !== 'Enter' || event.shiftKey || event.isComposing) return;
+    if (window.matchMedia('(pointer: coarse)').matches) return;
+    event.preventDefault();
+    if (input.value.trim()) composer.requestSubmit();
+  });
+
   function renderOwn(data) {
     const pending = pendingRows.get(data.client_id || '');
     if (pending) {
