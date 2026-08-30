@@ -3,6 +3,27 @@
 Entries are newest first. This is the public architecture record: it records
 rulings and rationale, never private operational details.
 
+## D024: Hands-free uses local energy VAD; the web app caches nothing
+
+**Date:** 2026-08-30
+
+**Decision:** The foreground hands-free web mode uses the browser's Web Audio
+analyser for adaptive, speech-band energy VAD instead of a WASM voice model.
+Spoken replies use the media element's direct output; they are not captured
+through the analyser's AudioContext, so playback-floor calibration observes
+only loudspeaker sound returned through the microphone and is best-effort.
+The installable web app's service worker performs install and activation only;
+it has no fetch handler and caches no responses.
+
+**Why:** The page CSP forbids external and WASM code, while the v1 environment
+is explicitly a screen-on phone in a cradle or on loudspeaker, where a tuned
+energy detector and echo-aware barge-in are sufficient. Authentication pages,
+session-bound responses, synthesized audio, and the live SSE stream must always
+reach the broker; service-worker interception would add stale-auth and broken-
+stream failure modes without supplying background audio on iOS. Some WebKit/iOS
+versions silence a media element after `createMediaElementSource`, so direct
+playback is more important than tighter analyzer/playback coupling.
+
 ## D022: On-the-go mode uses attach plus shared protocol text
 
 **Date:** 2026-08-30

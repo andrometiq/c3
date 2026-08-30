@@ -37,7 +37,8 @@ const (
 var errUnsupported = errors.New("web: operation unsupported")
 
 //go:generate ffmpeg -hide_banner -loglevel error -y -f lavfi -i anullsrc=r=24000:cl=mono -t 0.3 -codec:a libmp3lame -b:a 24k -write_xing 0 -id3v2_version 0 unlock.mp3
-//go:embed *.html unlock.mp3
+//go:generate go run ./internal/genicon
+//go:embed *.html *.js *.png *.svg *.webmanifest unlock.mp3
 var pages embed.FS
 
 // Config is the channels.web stanza.

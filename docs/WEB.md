@@ -118,6 +118,25 @@ Tailnets that issue certificates can instead keep C3 on loopback and use
 Tailscale Serve as the HTTPS terminator. Set Serve's `*.ts.net` origin as
 `public_url`, leave `tls` off, and keep Funnel off.
 
+## Install as an app
+
+Sign in first, open `/`, then install from that page so the app's start URL is
+the chat root. On Android, use Chrome's menu and choose **Add to Home screen**.
+On iOS, use Safari's **Share** menu and choose **Add to Home Screen**. iOS
+ignores the SVG app icon, so C3 also serves the required 180×180 PNG touch icon.
+
+The installed app has its own cookie jar. Open a fresh Telegram magic link
+inside the installed app and sign in there again; signing in in an ordinary
+browser tab does not authenticate the installed copy. While Voice or
+Hands-free is on, C3 requests a screen wake lock and re-acquires it after the
+page becomes visible or the browser releases it. Unsupported browsers simply
+continue without a wake lock.
+
+The v1 mobile boundary is foreground-only: keep the installed app visible and
+the phone screen on, in a cradle or on loudspeaker. The wake lock supports that
+pattern but does not make iOS background audio work; iOS suspends microphone
+and Web Audio capture when the app is backgrounded or the screen locks.
+
 ## Security model (T1–T18)
 
 1. The send body contains only `text` and `client_id`. C3 rejects extra JSON and
@@ -236,6 +255,56 @@ supported lock screens. Synthesized MP3 is memory-only: audio URLs expire after
 replayed after an SSE reconnect. Text delivery never waits for or fails with
 TTS; a provider failure produces at most one short live notice per minute.
 
+## Hands-free
+
+The header's **🎙 Hands-free** button turns on Voice, unlocks playback in the
+same tap, asks for microphone permission once, and then holds that microphone
+open until Hands-free is turned off. A text-and-icon pill shows the complete
+turn loop: **listening → recording → sending → thinking → speaking →
+listening**. Turning Hands-free off stops capture and playback and releases the
+microphone. Moving the app to the background pauses voice detection; if that
+happens during a recording, the page finishes and uploads the utterance first.
+
+| State | Entry action | Exits |
+| --- | --- | --- |
+| `idle` | Hands-free is off and the microphone is released. | Enabling Hands-free opens the microphone and enters `listening`, or `speaking` if a reply is already playing or queued. |
+| `listening` | VAD follows the ambient floor and arms capture. Tracking for a recent reply is retained for its 90-second late-audio window. | Speech enters `recording`; matching late audio enters `speaking`; disabling enters `idle`; reconnecting with an unanswered inbound id returns to `thinking`. |
+| `recording` | A recorder captures the continuously delayed microphone stream. | Hangover, the 60-second cap, or hiding the page stops after 300 ms and enters `sending`; a short utterance returns to `listening`. |
+| `sending` | The captured blob uploads with its client id. All attempts share a 60-second deadline. | Acceptance records the inbound message id and enters `thinking`; failure or deadline expiry marks the bubble **not sent**, sounds the error cue, and enters `listening`. Push-to-talk uploads retain their normal retry policy. |
+| `thinking` | The 90-second reply cap runs. The first live, non-replayed agent message with no `reply_to` or one matching the inbound id becomes the active reply; a different non-zero `reply_to` is ignored. Its 10-second audio wait is refreshed by typing. Transient SSE errors retain both ids; a reconnect restores this state while the inbound id is still awaited. | Audio for the active reply enters `speaking`; the audio wait, reply cap, or a closed SSE stream enters `listening`; disabling enters `idle`. `own`, `status`, `typing`, replayed, and unrelated message events do not select a reply. |
+| `speaking` | Reply audio plays while VAD calibrates for barge-in. | Playback completion enters `listening`; confirmed speech enters `recording`; disabling enters `idle`. |
+
+The dependency-free VAD samples the microphone every 50 ms. It removes each
+block's mean, then estimates speech-band RMS by scaling that time-domain RMS by
+the square root of the 300–3400 Hz fraction of FFT power. The thresholds
+therefore remain calibrated in time-domain RMS units while rumble and
+out-of-band hiss are suppressed. An adaptive ambient-noise floor is used.
+Speech starts after two samples above
+`max(noise × 2.5, 0.012)`, ends after 900 ms below
+`max(noise × 1.8, 0.008)`, discards speech shorter than 280 ms, and caps an
+utterance at 60 seconds. A continuously live 300 ms delay supplies pre-roll;
+the recorder continues for another 300 ms after the end hangover. These
+thresholds are tuned for a foregrounded phone in a cradle or on loudspeaker,
+not a pocket or a screen-off session.
+
+While a reply is speaking, VAD ignores its first 400 ms to sample a playback
+floor from the microphone alone, then requires 400 ms above
+`max(playback × 8, 0.07)` to barge in. Spoken replies stay on the browser's
+ordinary `<audio>` output and are deliberately not captured into the Web Audio
+graph: capturing a media element can silence it on WebKit/iOS. A successful
+barge-in stops and marks the reply **interrupted**, rejects later audio chunks
+for it, removes the first 200 ms of loudspeaker leakage from the next capture,
+and starts recording. Microphone-only playback-floor calibration is
+best-effort, especially on iOS, whose echo cancellation is weaker than
+Chromium's. The armed cue is a short 880 Hz tone; captured/sending uses two
+rising 660/880 Hz tones; errors use a low 220 Hz tone. Earcons are quiet, use a
+5 ms attack ramp, and mute VAD for 200 ms after each cue finishes.
+
+If road noise or loudspeaker leakage repeatedly starts capture at the wrong
+time, turn Hands-free off and use the push-to-talk microphone button. Loss of
+the microphone or denied permission is reported under the conversation; fix
+the browser permission and tap Hands-free again.
+
 Web state lives in `$XDG_STATE_HOME/c3/web/`, or
 `~/.local/state/c3/web/` when `XDG_STATE_HOME` is unset. The directory is mode
 0700. `sessions.json` stores hard floors for the next reply, inbound, and SSE
@@ -277,9 +346,25 @@ the live audio event and play each spoken reply.
   retry and verify it keeps one message id.
 - Grant microphone permission, record a voice note, and confirm its transcript
   edits the same `🎤` row. On iOS, verify the `audio/mp4` recorder path.
+- Install from `/` after login on Android and iOS; open a fresh magic link
+  inside the installed app and verify its separate cookie jar signs in.
 - Enable spoken replies with one tap, hear a reply, then exercise Stop, Replay,
   and lock-screen media controls. Reconnect SSE and confirm old audio is not
   replayed.
+- Enable Hands-free with one tap and complete a full
+  listening→recording→sending→thinking→speaking turn with the phone foregrounded
+  in a cradle. Verify the wake lock survives a visibility change and its own
+  release event.
+- Speak over TTS after its 400 ms calibration window; confirm playback is
+  marked **interrupted**, no later chunk for that reply plays, and the new
+  utterance keeps its opening word. Repeat on iOS and record any self-barge-in
+  caused by weaker echo cancellation.
+- Background the page while listening and confirm VAD pauses without releasing
+  the mic; background it while recording and confirm the finished clip uploads.
+  End the microphone track and confirm the loss message and idle state.
+- Hold `/voice-note` requests in a network failure. Confirm a Hands-free bubble
+  becomes **not sent**, sounds the error cue, and returns to listening 60 seconds
+  after its first attempt; confirm push-to-talk continues its existing retries.
 - Trigger typing, an edit, a held notice, and a permission notice; verify their
   distinct page treatments and that permission still waits at the laptop.
 - Reconnect with an old Last-Event-ID and verify **history may be incomplete**.
