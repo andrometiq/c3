@@ -17,14 +17,18 @@ type clientMessageKey struct {
 }
 
 type clientMessage struct {
-	mu        sync.Mutex
-	messageID int64
-	textHash  [32]byte
-	status    int
-	created   time.Time
+	mu            sync.Mutex
+	messageID     int64
+	textHash      [32]byte
+	kind          string
+	status        int
+	created       time.Time
+	voiceFileID   string
+	voiceSize     int64
+	voiceDuration float64
 }
 
-var errClientIDConflict = errors.New("client_id was already used for different text")
+var errClientIDConflict = errors.New("client_id was already used for different content")
 
 // acceptInbound serializes one client id across retries and stamps every trust-
 // boundary field from the authenticated session and channel config.
@@ -54,7 +58,7 @@ func (c *Channel) acceptInbound(sessionID string, current session, text, clientI
 	}
 
 	record.mu.Lock()
-	if record.textHash != hash {
+	if record.kind != "" || record.textHash != hash {
 		record.mu.Unlock()
 		if pruned {
 			c.persistSessions("stale client-message pruning")
@@ -97,7 +101,7 @@ func (c *Channel) acceptInbound(sessionID string, current session, text, clientI
 				MessageID: record.messageID,
 				ClientID:  clientID,
 				Text:      inbound.Text,
-				Timestamp: inbound.Timestamp,
+				Timestamp: streamTimestamp(inbound.Timestamp),
 			},
 		})
 		return record.messageID, http.StatusAccepted, nil

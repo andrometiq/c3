@@ -67,7 +67,7 @@ func TestPersistenceRoundTrip(t *testing.T) {
 	first.publish(streamEvent{
 		kind: "own",
 		payload: streamPayload{
-			MessageID: 99, ClientID: "persist-own", Text: "browser question", Timestamp: first.now(),
+			MessageID: 99, ClientID: "persist-own", Text: "browser question", Timestamp: streamTimestamp(first.now()),
 		},
 	})
 	if first.nextEventID != 4 {
@@ -109,7 +109,7 @@ func TestPersistenceRoundTrip(t *testing.T) {
 	resumed, resumedCancel, resumedDone := startSSE(second, cookie, "4", "")
 	waitFor(t, func() bool { return streamCount(second) == 1 })
 	_, resumedBody := resumed.snapshot()
-	if strings.Contains(resumedBody, "event:") || strings.Contains(resumedBody, "history may be incomplete") {
+	if !strings.Contains(resumedBody, "event: prefs") || strings.Contains(resumedBody, "event: message") || strings.Contains(resumedBody, "event: own") || strings.Contains(resumedBody, "event: edit") || strings.Contains(resumedBody, "history may be incomplete") {
 		t.Fatalf("Last-Event-ID at ring tip replayed data: %q", resumedBody)
 	}
 	resumedCancel()

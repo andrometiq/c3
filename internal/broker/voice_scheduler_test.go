@@ -106,6 +106,35 @@ func schedulerVoice(messageID int64, fileID string) (RouteKey, c3types.Inbound, 
 	return route, in, att
 }
 
+type webProbeChannel struct{ *probeChannel }
+
+func (*webProbeChannel) Name() string { return "web" }
+
+func TestVoiceSchedulerNonTelegramSkipsGetFileProbe(t *testing.T) {
+	b, scheduler, _ := schedulerHarness(t)
+	probe := &webProbeChannel{probeChannel: &probeChannel{fakeChannel: &fakeChannel{}, size: 999}}
+	b.chMu.Lock()
+	b.channels["web"] = &channelRegistration{Channel: probe}
+	b.chMu.Unlock()
+	var payload c3types.VoicePayload
+	b.Plugins.OnVoiceReceived(func(_ context.Context, current c3types.VoicePayload) (string, error) {
+		payload = current
+		return "local transcript", nil
+	})
+	att := c3types.Attachment{Kind: "voice", FileID: "local-id", MIME: "audio/ogg", Size: 123}
+	inbound := c3types.Inbound{Channel: "web", ChatID: 42, MessageID: 8, Attachments: []c3types.Attachment{att}}
+	result := scheduler.transcribe(context.Background(), voiceAttempt{
+		key:     voiceScheduleKey{route: MakeRouteKey("web", 42, nil), messageID: 8, fileID: att.FileID},
+		inbound: inbound, attachment: att,
+	})
+	if probe.calls.Load() != 0 {
+		t.Fatalf("non-telegram transcription made %d getFile probe(s), want zero", probe.calls.Load())
+	}
+	if !result.success || payload.Size != att.Size || payload.Channel != "web" {
+		t.Fatalf("result/payload=%+v/%+v", result, payload)
+	}
+}
+
 func schedulerCompletingSubmit(s *VoiceScheduler, jobs chan<- *ResolveVoiceJob) func(RouteKey, Job) bool {
 	return func(_ RouteKey, wrapped Job) bool {
 		job := wrapped.ResolveVoice

@@ -32,6 +32,8 @@ type fakeHost struct {
 	queuedMax       int64
 	queuedErr       error
 	loginDeliveries int
+	synthesize      func(context.Context, c3types.SpeechRequest) (c3types.SpeechResult, error)
+	synthCalls      int
 	done            chan struct{}
 }
 
@@ -97,6 +99,23 @@ func (host *fakeHost) SendWebLoginLink(requestedBy string) (bool, error) {
 	}
 	host.loginDeliveries++
 	return true, nil
+}
+
+func (host *fakeHost) Synthesize(ctx context.Context, request c3types.SpeechRequest) (c3types.SpeechResult, error) {
+	host.mu.Lock()
+	host.synthCalls++
+	fn := host.synthesize
+	host.mu.Unlock()
+	if fn == nil {
+		return c3types.SpeechResult{}, c3types.ErrNoSynthesizer
+	}
+	return fn(ctx, request)
+}
+
+func (host *fakeHost) synthCallCount() int {
+	host.mu.Lock()
+	defer host.mu.Unlock()
+	return host.synthCalls
 }
 
 func (host *fakeHost) emittedSnapshot() []*c3types.Inbound {
@@ -383,6 +402,8 @@ func TestFailedAuthDelayIsCapped(t *testing.T) {
 
 func TestSessionCookieAttributes(t *testing.T) {
 	c, _, _ := newHandlerChannel()
+	now := time.Date(2026, time.August, 30, 12, 0, 0, 0, time.UTC)
+	c.now = func() time.Time { return now }
 	for _, test := range []struct {
 		name      string
 		publicURL string
@@ -402,8 +423,11 @@ func TestSessionCookieAttributes(t *testing.T) {
 			w := httptest.NewRecorder()
 			c.setSessionCookie(w, r, "id")
 			cookie := w.Result().Cookies()[0]
-			if !cookie.HttpOnly || cookie.SameSite != http.SameSiteLaxMode || cookie.Path != "/" || cookie.Secure != test.secure {
+			if !cookie.HttpOnly || cookie.SameSite != http.SameSiteLaxMode || cookie.Path != "/" || cookie.Secure != test.secure || cookie.MaxAge != 86400 || !cookie.Expires.Equal(now.Add(sessionIdleTTL)) {
 				t.Fatalf("cookie=%+v", cookie)
+			}
+			if header := w.Header().Get("Set-Cookie"); !strings.Contains(header, "Max-Age=86400") {
+				t.Fatalf("Set-Cookie=%q, want Max-Age=86400", header)
 			}
 		})
 	}
@@ -944,6 +968,10 @@ func TestEmbeddedPagesAreSelfContainedAndUseTextContent(t *testing.T) {
 		"createElement('table')", "createElement('blockquote')", "createElement('span')",
 		"setAttribute('aria-label', 'spoiler')", "console.error('web: markdown render failed'",
 		"let detached = false", "detached ? 'no session attached — reconnected'", "detached = false",
+		"navigator.mediaDevices", "MediaRecorder", "navigator.mediaSession", "/voice-note", "/audio/",
+		"Date.now() - Number(next.queuedAt || 0) < 2000", "item.queuedAt = Date.now()",
+		"aria-label=\"Stop spoken reply\"", "aria-label=\"Replay last spoken reply\"",
+		"#stop-audio::before", "#replay-audio::before", "text-overflow: ellipsis",
 	} {
 		if !strings.Contains(pageText, marker) {
 			t.Fatalf("page is missing renderer/state marker %q", marker)
@@ -959,6 +987,9 @@ func TestPageHeadersDenyFraming(t *testing.T) {
 	setPageHeaders(w)
 	if got := w.Header().Get("X-Frame-Options"); got != "DENY" {
 		t.Fatalf("X-Frame-Options=%q, want DENY", got)
+	}
+	if csp := w.Header().Get("Content-Security-Policy"); !strings.Contains(csp, "media-src 'self'") {
+		t.Fatalf("CSP=%q, want same-origin media", csp)
 	}
 }
 

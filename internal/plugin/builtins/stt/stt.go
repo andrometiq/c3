@@ -35,6 +35,7 @@ import (
 	"time"
 
 	"github.com/Andrometiq/c3/internal/c3types"
+	"github.com/Andrometiq/c3/internal/channel"
 	"github.com/Andrometiq/c3/internal/plugin"
 	"github.com/Andrometiq/c3/internal/updater"
 )
@@ -233,12 +234,26 @@ func Register(host plugin.Host) error {
 			host.Logf("stt: msg=%d handler missing at %s (%v)", p.MessageID, cfg.HandlerPath, err)
 			return sttFailureMarker("handler_missing"), nil
 		}
+		if p.Channel != "telegram" {
+			registered, err := host.Channel(p.Channel)
+			provider, ok := registered.(channel.LocalAudioProvider)
+			if err != nil || !ok {
+				host.Logf("stt: local audio unavailable for channel=%s msg=%d", p.Channel, p.MessageID)
+				return sttFailureMarker("local_audio_unavailable"), nil
+			}
+			path, err := provider.LocalAudioPath(p.FileID)
+			if err != nil || path == "" {
+				host.Logf("stt: local audio unavailable for channel=%s msg=%d file_id=%s: %v", p.Channel, p.MessageID, p.FileID, err)
+				return sttFailureMarker("local_audio_unavailable"), nil
+			}
+			return runHandler(ctx, host, cfg, "", "", false, path, p)
+		}
 		token, apiBaseURL, answered, err := readTelegramConn(host)
 		if err != nil {
 			host.Logf("stt: token read failed for msg=%d: %v", p.MessageID, err)
 			return sttFailureMarker("token_unavailable"), nil
 		}
-		return runHandler(ctx, host, cfg, token, apiBaseURL, answered, p)
+		return runHandler(ctx, host, cfg, token, apiBaseURL, answered, "", p)
 	})
 	return nil
 }
@@ -369,7 +384,7 @@ func sttLogHintPath() string {
 	return filepath.Join(state, "c3", "broker.log")
 }
 
-func runHandler(ctx context.Context, host plugin.Host, cfg Config, token, apiBaseURL string, apiBaseAnswered bool, p c3types.VoicePayload) (string, error) {
+func runHandler(ctx context.Context, host plugin.Host, cfg Config, token, apiBaseURL string, apiBaseAnswered bool, localAudioPath string, p c3types.VoicePayload) (string, error) {
 	// argv: <chat_id> <msg_id> <file_id> [<thread_id>]
 	// token is fed via stdin (see package doc).
 	args := []string{
@@ -403,6 +418,9 @@ func runHandler(ctx context.Context, host plugin.Host, cfg Config, token, apiBas
 	// terminates the process; the handler never receives an empty nonce.
 	nonce := newFetchNonce()
 	cmd.Env = handlerEnv(apiBaseURL, apiBaseAnswered, nonce, cfg.AudioRetention, int(timeout.Seconds()))
+	if localAudioPath != "" {
+		cmd.Env = append(cmd.Env, localAudioEnvVar+"="+localAudioPath)
+	}
 
 	// I-7: kill the whole process group on the ctx deadline, not just the direct
 	// child. Setpgid makes stt-handler.py the leader of its OWN process group, so
@@ -550,6 +568,13 @@ func readTelegramConn(host plugin.Host) (token, apiBaseURL string, answered bool
 // that is the pre-existing behavior for a transport with no live accessor.
 func handlerEnv(base string, answered bool, nonce string, retention int, deadlineSecs int) []string {
 	env := os.Environ()
+	kept := env[:0]
+	for _, kv := range env {
+		if !strings.HasPrefix(kv, localAudioEnvVar+"=") {
+			kept = append(kept, kv)
+		}
+	}
+	env = kept
 	// A base is installed whenever we HAVE one — whether the live channel gave
 	// it or readTelegramConn resolved it from env/mappings. Gating the install on
 	// `answered` dropped the configured api_base_url for any transport without a
@@ -580,6 +605,10 @@ func handlerEnv(base string, answered bool, nonce string, retention int, deadlin
 
 // apiURLEnvVar is the variable stt-handler.py reads its Bot-API base from.
 const apiURLEnvVar = "C3_TELEGRAM_API_URL"
+
+// localAudioEnvVar tells the bundled handler to copy a channel-owned local OGG
+// file instead of calling Telegram getFile.
+const localAudioEnvVar = "C3_STT_LOCAL_FILE"
 
 // ensureSTTDefaultDirs creates the default handler-side log and inbox
 // directories at broker startup. The Python handler also mkdir's these

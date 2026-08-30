@@ -188,6 +188,67 @@ class TestMainDownloadTerminalFailureExits(unittest.TestCase):
         self.assertEqual(len(download_calls), 1)
 
 
+class TestMainLocalAudio(unittest.TestCase):
+    def setUp(self):
+        self.handler = load_handler()
+        self.tmp = tempfile.mkdtemp(prefix="c3-stt-local-")
+        self._saved_inbox = self.handler.INBOX_DIR
+        self.handler.INBOX_DIR = os.path.join(self.tmp, "inbox")
+        os.makedirs(self.handler.INBOX_DIR)
+
+    def tearDown(self):
+        self.handler.INBOX_DIR = self._saved_inbox
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_local_file_is_copied_and_telegram_download_is_skipped(self):
+        from unittest import mock
+        import io
+
+        source = os.path.join(self.tmp, "source.oga")
+        with open(source, "wb") as file:
+            file.write(b"OggS-local-audio")
+
+        download = mock.Mock(side_effect=AssertionError("download_file must not run"))
+        with mock.patch.dict(os.environ, {"C3_STT_LOCAL_FILE": source}, clear=False), \
+             mock.patch.object(self.handler, "download_file", download), \
+             mock.patch.object(self.handler, "run_stt", return_value="local transcript"), \
+             mock.patch.object(sys, "argv", ["stt-handler.py", "42", "9", "LOCALID", ""]), \
+             mock.patch.object(sys, "stdin", io.StringIO("\n")):
+            self.handler.main()
+
+        download.assert_not_called()
+        copied = [name for name in os.listdir(self.handler.INBOX_DIR)
+                  if name.endswith("-LOCALID.oga")]
+        self.assertEqual(len(copied), 1)
+        with open(os.path.join(self.handler.INBOX_DIR, copied[0]), "rb") as file:
+            self.assertEqual(file.read(), b"OggS-local-audio")
+
+    def test_local_symlink_is_refused_with_empty_stdout(self):
+        from unittest import mock
+        import io
+
+        source = os.path.join(self.tmp, "source.oga")
+        link = os.path.join(self.tmp, "link.oga")
+        with open(source, "wb") as file:
+            file.write(b"must-not-copy")
+        os.symlink(source, link)
+
+        stdout = io.StringIO()
+        with mock.patch.dict(os.environ, {"C3_STT_LOCAL_FILE": link}, clear=False), \
+             mock.patch.object(sys, "argv", ["stt-handler.py", "42", "9", "LOCALID", ""]), \
+             mock.patch.object(sys, "stdin", io.StringIO("\n")), \
+             mock.patch.object(sys, "stdout", stdout), \
+             self.assertLogs(level="ERROR") as logs:
+            with self.assertRaises(SystemExit) as ctx:
+                self.handler.main()
+
+        self.assertEqual(ctx.exception.code, 1)
+        self.assertEqual(stdout.getvalue(), "")
+        self.assertEqual(len(logs.output), 1)
+        self.assertIn("C3_STT_LOCAL_FILE is not a regular file", logs.output[0])
+        self.assertEqual(os.listdir(self.handler.INBOX_DIR), [])
+
+
 class TestPruneInbox(unittest.TestCase):
     """The rolling-window audio cache (replaces the old delete-immediately):
     prune_inbox(keep_n) keeps the newest keep_n .oga files in INBOX_DIR and

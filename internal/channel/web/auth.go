@@ -27,6 +27,7 @@ type session struct {
 	created       time.Time
 	lastSeen      time.Time
 	savedLastSeen time.Time
+	voice         bool
 }
 
 func randomID() (string, error) {
@@ -186,6 +187,7 @@ func (c *Channel) setSessionCookie(w http.ResponseWriter, r *http.Request, id st
 	http.SetCookie(w, &http.Cookie{
 		Name: sessionCookieName, Value: id, Path: "/", HttpOnly: true,
 		SameSite: http.SameSiteLaxMode, Secure: r.TLS != nil || strings.HasPrefix(c.cfg.PublicURL, "https://"),
+		MaxAge: int(sessionIdleTTL / time.Second), Expires: c.now().Add(sessionIdleTTL),
 	})
 }
 

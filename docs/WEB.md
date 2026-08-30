@@ -1,6 +1,6 @@
 # Web channel
 
-The phase-1 `web` channel is a small, private text chat served by the broker. It
+The `web` channel is a small, private chat served by the broker. It
 runs beside Telegram, gives the configured operator one browser conversation,
 and drives the CLI session that has claimed the `(web, operator user id, no
 topic)` route. It has no external resources or build step.
@@ -110,13 +110,15 @@ Tailscale Serve as the HTTPS terminator. Set Serve's `*.ts.net` origin as
    only the operator's Continue POST can consume it.
 4. Browser sessions use random HttpOnly, SameSite=Lax cookies and idle out after
    24 hours. Only each cookie's SHA-256 hash is persisted; the raw credential
-   exists only in the browser. Secure is set for TLS or an HTTPS public URL.
+   exists only in the browser. The cookie lasts for the same idle window across
+   browser restarts. Secure is set for TLS or an HTTPS public URL.
 5. Authentication, send, logout, and fresh-link POSTs require same-origin
    evidence. SSE requires the cookie and refuses an explicitly foreign Origin.
    No route sends CORS headers.
 6. The default listener is loopback. HTTP headers and idle connections have
-   timeouts, POST bodies are capped at 64 KiB, and SSE has no server-wide write
-   timeout. `/healthz` reveals only that the listener exists.
+   timeouts, ordinary POST bodies are capped at 64 KiB, voice-note bodies at
+   12 MiB, and SSE has no server-wide write timeout. `/healthz` reveals only
+   that the listener exists.
 7. The fresh-link endpoint always targets the configured operator, is debounced
    to one per minute and five per hour, and labels the Telegram DM as requested
    from the login page.
@@ -127,7 +129,10 @@ Tailscale Serve as the HTTPS terminator. Set Serve's `*.ts.net` origin as
 10. Web never reads the Telegram token, poller, or offset store. Telegram is
     registered first and transports cannot replace another registration.
 11. Outbound replies inherit the broker's structural claimed-route check; a
-    tool cannot override the destination with supplied arguments.
+    tool cannot override the destination with supplied arguments. The trusted
+    voice-preference system notice is channel-authored after an authenticated
+    same-origin change and bypasses `GateInbound`, matching the broker's own
+    `broadcastSystemEvent`; browser-authored messages still pass the gate.
 12. The cookie is an **agent-driving credential**: a holder can prompt a CLI
     whose tools act on the laptop. Copying the web state files does not supply
     that credential. The surface is tailnet-private by design, not a public
@@ -174,15 +179,53 @@ horizontal-scroll wrapper. Link targets are created only for
 `http:`, `https:`, `mailto:`, and `tel:` schemes. Operator messages and status
 notices remain literal text with line breaks.
 
+## Voice
+
+The microphone button is a push-to-talk toggle: tap once to record and again
+to stop. Recordings stop automatically after five minutes; clips shorter than
+400 ms are discarded, and uploads over 12 MiB are refused. Chrome and Android
+normally produce WebM/Opus, while iOS commonly produces `audio/mp4` with AAC.
+The channel accepts browser `audio/*` input and transcodes it at the HTTP edge
+with ffmpeg to 48 kHz mono OGG/Opus before it enters the existing STT chain.
+The original browser file is deleted after conversion. After origin and
+authentication, `/voice-note` checks content type, size, then client-id
+idempotency; a conflicting client id sent with a bad content type therefore
+returns 415 rather than 409.
+
+Converted voice notes live under the web state directory in `voice/`, mode
+0600, with the newest 200 retained. Their channel-minted file ids continue to
+work with `retranscribe` while retained. The optimistic `🎤 Voice note` row is
+persisted like other operator rows; the transcript (or a couldn't-transcribe
+notice) returns as a persisted edit underneath that label. Microphone capture
+requires a secure context, so use the private-CA HTTPS link or loopback
+`http://127.0.0.1`; the page hides the mic and explains the requirement on an
+insecure origin.
+
+The header's 🔊/🔇 control enables spoken agent replies for that browser
+session. The enabling tap first plays the same-origin `/audio/unlock` silence
+clip to satisfy mobile autoplay rules, then persists the preference. Synthesis
+can incur provider cost and runs only while at least one web session has spoken
+replies enabled and a connected SSE stream. Web leaves the speech language
+automatic; the web mapping accepts no voice-language key.
+
+Replies play in arrival order through one reusable player. **Stop** ends the
+current queue and **Replay** repeats the last reply. Browser media-session
+controls expose play, pause, stop, replay-last, and replay-previous actions on
+supported lock screens. Synthesized MP3 is memory-only: audio URLs expire after
+15 minutes, are not written to replay history or `sessions.json`, and are not
+replayed after an SSE reconnect. Text delivery never waits for or fails with
+TTS; a provider failure produces at most one short live notice per minute.
+
 Web state lives in `$XDG_STATE_HOME/c3/web/`, or
 `~/.local/state/c3/web/` when `XDG_STATE_HOME` is unset. The directory is mode
 0700. `sessions.json` stores hard floors for the next reply, inbound, and SSE
-event ids alongside sessions and client-message outcomes. `sessions.json` and
+event ids alongside sessions, each session's spoken-reply preference, and
+client-message outcomes. `sessions.json` and
 the append-only `replay.jsonl` are mode 0600 and are
 updated with fsync-backed atomic state writes or fsynced replay appends. Browser
-sessions survive restart for the remainder of their 24-hour idle window, as do
-recent client-id outcomes and the replay ring. Ten-minute login links, typing,
-and status notices do not survive restart.
+sessions and their cookies survive broker and browser restarts for the remainder
+of their 24-hour idle window, as do recent client-id outcomes and the replay
+ring. Ten-minute login links, typing, and status notices do not survive restart.
 
 When the broker holds a message because no CLI owns the web route, the page
 changes its connection label to **no session attached**. A later reply, edit,
@@ -193,9 +236,12 @@ store; Telegram's in-app browser may still reject it. A changed tailnet IP
 requires a config update and restart so the leaf SANs can be reissued, but does
 not require reinstalling the CA.
 
-Other current limits: there is one web conversation per operator; text only
-(no media, polls, reactions, buttons, or remote permission verdicts); and a CLI
-session can claim only one Telegram or web route at once.
+Other current limits: there is one web conversation per operator; voice notes
+are the only inbound media (no files, photos, polls, reactions, buttons, or
+remote permission verdicts); and a CLI session can claim only one Telegram or
+web route at once. Synthesized audio is intentionally transient rather than
+conversation history. Two open tabs sharing one browser session both receive
+the live audio event and play each spoken reply.
 
 ## Phone verification checklist
 
@@ -209,6 +255,11 @@ session can claim only one Telegram or web route at once.
 - Confirm the page says connected and replies arrive incrementally over SSE.
 - Send text and verify the attached CLI receives one `<channel>` turn; force one
   retry and verify it keeps one message id.
+- Grant microphone permission, record a voice note, and confirm its transcript
+  edits the same `🎤` row. On iOS, verify the `audio/mp4` recorder path.
+- Enable spoken replies with one tap, hear a reply, then exercise Stop, Replay,
+  and lock-screen media controls. Reconnect SSE and confirm old audio is not
+  replayed.
 - Trigger typing, an edit, a held notice, and a permission notice; verify their
   distinct page treatments and that permission still waits at the laptop.
 - Reconnect with an old Last-Event-ID and verify **history may be incomplete**.

@@ -21,6 +21,10 @@ func (c *Channel) routes() http.Handler {
 	mux.HandleFunc("POST /logout", c.handleLogout)
 	mux.HandleFunc("GET /events", c.handleEvents)
 	mux.HandleFunc("POST /send", c.handleSend)
+	mux.HandleFunc("POST /voice-note", c.handleVoiceNote)
+	mux.HandleFunc("POST /voice", c.handleVoicePreference)
+	mux.HandleFunc("GET /audio/unlock", c.handleAudioUnlock)
+	mux.HandleFunc("GET /audio/{token}", c.handleAudio)
 	mux.HandleFunc("GET /healthz", c.handleHealth)
 	mux.HandleFunc("GET /ca.crt", c.handleCACertificate)
 	return mux
@@ -78,7 +82,7 @@ func setPageHeaders(w http.ResponseWriter) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("X-Frame-Options", "DENY")
-	w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; img-src 'none'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'")
+	w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; media-src 'self'; img-src 'none'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'")
 }
 
 func (c *Channel) handleAuth(w http.ResponseWriter, r *http.Request) {
@@ -256,8 +260,15 @@ func (c *Channel) handleEvents(w http.ResponseWriter, r *http.Request) {
 
 	client, replay, incomplete := c.connectStream(sessionID, r.Header.Get("Last-Event-ID"))
 	defer c.removeStream(sessionID, client)
+	c.authMu.Lock()
+	current := c.sessions[sessionID]
+	voice := current != nil && current.voice
+	c.authMu.Unlock()
+	if err := writeSSE(w, streamEvent{kind: "prefs", payload: streamPayload{Voice: &voice}}); err != nil {
+		return
+	}
 	if incomplete {
-		_ = writeSSE(w, streamEvent{kind: "status", payload: streamPayload{Text: "history may be incomplete", Timestamp: c.now()}})
+		_ = writeSSE(w, streamEvent{kind: "status", payload: streamPayload{Text: "history may be incomplete", Timestamp: streamTimestamp(c.now())}})
 	}
 	for _, event := range replay {
 		if err := writeSSE(w, event); err != nil {
