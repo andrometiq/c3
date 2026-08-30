@@ -67,7 +67,9 @@ The first is cleaner; the second is far easier to reason about when it misbehave
 - **Roadmap #14 phases 3b–4 shipped:** per-session spoken web replies with
   transient playback, plus browser voice notes transcoded at the edge into the
   retained OGG/Opus STT path with transcript edits.
-- **Roadmap #14 phase 6 shipped:** manifest-driven spoken-reply guidance, explicit on-the-go trigger protocol, and `/c3:on-the-go` / `/c3:off-the-go` wrappers.
+- **Roadmap #14 phase 6 shipped:** manifest-driven spoken-reply guidance,
+  explicit on-the-go trigger protocol, and `/c3:on-the-go` / `/c3:off-the-go`
+  wrappers.
 - **Roadmap #14 phases 5 and 7 shipped:** foreground hands-free VAD, spoken-turn
   state machine and barge-in, plus the installable PWA shell and screen wake lock.
 - The full rationale and later voice/native directions remain

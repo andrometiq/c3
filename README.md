@@ -300,7 +300,7 @@ only the capabilities that host can actually support, and reconnect after a brok
 Codex's live path adds its launcher and app-server because the app-server — not the TUI —
 owns MCP startup.
 
-**Channels.** Telegram plus the private phase-1 web chat, behind one internal transport interface.
+**Channels.** Telegram plus the private web chat (rich text, voice notes in, spoken replies out, hands-free mode, installable as an app), behind one internal transport interface.
 
 **Plugins.** Built-in Go plugins subscribe to broker hooks. The shipped STT plugin drives a
 bundled Python provider chain; external loadable plugins remain roadmap work.
