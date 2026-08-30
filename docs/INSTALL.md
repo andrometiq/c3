@@ -59,6 +59,7 @@ You need:
   - No model downloads — the four bundled providers are remote APIs.
 
   If you don't need voice, set `mappings.json:plugins.stt.enabled=false` and skip the API keys. You can swap in a custom handler (whisper, local, anything that matches the argv contract) by setting `plugins.stt.handler_path` to your own script — see `docs/PLUGINS.md`.
+- **For voice synthesis (TTS plugin):** `~/.claude/tts.env` is optional. Put `OPENROUTER_API_KEY`, `SARVAM_API_KEY`, and/or `ELEVENLABS_API_KEY` there; any of those three missing from `tts.env` falls back to its existing value in `~/.claude/stt.env`. The plugin does not synthesize during ordinary text delivery in this phase—use `c3-broker tts check` to inspect availability and `c3-broker tts say <text> > reply.mp3` for a local test.
 
 ## Step 1: Install the Claude Code plugin
 

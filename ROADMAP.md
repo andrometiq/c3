@@ -62,8 +62,10 @@ The first is cleaner; the second is far easier to reason about when it misbehave
 - **Web-chat phase 1 shipped:** a real `web` channel, private text page, SSE,
   magic-link auth through the Telegram operator DM, and `attach web` routing.
   See [`docs/WEB.md`](docs/WEB.md).
-- Phases 2–7 remain: reach hardening + persistent sessions/multi-conversation;
-  TTS out; voice in; VAD/barge-in; an explicit on-the-go mode; then PWA and
+- **Roadmap #14 phase 3a shipped:** the bundled TTS synthesizer and local
+  verification CLI; web voice-session wiring follows in the next phase.
+- The remaining phases cover reach hardening + persistent sessions/multi-conversation;
+  voice in; VAD/barge-in; an explicit on-the-go mode; then PWA and
   wake-lock polish. The full rationale and later voice/native directions remain
   in the [on-the-go / voice-channel design capture](docs/future/on-the-go-voice-channel.md).
 - Other transports the interface already admits (Slack, Matrix, …).

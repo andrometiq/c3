@@ -33,7 +33,7 @@ tool finishing, a Telegram tap can still render as effective even though the
 host drops it; only an upstream `permission_resolved` notification can close
 that window.
 
-## D021: Web channel phase 1 contract (D1–D11)
+## D021: Web channel phase 1 and TTS phase 3a contracts
 
 **Date:** 2026-08-30
 
@@ -56,6 +56,14 @@ trust-boundary holes before the HTTP transport lands. The accepted windows are
 explicit: worker-queue acceptance can be lost in a crash before append, browser
 sessions and reply replay are in memory for phase 1, and tool permissions/`ask`
 remain laptop-only.
+
+**TTS phase 3a:** Live provider probes on 2026-08-30 made Sarvam Bulbul v3 and
+ElevenLabs Flash v2.5 the first two defaults: both round-tripped mixed Tamil and
+English through the STT chain word-for-word. Three Gemini preview probes instead
+returned 1.2–2.1-second clips containing only “Hello”, while a plain-English
+probe repeated its first sentence three times and omitted the second; OpenRouter
+also accepted only 24 kHz mono PCM, requiring local MP3 transcoding. Gemini stays
+as the last fallback, and `C3_TTS_CHAIN` remains the explicit order override.
 
 ## D019: dcode adapter — live push via the external-event socket; slash commands as user skills
 

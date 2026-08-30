@@ -1,6 +1,6 @@
 # Writing C3 Plugins
 
-A C3 plugin extends the broker with capabilities that aren't tied to a specific channel or CLI. Speech-to-text is the one shipped example. This document is for plugin authors.
+A C3 plugin extends the broker with capabilities that aren't tied to a specific channel or CLI. Speech-to-text and text-to-speech are the shipped examples. This document is for plugin authors.
 
 If you want to add a new transport (Slack, web chat, voice), you want a **channel** — see `CHANNELS.md`. If you want to bridge a new CLI to C3, you want an **adapter** — see `ADAPTERS.md`.
 
@@ -11,7 +11,7 @@ There are two extension seams here, and they have very different costs.
 | Seam | Posture in v0.1.0 | What it costs you |
 |---|---|---|
 | **Go plugin API** (`plugin.Host`, hooks, config, state) | **In-tree only — you fork the broker.** | Your plugin lives in *your* copy of this repo under `internal/plugin/builtins/<name>/`, you rebuild the broker binary, and you rebase onto every upstream release. You cannot ship your plugin as an independent artifact, and users install your broker rather than C3's. |
-| **STT provider** (a Python file in `plugins/c3/stt/stt-pkg/providers/`) | **Open. Drop-in, no recompile.** | Nothing. It's a data-file change to the Python pipeline. [Contract below](#stt-provider-contract-frozen-for-v010). |
+| **Speech provider** (a Python file in an STT or TTS `providers/` directory) | **Open. Drop-in, no recompile.** | Nothing. It's a data-file change to the Python pipeline. [STT contract below](#stt-provider-contract-frozen-for-v010); the bundled TTS contract is documented in `plugins/c3/tts/tts-pkg/README.md`. |
 
 The reason for the first row is structural, not a policy choice: every Go package in this module lives under `internal/`, so Go's internal-import rule makes `github.com/Andrometiq/c3/internal/plugin` unimportable from any other module. The same is true of the channel and adapter seams. Promoting `plugin`, `c3types`, and `channel` out of `internal/` is on the roadmap; until then, "write a plugin" means "maintain a fork."
 
@@ -19,12 +19,13 @@ If what you want is a new transcription engine, you almost certainly want the ST
 
 ## Hook points — what fires, and what doesn't
 
-`plugin.Host` (`internal/plugin/host.go:18`) declares four callback subscription methods plus the `RegisterTools` registration seam. **Two callbacks are live. Two are declared but never invoked by the broker in v0.1.0.** They remain on the interface, so you will see them if you read `host.go`; this table is the authority on which ones actually run.
+`plugin.Host` (`internal/plugin/host.go:18`) declares four callback subscription methods plus synthesizer and tool registration seams. **Two callbacks are live. Two are declared but never invoked by the broker in v0.1.0.** The synthesizer registration is live through explicit callers. This table is the authority on which paths actually run.
 
 | Hook | Status in v0.1.0 | Semantics |
 |---|---|---|
 | `OnInbound` | **Live** | Called for debounce-merged non-voice inbounds and channel events before routing. Resolved voice rows use the durable voice-delivery path and do not re-enter this transform chain. Return a replacement `*Inbound` to mutate, or `drop=true` to short-circuit the chain and discard the message. |
 | `OnVoiceReceived` | **Live** | Called by the bounded voice scheduler for automatic voice enrichment and manual `retranscribe`. First callback to return a **non-empty string with a nil error** wins; a callback that errors or returns `""` is skipped and the next one runs. |
+| `RegisterSynthesizer` | **Live through explicit callers** | Registers the broker's text-to-speech function. `PluginHost.Synthesize` returns `ErrNoSynthesizer` when none is registered; phase 3a exposes it to the local `tts` CLI, while web wiring follows in the next phase. |
 | `RegisterTools` | **Registers, does not dispatch** | The registry accepts your tool and stores it. Nothing in the broker reads that map, and tool dispatch is a fixed switch. See [Tools](#tools-registered-but-not-dispatched-in-v010). |
 | `OnOutbound` | **Declared, not yet invoked** | The signature and the chain runner (`FireOnOutbound`) exist and are correct, but no broker code path calls them. Outbound messages go straight from `dispatchReply` to the channel. Subscribing succeeds and the callback never runs. |
 | `OnAttach` | **Declared, not yet invoked** | Same: `FireOnAttach` exists, the attach path does not call it. Subscribing succeeds and the callback never runs. |
@@ -234,6 +235,56 @@ consumed while STT ran, the result is an additive transcript-update row rather
 than a rewrite of consumed history.
 
 Note the chain consequence: because the marker is a **non-empty string returned with a nil error**, it wins `FireOnVoiceReceived` and any `OnVoiceReceived` callback registered after STT will not run on that message. If you are writing a second voice plugin, register it *before* STT in `builtinPlugins`.
+
+## TTS
+
+The bundled TTS plugin is a Go shim at `internal/plugin/builtins/tts/` plus a
+stdlib-only Python runtime at `plugins/c3/tts/`. It reads this optional config:
+
+```json
+{
+  "plugins": {
+    "tts": {
+      "enabled": true,
+      "handler_path": "/path/to/plugins/c3/tts/tts-handler.py",
+      "timeout_seconds": 120,
+      "python": "python3",
+      "chain": "sarvam-bulbul-v3,elevenlabs-flash-v25,openrouter-gemini-tts",
+      "language": "auto"
+    }
+  }
+}
+```
+
+The handler contract is:
+
+```text
+stdin:   the whole UTF-8 text to speak, including multi-line Markdown
+argv:    <python> <handler_path> [--language <ta|en|…>] [--chain a,b,c]
+         [--check] [--out <path>]
+env:     C3_TTS_CHAIN=<comma list>
+         C3_TTS_DEADLINE_SECONDS=<overall seconds>
+         TTS_ENV_FILE=<path>       (default ~/.claude/tts.env)
+         TTS_LOG_FILE=<path>       (default ~/.claude/channels/web/tts-handler.log)
+stdout:  raw MP3 bytes only; --check is the non-audio diagnostic mode
+exit:    0 success, 3 nothing speakable, 1 every provider failed
+```
+
+`--chain` wins over `C3_TTS_CHAIN`, which wins over the shipped Sarvam Bulbul
+v3 → ElevenLabs Flash v2.5 → OpenRouter Gemini order. Missing keys in
+`TTS_ENV_FILE` fall back to `~/.claude/stt.env`; the supported names are
+`OPENROUTER_API_KEY`, `SARVAM_API_KEY`, and `ELEVENLABS_API_KEY`. Unkeyed
+providers skip immediately. Each response is MP3-validated, and every chunk of
+one reply uses the same provider; a chunk failure restarts the whole text on the
+next provider instead of mixing voices. OpenRouter's Gemini endpoint returns
+24 kHz mono PCM by default, so that fallback also requires `ffmpeg` to produce
+the handler's MP3 output.
+
+Use `c3-broker tts check` to print the resolved chain, key-file locations, and
+provider availability. Use `c3-broker tts say <text…> > reply.mp3` for a paid
+manual synthesis test. Ordinary text delivery does not incur synthesis cost in
+phase 3a: synthesis runs only when a web voice session asks for it, which is
+wired in the next phase.
 
 ## STT provider contract (frozen for v0.1.0)
 

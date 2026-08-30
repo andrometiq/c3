@@ -19,6 +19,8 @@ const maxBinaryBytes = 200 << 20
 const (
 	sttBundleRelativePath = "plugins/c3/stt"
 	maxSTTBundleBytes     = 50 << 20
+	ttsBundleRelativePath = "plugins/c3/tts"
+	maxTTSBundleBytes     = 50 << 20
 )
 
 var requiredSTTBundleFiles = []string{
@@ -29,6 +31,15 @@ var requiredSTTBundleFiles = []string{
 	filepath.Join("stt-pkg", "providers", "soniox-stt-async-v5.py"),
 	filepath.Join("stt-pkg", "providers", "elevenlabs-scribe-v2.py"),
 	filepath.Join("stt-pkg", "providers", "sarvam-saaras-v3.py"),
+}
+
+var requiredTTSBundleFiles = []string{
+	"tts-handler.py",
+	filepath.Join("tts-pkg", "tts.py"),
+	filepath.Join("tts-pkg", "providers", "__init__.py"),
+	filepath.Join("tts-pkg", "providers", "openrouter-gemini-tts.py"),
+	filepath.Join("tts-pkg", "providers", "sarvam-bulbul-v3.py"),
+	filepath.Join("tts-pkg", "providers", "elevenlabs-flash-v25.py"),
 }
 
 // ExecutableDir returns the directory the currently-running executable lives in,
@@ -268,6 +279,142 @@ func InstallSTTBundleFS(destDir string, src fs.FS) error {
 	return InstallSTTBundle(destDir, materialized)
 }
 
+// InstallTTSBundle atomically replaces the Python TTS runtime while refusing
+// symlinked destination roots and preserving operator-added providers.
+func InstallTTSBundle(destDir, srcDir string) error {
+	if err := ValidateTTSBundle(srcDir); err != nil {
+		return fmt.Errorf("install TTS bundle: %w", err)
+	}
+	if err := ensureRealDir(destDir); err != nil {
+		return fmt.Errorf("install TTS bundle: %w", err)
+	}
+	if err := dirWritable(destDir); err != nil {
+		return err
+	}
+	parent := filepath.Join(destDir, "plugins", "c3")
+	if err := ensureRealDir(filepath.Join(destDir, "plugins")); err != nil {
+		return fmt.Errorf("install TTS bundle: %w", err)
+	}
+	if err := ensureRealDir(parent); err != nil {
+		return fmt.Errorf("install TTS bundle: %w", err)
+	}
+
+	stage, err := os.MkdirTemp(parent, ".c3-tts-stage-")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(stage)
+	stagedBundle := filepath.Join(stage, "tts")
+	if err := copyTTSBundle(srcDir, stagedBundle); err != nil {
+		return fmt.Errorf("install TTS bundle: stage: %w", err)
+	}
+
+	dest := filepath.Join(parent, "tts")
+	backup := ""
+	if info, err := os.Lstat(dest); err == nil {
+		if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+			return fmt.Errorf("install TTS bundle: destination %s is not a real directory", dest)
+		}
+		if err := preserveCustomTTSProviders(dest, stagedBundle); err != nil {
+			return fmt.Errorf("install TTS bundle: preserve custom providers: %w", err)
+		}
+		backup, err = os.MkdirTemp(parent, ".c3-tts-backup-")
+		if err != nil {
+			return err
+		}
+		if err := os.Remove(backup); err != nil {
+			return err
+		}
+		if err := os.Rename(dest, backup); err != nil {
+			return err
+		}
+		defer os.RemoveAll(backup)
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	if err := os.Rename(stagedBundle, dest); err != nil {
+		if backup != "" {
+			_ = os.Rename(backup, dest)
+		}
+		return err
+	}
+	return nil
+}
+
+// InstallTTSBundleFS materializes an embedded TTS filesystem and sends it
+// through the same validated atomic installer as a release-directory bundle.
+func InstallTTSBundleFS(destDir string, src fs.FS) error {
+	if src == nil {
+		return fmt.Errorf("install TTS bundle: nil source filesystem")
+	}
+	materialized, err := os.MkdirTemp("", "c3-embedded-tts-")
+	if err != nil {
+		return fmt.Errorf("install TTS bundle: materialize: %w", err)
+	}
+	defer os.RemoveAll(materialized)
+
+	var copied int64
+	err = fs.WalkDir(src, ".", func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if path == "." {
+			return nil
+		}
+		if !fs.ValidPath(path) {
+			return fmt.Errorf("invalid embedded path %q", path)
+		}
+		dest := filepath.Join(materialized, filepath.FromSlash(path))
+		if entry.IsDir() {
+			return os.MkdirAll(dest, 0o755)
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("refusing non-regular embedded file %s", path)
+		}
+		if copied+info.Size() > maxTTSBundleBytes {
+			return fmt.Errorf("embedded TTS bundle exceeds %d-byte cap", int64(maxTTSBundleBytes))
+		}
+		in, err := src.Open(path)
+		if err != nil {
+			return err
+		}
+		if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
+			_ = in.Close()
+			return err
+		}
+		out, err := os.OpenFile(dest, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+		if err != nil {
+			_ = in.Close()
+			return err
+		}
+		n, copyErr := io.Copy(out, io.LimitReader(in, maxTTSBundleBytes-copied+1))
+		closeInErr := in.Close()
+		closeOutErr := out.Close()
+		if copyErr != nil {
+			return copyErr
+		}
+		if closeInErr != nil {
+			return closeInErr
+		}
+		if closeOutErr != nil {
+			return closeOutErr
+		}
+		copied += n
+		if copied > maxTTSBundleBytes {
+			return fmt.Errorf("embedded TTS bundle exceeds %d-byte cap", int64(maxTTSBundleBytes))
+		}
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("install TTS bundle: materialize: %w", err)
+	}
+	return InstallTTSBundle(destDir, materialized)
+}
+
 // preserveCustomSTTProviders carries the documented drop-in provider seam
 // across an update. Shipped provider names in the new bundle win; any other
 // regular *.py file is user extension state, not stale release data.
@@ -295,6 +442,36 @@ func preserveCustomSTTProviders(oldBundle, stagedBundle string) error {
 			return err
 		}
 		if err := copyBoundedRegularFile(filepath.Join(oldDir, entry.Name()), target, maxSTTBundleBytes); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func preserveCustomTTSProviders(oldBundle, stagedBundle string) error {
+	oldDir := filepath.Join(oldBundle, "tts-pkg", "providers")
+	entries, err := os.ReadDir(oldDir)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	newDir := filepath.Join(stagedBundle, "tts-pkg", "providers")
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".py") {
+			continue
+		}
+		if entry.Type()&os.ModeSymlink != 0 {
+			return fmt.Errorf("refusing symlink %s", filepath.Join(oldDir, entry.Name()))
+		}
+		target := filepath.Join(newDir, entry.Name())
+		if _, err := os.Lstat(target); err == nil {
+			continue
+		} else if !os.IsNotExist(err) {
+			return err
+		}
+		if err := copyBoundedRegularFile(filepath.Join(oldDir, entry.Name()), target, maxTTSBundleBytes); err != nil {
 			return err
 		}
 	}
@@ -369,6 +546,24 @@ func ValidateSTTBundle(dir string) error {
 	return nil
 }
 
+// ValidateTTSBundle verifies the complete runnable TTS release asset set.
+func ValidateTTSBundle(dir string) error {
+	for _, name := range requiredTTSBundleFiles {
+		path := filepath.Join(dir, name)
+		info, err := os.Stat(path)
+		if err != nil {
+			return fmt.Errorf("missing %s: %w", name, err)
+		}
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("%s is not a regular file", path)
+		}
+		if info.Size() == 0 {
+			return fmt.Errorf("%s is empty", path)
+		}
+	}
+	return nil
+}
+
 func copySTTBundle(src, dest string) error {
 	var copied int64
 	return copySTTBundleFiles(src, dest, &copied)
@@ -425,6 +620,67 @@ func copySTTBundleFiles(src, dest string, copied *int64) error {
 		*copied += n
 		if *copied > maxSTTBundleBytes {
 			return fmt.Errorf("STT bundle exceeds %d-byte cap", int64(maxSTTBundleBytes))
+		}
+	}
+	return nil
+}
+
+func copyTTSBundle(src, dest string) error {
+	var copied int64
+	return copyTTSBundleFiles(src, dest, &copied)
+}
+
+func copyTTSBundleFiles(src, dest string, copied *int64) error {
+	entries, err := os.ReadDir(src)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(dest, 0o755); err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if entry.Type()&os.ModeSymlink != 0 {
+			return fmt.Errorf("refusing symlink %s", filepath.Join(src, entry.Name()))
+		}
+		srcPath := filepath.Join(src, entry.Name())
+		destPath := filepath.Join(dest, entry.Name())
+		if entry.IsDir() {
+			if err := copyTTSBundleFiles(srcPath, destPath, copied); err != nil {
+				return err
+			}
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("refusing non-regular file %s", srcPath)
+		}
+		in, err := os.Open(srcPath)
+		if err != nil {
+			return err
+		}
+		out, err := os.OpenFile(destPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, info.Mode().Perm())
+		if err != nil {
+			_ = in.Close()
+			return err
+		}
+		n, copyErr := io.Copy(out, io.LimitReader(in, maxTTSBundleBytes-*copied+1))
+		closeInErr := in.Close()
+		closeOutErr := out.Close()
+		if copyErr != nil {
+			return copyErr
+		}
+		if closeInErr != nil {
+			return closeInErr
+		}
+		if closeOutErr != nil {
+			return closeOutErr
+		}
+		*copied += n
+		if *copied > maxTTSBundleBytes {
+			return fmt.Errorf("TTS bundle exceeds %d-byte cap", int64(maxTTSBundleBytes))
 		}
 	}
 	return nil

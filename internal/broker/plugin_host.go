@@ -25,12 +25,13 @@ import (
 type PluginHost struct {
 	broker *Broker
 
-	mu         sync.RWMutex
-	onInbound  []func(context.Context, *c3types.Inbound) (*c3types.Inbound, bool)
-	onVoice    []func(context.Context, c3types.VoicePayload) (string, error)
-	onOutbound []func(context.Context, *c3types.Outbound) (*c3types.Outbound, bool)
-	onAttach   []func(*plugin.Stub, *plugin.Mapping)
-	tools      map[string]plugin.Tool
+	mu          sync.RWMutex
+	onInbound   []func(context.Context, *c3types.Inbound) (*c3types.Inbound, bool)
+	onVoice     []func(context.Context, c3types.VoicePayload) (string, error)
+	onOutbound  []func(context.Context, *c3types.Outbound) (*c3types.Outbound, bool)
+	onAttach    []func(*plugin.Stub, *plugin.Mapping)
+	synthesizer func(context.Context, c3types.SpeechRequest) (c3types.SpeechResult, error)
+	tools       map[string]plugin.Tool
 }
 
 func newPluginHost(b *Broker) *PluginHost {
@@ -64,6 +65,12 @@ func (h *PluginHost) OnAttach(fn func(*plugin.Stub, *plugin.Mapping)) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.onAttach = append(h.onAttach, fn)
+}
+
+func (h *PluginHost) RegisterSynthesizer(fn func(context.Context, c3types.SpeechRequest) (c3types.SpeechResult, error)) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.synthesizer = fn
 }
 
 func (h *PluginHost) RegisterTools(fn func(*plugin.ToolRegistry)) {
@@ -146,6 +153,18 @@ func (h *PluginHost) FireOnVoiceReceived(ctx context.Context, p c3types.VoicePay
 		}
 	}
 	return ""
+}
+
+// Synthesize calls the registered TTS plugin without holding the host mutex
+// across provider work.
+func (h *PluginHost) Synthesize(ctx context.Context, req c3types.SpeechRequest) (c3types.SpeechResult, error) {
+	h.mu.RLock()
+	fn := h.synthesizer
+	h.mu.RUnlock()
+	if fn == nil {
+		return c3types.SpeechResult{}, c3types.ErrNoSynthesizer
+	}
+	return fn(ctx, req)
 }
 
 // FireOnInbound runs registered OnInbound callbacks in registration order

@@ -11,6 +11,7 @@ import (
 	"github.com/Andrometiq/c3/internal/broker"
 	"github.com/Andrometiq/c3/internal/mappings"
 	"github.com/Andrometiq/c3/internal/plugin/builtins/stt"
+	"github.com/Andrometiq/c3/internal/plugin/builtins/tts"
 	"github.com/Andrometiq/c3/internal/updater"
 )
 
@@ -118,6 +119,10 @@ func runInstallDesktop(args []string) error {
 	if err != nil {
 		return err
 	}
+	sttInstall, err = prepareTTSHandlerInstall(sttInstall)
+	if err != nil {
+		return err
+	}
 	// Commit mappings first. An unused valid handler path is harmless if the
 	// later Desktop config write fails; the inverse leaves Desktop configured
 	// while the broker cannot find the voice runtime. The broker singleton held
@@ -142,6 +147,9 @@ func runInstallDesktop(args []string) error {
 	}
 	if sttInstall.handler != "" {
 		fmt.Printf("Recorded bundled STT handler:\n  %s\n\n", sttInstall.handler)
+	}
+	if sttInstall.ttsHandler != "" {
+		fmt.Printf("Recorded bundled TTS handler:\n  %s\n\n", sttInstall.ttsHandler)
 	}
 
 	fmt.Printf("Wrote Claude Desktop MCP config:\n  %s\n\n", cfgPath)
@@ -206,6 +214,7 @@ func acquireDesktopInstallLock() (func(), error) {
 
 type sttHandlerInstall struct {
 	handler      string
+	ttsHandler   string
 	mappingsPath string
 	mappings     *mappings.MappingsFile
 }
@@ -272,9 +281,69 @@ func (p sttHandlerInstall) commit() error {
 		return nil
 	}
 	if err := desktopWriteMappingsFile(p.mappingsPath, p.mappings); err != nil {
-		return fmt.Errorf("record bundled STT handler: %w", err)
+		return fmt.Errorf("record bundled speech handlers: %w", err)
 	}
 	return nil
+}
+
+func prepareTTSHandlerInstall(prepared sttHandlerInstall) (sttHandlerInstall, error) {
+	path := prepared.mappingsPath
+	mf := prepared.mappings
+	if mf == nil {
+		var err error
+		path, err = mappings.DefaultPath()
+		if err != nil {
+			return prepared, fmt.Errorf("resolve mappings path: %w", err)
+		}
+		mf, err = mappings.Read(path)
+		switch {
+		case err == nil:
+		case os.IsNotExist(err):
+			mf = &mappings.MappingsFile{
+				SchemaVersion: 1,
+				Channels:      map[string]mappings.ChannelConfig{},
+				Mappings:      map[string]mappings.Mapping{},
+			}
+		default:
+			return prepared, fmt.Errorf("read mappings before recording TTS handler: %w", err)
+		}
+	}
+	if mf.Plugins == nil {
+		mf.Plugins = map[string]map[string]any{}
+	}
+	cfg := mf.Plugins[tts.Name]
+	if raw, exists := cfg["enabled"]; exists {
+		enabled, ok := raw.(bool)
+		if !ok {
+			return prepared, fmt.Errorf("plugins.%s.enabled is not a boolean", tts.Name)
+		}
+		if !enabled {
+			return prepared, nil
+		}
+	}
+	if raw, exists := cfg["handler_path"]; exists {
+		configured, ok := raw.(string)
+		if !ok {
+			return prepared, fmt.Errorf("plugins.%s.handler_path is not a string; refusing to overwrite it", tts.Name)
+		}
+		if strings.TrimSpace(configured) != "" {
+			return prepared, nil
+		}
+	}
+	handler := discoveredTTSHandlerPath()
+	if handler == "" {
+		// TTS ships beside STT; the runtime deliberately re-probes when it is absent here.
+		return prepared, nil
+	}
+	if cfg == nil {
+		cfg = map[string]any{}
+	}
+	cfg["handler_path"] = handler
+	mf.Plugins[tts.Name] = cfg
+	prepared.ttsHandler = handler
+	prepared.mappingsPath = path
+	prepared.mappings = mf
+	return prepared, nil
 }
 
 func discoveredSTTHandlerPath() string {
@@ -312,6 +381,49 @@ func discoveredSTTHandlerPath() string {
 	for {
 		if isC3SourceDir(dir) {
 			path := filepath.Join(dir, "plugins", "c3", "stt", "stt-handler.py")
+			if info, err := os.Stat(path); err == nil && !info.IsDir() {
+				return path
+			}
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return ""
+		}
+		dir = parent
+	}
+}
+
+func discoveredTTSHandlerPath() string {
+	if root, ok := discoverSourceDir(); ok {
+		path := filepath.Join(root, "plugins", "c3", "tts", "tts-handler.py")
+		if info, err := os.Stat(path); err == nil && !info.IsDir() {
+			return path
+		}
+	}
+	if executable, err := desktopExecutablePath(); err == nil {
+		if resolved, resolveErr := filepath.EvalSymlinks(executable); resolveErr == nil {
+			executable = resolved
+		}
+		path := filepath.Join(filepath.Dir(executable), "plugins", "c3", "tts", "tts-handler.py")
+		if info, err := os.Stat(path); err == nil && !info.IsDir() &&
+			updater.ValidateTTSBundle(filepath.Dir(path)) == nil {
+			return path
+		}
+	}
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		path := filepath.Join(home, ".local", "share", "c3", "plugins", "c3", "tts", "tts-handler.py")
+		if info, err := os.Stat(path); err == nil && !info.IsDir() &&
+			updater.ValidateTTSBundle(filepath.Dir(path)) == nil {
+			return path
+		}
+	}
+	dir, err := os.Getwd()
+	if err != nil {
+		return ""
+	}
+	for {
+		if isC3SourceDir(dir) {
+			path := filepath.Join(dir, "plugins", "c3", "tts", "tts-handler.py")
 			if info, err := os.Stat(path); err == nil && !info.IsDir() {
 				return path
 			}

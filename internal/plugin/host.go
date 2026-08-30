@@ -21,6 +21,7 @@ type Host interface {
 	OnOutbound(fn func(ctx context.Context, msg *c3types.Outbound) (*c3types.Outbound, bool /*drop*/))
 	OnAttach(fn func(*Stub, *Mapping))
 
+	RegisterSynthesizer(fn func(ctx context.Context, req c3types.SpeechRequest) (c3types.SpeechResult, error))
 	RegisterTools(fn func(*ToolRegistry))
 
 	Config(name string, target any) error        // mappings.json:plugins.<name>
