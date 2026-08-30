@@ -32,6 +32,9 @@ const (
 	replayLimit           = 200
 	maxFailedAuthDelay    = 5 * time.Second
 	defaultVoiceRetention = 200
+	filesDirectoryName    = "files"
+	filesRetention        = 200
+	maxDocumentBytes      = 5 << 20
 )
 
 var errUnsupported = errors.New("web: operation unsupported")
@@ -172,7 +175,8 @@ func (c *Channel) Name() string { return Name }
 func (c *Channel) Capabilities() c3types.Capabilities {
 	return c3types.Capabilities{
 		Channel: Name, RichText: true, SpokenReplies: true, RichTables: true, MaxMessageRunes: maxMessageRunes,
-		EditMessages: true, Typing: true, MediaKinds: []c3types.MediaKind{},
+		EditMessages: true, Typing: true, MediaKinds: []c3types.MediaKind{c3types.MediaFile},
+		OriginalFile: true, MaxSendBytes: maxDocumentBytes,
 	}
 }
 

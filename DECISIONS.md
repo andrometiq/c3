@@ -3,6 +3,31 @@
 Entries are newest first. This is the public architecture record: it records
 rulings and rationale, never private operational details.
 
+## D028: Agent HTML opens in a sandboxed in-page viewer
+
+**Date:** 2026-08-30
+
+**Decision:** The web channel accepts one path-based `.html` or `.htm` file per
+outbound part, copies at most 5 MiB into a private newest-200 store, and
+publishes a document attachment on the ordinary persisted message event. The
+authenticated page renders a DOM-built card and opens its random-token
+`/files/` response in a full-screen iframe with exactly `allow-scripts`. The
+response independently applies the same CSP sandbox plus a default-deny content
+policy, and the viewer treats a pruned file as expired.
+
+**Why:** A self-contained document is a useful high-bandwidth agent reply, but
+its author is an untrusted, potentially prompt-injected model. A download was
+rejected because it loses the contained in-page reading flow and does not
+preserve response policy after the file leaves C3. `srcdoc` was rejected because
+it would move untrusted bytes into the trusted parent page and complicate
+authentication, replay, and range serving. `allow-same-origin` was rejected
+because it would remove the opaque-origin boundary that keeps document script
+away from the session cookie, parent DOM, same-origin endpoints, and persistent
+origin storage. A cookie-gated response with both iframe and response sandboxing
+keeps in-page viewing fail closed. Opening in a new tab was rejected because a
+top-level document is outside the parent page's CSP box, while its response
+sandbox does not stop it from navigating itself to an attacker page.
+
 ## D027: Web presence follows broker route ownership
 
 **Date:** 2026-08-30

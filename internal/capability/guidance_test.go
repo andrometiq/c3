@@ -194,6 +194,19 @@ func TestGuidanceFor_SpokenRepliesGolden(t *testing.T) {
 	}
 }
 
+func TestManifestAdvertisesFile(t *testing.T) {
+	caps := web.New().Capabilities()
+	guidance := GuidanceFor(caps)
+	for _, want := range []string{
+		`Media: send via the ` + "`media`" + ` arg. kind="file" delivers the ORIGINAL bytes`,
+		"Max ~5MB per item.",
+	} {
+		if !strings.Contains(guidance, want) {
+			t.Errorf("web guidance missing %q:\n%s", want, guidance)
+		}
+	}
+}
+
 func TestSpokenRepliesManifests(t *testing.T) {
 	if !web.New().Capabilities().SpokenReplies {
 		t.Error("web manifest SpokenReplies=false; want true")
