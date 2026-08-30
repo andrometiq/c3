@@ -3,7 +3,12 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#0b0d10">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="color-scheme" content="dark">
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png">
   <title>C3 web chat</title>
   <style>
     :root { color-scheme: dark; font: 17px/1.45 system-ui, sans-serif; background: #0b0d10; color: #f4f6f8; }
@@ -16,6 +21,11 @@
     #connection.connected { color: #77d68c; }
     #connection.detached { color: #9fb3c8; }
     #connection.disconnected { color: #ff6b6b; text-decoration: underline; }
+    #hands-free-state { border: 1px solid #46515e; border-radius: 999px; padding: .22rem .55rem; color: #c5ced8; font-size: .76rem; white-space: nowrap; }
+    #hands-free-state.state-listening { border-color: #77d68c; color: #77d68c; }
+    #hands-free-state.state-recording { border-color: #ff6b6b; color: #ff9aa7; }
+    #hands-free-state.state-sending, #hands-free-state.state-thinking { border-color: #f2c94c; color: #f2c94c; }
+    #hands-free-state.state-speaking { border-color: #70b7ff; color: #70b7ff; }
     .header-control { min-width: 2.6rem; min-height: 2.6rem; border: 1px solid #46515e; border-radius: .55rem; padding: .3rem .5rem; background: #1a2027; color: #f4f6f8; font: inherit; flex: 0 0 auto; }
     .header-control:disabled { opacity: .45; }
     #logout { border: 0; padding: .25rem; background: transparent; color: #aeb8c4; text-decoration: underline; font: inherit; font-size: .82rem; flex: 0 0 auto; }
@@ -23,6 +33,8 @@
     .message { max-width: 88%; margin: 0 0 1rem; padding: .72rem .85rem; border-radius: .9rem; background: #1a2027; box-shadow: 0 1px 0 #303842; }
     .message.mine { margin-left: auto; background: #173756; }
     .message.status { max-width: 100%; margin: .5rem 0 1rem; padding: .25rem .1rem; background: transparent; box-shadow: none; color: #aeb8c4; font-size: .9rem; }
+    .message.interrupted { border: 1px solid #f2c94c; }
+    .interruption { color: #f2c94c; }
     .body { overflow-wrap: anywhere; }
     .body.literal { white-space: pre-wrap; }
     .voice-label { display: block; font-weight: 700; }
@@ -61,9 +73,10 @@
     #send { min-width: 5.7rem; background: #2f8ad5; }
     #send:active { background: #246fae; }
     @media (max-width: 560px) {
-      header { gap: .4rem; padding-inline: .65rem; }
+      header { flex-wrap: wrap; gap: .4rem; padding-inline: .65rem; }
       h1 { font-size: .95rem; }
-      #connection { max-width: 5.5rem; font-size: .76rem; }
+      #connection { max-width: 8rem; font-size: .76rem; flex: 1 1 5.5rem; }
+      #hands-free-state { max-width: 6.8rem; overflow: hidden; text-overflow: ellipsis; }
       .header-control { min-width: 2.4rem; padding-inline: .35rem; font-size: .82rem; }
       #stop-audio, #replay-audio { font-size: 0; }
       #stop-audio::before { content: '■'; font-size: .82rem; }
@@ -78,7 +91,9 @@
   <header>
     <h1>C3 on-the-go chat</h1>
     <a id="connection" href="" role="status" aria-live="polite">reconnecting…</a>
+    <span id="hands-free-state" class="state-idle" aria-live="polite">○ idle</span>
     <button id="voice-toggle" class="header-control" type="button" aria-label="Spoken replies" aria-pressed="false">🔇</button>
+    <button id="hands-free-toggle" class="header-control" type="button" aria-label="Hands-free" aria-pressed="false">🎙</button>
     <button id="stop-audio" class="header-control" type="button" aria-label="Stop spoken reply" hidden>Stop</button>
     <button id="replay-audio" class="header-control" type="button" aria-label="Replay last spoken reply" disabled>Replay</button>
     <button id="logout" type="button">logout</button>
@@ -99,6 +114,81 @@
 </main>
 <script>
 (() => {
+  // VAD samples the live microphone every 50 ms.
+  const VAD_SAMPLE_MS = 50;
+  // The AnalyserNode uses 1024 samples per time-domain block.
+  const VAD_FFT_SIZE = 1024;
+  // The idle noise floor follows ambient sound with a roughly three-second EMA.
+  const VAD_NOISE_ALPHA = 0.015;
+  // The adaptive noise floor starts at a conservative RMS value.
+  const VAD_INITIAL_FLOOR = 0.01;
+  // Speech must exceed 2.5 times the ambient floor to start.
+  const VAD_START_FLOOR_MULTIPLIER = 2.5;
+  // Speech start has a fixed RMS floor for quiet rooms.
+  const VAD_START_MIN_RMS = 0.012;
+  // Two consecutive positive blocks make the 100 ms start vote.
+  const VAD_START_SAMPLES = 2;
+  // Speech end uses 1.8 times the frozen ambient floor.
+  const VAD_END_FLOOR_MULTIPLIER = 1.8;
+  // Speech end has a fixed RMS floor for quiet rooms.
+  const VAD_END_MIN_RMS = 0.008;
+  // Nine hundred milliseconds below threshold ends an utterance.
+  const VAD_HANGOVER_MS = 900;
+  // Ambient-floor learning remains frozen for one second after hangover.
+  const VAD_FLOOR_FREEZE_MS = 1000;
+  // Speech shorter than 280 ms is discarded without a message.
+  const VAD_MIN_UTTERANCE_MS = 280;
+  // A hands-free utterance is capped at 60 seconds.
+  const VAD_MAX_UTTERANCE_MS = 60000;
+  // The recorder input is delayed by 300 ms to retain pre-roll.
+  const VAD_PRE_ROLL_SECONDS = 0.3;
+  // Recording continues for 300 ms after hangover completes.
+  const VAD_RECORDER_STOP_DELAY_MS = 300;
+  // Speech-band spectral flatness must stay below this noise rejection vote.
+  const VAD_MAX_FLATNESS = 0.45;
+  // VAD energy excludes frequencies below the speech band.
+  const VAD_LOW_HZ = 300;
+  // VAD energy excludes frequencies above the speech band.
+  const VAD_HIGH_HZ = 3400;
+  // Barge-in ignores the first 400 ms of synthesized playback.
+  const BARGE_IGNORE_MS = 400;
+  // Playback-floor sampling reacts quickly during the short calibration window.
+  const BARGE_FLOOR_ALPHA = 0.2;
+  // Barge-in energy must exceed eight times the sampled playback floor.
+  const BARGE_FLOOR_MULTIPLIER = 8;
+  // Barge-in has a high fixed RMS floor to reject loudspeaker leakage.
+  const BARGE_MIN_RMS = 0.07;
+  // Four hundred milliseconds over threshold confirms a barge-in.
+  const BARGE_REQUIRED_MS = 400;
+  // The first 200 ms after barge-in is muted from the captured audio.
+  const BARGE_DROP_MS = 200;
+  // Earcons use a deliberately low gain.
+  const EARCON_GAIN = 0.15;
+  // The listening-armed earcon is an 880 Hz tone.
+  const EARCON_ARM_HZ = 880;
+  // The listening-armed earcon lasts 80 ms.
+  const EARCON_ARM_MS = 80;
+  // The captured earcon begins at 660 Hz.
+  const EARCON_SEND_LOW_HZ = 660;
+  // The captured earcon rises to 880 Hz.
+  const EARCON_SEND_HIGH_HZ = 880;
+  // Each captured-earcon tone lasts 60 ms.
+  const EARCON_SEND_TONE_MS = 60;
+  // The error earcon uses a low 220 Hz tone.
+  const EARCON_ERROR_HZ = 220;
+  // The error earcon lasts 150 ms.
+  const EARCON_ERROR_MS = 150;
+  // VAD analysis pauses for 200 ms after every audible earcon finishes.
+  const EARCON_ANALYSIS_MUTE_MS = 200;
+  // An accepted utterance waits at most 90 seconds for its own reply.
+  const REPLY_TIMEOUT_MS = 90000;
+  // A delivered reply waits ten seconds for synthesized audio.
+  const REPLY_AUDIO_WAIT_MS = 10000;
+  // All hands-free upload attempts share one 60-second deadline.
+  const HANDS_FREE_UPLOAD_TIMEOUT_MS = 60000;
+  // Earcons ramp up over five milliseconds to avoid an audible click.
+  const EARCON_ATTACK_MS = 5;
+
   const messages = document.getElementById('messages');
   const composer = document.getElementById('composer');
   const input = document.getElementById('text');
@@ -108,6 +198,8 @@
   const voiceStatus = document.getElementById('voice-status');
   const micButton = document.getElementById('mic');
   const voiceButton = document.getElementById('voice-toggle');
+  const handsFreeButton = document.getElementById('hands-free-toggle');
+  const handsFreeState = document.getElementById('hands-free-state');
   const stopAudioButton = document.getElementById('stop-audio');
   const replayAudioButton = document.getElementById('replay-audio');
   const rows = new Map();
@@ -117,11 +209,33 @@
   let detached = false;
   let connectionText = 'reconnecting…';
   let connectionClass = '';
-  let speaking = false;
+  let handsFreeEnabled = false;
+  let state = 'idle';
+
+  const stateLabels = {
+    idle: '○ idle',
+    listening: '◉ listening',
+    recording: '● recording',
+    sending: '↑ sending',
+    thinking: '… thinking',
+    speaking: '🔊 speaking'
+  };
 
   function renderConnection() {
-    connection.textContent = speaking ? 'speaking…' : connectionText;
-    connection.className = speaking ? 'connected' : connectionClass;
+    connection.textContent = connectionText;
+    connection.className = connectionClass;
+  }
+
+  function setState(next, quiet) {
+    if (!stateLabels[next]) return;
+    const previous = state;
+    state = next;
+    handsFreeState.textContent = stateLabels[state];
+    handsFreeState.className = 'state-' + state;
+    renderConnection();
+    if (!handsFreeEnabled || previous === state || quiet) return;
+    if (state === 'listening') playEarcon('armed');
+    if (state === 'sending') playEarcon('sending');
   }
 
   function setConnection(text, className) {
@@ -451,6 +565,7 @@
     }
     row.append(body, meta);
     row.bodyNode = body;
+    row.metaNode = meta;
     row.replyText = String(data.text || '');
     row.voiceDuration = Number(data.duration_seconds || 0);
     messages.append(row);
@@ -524,36 +639,62 @@
   }
 
   function finishVoiceUpload() {
-    micButton.disabled = false;
+    micButton.disabled = handsFreeEnabled;
     micButton.setAttribute('aria-pressed', 'false');
     micButton.textContent = '🎤';
+    handsFreeButton.disabled = handsFreeStarting;
+  }
+
+  function settleVoiceUpload(pending) {
+    if (pending.settled) return false;
+    pending.settled = true;
+    window.clearTimeout(pending.handsFreeDeadline);
+    pending.handsFreeDeadline = 0;
+    return true;
+  }
+
+  function failVoiceUpload(pending, reason) {
+    if (!settleVoiceUpload(pending)) return;
+    pendingRows.delete(pending.clientID);
+    setDelivery(pending.row, 'not sent — ' + reason, 'failed');
+    finishVoiceUpload();
+    if (pending.handsFree) handsFreeUploadFailed(pending.clientID);
+  }
+
+  function startHandsFreeUploadDeadline(pending) {
+    if (!pending.handsFree || pending.handsFreeDeadline) return;
+    pending.handsFreeDeadline = window.setTimeout(() => {
+      if (pending.controller) pending.controller.abort();
+      failVoiceUpload(pending, 'upload timed out');
+    }, HANDS_FREE_UPLOAD_TIMEOUT_MS);
   }
 
   async function deliverVoice(pending) {
+    if (pending.settled) return;
+    startHandsFreeUploadDeadline(pending);
     setDelivery(pending.row, pending.attempt ? 'not delivered — retrying' : 'sending', pending.attempt ? 'retrying' : '');
     micButton.disabled = true;
     micButton.setAttribute('aria-pressed', 'false');
     micButton.textContent = 'uploading…';
+    const controller = new AbortController();
+    pending.controller = controller;
+    const attemptTimeout = pending.handsFree ? 0 : window.setTimeout(() => controller.abort(), 60000);
     try {
-      const controller = new AbortController();
-      const timeout = window.setTimeout(() => controller.abort(), 60000);
-      let response;
-      try {
-        response = await fetch('/voice-note', {
-          method: 'POST',
-          headers: {'Content-Type': pending.mimeType, 'X-Client-Id': pending.clientID},
-          body: pending.blob,
-          signal: controller.signal
-        });
-      } finally {
-        window.clearTimeout(timeout);
-      }
+      const response = await fetch('/voice-note', {
+        method: 'POST',
+        headers: {'Content-Type': pending.mimeType, 'X-Client-Id': pending.clientID},
+        body: pending.blob,
+        signal: controller.signal
+      });
       if (response.status === 202) {
         const result = await response.json();
-        recordMessageID(pending.row, 'mine', Number(result.message_id || 0));
+        if (!settleVoiceUpload(pending)) return;
+        const messageID = Number(result.message_id || 0);
+        recordMessageID(pending.row, 'mine', messageID);
         pendingRows.delete(pending.clientID);
         setDelivery(pending.row, 'sent', '');
         finishVoiceUpload();
+        if (pending.handsFree) handsFreeUploadAccepted(pending.clientID, messageID);
         return;
       }
       if (response.status === 503) throw new Error('retry');
@@ -564,14 +705,16 @@
       } catch (_) {
         if (response.status === 401) reason = 'sign in again';
       }
-      pendingRows.delete(pending.clientID);
-      setDelivery(pending.row, 'not sent — ' + reason, 'failed');
-      finishVoiceUpload();
+      failVoiceUpload(pending, reason);
     } catch (_) {
+      if (pending.settled) return;
       pending.attempt += 1;
       const delay = Math.min(30000, 2000 * Math.pow(2, pending.attempt - 1));
       setDelivery(pending.row, 'not delivered — retrying', 'retrying');
       window.setTimeout(() => deliverVoice(pending), delay);
+    } finally {
+      window.clearTimeout(attemptTimeout);
+      if (pending.controller === controller) pending.controller = null;
     }
   }
 
@@ -598,6 +741,7 @@
     if (recordingStarting) return;
     recordingStarting = true;
     micButton.disabled = true;
+    handsFreeButton.disabled = true;
     setVoiceStatus('');
     let stream;
     try {
@@ -641,7 +785,7 @@
         finishVoiceUpload();
         setVoiceStatus('microphone recording failed', 4000);
       }, {once: true});
-      recorder.start(1000);
+      recorder.start();
       recordingStarting = false;
       micButton.disabled = false;
       micButton.setAttribute('aria-pressed', 'true');
@@ -666,6 +810,7 @@
 
   if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia || !window.MediaRecorder) {
     micButton.hidden = true;
+    handsFreeButton.hidden = true;
     setVoiceStatus('Voice notes need the HTTPS link.');
   }
 
@@ -722,14 +867,490 @@
   document.body.append(player);
   const audioQueue = [];
   const audioHistory = [];
+  const ignoredAudioReplyIDs = [];
   let currentAudio;
   let voiceEnabled = false;
   let audioUnlocked = false;
   let unlockingAudio = false;
+  let audioContext;
+  let microphoneStream;
+  let microphoneSource;
+  let analyser;
+  let recordingDelay;
+  let recordingGain;
+  let recordingDestination;
+  let vadTimeData;
+  let vadFrequencyData;
+  let vadTimer;
+  let noiseFloor = VAD_INITIAL_FLOOR;
+  let floorFrozenUntil = 0;
+  let startVotes = 0;
+  let handsFreeCapture;
+  let handsFreeStarting = false;
+  let analysisMutedUntil = 0;
+  let speakingStartedAt = 0;
+  let playbackFloor = VAD_INITIAL_FLOOR;
+  let bargeAboveMilliseconds = 0;
+  let suppressPlaybackPauseUntil = 0;
+  let awaitingClientID = '';
+  let awaitingMessageID = 0;
+  let activeReplyID = 0;
+  let lateAudioUntil = 0;
+  let replyTimer;
+  let audioWaitTimer;
+  let wakeLockSentinel;
+  let wakeLockRequesting = false;
 
   function updateVoiceButton() {
     voiceButton.textContent = voiceEnabled ? '🔊' : '🔇';
     voiceButton.setAttribute('aria-pressed', String(voiceEnabled));
+  }
+
+  function updateHandsFreeButton() {
+    handsFreeButton.textContent = handsFreeEnabled ? '🎙✓' : '🎙';
+    handsFreeButton.setAttribute('aria-pressed', String(handsFreeEnabled));
+  }
+
+  function createAudioContext() {
+    if (audioContext) return audioContext;
+    const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+    if (!AudioContextClass) throw new Error('Web Audio unavailable');
+    audioContext = new AudioContextClass();
+    audioContext.addEventListener('statechange', resumeAudioContext);
+    return audioContext;
+  }
+
+  function resumeAudioContext() {
+    if (!audioContext || audioContext.state !== 'suspended' || document.visibilityState !== 'visible') return;
+    if (!handsFreeEnabled && !voiceEnabled && state !== 'speaking') return;
+    audioContext.resume().catch(() => {});
+  }
+
+  function playEarcon(kind) {
+    if (!audioContext || state === 'speaking') return;
+    audioContext.resume().catch(() => {});
+    const tones = kind === 'armed' ? [[EARCON_ARM_HZ, EARCON_ARM_MS]] :
+      kind === 'sending' ? [[EARCON_SEND_LOW_HZ, EARCON_SEND_TONE_MS], [EARCON_SEND_HIGH_HZ, EARCON_SEND_TONE_MS]] :
+      [[EARCON_ERROR_HZ, EARCON_ERROR_MS]];
+    let begins = audioContext.currentTime + 0.01;
+    tones.forEach(([frequency, milliseconds]) => {
+      const oscillator = audioContext.createOscillator();
+      const gain = audioContext.createGain();
+      const ends = begins + milliseconds / 1000;
+      oscillator.frequency.value = frequency;
+      gain.gain.setValueAtTime(0.0001, begins);
+      gain.gain.linearRampToValueAtTime(EARCON_GAIN, begins + EARCON_ATTACK_MS / 1000);
+      gain.gain.exponentialRampToValueAtTime(0.0001, ends);
+      oscillator.connect(gain);
+      gain.connect(audioContext.destination);
+      oscillator.start(begins);
+      oscillator.stop(ends);
+      begins = ends;
+    });
+    analysisMutedUntil = performance.now() + (begins - audioContext.currentTime) * 1000 + EARCON_ANALYSIS_MUTE_MS;
+  }
+
+  function connectMicrophoneGraph(stream) {
+    const context = createAudioContext();
+    microphoneSource = context.createMediaStreamSource(stream);
+    analyser = context.createAnalyser();
+    analyser.fftSize = VAD_FFT_SIZE;
+    analyser.smoothingTimeConstant = 0;
+    recordingDelay = context.createDelay(1);
+    recordingDelay.delayTime.value = VAD_PRE_ROLL_SECONDS;
+    recordingGain = context.createGain();
+    recordingDestination = context.createMediaStreamDestination();
+    microphoneSource.connect(analyser);
+    microphoneSource.connect(recordingDelay);
+    recordingDelay.connect(recordingGain);
+    recordingGain.connect(recordingDestination);
+    vadTimeData = new Float32Array(analyser.fftSize);
+    vadFrequencyData = new Float32Array(analyser.frequencyBinCount);
+  }
+
+  function releaseMicrophone() {
+    stopVAD();
+    if (microphoneSource) microphoneSource.disconnect();
+    if (recordingDelay) recordingDelay.disconnect();
+    if (recordingGain) recordingGain.disconnect();
+    if (microphoneStream) microphoneStream.getTracks().forEach(track => track.stop());
+    microphoneStream = null;
+    microphoneSource = null;
+    analyser = null;
+    recordingDelay = null;
+    recordingGain = null;
+    recordingDestination = null;
+    vadTimeData = null;
+    vadFrequencyData = null;
+  }
+
+  // Estimate speech-band RMS by weighting centered time-domain RMS with the
+  // square root of the 300–3400 Hz FFT-power fraction; thresholds stay in RMS units.
+  function estimateSpeechEnergy() {
+    analyser.getFloatTimeDomainData(vadTimeData);
+    let mean = 0;
+    for (const sample of vadTimeData) mean += sample;
+    mean /= vadTimeData.length;
+    let timePower = 0;
+    for (const sample of vadTimeData) {
+      const centered = sample - mean;
+      timePower += centered * centered;
+    }
+    const timeRMS = Math.sqrt(timePower / vadTimeData.length);
+
+    analyser.getFloatFrequencyData(vadFrequencyData);
+    const hertzPerBin = audioContext.sampleRate / analyser.fftSize;
+    const firstBin = Math.max(1, Math.ceil(VAD_LOW_HZ / hertzPerBin));
+    const lastBin = Math.min(vadFrequencyData.length - 1, Math.floor(VAD_HIGH_HZ / hertzPerBin));
+    let allPower = 0;
+    let bandPower = 0;
+    let bandLogPower = 0;
+    let bandBins = 0;
+    for (let index = 1; index < vadFrequencyData.length; index += 1) {
+      const decibels = vadFrequencyData[index];
+      const power = Number.isFinite(decibels) ? Math.pow(10, decibels / 10) : 0;
+      allPower += power;
+      if (index < firstBin || index > lastBin) continue;
+      bandPower += power;
+      bandLogPower += Math.log(Math.max(power, 1e-12));
+      bandBins += 1;
+    }
+    const bandRatio = allPower > 0 ? Math.sqrt(bandPower / allPower) : 0;
+    const arithmeticMean = bandBins ? bandPower / bandBins : 0;
+    const flatness = arithmeticMean > 0 ? Math.exp(bandLogPower / bandBins) / arithmeticMean : 1;
+    return {rms: timeRMS * bandRatio, flatness};
+  }
+
+  function startVAD() {
+    if (vadTimer || !handsFreeEnabled || !analyser || document.visibilityState === 'hidden') return;
+    vadTimer = window.setInterval(sampleVAD, VAD_SAMPLE_MS);
+  }
+
+  function stopVAD() {
+    window.clearInterval(vadTimer);
+    vadTimer = null;
+  }
+
+  function sampleVAD() {
+    if (!handsFreeEnabled || !analyser || performance.now() < analysisMutedUntil) return;
+    const now = performance.now();
+    const energy = estimateSpeechEnergy();
+    if (state === 'listening') {
+      const threshold = Math.max(noiseFloor * VAD_START_FLOOR_MULTIPLIER, VAD_START_MIN_RMS);
+      const isSpeech = energy.rms > threshold && energy.flatness < VAD_MAX_FLATNESS;
+      startVotes = isSpeech ? startVotes + 1 : 0;
+      if (startVotes >= VAD_START_SAMPLES) {
+        startVotes = 0;
+        startHandsFreeRecording(false);
+        return;
+      }
+      if (now >= floorFrozenUntil) {
+        noiseFloor += VAD_NOISE_ALPHA * (energy.rms - noiseFloor);
+      }
+      return;
+    }
+    if (state === 'recording' && handsFreeCapture && !handsFreeCapture.finishing) {
+      const threshold = Math.max(noiseFloor * VAD_END_FLOOR_MULTIPLIER, VAD_END_MIN_RMS);
+      if (energy.rms >= threshold) {
+        handsFreeCapture.belowSince = 0;
+        handsFreeCapture.lastSpeechAt = now;
+      } else if (!handsFreeCapture.belowSince) {
+        handsFreeCapture.belowSince = now;
+      } else if (now - handsFreeCapture.belowSince >= VAD_HANGOVER_MS) {
+        floorFrozenUntil = now + VAD_FLOOR_FREEZE_MS;
+        finishHandsFreeRecording(false, VAD_RECORDER_STOP_DELAY_MS);
+      }
+      if (now - handsFreeCapture.started >= VAD_MAX_UTTERANCE_MS) {
+        finishHandsFreeRecording(true, VAD_RECORDER_STOP_DELAY_MS);
+      }
+      return;
+    }
+    if (state !== 'speaking') return;
+    const speakingMilliseconds = now - speakingStartedAt;
+    if (speakingMilliseconds < BARGE_IGNORE_MS) {
+      playbackFloor += BARGE_FLOOR_ALPHA * (energy.rms - playbackFloor);
+      return;
+    }
+    const threshold = Math.max(playbackFloor * BARGE_FLOOR_MULTIPLIER, BARGE_MIN_RMS);
+    bargeAboveMilliseconds = energy.rms > threshold ? bargeAboveMilliseconds + VAD_SAMPLE_MS : 0;
+    if (bargeAboveMilliseconds >= BARGE_REQUIRED_MS) bargeIn();
+  }
+
+  function startHandsFreeRecording(isBargeIn) {
+    if (!handsFreeEnabled || handsFreeCapture || !recordingDestination) return;
+    let recorder;
+    try {
+      const mimeType = recorderMimeType();
+      recorder = mimeType ? new MediaRecorder(recordingDestination.stream, {mimeType}) : new MediaRecorder(recordingDestination.stream);
+    } catch (_) {
+      setState('listening', true);
+      playEarcon('error');
+      setVoiceStatus('microphone recording failed', 4000);
+      return;
+    }
+    const started = performance.now();
+    const capture = {
+      recorder,
+      started,
+      speechStarted: started - (VAD_START_SAMPLES - 1) * VAD_SAMPLE_MS,
+      lastSpeechAt: started,
+      belowSince: 0,
+      chunks: [],
+      finishing: false,
+      forceUpload: false,
+      discard: false,
+      failed: false,
+      unmuteTimer: 0,
+      stopTimer: 0
+    };
+    handsFreeCapture = capture;
+    recorder.addEventListener('dataavailable', event => {
+      if (event.data && event.data.size) capture.chunks.push(event.data);
+    });
+    recorder.addEventListener('error', () => {
+      capture.failed = true;
+      if (handsFreeCapture === capture) handsFreeCapture = null;
+      window.clearTimeout(capture.stopTimer);
+      window.clearTimeout(capture.unmuteTimer);
+      if (recordingGain) recordingGain.gain.value = 1;
+      setState(handsFreeEnabled ? 'listening' : 'idle', true);
+      playEarcon('error');
+      setVoiceStatus('microphone recording failed', 4000);
+    }, {once: true});
+    recorder.addEventListener('stop', () => completeHandsFreeRecording(capture), {once: true});
+    if (isBargeIn) {
+      recordingGain.gain.value = 0;
+      capture.unmuteTimer = window.setTimeout(() => {
+        if (handsFreeCapture === capture && recordingGain) recordingGain.gain.value = 1;
+      }, BARGE_DROP_MS);
+    } else {
+      recordingGain.gain.value = 1;
+    }
+    try {
+      recorder.start();
+    } catch (_) {
+      handsFreeCapture = null;
+      window.clearTimeout(capture.unmuteTimer);
+      recordingGain.gain.value = 1;
+      setState('listening', true);
+      playEarcon('error');
+      setVoiceStatus('microphone recording failed', 4000);
+      return;
+    }
+    setState('recording');
+  }
+
+  function finishHandsFreeRecording(forceUpload, delay) {
+    const capture = handsFreeCapture;
+    if (!capture || capture.finishing || capture.recorder.state === 'inactive') return;
+    capture.finishing = true;
+    capture.forceUpload = forceUpload;
+    capture.stopTimer = window.setTimeout(() => {
+      if (capture.recorder.state !== 'inactive') capture.recorder.stop();
+    }, delay);
+  }
+
+  function completeHandsFreeRecording(capture) {
+    if (handsFreeCapture === capture) handsFreeCapture = null;
+    window.clearTimeout(capture.stopTimer);
+    window.clearTimeout(capture.unmuteTimer);
+    if (recordingGain) recordingGain.gain.value = 1;
+    if (capture.failed || capture.discard || !handsFreeEnabled) return;
+    const speechMilliseconds = Math.max(0, capture.lastSpeechAt - capture.speechStarted + VAD_SAMPLE_MS);
+    if (!capture.forceUpload && speechMilliseconds < VAD_MIN_UTTERANCE_MS) {
+      setState('listening', true);
+      return;
+    }
+    const actualType = capture.recorder.mimeType || (capture.chunks[0] && capture.chunks[0].type) || 'audio/webm';
+    const blob = new Blob(capture.chunks, {type: actualType});
+    if (!blob.size) {
+      setState('listening', true);
+      playEarcon('error');
+      setVoiceStatus('microphone recording failed', 4000);
+      return;
+    }
+    setState('sending');
+    const row = addMessage('mine', {
+      voice: true,
+      duration_seconds: (performance.now() - capture.started) / 1000,
+      timestamp: new Date().toISOString()
+    }, 'sending');
+    const id = clientID();
+    resetReplyTracking();
+    awaitingClientID = id;
+    pendingRows.set(id, row);
+    deliverVoice({blob, mimeType: actualType, clientID: id, row, attempt: 0, handsFree: true});
+  }
+
+  function resetReplyTracking() {
+    window.clearTimeout(replyTimer);
+    window.clearTimeout(audioWaitTimer);
+    replyTimer = null;
+    audioWaitTimer = null;
+    awaitingClientID = '';
+    awaitingMessageID = 0;
+    activeReplyID = 0;
+    lateAudioUntil = 0;
+  }
+
+  function handsFreeUploadAccepted(id, messageID) {
+    if (!handsFreeEnabled || id !== awaitingClientID || !messageID) return;
+    awaitingMessageID = messageID;
+    setState('thinking');
+    replyTimer = window.setTimeout(() => {
+      if (!handsFreeEnabled || state !== 'thinking' || activeReplyID) return;
+      resetReplyTracking();
+      setState('listening');
+    }, REPLY_TIMEOUT_MS);
+  }
+
+  function handsFreeUploadFailed(id) {
+    if (!handsFreeEnabled || id !== awaitingClientID) return;
+    resetReplyTracking();
+    setState('listening', true);
+    playEarcon('error');
+  }
+
+  function handleHandsFreeReply(data) {
+    if (!handsFreeEnabled || state !== 'thinking' || data.replay || !awaitingMessageID || activeReplyID) return;
+    const replyTo = Number(data.reply_to || 0);
+    if (replyTo !== 0 && replyTo !== awaitingMessageID) return;
+    activeReplyID = Number(data.message_id || 0);
+    if (!activeReplyID) return;
+    window.clearTimeout(replyTimer);
+    replyTimer = null;
+    lateAudioUntil = Date.now() + REPLY_TIMEOUT_MS;
+    refreshAudioWait();
+  }
+
+  function refreshAudioWait() {
+    if (!activeReplyID || state !== 'thinking') return;
+    window.clearTimeout(audioWaitTimer);
+    audioWaitTimer = window.setTimeout(() => {
+      if (handsFreeEnabled && state === 'thinking') setState('listening');
+    }, REPLY_AUDIO_WAIT_MS);
+  }
+
+  function acceptsHandsFreeAudio(item) {
+    const messageID = Number(item.message_id || 0);
+    if (ignoredAudioReplyIDs.includes(messageID)) return false;
+    if (!handsFreeEnabled) return true;
+    return messageID > 0 && messageID === activeReplyID && Date.now() <= lateAudioUntil;
+  }
+
+  function ignoreAudioReply(messageID) {
+    if (!messageID || ignoredAudioReplyIDs.includes(messageID)) return;
+    ignoredAudioReplyIDs.push(messageID);
+    if (ignoredAudioReplyIDs.length > 20) ignoredAudioReplyIDs.shift();
+  }
+
+  function markInterrupted(item) {
+    const row = rows.get(rowKey('agent', Number(item && item.message_id || 0)));
+    if (!row || row.classList.contains('interrupted')) return;
+    row.classList.add('interrupted');
+    const label = document.createElement('span');
+    label.className = 'interruption';
+    label.textContent = '⚠ interrupted';
+    row.metaNode.append(label);
+  }
+
+  function bargeIn() {
+    if (!handsFreeEnabled || state !== 'speaking' || !currentAudio || handsFreeCapture) return;
+    const interrupted = currentAudio;
+    const messageID = Number(interrupted.message_id || 0);
+    markInterrupted(interrupted);
+    ignoreAudioReply(messageID);
+    for (let index = audioQueue.length - 1; index >= 0; index -= 1) {
+      if (Number(audioQueue[index].message_id || 0) === messageID) audioQueue.splice(index, 1);
+    }
+    if (audioHistory[audioHistory.length - 1] === interrupted) audioHistory.pop();
+    replayAudioButton.disabled = audioHistory.length === 0;
+    suppressPlaybackPauseUntil = performance.now() + 500;
+    player.pause();
+    currentAudio = null;
+    clearPlayerSource();
+    stopAudioButton.hidden = true;
+    startHandsFreeRecording(true);
+  }
+
+  function handleMicrophoneLost() {
+    if (!handsFreeEnabled) return;
+    handsFreeEnabled = false;
+    updateHandsFreeButton();
+    resetReplyTracking();
+    if (handsFreeCapture && handsFreeCapture.recorder.state !== 'inactive') {
+      handsFreeCapture.discard = true;
+      handsFreeCapture.recorder.stop();
+    }
+    releaseMicrophone();
+    micButton.disabled = false;
+    setState('idle', true);
+    playEarcon('error');
+    setVoiceStatus('microphone lost — tap hands-free to resume');
+    updateWakeLock();
+  }
+
+  async function enableHandsFree() {
+    if (handsFreeStarting || handsFreeEnabled) return;
+    handsFreeStarting = true;
+    handsFreeButton.disabled = true;
+    let stream;
+    try {
+      createAudioContext();
+      const contextReady = audioContext.resume();
+      const playbackReady = audioUnlocked ? Promise.resolve(true) : unlockAudio();
+      await contextReady;
+      if (!(await playbackReady)) throw new Error('audio unlock failed');
+      if (!voiceEnabled && !(await changeVoicePreference(true))) throw new Error('voice preference failed');
+      stream = await navigator.mediaDevices.getUserMedia({audio: {
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true
+      }});
+      microphoneStream = stream;
+      connectMicrophoneGraph(stream);
+      stream.getAudioTracks().forEach(track => { track.onended = handleMicrophoneLost; });
+      noiseFloor = VAD_INITIAL_FLOOR;
+      floorFrozenUntil = performance.now();
+      handsFreeEnabled = true;
+      updateHandsFreeButton();
+      micButton.disabled = true;
+      setVoiceStatus('');
+      if (currentAudio || audioQueue.length) enterHandsFreeSpeaking();
+      else setState('listening');
+      startVAD();
+      updateWakeLock();
+    } catch (error) {
+      if (stream) stream.getTracks().forEach(track => track.stop());
+      microphoneStream = null;
+      releaseMicrophone();
+      handsFreeEnabled = false;
+      updateHandsFreeButton();
+      setState('idle', true);
+      playEarcon('error');
+      const denied = error && (error.name === 'NotAllowedError' || error.name === 'SecurityError');
+      setVoiceStatus(denied ? 'Microphone permission denied — allow it in browser settings, then tap hands-free.' : 'Hands-free microphone unavailable — check browser permission.');
+    } finally {
+      handsFreeStarting = false;
+      handsFreeButton.disabled = false;
+    }
+  }
+
+  function disableHandsFree() {
+    if (!handsFreeEnabled && !handsFreeStarting) return;
+    handsFreeEnabled = false;
+    updateHandsFreeButton();
+    resetReplyTracking();
+    if (handsFreeCapture && handsFreeCapture.recorder.state !== 'inactive') {
+      handsFreeCapture.discard = true;
+      handsFreeCapture.recorder.stop();
+    }
+    releaseMicrophone();
+    micButton.disabled = false;
+    stopPlayback();
+    setState('idle', true);
+    setVoiceStatus('');
+    updateWakeLock();
   }
 
   function updateMediaMetadata(item) {
@@ -747,13 +1368,13 @@
   }
 
   function stopPlayback() {
+    suppressPlaybackPauseUntil = performance.now() + 500;
     player.pause();
     currentAudio = null;
     audioQueue.length = 0;
     clearPlayerSource();
-    speaking = false;
     stopAudioButton.hidden = true;
-    renderConnection();
+    if (handsFreeEnabled) setState('listening');
   }
 
   function playNext() {
@@ -775,6 +1396,7 @@
       audioQueue.unshift(currentAudio);
       currentAudio = null;
       audioUnlocked = false;
+      if (handsFreeEnabled) setState('listening', true);
       setVoiceStatus('Tap 🔊 to unlock spoken replies.');
     });
   }
@@ -782,6 +1404,7 @@
   function replayAt(index) {
     const item = audioHistory[index];
     if (!item || !voiceEnabled) return;
+    suppressPlaybackPauseUntil = performance.now() + 500;
     player.pause();
     currentAudio = null;
     clearPlayerSource();
@@ -816,13 +1439,8 @@
     }
   }
 
-  voiceButton.addEventListener('click', async () => {
-    if (voiceEnabled && !audioUnlocked) {
-      if (await unlockAudio()) playNext();
-      return;
-    }
-    const enabled = !voiceEnabled;
-    if (enabled && !(await unlockAudio())) return;
+  async function changeVoicePreference(enabled) {
+    if (enabled && !audioUnlocked && !(await unlockAudio())) return false;
     try {
       const response = await fetch('/voice', {
         method: 'POST',
@@ -832,50 +1450,74 @@
       if (!response.ok) throw new Error('preference failed');
       voiceEnabled = enabled;
       updateVoiceButton();
-      if (!enabled) stopPlayback();
-      else playNext();
+      if (!enabled) {
+        if (handsFreeEnabled) disableHandsFree();
+        stopPlayback();
+      } else {
+        playNext();
+      }
+      updateWakeLock();
+      return true;
     } catch (_) {
       setVoiceStatus('Could not change spoken replies.', 4000);
+      return false;
     }
+  }
+
+  voiceButton.addEventListener('click', async () => {
+    if (voiceEnabled && !audioUnlocked) {
+      if (await unlockAudio()) playNext();
+      return;
+    }
+    await changeVoicePreference(!voiceEnabled);
+  });
+
+  handsFreeButton.addEventListener('click', () => {
+    if (handsFreeEnabled) disableHandsFree();
+    else enableHandsFree();
   });
 
   stopAudioButton.addEventListener('click', stopPlayback);
   replayAudioButton.addEventListener('click', replayLast);
+  function enterHandsFreeSpeaking() {
+    window.clearTimeout(audioWaitTimer);
+    audioWaitTimer = null;
+    speakingStartedAt = performance.now();
+    playbackFloor = noiseFloor;
+    bargeAboveMilliseconds = 0;
+    setState('speaking');
+  }
+
   player.addEventListener('play', () => {
     if (unlockingAudio) return;
-    speaking = true;
     stopAudioButton.hidden = false;
-    renderConnection();
+    if (handsFreeEnabled) enterHandsFreeSpeaking();
   });
   player.addEventListener('pause', () => {
-    if (unlockingAudio) return;
-    speaking = false;
+    if (unlockingAudio || performance.now() < suppressPlaybackPauseUntil) return;
     stopAudioButton.hidden = true;
-    renderConnection();
+    if (handsFreeEnabled && state === 'speaking') setState('listening');
   });
-  player.addEventListener('ended', () => {
-    if (unlockingAudio) return;
-    currentAudio = null;
-    speaking = false;
-    stopAudioButton.hidden = true;
-    clearPlayerSource();
-    renderConnection();
-    playNext();
-  });
-  player.addEventListener('error', () => {
+
+  function finishPlayback() {
     if (unlockingAudio) return;
     currentAudio = null;
-    speaking = false;
     stopAudioButton.hidden = true;
     clearPlayerSource();
-    renderConnection();
-    playNext();
-  });
+    if (audioQueue.length) {
+      playNext();
+    } else if (handsFreeEnabled) {
+      setState('listening');
+    }
+  }
+
+  player.addEventListener('ended', finishPlayback);
+  player.addEventListener('error', finishPlayback);
 
   if (navigator.mediaSession) {
     const actions = {
       play: () => player.play(),
-      pause: () => player.pause(),
+      pause: stopPlayback,
       stop: stopPlayback,
       nexttrack: replayLast,
       previoustrack: replayPrevious
@@ -885,16 +1527,51 @@
     });
   }
 
+  function wantsWakeLock() {
+    return voiceEnabled || handsFreeEnabled;
+  }
+
+  async function requestWakeLock() {
+    if (!navigator.wakeLock || wakeLockSentinel || wakeLockRequesting || !wantsWakeLock() || document.visibilityState !== 'visible') return;
+    wakeLockRequesting = true;
+    try {
+      const sentinel = await navigator.wakeLock.request('screen');
+      wakeLockSentinel = sentinel;
+      sentinel.addEventListener('release', () => {
+        if (wakeLockSentinel === sentinel) wakeLockSentinel = null;
+        if (wantsWakeLock() && document.visibilityState === 'visible') window.setTimeout(requestWakeLock, 0);
+      }, {once: true});
+    } catch (_) {
+    } finally {
+      wakeLockRequesting = false;
+    }
+  }
+
+  function updateWakeLock() {
+    if (wantsWakeLock()) {
+      requestWakeLock();
+    } else if (wakeLockSentinel) {
+      const sentinel = wakeLockSentinel;
+      wakeLockSentinel = null;
+      sentinel.release().catch(() => {});
+    }
+  }
+
   function connect() {
     setConnection('reconnecting…', '');
     const events = new EventSource('/events');
     events.onopen = () => {
       setConnection(detached ? 'no session attached — reconnected' : 'connected', detached ? 'detached' : 'connected');
+      if (handsFreeEnabled && awaitingMessageID && !activeReplyID && state === 'listening') setState('thinking');
       scrollBottom();
     };
     events.onerror = () => {
       const closed = events.readyState === EventSource.CLOSED;
       setConnection(closed ? 'disconnected — reload to sign in' : 'reconnecting…', closed ? 'disconnected' : '');
+      if (closed && handsFreeEnabled && state === 'thinking') {
+        resetReplyTracking();
+        setState('listening');
+      }
     };
     function markConnected() {
       detached = false;
@@ -902,7 +1579,9 @@
     }
     events.addEventListener('message', event => {
       markConnected();
-      addMessage('agent', JSON.parse(event.data));
+      const data = JSON.parse(event.data);
+      addMessage('agent', data);
+      handleHandsFreeReply(data);
     });
     events.addEventListener('own', event => renderOwn(JSON.parse(event.data)));
     events.addEventListener('status', event => {
@@ -918,6 +1597,7 @@
       typing.textContent = 'agent is typing…';
       window.clearTimeout(typingTimer);
       typingTimer = window.setTimeout(() => { typing.textContent = ''; }, 3500);
+      if (handsFreeEnabled && state === 'thinking' && activeReplyID) refreshAudioWait();
       scrollBottom();
     });
     events.addEventListener('edit', event => {
@@ -945,12 +1625,19 @@
       const data = JSON.parse(event.data);
       voiceEnabled = Boolean(data.voice);
       updateVoiceButton();
-      if (!voiceEnabled) stopPlayback();
+      if (!voiceEnabled) {
+        if (handsFreeEnabled) disableHandsFree();
+        stopPlayback();
+      }
+      updateWakeLock();
     });
     events.addEventListener('audio', event => {
       if (!voiceEnabled) return;
       const item = JSON.parse(event.data);
+      if (!acceptsHandsFreeAudio(item)) return;
       item.queuedAt = Date.now();
+      window.clearTimeout(audioWaitTimer);
+      audioWaitTimer = null;
       audioQueue.push(item);
       playNext();
     });
@@ -960,8 +1647,24 @@
     const response = await fetch('/logout', {method: 'POST'});
     if (response.ok || response.status === 401) location.assign('/login');
   });
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden') {
+      if (state === 'recording' && handsFreeCapture) finishHandsFreeRecording(true, VAD_RECORDER_STOP_DELAY_MS);
+      stopVAD();
+      return;
+    }
+    resumeAudioContext();
+    startVAD();
+    requestWakeLock();
+  });
+  if (window.isSecureContext && 'serviceWorker' in navigator) {
+    navigator.serviceWorker.register('/sw.js').catch(error => {
+      console.error('web: service worker registration failed', error);
+    });
+  }
   if (window.visualViewport) window.visualViewport.addEventListener('resize', scrollBottom);
   input.addEventListener('focus', scrollBottom);
+  updateHandsFreeButton();
   connect();
   input.focus({preventScroll: true});
 })();

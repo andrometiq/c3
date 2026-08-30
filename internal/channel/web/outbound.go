@@ -13,6 +13,7 @@ import (
 
 type streamPayload struct {
 	MessageID       int64      `json:"message_id,omitempty"`
+	ReplyTo         int64      `json:"reply_to,omitempty"`
 	ClientID        string     `json:"client_id,omitempty"`
 	Text            string     `json:"text,omitempty"`
 	Timestamp       *time.Time `json:"timestamp,omitempty"`
@@ -22,6 +23,7 @@ type streamPayload struct {
 	URL             string     `json:"url,omitempty"`
 	Bytes           int        `json:"bytes,omitempty"`
 	Provider        string     `json:"provider,omitempty"`
+	Replay          bool       `json:"replay,omitempty"`
 }
 
 type streamEvent struct {
@@ -55,10 +57,11 @@ func (c *Channel) SendReply(args c3types.ReplyArgs) (int64, error) {
 		return *args.ReplyTo, nil
 	}
 	messageID := c.nextReplyMessageID()
-	event := streamEvent{
-		kind:    "message",
-		payload: streamPayload{MessageID: messageID, Text: args.Text, Timestamp: streamTimestamp(c.now())},
+	payload := streamPayload{MessageID: messageID, Text: args.Text, Timestamp: streamTimestamp(c.now())}
+	if args.ReplyTo != nil && *args.ReplyTo > 0 {
+		payload.ReplyTo = *args.ReplyTo
 	}
+	event := streamEvent{kind: "message", payload: payload}
 	if isStatusText(args.Text) {
 		event.kind = "status"
 	}

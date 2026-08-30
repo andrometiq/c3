@@ -1,15 +1,18 @@
 package web
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"image/png"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -619,6 +622,25 @@ func TestFreshEventsReplayOwnAndAgentHistory(t *testing.T) {
 	<-resumedDone
 }
 
+func TestReplyEventsCarrySourceIDAndReplayMarker(t *testing.T) {
+	c, _, cookie := newHandlerChannel()
+	sourceID := int64(17)
+	if _, err := c.SendReply(c3types.ReplyArgs{Channel: Name, ChatID: 42, ReplyTo: &sourceID, Text: "correlated answer"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(c.replay) != 1 || c.replay[0].payload.ReplyTo != sourceID || c.replay[0].payload.Replay {
+		t.Fatalf("live correlated event=%+v", c.replay)
+	}
+
+	recorder, cancel, done := startSSE(c, cookie, "", "")
+	waitFor(t, func() bool {
+		_, body := recorder.snapshot()
+		return strings.Contains(body, `"reply_to":17`) && strings.Contains(body, `"replay":true`)
+	})
+	cancel()
+	<-done
+}
+
 func TestInboundAndReplyIDsHaveSeparateCounters(t *testing.T) {
 	c, _, cookie := newHandlerChannel()
 	inbound := sendRequest(c, cookie, `{"text":"question","client_id":"counter-test"}`)
@@ -954,6 +976,16 @@ func TestEmbeddedPagesAreSelfContainedAndUseTextContent(t *testing.T) {
 		t.Fatal(err)
 	}
 	pageText := string(page)
+	resourcePattern := regexp.MustCompile(`(?:href|src)="([^"]*)"`)
+	allowedResources := map[string]bool{
+		"": true, "/manifest.webmanifest": true, "/icon.svg": true,
+		"/apple-touch-icon.png": true, "/sw.js": true,
+	}
+	for _, match := range resourcePattern.FindAllStringSubmatch(pageText, -1) {
+		if !allowedResources[match[1]] {
+			t.Fatalf("page loads non-allowlisted resource %q", match[1])
+		}
+	}
 	const allowlist = "const allowedSchemes = ['http:', 'https:', 'mailto:', 'tel:'];"
 	if !strings.Contains(pageText, allowlist) {
 		t.Fatal("page does not contain the exact safe link-scheme allowlist")
@@ -969,6 +1001,15 @@ func TestEmbeddedPagesAreSelfContainedAndUseTextContent(t *testing.T) {
 		"setAttribute('aria-label', 'spoiler')", "console.error('web: markdown render failed'",
 		"let detached = false", "detached ? 'no session attached — reconnected'", "detached = false",
 		"navigator.mediaDevices", "MediaRecorder", "navigator.mediaSession", "/voice-note", "/audio/",
+		"navigator.wakeLock", "navigator.serviceWorker.register('/sw.js')", "createAnalyser(",
+		"getFloatTimeDomainData", "createMediaStreamDestination", "createDelay(1)",
+		"aria-label=\"Hands-free\"", "aria-live=\"polite\">○ idle",
+		"rel=\"manifest\" href=\"/manifest.webmanifest\"", "meta name=\"theme-color\" content=\"#0b0d10\"",
+		"meta name=\"mobile-web-app-capable\" content=\"yes\"", "rel=\"apple-touch-icon\" href=\"/apple-touch-icon.png\"",
+		"meta name=\"apple-mobile-web-app-capable\" content=\"yes\"", "width=device-width, initial-scale=1, viewport-fit=cover",
+		"const VAD_NOISE_ALPHA = 0.015;", "const VAD_HANGOVER_MS = 900;", "const VAD_MIN_UTTERANCE_MS = 280;",
+		"const VAD_PRE_ROLL_SECONDS = 0.3;", "const BARGE_FLOOR_MULTIPLIER = 8;", "const BARGE_REQUIRED_MS = 400;",
+		"data.replay", "data.reply_to", "sentinel.addEventListener('release'",
 		"Date.now() - Number(next.queuedAt || 0) < 2000", "item.queuedAt = Date.now()",
 		"aria-label=\"Stop spoken reply\"", "aria-label=\"Replay last spoken reply\"",
 		"#stop-audio::before", "#replay-audio::before", "text-overflow: ellipsis",
@@ -977,19 +1018,134 @@ func TestEmbeddedPagesAreSelfContainedAndUseTextContent(t *testing.T) {
 			t.Fatalf("page is missing renderer/state marker %q", marker)
 		}
 	}
+	for _, stateName := range []string{"idle", "listening", "recording", "sending", "thinking", "speaking"} {
+		if !strings.Contains(pageText, stateName+":") {
+			t.Fatalf("page is missing state %q", stateName)
+		}
+	}
 	if got := strings.Count(pageText, "markConnected();"); got != 3 {
 		t.Fatalf("page marks %d event kinds connected, want message/typing/edit only", got)
 	}
 }
 
-func TestPageHeadersDenyFraming(t *testing.T) {
+func TestHandsFreePageStateMachineRules(t *testing.T) {
+	page, err := pages.ReadFile("page.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(page)
+	for _, rule := range []string{
+		"if (!handsFreeEnabled || state !== 'thinking' || data.replay || !awaitingMessageID || activeReplyID) return;",
+		"const replyTo = Number(data.reply_to || 0);",
+		"if (replyTo !== 0 && replyTo !== awaitingMessageID) return;",
+		"if (handsFreeEnabled && awaitingMessageID && !activeReplyID && state === 'listening') setState('thinking');",
+		"if (closed && handsFreeEnabled && state === 'thinking') {\n        resetReplyTracking();\n        setState('listening');",
+		"if (currentAudio || audioQueue.length) enterHandsFreeSpeaking();",
+		"function enterHandsFreeSpeaking()",
+		"analysisMutedUntil = performance.now() + (begins - audioContext.currentTime) * 1000 + EARCON_ANALYSIS_MUTE_MS;",
+		"square root of the 300–3400 Hz FFT-power fraction",
+		"function estimateSpeechEnergy()",
+		"const HANDS_FREE_UPLOAD_TIMEOUT_MS = 60000;",
+		"startHandsFreeUploadDeadline(pending);",
+		"pending.handsFreeDeadline = window.setTimeout(() => {\n      if (pending.controller) pending.controller.abort();\n      failVoiceUpload(pending, 'upload timed out');\n    }, HANDS_FREE_UPLOAD_TIMEOUT_MS);",
+		"setDelivery(pending.row, 'not sent — ' + reason, 'failed');",
+		"setState('listening', true);\n    playEarcon('error');",
+		"const EARCON_ATTACK_MS = 5;",
+		"gain.gain.setValueAtTime(0.0001, begins);",
+		"gain.gain.linearRampToValueAtTime(EARCON_GAIN, begins + EARCON_ATTACK_MS / 1000);",
+		"gain.gain.exponentialRampToValueAtTime(0.0001, ends);",
+	} {
+		if !strings.Contains(text, rule) {
+			t.Errorf("page is missing hands-free rule %q", rule)
+		}
+	}
+	if got := strings.Count(text, "handleHandsFreeReply("); got != 2 {
+		t.Errorf("handleHandsFreeReply appears %d times, want its definition and message-event call only", got)
+	}
+	if got := strings.Count(text, "enterHandsFreeSpeaking();"); got != 2 {
+		t.Errorf("enterHandsFreeSpeaking calls=%d, want hands-free enable and player-play paths", got)
+	}
+	if strings.Contains(text, "finishHandsFreeRecording(true, 0)") {
+		t.Error("forced recording stop bypasses the delayed microphone tail")
+	}
+	if got := strings.Count(text, "finishHandsFreeRecording(true, VAD_RECORDER_STOP_DELAY_MS)"); got != 2 {
+		t.Errorf("delayed forced recording stops=%d, want 60-second cap and hidden-page stop", got)
+	}
+	if got := strings.Count(text, "startHandsFreeUploadDeadline(pending);"); got != 1 {
+		t.Errorf("hands-free upload deadline starts=%d, want one shared deadline in deliverVoice", got)
+	}
+	if strings.Contains(text, "createMediaElementSource") {
+		t.Error("spoken reply media element is captured into Web Audio")
+	}
+}
+
+func TestPWAAssets(t *testing.T) {
+	c, _, _ := newHandlerChannel()
+	tests := []struct {
+		path        string
+		contentType string
+	}{
+		{"/manifest.webmanifest", "application/manifest+json"},
+		{"/icon.svg", "image/svg+xml"},
+		{"/apple-touch-icon.png", "image/png"},
+		{"/sw.js", "text/javascript"},
+	}
+	responses := make(map[string]*httptest.ResponseRecorder, len(tests))
+	for _, test := range tests {
+		response := httptest.NewRecorder()
+		c.routes().ServeHTTP(response, request(http.MethodGet, test.path, "", nil, false))
+		if response.Code != http.StatusOK || response.Header().Get("Content-Type") != test.contentType {
+			t.Fatalf("GET %s status/content-type=%d/%q", test.path, response.Code, response.Header().Get("Content-Type"))
+		}
+		if response.Header().Get("Cache-Control") != "no-store" || response.Header().Get("X-Content-Type-Options") != "nosniff" {
+			t.Fatalf("GET %s cache/nosniff headers=%q/%q", test.path, response.Header().Get("Cache-Control"), response.Header().Get("X-Content-Type-Options"))
+		}
+		if got := response.Header().Get("Content-Security-Policy"); got != "" {
+			t.Fatalf("GET %s Content-Security-Policy=%q, want absent", test.path, got)
+		}
+		if got := response.Header().Get("Permissions-Policy"); got != "" {
+			t.Fatalf("GET %s Permissions-Policy=%q, want absent", test.path, got)
+		}
+		responses[test.path] = response
+	}
+
+	const manifest = `{"name":"C3 web chat","short_name":"C3","start_url":"/","scope":"/","display":"standalone","background_color":"#0b0d10","theme_color":"#0b0d10","icons":[{"src":"/icon.svg","sizes":"any","type":"image/svg+xml","purpose":"any"},{"src":"/apple-touch-icon.png","sizes":"180x180","type":"image/png"}]}`
+	if got := strings.TrimSpace(responses["/manifest.webmanifest"].Body.String()); got != manifest {
+		t.Fatalf("manifest=%q", got)
+	}
+	icon := responses["/icon.svg"].Body.Bytes()
+	if len(icon) > 1024 || !bytes.Contains(icon, []byte(">C3</text>")) {
+		t.Fatalf("icon size/design=%d/%q", len(icon), icon)
+	}
+	image, err := png.DecodeConfig(bytes.NewReader(responses["/apple-touch-icon.png"].Body.Bytes()))
+	if err != nil || image.Width != 180 || image.Height != 180 {
+		t.Fatalf("apple icon=%dx%d error=%v", image.Width, image.Height, err)
+	}
+	worker := responses["/sw.js"]
+	if strings.Contains(worker.Body.String(), "addEventListener('fetch'") || !strings.Contains(worker.Body.String(), "skipWaiting") || !strings.Contains(worker.Body.String(), "clients.claim") {
+		t.Fatalf("service worker has unexpected lifecycle: %q", worker.Body.String())
+	}
+	if got := worker.Header().Get("Service-Worker-Allowed"); got != "" {
+		t.Fatalf("Service-Worker-Allowed=%q, want absent", got)
+	}
+}
+
+func TestDocumentHeadersDenyFraming(t *testing.T) {
+	c, _, _ := newHandlerChannel()
 	w := httptest.NewRecorder()
-	setPageHeaders(w)
+	c.routes().ServeHTTP(w, request(http.MethodGet, "/login", "", nil, false))
+	if w.Code != http.StatusOK || w.Header().Get("Cache-Control") != "no-store" || w.Header().Get("X-Content-Type-Options") != "nosniff" {
+		t.Fatalf("GET /login status/cache/nosniff=%d/%q/%q", w.Code, w.Header().Get("Cache-Control"), w.Header().Get("X-Content-Type-Options"))
+	}
 	if got := w.Header().Get("X-Frame-Options"); got != "DENY" {
 		t.Fatalf("X-Frame-Options=%q, want DENY", got)
 	}
-	if csp := w.Header().Get("Content-Security-Policy"); !strings.Contains(csp, "media-src 'self'") {
-		t.Fatalf("CSP=%q, want same-origin media", csp)
+	const csp = "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; img-src 'self'; media-src 'self'; worker-src 'self'; manifest-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
+	if got := w.Header().Get("Content-Security-Policy"); got != csp {
+		t.Fatalf("Content-Security-Policy=%q", got)
+	}
+	if got := w.Header().Get("Permissions-Policy"); got != "microphone=(self), camera=()" {
+		t.Fatalf("Permissions-Policy=%q", got)
 	}
 }
 

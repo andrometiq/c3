@@ -25,6 +25,10 @@ func (c *Channel) routes() http.Handler {
 	mux.HandleFunc("POST /voice", c.handleVoicePreference)
 	mux.HandleFunc("GET /audio/unlock", c.handleAudioUnlock)
 	mux.HandleFunc("GET /audio/{token}", c.handleAudio)
+	mux.HandleFunc("GET /manifest.webmanifest", handleWebManifest)
+	mux.HandleFunc("GET /icon.svg", handleWebIcon)
+	mux.HandleFunc("GET /apple-touch-icon.png", handleAppleTouchIcon)
+	mux.HandleFunc("GET /sw.js", handleServiceWorker)
 	mux.HandleFunc("GET /healthz", c.handleHealth)
 	mux.HandleFunc("GET /ca.crt", c.handleCACertificate)
 	return mux
@@ -82,7 +86,36 @@ func setPageHeaders(w http.ResponseWriter) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("X-Frame-Options", "DENY")
-	w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; media-src 'self'; img-src 'none'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'")
+	w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; img-src 'self'; media-src 'self'; worker-src 'self'; manifest-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'")
+	w.Header().Set("Permissions-Policy", "microphone=(self), camera=()")
+}
+
+func handleWebManifest(w http.ResponseWriter, _ *http.Request) {
+	serveEmbeddedAsset(w, "manifest.webmanifest", "application/manifest+json")
+}
+
+func handleWebIcon(w http.ResponseWriter, _ *http.Request) {
+	serveEmbeddedAsset(w, "icon.svg", "image/svg+xml")
+}
+
+func handleAppleTouchIcon(w http.ResponseWriter, _ *http.Request) {
+	serveEmbeddedAsset(w, "apple-touch-icon.png", "image/png")
+}
+
+func handleServiceWorker(w http.ResponseWriter, _ *http.Request) {
+	serveEmbeddedAsset(w, "sw.js", "text/javascript")
+}
+
+func serveEmbeddedAsset(w http.ResponseWriter, name, contentType string) {
+	asset, err := pages.ReadFile(name)
+	if err != nil {
+		http.Error(w, "asset unavailable", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Content-Type", contentType)
+	_, _ = w.Write(asset)
 }
 
 func (c *Channel) handleAuth(w http.ResponseWriter, r *http.Request) {
@@ -271,6 +304,7 @@ func (c *Channel) handleEvents(w http.ResponseWriter, r *http.Request) {
 		_ = writeSSE(w, streamEvent{kind: "status", payload: streamPayload{Text: "history may be incomplete", Timestamp: streamTimestamp(c.now())}})
 	}
 	for _, event := range replay {
+		event.payload.Replay = true
 		if err := writeSSE(w, event); err != nil {
 			return
 		}
