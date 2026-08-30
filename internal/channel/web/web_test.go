@@ -1001,7 +1001,7 @@ func TestEmbeddedPagesAreSelfContainedAndUseTextContent(t *testing.T) {
 		"setAttribute('aria-label', 'spoiler')", "console.error('web: markdown render failed'",
 		"let detached = false", "detached ? 'no session attached — reconnected'", "detached = false",
 		"navigator.mediaDevices", "MediaRecorder", "navigator.mediaSession", "/voice-note", "/audio/",
-		"navigator.wakeLock", "navigator.serviceWorker.register('/sw.js')", "AnalyserNode",
+		"navigator.wakeLock", "navigator.serviceWorker.register('/sw.js')", "createAnalyser(",
 		"getFloatTimeDomainData", "createMediaStreamDestination", "createDelay(1)",
 		"aria-label=\"Hands-free\"", "aria-live=\"polite\">○ idle",
 		"rel=\"manifest\" href=\"/manifest.webmanifest\"", "meta name=\"theme-color\" content=\"#0b0d10\"",

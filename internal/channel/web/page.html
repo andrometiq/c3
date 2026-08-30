@@ -222,7 +222,7 @@
   };
 
   function renderConnection() {
-    connection.textContent = state === 'idle' ? connectionText : stateLabels[state] + ' · ' + connectionText;
+    connection.textContent = connectionText;
     connection.className = connectionClass;
   }
 
