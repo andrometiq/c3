@@ -11,6 +11,7 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/Andrometiq/c3/internal/c3types"
 	"github.com/Andrometiq/c3/internal/ipc"
 	"github.com/Andrometiq/c3/internal/termtitle"
 )
@@ -42,14 +43,16 @@ func drivePendingAttached(t *testing.T, a *adapter, msg ipc.AttachedMsg) {
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
 		a.pmu.Lock()
-		ch, ok := a.pending["attached"]
+		_, ok := a.pending["attached"]
+		a.pmu.Unlock()
 		if ok {
-			delete(a.pending, "attached")
-			a.pmu.Unlock()
-			ch <- ipc.ToolResultMsg{Result: map[string]any{"_attached": msg}}
+			raw, err := json.Marshal(msg)
+			if err != nil {
+				t.Fatalf("marshal attached response: %v", err)
+			}
+			a.dispatchAttached(raw)
 			return
 		}
-		a.pmu.Unlock()
 		time.Sleep(2 * time.Millisecond)
 	}
 	t.Fatal("pending['attached'] never registered")
@@ -101,26 +104,89 @@ func newAttachReq(t *testing.T, args map[string]any) *mcp.CallToolRequest {
 // pending channel with the supplied response, and returns when
 // toolAttach returns. Ensures the title-emit (if any) has flushed
 // before the test reads the buffer.
-func callToolAttachSync(t *testing.T, a *adapter, resp ipc.AttachedMsg) {
+func callToolAttachSync(t *testing.T, a *adapter, resp ipc.AttachedMsg) *mcp.CallToolResult {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
 	req := newAttachReq(t, map[string]any{"name": "foo"})
-	done := make(chan struct{})
+	done := make(chan *mcp.CallToolResult, 1)
 	go func() {
-		_, _ = a.toolAttach(ctx, req)
-		close(done)
+		result, _ := a.toolAttach(ctx, req)
+		done <- result
 	}()
 	drivePendingAttached(t, a, resp)
 	select {
-	case <-done:
+	case result := <-done:
+		return result
 	case <-ctx.Done():
 		t.Fatal("toolAttach did not return in time")
 	}
+	return nil
 }
 
 // ── tests ───────────────────────────────────────────────────────────────────
+
+func TestToolAttach_WebResultIncludesSpokenReplyGuidance(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		initCaps *c3types.Capabilities
+	}{
+		{name: "after telegram initialize", initCaps: &c3types.Capabilities{Channel: "telegram", RichText: true}},
+		{name: "after unknown initialize"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			a := newAdapterWithDummyConn(t)
+			a.helloAck.Capabilities = test.initCaps
+			_ = a.buildInstructions()
+			result := callToolAttachSync(t, a, ipc.AttachedMsg{
+				Op:      ipc.OpAttached,
+				OK:      true,
+				Channel: "web",
+				Name:    "web",
+				Capabilities: &c3types.Capabilities{
+					Channel: "web", RichText: true, SpokenReplies: true,
+				},
+			})
+			if result.IsError {
+				t.Fatalf("toolAttach returned an error: %q", resultText(t, result))
+			}
+			text := resultText(t, result)
+			for _, want := range []string{"CHANNEL CAPABILITIES (web):", "Spoken replies: POSSIBLE", "WHILE VOICE IS ON"} {
+				if !strings.Contains(text, want) {
+					t.Errorf("attach web result missing %q:\n%s", want, text)
+				}
+			}
+		})
+	}
+}
+
+func TestToolAttach_TelegramResultMatchesPreModeText(t *testing.T) {
+	a := newAdapterWithDummyConn(t)
+	a.helloAck.Capabilities = &c3types.Capabilities{Channel: "telegram", RichText: true}
+	_ = a.buildInstructions()
+	topicID := int64(42)
+	result := callToolAttachSync(t, a, ipc.AttachedMsg{
+		Op:      ipc.OpAttached,
+		OK:      true,
+		Channel: "telegram",
+		Name:    "project",
+		ChatID:  -1001,
+		TopicID: &topicID,
+		Capabilities: &c3types.Capabilities{
+			Channel: "telegram", RichText: true,
+		},
+	})
+	if result.IsError {
+		t.Fatalf("toolAttach returned an error: %q", resultText(t, result))
+	}
+	if got, want := resultText(t, result), `attached to "project" (chat -1001, thread 42)`; got != want {
+		t.Fatalf("Telegram attach result changed:\n got: %q\nwant: %q", got, want)
+	}
+	if strings.Contains(resultText(t, result), "CHANNEL CAPABILITIES") {
+		t.Fatalf("Telegram attach repeated initialize guidance: %q", resultText(t, result))
+	}
+}
 
 // TestToolAttach_EmitsTitleOnOK verifies the happy path: an OK attach
 // response triggers exactly one title-bar escape with the

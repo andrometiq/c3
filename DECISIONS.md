@@ -3,6 +3,25 @@
 Entries are newest first. This is the public architecture record: it records
 rulings and rationale, never private operational details.
 
+## D022: On-the-go mode uses attach plus shared protocol text
+
+**Date:** 2026-08-30
+
+**Decision:** On-the-go mode has no activation tool or new IPC operation. Only
+the unambiguous imperatives “start on-the-go mode” and “switch to the web chat,”
+plus the slash command, call the existing attach tool for the web route and
+switch the agent's output mode. The generic English fragment “on-the-go” is not
+a trigger. The end phrases later re-attach the topic the agent held before.
+Spoken-reply guidance is rendered only from the channel's `SpokenReplies`
+manifest flag, and the same shared protocol text is delivered to Claude, Codex,
+and Codex's managed `AGENTS.md` block.
+
+**Why:** `attach web` already claims the route and delivers the login link, so a
+second activation mechanism would duplicate state transitions. Treating the
+trigger phrase as the explicit output-mode request preserves the no-inference
+mode contract, while manifest-driven guidance cannot drift from whether a
+channel can actually read replies aloud.
+
 ## D020: Observe Claude transcripts to settle locally-resolved permission prompts
 
 **Date:** 2026-08-30

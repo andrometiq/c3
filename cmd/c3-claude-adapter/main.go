@@ -58,6 +58,7 @@ import (
 
 	"github.com/Andrometiq/c3/internal/broker"
 	"github.com/Andrometiq/c3/internal/c3types"
+	"github.com/Andrometiq/c3/internal/capability"
 	"github.com/Andrometiq/c3/internal/ipc"
 	"github.com/Andrometiq/c3/internal/mcptools"
 	"github.com/Andrometiq/c3/internal/mode"
@@ -358,6 +359,11 @@ type adapter struct {
 	// Hello-ack response state, captured on connect.
 	helloAck      ipc.HelloAckMsg
 	brokerVersion atomic.Int64
+	// initGuidanceChannel is the channel whose capability guidance was rendered
+	// into the MCP initialize instructions. It stays fixed even when a later
+	// attach refreshes helloAck.Capabilities; toolAttach uses it to avoid
+	// repeating guidance the agent already holds.
+	initGuidanceChannel string
 
 	// Last successful attach request — replayed on broker reconnect so a
 	// session that survives a broker restart auto-reclaims its route. Nil
@@ -1566,6 +1572,9 @@ func (a *adapter) buildMCPServer() *mcp.Server {
 // mode protocol + multi-part reply protocol). mode.Combined() is the
 // single source of truth shared with the Codex adapter.
 func (a *adapter) buildInstructions() string {
+	caps := a.capsOrDefault()
+	a.initGuidanceChannel = caps.Channel
+
 	var head string
 	switch {
 	case a.helloAck.NoConfig:
@@ -1588,7 +1597,7 @@ func (a *adapter) buildInstructions() string {
 	// returned in the MCP initialize RESULT (a normal JSON-RPC response the CLI
 	// always processes), NOT a channel push, so they render even in the broken
 	// session. The human separately sees the Telegram held-notice.
-	return renderDegradedNote(a.hostRenderCapable) + head + permissionContractNote + mode.Combined(a.capsOrDefault())
+	return renderDegradedNote(a.hostRenderCapable) + head + permissionContractNote + mode.Combined(caps)
 }
 
 // renderDegradedNote returns the leading init-instructions warning for a session
@@ -1906,6 +1915,18 @@ func (a *adapter) toolAttach(ctx context.Context, req *mcp.CallToolRequest) (*mc
 			termtitle.EmitAttach(&attached)
 		}
 		text := ipc.FormatAttached(&attached)
+		// A successful attach can switch channels after initialize. Surface the
+		// just-attached manifest immediately only when it differs from the channel
+		// whose guidance the agent already received (or that channel was unknown).
+		if attached.OK && attached.Capabilities != nil {
+			attachedChannel := attached.Channel
+			if attachedChannel == "" {
+				attachedChannel = attached.Capabilities.Channel
+			}
+			if a.initGuidanceChannel == "" || attachedChannel != a.initGuidanceChannel {
+				text += "\n\n" + capability.GuidanceFor(*attached.Capabilities)
+			}
+		}
 		// Backlog-on-attach: surface any inbound held while no session was
 		// attached (spec backlog-on-attach). renderBacklogSummary degrades
 		// gracefully when the broker reports QueuedCount>0 with an EMPTY

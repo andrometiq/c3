@@ -78,6 +78,7 @@ func TestServerInfoName(t *testing.T) {
 	for _, want := range []string{
 		"CHANNEL CAPABILITIES",
 		"Typing: shown automatically",
+		"ON-THE-GO MODE (phone, web chat)",
 	} {
 		if !strings.Contains(result.Instructions, want) {
 			t.Errorf("instructions missing capability-guidance phrase %q:\n%s", want, result.Instructions)
@@ -101,14 +102,25 @@ func TestServerInfoName(t *testing.T) {
 	}
 	got := map[string]bool{}
 	gotDesc := map[string]string{}
+	var attachSchema string
 	for _, tool := range listResult.Tools {
 		got[tool.Name] = true
 		gotDesc[tool.Name] = tool.Description
+		if tool.Name == "attach" {
+			raw, err := json.Marshal(tool.InputSchema)
+			if err != nil {
+				t.Fatalf("marshal attach schema: %v", err)
+			}
+			attachSchema = string(raw)
+		}
 	}
 	for _, name := range wantTools {
 		if !got[name] {
 			t.Errorf("tools/list missing %q (got %v)", name, got)
 		}
+	}
+	if !strings.Contains(attachSchema, `"expr"`) {
+		t.Errorf("attach schema missing expr selector: %s", attachSchema)
 	}
 	// The reply tool Description is the compose-time surface; it must carry the
 	// format-for-readability nudge (formatting-policy 2026-06-20), in parity with

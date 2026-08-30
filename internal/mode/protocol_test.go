@@ -59,6 +59,29 @@ func TestModeProtocol_HasAnnounceModeAfterAttach(t *testing.T) {
 	}
 }
 
+func TestOnTheGoProtocol_HasCanonicalKeyPhrases(t *testing.T) {
+	for _, want := range []string{
+		"ON-THE-GO MODE (phone, web chat)",
+		"start on-the-go mode",
+		"switch to the web chat",
+		"attach with expr \"web\"",
+		"Spoken replies ON",
+		"back to Telegram",
+		"topic you held before",
+		"answered at the laptop",
+	} {
+		if !strings.Contains(OnTheGoProtocol, want) {
+			t.Errorf("OnTheGoProtocol missing %q:\n%s", want, OnTheGoProtocol)
+		}
+	}
+}
+
+func TestOnTheGoProtocol_RejectsBareOnTheGoTrigger(t *testing.T) {
+	if strings.Contains(OnTheGoProtocol, `"on-the-go"`) {
+		t.Fatalf("OnTheGoProtocol must not recognize the ambiguous bare trigger %q:\n%s", "on-the-go", OnTheGoProtocol)
+	}
+}
+
 // TestMultipartProtocol_HasCanonicalKeyPhrases — same shape as above.
 func TestMultipartProtocol_HasCanonicalKeyPhrases(t *testing.T) {
 	for _, want := range []string{
@@ -83,13 +106,16 @@ func TestCombined_PreservesLeadingNewlines(t *testing.T) {
 	}
 }
 
-// TestCombined_ContainsBothProtocols — the whole point of Combined() is
-// that callers don't have to remember to concatenate both protocols
+// TestCombined_ContainsAllProtocols — the whole point of Combined() is
+// that callers don't have to remember to concatenate the protocols
 // themselves.
-func TestCombined_ContainsBothProtocols(t *testing.T) {
+func TestCombined_ContainsAllProtocols(t *testing.T) {
 	got := Combined(testCaps)
 	if !strings.Contains(got, ModeProtocol) {
 		t.Error("Combined() missing ModeProtocol body")
+	}
+	if !strings.Contains(got, OnTheGoProtocol) {
+		t.Error("Combined() missing OnTheGoProtocol body")
 	}
 	if !strings.Contains(got, MultipartProtocol) {
 		t.Error("Combined() missing MultipartProtocol body")
@@ -114,20 +140,21 @@ func TestCombined_FoldsInCapabilityGuidance(t *testing.T) {
 
 // TestCombined_CapabilityGuidanceOrdering locks in the 2026-06-20 reorder:
 // ModeProtocol (the safety-critical no-auto-reply/no-auto-switch contract) stays
-// FIRST, the capability/formatting guidance moves to the MIDDLE (so it is no
-// longer the forgotten tail), and the narrow MultipartProtocol voice convention
-// moves LAST. Order: Mode → CHANNEL CAPABILITIES → Multipart.
+// FIRST, the capability/formatting guidance follows, then the on-the-go trigger
+// protocol, and the narrow MultipartProtocol voice convention moves LAST.
+// Order: Mode → CHANNEL CAPABILITIES → On-the-go → Multipart.
 func TestCombined_CapabilityGuidanceOrdering(t *testing.T) {
 	got := Combined(testCaps)
 	idxMode := strings.Index(got, "OUTPUT MODE PROTOCOL")
 	idxCaps := strings.Index(got, "CHANNEL CAPABILITIES")
+	idxOnTheGo := strings.Index(got, "ON-THE-GO MODE")
 	idxMulti := strings.Index(got, "MULTI-PART REPLY PROTOCOL")
-	if idxMode < 0 || idxCaps < 0 || idxMulti < 0 {
-		t.Fatalf("a required section is missing: mode=%d caps=%d multi=%d", idxMode, idxCaps, idxMulti)
+	if idxMode < 0 || idxCaps < 0 || idxOnTheGo < 0 || idxMulti < 0 {
+		t.Fatalf("a required section is missing: mode=%d caps=%d on-the-go=%d multi=%d", idxMode, idxCaps, idxOnTheGo, idxMulti)
 	}
-	if !(idxMode < idxCaps && idxCaps < idxMulti) {
-		t.Errorf("Combined() order must be Mode < Capabilities < Multipart; got mode=%d caps=%d multi=%d",
-			idxMode, idxCaps, idxMulti)
+	if !(idxMode < idxCaps && idxCaps < idxOnTheGo && idxOnTheGo < idxMulti) {
+		t.Errorf("Combined() order must be Mode < Capabilities < On-the-go < Multipart; got mode=%d caps=%d on-the-go=%d multi=%d",
+			idxMode, idxCaps, idxOnTheGo, idxMulti)
 	}
 }
 
@@ -146,7 +173,7 @@ func TestCombined_ProtocolsSeparated(t *testing.T) {
 	// Everything before idx should end with at least "\n\n".
 	prefix := got[:idx]
 	if !strings.HasSuffix(prefix, "\n\n") {
-		t.Errorf("ModeProtocol → MultipartProtocol transition missing blank-line separator; tail = %q",
+		t.Errorf("OnTheGoProtocol → MultipartProtocol transition missing blank-line separator; tail = %q",
 			prefix[max(0, len(prefix)-10):])
 	}
 }

@@ -47,6 +47,10 @@ const ModeProtocol = "OUTPUT MODE PROTOCOL (per-session, agent-only state — de
 	"• The mode is your responsibility to track — the broker doesn't store it. Always start in CLI mode; honor the user's EXPLICIT switch instructions immediately, but never switch on your own.\n" +
 	"• After attach completes, briefly announce your current output mode (\"currently in CLI mode\" / \"currently in Telegram mode\") so the human has explicit confirmation of where replies will land."
 
+// OnTheGoProtocol defines the web-chat trigger phrases as explicit output-mode
+// requests and tells the agent how to return to its previously held topic.
+const OnTheGoProtocol = "ON-THE-GO MODE (phone, web chat): when the user says \"start on-the-go mode\" / \"switch to the web chat\", that IS an explicit output-mode request: call attach with expr \"web\", switch to reply-tool (\"Telegram\") mode so replies land on the web route, announce it in one line, and follow the SPOKEN REPLIES guidance whenever a \"Spoken replies ON\" notice is in effect. When the user says \"end on-the-go mode\" / \"back to Telegram\" / \"back to the topic\", re-attach the topic you held before (attach with its name) and announce the mode you are in. Permission prompts and `ask` are answered at the laptop while on the go."
+
 // MultipartProtocol is the voice-dictation convention: the user announces
 // "start multi-part reply", fires a series of short voice bursts that each
 // individually look like complete prompts, and the agent must wait for
@@ -81,8 +85,9 @@ const MultipartProtocol = "MULTI-PART REPLY PROTOCOL:\n" +
 // no-auto-reply / no-auto-switch contract and must not be demoted. The capability
 // guidance moves to the MIDDLE (right after the mode contract, read while the
 // rules are fresh) so the formatting guidance is no longer the forgotten tail;
-// the narrow MultipartProtocol voice-burst convention moves LAST. The leading
-// "\n\n" + ModeProtocol byte-shape is preserved for the existing wire tests.
+// the on-the-go trigger protocol follows it, and the narrow MultipartProtocol
+// voice-burst convention moves LAST. The leading "\n\n" + ModeProtocol
+// byte-shape is preserved for the existing wire tests.
 func Combined(c c3types.Capabilities) string {
-	return "\n\n" + ModeProtocol + "\n\n" + capability.GuidanceFor(c) + "\n\n" + MultipartProtocol
+	return "\n\n" + ModeProtocol + "\n\n" + capability.GuidanceFor(c) + "\n\n" + OnTheGoProtocol + "\n\n" + MultipartProtocol
 }

@@ -27,6 +27,8 @@ support.
 | `ping`          | `c3-broker ping` (CLI)            | pure shell    | Send a one-shot "this is me" message to the attached topic, identifying which CLI session currently owns it. Run in each candidate tab to find the owner before force-stealing. |
 | `sessions`      | `c3-broker sessions` (CLI)        | pure shell    | List every live Claude Code / Codex session the broker tracks — CWD, attached topic, and a "you are here" marker for the calling terminal. |
 | `attach`        | `attach(expr=…)` (MCP tool)       | LLM dispatch  | Attach this session to a Telegram DM/topic or the web route. Broker parses `expr` first, then resolves the requested channel and target. |
+| `on-the-go`     | `attach(expr="web")` + output-mode protocol | LLM dispatch | Remember the current topic, attach web, switch to reply-tool (“Telegram”) mode, announce the switch, and remind that permissions/`ask` stay at the laptop. Claude command: `/c3:on-the-go`. |
+| `off-the-go`    | `attach(name=…)` + output-mode protocol | LLM dispatch | Re-attach the topic held before on-the-go mode (ask if unknown) and announce the restored route and mode. Claude command: `/c3:off-the-go`. |
 | `detach`        | `detach()` (MCP tool)             | LLM dispatch  | Release the session's current claim (sends `OpRelease`). Claude + Codex + Grok + dcode (every adapter with the tool). |
 | `fetch-queue`   | `fetch_queue(limit=…)` (MCP tool) + `fetch-queue` (MCP prompt on Desktop/Cursor) | LLM dispatch / prompt inject | Drain held inbound for this session's topic. Bare = all; optional count fetches the oldest N. Claude: `/c3:fetch-queue` and short alias `/c3:fetch`. Desktop: `/fetch-queue` MCP prompt. Cursor: MCP prompt `fetch-queue` plus `~/.cursor/commands/{fetch,c3-fetch}.md` from `install-cursor`. dcode: `/skill:c3-fetch` user skill from `install-dcode`. |
 | `release`       | `c3-broker release <cwd>` (CLI)   | pure shell    | **Stubbed in v1** — intended to drop a route claim by cwd without restarting the broker; returns 'not yet implemented' today; workaround is `/exit` the holding session. |
@@ -127,7 +129,26 @@ A successful `attach web` claims the operator's web route. If the browser has
 no live authenticated session, the broker sends a login link through the
 Telegram DM and the attach response says so. The response also reminds the
 agent to use reply-tool (“Telegram”) mode so `reply` lands on the claimed web
-route, and that permission prompts/`ask` still require the laptop.
+route, that **🔊 Voice** can read replies aloud, and that permission
+prompts/`ask` still require the laptop. The attach tool result includes the
+web manifest's capability guidance immediately, including the spoken-reply
+rules.
+
+## on-the-go / off-the-go — output-mode wrappers
+
+`/c3:on-the-go` remembers the currently held Telegram topic, calls
+`attach(expr="web")`, switches the agent to reply-tool (“Telegram”) mode, and
+announces the switch plus the laptop-side permission boundary. The phrases
+“start on-the-go mode” and “switch to the web chat” request the same sequence
+explicitly; they are not inferred merely because a message came from a phone.
+
+`/c3:off-the-go` re-attaches the topic held immediately before the switch. If
+that name is unknown, the wrapper asks the user rather than guessing. The
+phrases “end on-the-go mode,” “back to Telegram,” and “back to the topic” do the
+same, followed by a one-line mode announcement. A web system notice says
+“Spoken replies ON” or “Spoken replies OFF”; the agent uses speakable prose only
+while ON. Permission prompts and `ask` are answered at the laptop in either
+state.
 
 ### Bare `attach` (empty input) — never guesses
 
@@ -195,6 +216,8 @@ rest of the surface is the MCP tools plus `c3-broker` subcommands, as on Codex.
 | `ping`          | `/c3:ping` (`commands/ping.md`)                 | `c3-broker ping` (shell)                | `c3-broker ping` (shell)                     |
 | `sessions`      | `/c3:sessions` (`commands/sessions.md`)         | `c3-broker sessions` (shell)            | `c3-broker sessions` (shell)                 |
 | `attach`        | `/c3:attach` + `attach` MCP tool                | `attach` MCP tool                       | `/skill:c3-attach` + `attach` MCP tool       |
+| `on-the-go`     | `/c3:on-the-go` + `attach` MCP tool             | trigger phrase + `attach` MCP tool      | —                                            |
+| `off-the-go`    | `/c3:off-the-go` + `attach` MCP tool            | trigger phrase + `attach` MCP tool      | —                                            |
 | `detach`        | `/c3:detach` + `detach` MCP tool                | `detach` MCP tool                       | `detach` MCP tool                            |
 | `fetch-queue`   | `/c3:fetch-queue` / `/c3:fetch`                 | `fetch_queue` MCP tool                  | `/skill:c3-fetch` + `fetch_queue` MCP tool   |
 | `update`        | `/c3:update` (`commands/update.md`)             | `c3-broker update [--check]` (shell)    | `c3-broker update [--check]` (shell)         |

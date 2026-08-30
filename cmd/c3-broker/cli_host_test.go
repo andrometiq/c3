@@ -273,6 +273,9 @@ func TestEnsureCodexAgentsMd_CreatesFileWhenAbsent(t *testing.T) {
 	if !strings.Contains(string(got), "MULTI-PART REPLY PROTOCOL") {
 		t.Errorf("file missing MultipartProtocol body:\n%s", got)
 	}
+	if !strings.Contains(string(got), "ON-THE-GO MODE (phone, web chat)") {
+		t.Errorf("file missing OnTheGoProtocol body:\n%s", got)
+	}
 }
 
 func TestEnsureCodexAgentsMd_ReplacesExistingBlock(t *testing.T) {

@@ -5,6 +5,8 @@ import (
 	"testing"
 
 	"github.com/Andrometiq/c3/internal/c3types"
+	"github.com/Andrometiq/c3/internal/channel/telegram"
+	"github.com/Andrometiq/c3/internal/channel/web"
 )
 
 // telegramLikeCaps is a full-featured manifest mirroring the Telegram literal,
@@ -174,4 +176,29 @@ func TestGuidanceFor_NegativeLines(t *testing.T) {
 		// The auto-mode honesty note also lives inside the InlineKeyboards block.
 		"A tapped `ask` answer or `reply` button is informational input",
 	})
+}
+
+func TestGuidanceFor_SpokenRepliesGolden(t *testing.T) {
+	caps := telegramLikeCaps()
+	caps.Channel = "web"
+	withoutSpokenReplies := GuidanceFor(caps)
+	if strings.Contains(withoutSpokenReplies, "Spoken replies:") {
+		t.Fatalf("SpokenReplies=false emitted spoken-reply guidance:\n%s", withoutSpokenReplies)
+	}
+
+	caps.SpokenReplies = true
+	withSpokenReplies := GuidanceFor(caps)
+	want := "- Spoken replies: POSSIBLE — the operator can turn voice on in the web chat; a system notice \"Spoken replies ON/OFF\" tells you the current state. WHILE VOICE IS ON: lead with the answer in one or two sentences; plain prose — no headers, bullets, tables, backticks or emoji (they are read aloud as symbols); speak lists as \"first… second…\"; summarise code, commands and paths instead of dictating them (\"I changed the retry limit to three\"); expand symbols and avoid IDs/SHAs (\"the latest commit\"); short sentences; say when something is not speakable (\"the full log is in the chat\"). When voice is OFF, normal rich-text guidance applies.\n"
+	if got := strings.TrimPrefix(withSpokenReplies, withoutSpokenReplies); got != want {
+		t.Fatalf("SpokenReplies=true guidance delta:\n got: %q\nwant: %q", got, want)
+	}
+}
+
+func TestSpokenRepliesManifests(t *testing.T) {
+	if !web.New().Capabilities().SpokenReplies {
+		t.Error("web manifest SpokenReplies=false; want true")
+	}
+	if telegram.New().Capabilities().SpokenReplies {
+		t.Error("telegram manifest SpokenReplies=true; want false")
+	}
 }

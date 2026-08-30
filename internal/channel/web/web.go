@@ -144,7 +144,7 @@ func (c *Channel) Name() string { return Name }
 
 func (c *Channel) Capabilities() c3types.Capabilities {
 	return c3types.Capabilities{
-		Channel: Name, RichText: true, RichTables: true, MaxMessageRunes: maxMessageRunes,
+		Channel: Name, RichText: true, SpokenReplies: true, RichTables: true, MaxMessageRunes: maxMessageRunes,
 		EditMessages: true, Typing: true, MediaKinds: []c3types.MediaKind{},
 	}
 }

@@ -101,12 +101,12 @@ install-claude-shim`, `install-codex-shim`, `install-desktop`, `install-grok`,
 
 ## Channels
 
-Telegram and a private, text-only web chat ship in the broker.
+Telegram and a private web chat (rich text, optional spoken replies) ship in the broker.
 
 | Channel | Status | Carries |
 |---|---|---|
 | Telegram | shipping | Markdown, quote-replies, six media kinds, edits, reactions, polls, inline buttons |
-| Web | shipping | Private-CA HTTPS on the tailnet; plain text, typing, edits, held/system notices; magic-link login through the Telegram operator DM |
+| Web | shipping | Private-CA HTTPS on the tailnet; rich text, typing, edits, held/system notices, and optional spoken replies in on-the-go mode; magic-link login through the Telegram operator DM |
 
 Each CLI session drives one claimed route at a time: use `attach web` on the go and attach
 back to a Telegram topic at the desk. The web surface is private-first and intentionally
