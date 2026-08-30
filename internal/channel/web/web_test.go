@@ -979,7 +979,7 @@ func TestEmbeddedPagesAreSelfContainedAndUseTextContent(t *testing.T) {
 	resourcePattern := regexp.MustCompile(`(?:href|src)="([^"]*)"`)
 	allowedResources := map[string]bool{
 		"": true, "/manifest.webmanifest": true, "/icon.svg": true,
-		"/apple-touch-icon.png": true, "/sw.js": true,
+		"/apple-touch-icon.png": true, "/icon-192.png": true, "/icon-512.png": true, "/sw.js": true,
 	}
 	for _, match := range resourcePattern.FindAllStringSubmatch(pageText, -1) {
 		if !allowedResources[match[1]] {
@@ -996,11 +996,15 @@ func TestEmbeddedPagesAreSelfContainedAndUseTextContent(t *testing.T) {
 		}
 	}
 	for _, marker := range []string{
+		`id="view-drive"`, `id="view-chat"`, `id="drive-circle"`, `id="drive-word"`, `id="drive-chip"`,
+		`id="drive-mute"`, `id="drive-chat"`, `id="drive-live"`, `id="drive-replay"`,
+		`id="drive-last-reply"`, `id="drive-reply-play"`, `id="drive-transcript"`, `id="drive-lock-hint"`,
+		`id="load-earlier"`, `id="message-list"`, `id="new-messages"`,
 		"return 'mine:' + id", "return 'agent:' + id", "return 'status:' + id",
 		"createElement('table')", "createElement('blockquote')", "createElement('span')",
 		"setAttribute('aria-label', 'spoiler')", "console.error('web: markdown render failed'",
 		"let detached = false", "detached ? 'no session attached — reconnected'", "detached = false",
-		"navigator.mediaDevices", "MediaRecorder", "navigator.mediaSession", "/voice-note", "/audio/",
+		"navigator.mediaDevices", "MediaRecorder", "navigator.mediaSession", "/voice-note", "/speak", "/audio/",
 		"navigator.wakeLock", "navigator.serviceWorker.register('/sw.js')", "createAnalyser(",
 		"getFloatTimeDomainData", "createMediaStreamDestination", "createDelay(1)",
 		"aria-label=\"Hands-free\"", "aria-live=\"polite\">○ idle",
@@ -1062,8 +1066,8 @@ func TestHandsFreePageStateMachineRules(t *testing.T) {
 	if got := strings.Count(text, "handleHandsFreeReply("); got != 2 {
 		t.Errorf("handleHandsFreeReply appears %d times, want its definition and message-event call only", got)
 	}
-	if got := strings.Count(text, "enterHandsFreeSpeaking();"); got != 2 {
-		t.Errorf("enterHandsFreeSpeaking calls=%d, want hands-free enable and player-play paths", got)
+	if got := strings.Count(text, "enterHandsFreeSpeaking();"); got != 3 {
+		t.Errorf("enterHandsFreeSpeaking calls=%d, want hands-free enable, Drive-view entry, and player-play paths", got)
 	}
 	if strings.Contains(text, "finishHandsFreeRecording(true, 0)") {
 		t.Error("forced recording stop bypasses the delayed microphone tail")
@@ -1079,6 +1083,111 @@ func TestHandsFreePageStateMachineRules(t *testing.T) {
 	}
 }
 
+func TestDriveViewPageRules(t *testing.T) {
+	page, err := pages.ReadFile("page.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(page)
+	for _, rule := range []string{
+		"const VIEW_EDGE_START_PX = 24;",
+		"const VIEW_SWIPE_DISTANCE_PX = 80;",
+		"const GESTURE_VERTICAL_CANCEL_PX = 30;",
+		"const DRIVE_HOLD_CANCEL_PX = 30;",
+		"const DRIVE_LOCK_DISTANCE_PX = 60;",
+		"const DRIVE_CANCEL_DISTANCE_PX = 60;",
+		"const DRIVE_LOCKED_CANCEL_MS = 700;",
+		"const DRIVE_LIVE_HOLD_MS = 700;",
+		"const DRIVE_LIVE_SEND_DELAY_MS = 1200;",
+		"const DRIVE_CLICK_GUARD_MS = 400;",
+		"const VIEW_TRANSITION_MS = 150;",
+		"transition: transform 150ms ease",
+		"transition: background-color 150ms linear",
+		"@media (prefers-reduced-motion: reduce)",
+		"width: clamp(220px, 64vmin, 340px)",
+		"#14181d", "#b3261e", "#8a5a00", "#1e6b3a", "#1f4f8a", "#6e1414",
+		"word = 'TALK'", "word = 'REC'", "word = 'WAIT'", "word = 'SPEAKING'", "word = 'LIVE'", "word = 'NO SESSION'",
+		"localStorage.getItem(VIEW_STORAGE_KEY)",
+		"localStorage.setItem(key, value)",
+		"driveCircle.addEventListener('pointerdown'",
+		"driveCircle.addEventListener('pointerup'",
+		"if (driveHold.mode === 'locked-action' || driveHold.locked) return;",
+		"if (upward >= DRIVE_LOCK_DISTANCE_PX && upward >= horizontal)",
+		"if (vertical < DRIVE_CANCEL_DISTANCE_PX && horizontal < DRIVE_CANCEL_DISTANCE_PX) return;",
+		"}, DRIVE_LOCKED_CANCEL_MS);",
+		"hint = driveLocked ? '🔒 LOCKED' : '';",
+		"showDriveLockHint(upward >= DRIVE_HOLD_CANCEL_PX && upward >= horizontal);",
+		"cancelDriveHoldRecording('recording-cancelled');",
+		"cancelLiveSendBeat(true);",
+		"}, DRIVE_LIVE_SEND_DELAY_MS);",
+		"driveLiveButton.addEventListener('pointerdown'",
+		"showDriveTranscriptNotice('hold to switch live'",
+		"if (event.clientX <= VIEW_EDGE_START_PX)",
+		"if (Math.abs(event.clientY - edgeSwipe.startY) >= GESTURE_VERTICAL_CANCEL_PX)",
+		"if (swipe.edge === 'right' && distance <= -VIEW_SWIPE_DISTANCE_PX) switchView('chat');",
+		"if (swipe.edge === 'left' && distance >= VIEW_SWIPE_DISTANCE_PX) switchView('drive');",
+		"event.key === 'ArrowLeft'", "event.key === 'ArrowRight'",
+		"function toSpeakableText(text)",
+		"window.speechSynthesis.speak(new SpeechSynthesisUtterance(text));",
+		"if (navigator.vibrate) navigator.vibrate(pattern);",
+		"String(data.text || '').startsWith('⏸ Permission')",
+		"'permission-held': ['Permission held', 'error', 30]",
+		"return currentView === 'drive' || voiceEnabled || handsFreeEnabled;",
+		"await changeVoicePreference(false, true);",
+		"if (handsFreeEnabled || currentView === 'drive') enterHandsFreeSpeaking();",
+	} {
+		if !strings.Contains(text, rule) {
+			t.Errorf("page is missing Drive rule %q", rule)
+		}
+	}
+	for _, forbidden := range []string{"dblclick", "ondblclick", "double-tap", "double tap"} {
+		if strings.Contains(strings.ToLower(text), forbidden) {
+			t.Errorf("page contains forbidden double-tap handler marker %q", forbidden)
+		}
+	}
+	if got := strings.Count(text, "driveCircle.addEventListener('click'"); got != 1 {
+		t.Errorf("Drive circle click guards=%d, want one post-release guard only", got)
+	}
+	if !strings.Contains(text, "performance.now() - lastDriveReleaseAt <= DRIVE_CLICK_GUARD_MS") {
+		t.Error("Drive circle click listener is not the 400 ms post-release guard")
+	}
+}
+
+func TestFoldUpPageRules(t *testing.T) {
+	page, err := pages.ReadFile("page.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(page)
+	for _, rule := range []string{
+		"const HISTORY_PAGE_SIZE = 20;",
+		"const NEW_MESSAGE_BOTTOM_PX = 80;",
+		"replayHistoryVisibleStart = Math.max(0, replayHistoryEntries.length - HISTORY_PAGE_SIZE);",
+		"messages.scrollTop = oldTop + messages.scrollHeight - oldHeight;",
+		"if (messages.scrollTop <= 1 && replayHistoryVisibleStart > 0) loadEarlierHistory();",
+		"else newMessagesButton.hidden = false;",
+		"chatView.classList.add('history-ready');",
+		"const TRANSCRIPT_FOLD_THRESHOLD = 240;",
+		"const TRANSCRIPT_FOLD_LINE_CHARS = 72;",
+		"toggle.setAttribute('aria-expanded', 'false');",
+		"toggle.textContent = '✂ ⋯ ✂';",
+		"middle.style.maxHeight = middle.scrollHeight + 'px';",
+		"method: 'POST',\n        headers: {'Content-Type': 'application/json'},\n        body: JSON.stringify({message_id: messageID})",
+		"button.textContent = pending ? '…' : playing ? '⏸' : '▶';",
+		"button.setAttribute('aria-label', pending ? 'Preparing spoken reply' : playing ? 'Stop spoken reply' : 'Play spoken reply');",
+		"if (!voiceEnabled || driveMuted || !newestAgentReplyID || newestAgentReplyID <= lastAudioPlayedMessageID) return;",
+		"playMessageAudio(newestAgentReplyID, false, false);",
+		"playMessageAudio(lastReplyMessageID, true, false);",
+	} {
+		if !strings.Contains(text, rule) {
+			t.Errorf("page is missing fold-up rule %q", rule)
+		}
+	}
+	if got := strings.Count(text, "createMessageAudioButton(id)"); got != 1 {
+		t.Errorf("agent audio-button creation sites=%d, want one", got)
+	}
+}
+
 func TestPWAAssets(t *testing.T) {
 	c, _, _ := newHandlerChannel()
 	tests := []struct {
@@ -1088,6 +1197,8 @@ func TestPWAAssets(t *testing.T) {
 		{"/manifest.webmanifest", "application/manifest+json"},
 		{"/icon.svg", "image/svg+xml"},
 		{"/apple-touch-icon.png", "image/png"},
+		{"/icon-192.png", "image/png"},
+		{"/icon-512.png", "image/png"},
 		{"/sw.js", "text/javascript"},
 	}
 	responses := make(map[string]*httptest.ResponseRecorder, len(tests))
@@ -1109,7 +1220,7 @@ func TestPWAAssets(t *testing.T) {
 		responses[test.path] = response
 	}
 
-	const manifest = `{"name":"C3 web chat","short_name":"C3","start_url":"/","scope":"/","display":"standalone","background_color":"#0b0d10","theme_color":"#0b0d10","icons":[{"src":"/icon.svg","sizes":"any","type":"image/svg+xml","purpose":"any"},{"src":"/apple-touch-icon.png","sizes":"180x180","type":"image/png"}]}`
+	const manifest = `{"name":"C3 web chat","short_name":"C3","start_url":"/","scope":"/","display":"standalone","background_color":"#0b0d10","theme_color":"#0b0d10","icons":[{"src":"/icon-192.png","sizes":"192x192","type":"image/png","purpose":"any"},{"src":"/icon-512.png","sizes":"512x512","type":"image/png","purpose":"any"},{"src":"/icon.svg","sizes":"any","type":"image/svg+xml","purpose":"any"},{"src":"/apple-touch-icon.png","sizes":"180x180","type":"image/png"}]}`
 	if got := strings.TrimSpace(responses["/manifest.webmanifest"].Body.String()); got != manifest {
 		t.Fatalf("manifest=%q", got)
 	}
@@ -1117,9 +1228,15 @@ func TestPWAAssets(t *testing.T) {
 	if len(icon) > 1024 || !bytes.Contains(icon, []byte(">C3</text>")) {
 		t.Fatalf("icon size/design=%d/%q", len(icon), icon)
 	}
-	image, err := png.DecodeConfig(bytes.NewReader(responses["/apple-touch-icon.png"].Body.Bytes()))
-	if err != nil || image.Width != 180 || image.Height != 180 {
-		t.Fatalf("apple icon=%dx%d error=%v", image.Width, image.Height, err)
+	for path, size := range map[string]int{
+		"/apple-touch-icon.png": 180,
+		"/icon-192.png":         192,
+		"/icon-512.png":         512,
+	} {
+		image, err := png.DecodeConfig(bytes.NewReader(responses[path].Body.Bytes()))
+		if err != nil || image.Width != size || image.Height != size {
+			t.Fatalf("%s icon=%dx%d error=%v", path, image.Width, image.Height, err)
+		}
 	}
 	worker := responses["/sw.js"]
 	if strings.Contains(worker.Body.String(), "addEventListener('fetch'") || !strings.Contains(worker.Body.String(), "skipWaiting") || !strings.Contains(worker.Body.String(), "clients.claim") {

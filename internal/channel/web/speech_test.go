@@ -3,7 +3,9 @@ package web
 import (
 	"context"
 	"encoding/binary"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"regexp"
@@ -14,6 +16,27 @@ import (
 
 	"github.com/Andrometiq/c3/internal/c3types"
 )
+
+func postSpeak(c *Channel, cookie *http.Cookie, body string, withOrigin bool) *httptest.ResponseRecorder {
+	response := httptest.NewRecorder()
+	c.routes().ServeHTTP(response, request(http.MethodPost, "/speak", body, cookie, withOrigin))
+	return response
+}
+
+func decodeSpeakResponse(t *testing.T, response *httptest.ResponseRecorder) struct {
+	URL       string `json:"url"`
+	MessageID int64  `json:"message_id"`
+} {
+	t.Helper()
+	var result struct {
+		URL       string `json:"url"`
+		MessageID int64  `json:"message_id"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	return result
+}
 
 func setVoiceEnabled(t *testing.T, c *Channel, cookie *http.Cookie, enabled bool) {
 	t.Helper()
@@ -178,6 +201,88 @@ func TestSpokenReplyAudioServingRangeExpiryAndVoiceOff(t *testing.T) {
 	if expired := serve(match[1], ""); expired.Code != http.StatusNotFound {
 		t.Fatalf("expired token status=%d", expired.Code)
 	}
+}
+
+func TestSpeakEndpointAuthUnknownCachedAndSynthesized(t *testing.T) {
+	t.Run("auth and unknown reply", func(t *testing.T) {
+		c, _, cookie := newHandlerChannel()
+		if response := postSpeak(c, cookie, `{"message_id":1}`, false); response.Code != http.StatusForbidden {
+			t.Fatalf("without origin status/body=%d/%q", response.Code, response.Body.String())
+		}
+		if response := postSpeak(c, nil, `{"message_id":1}`, true); response.Code != http.StatusUnauthorized {
+			t.Fatalf("without cookie status/body=%d/%q", response.Code, response.Body.String())
+		}
+		if response := postSpeak(c, cookie, `{"message_id":1}`, true); response.Code != http.StatusNotFound {
+			t.Fatalf("unknown reply status/body=%d/%q", response.Code, response.Body.String())
+		}
+		if response := sendRequest(c, cookie, `{"text":"operator row","client_id":"own-speak"}`); response.Code != http.StatusAccepted {
+			t.Fatalf("own row send status/body=%d/%q", response.Code, response.Body.String())
+		}
+		if response := postSpeak(c, cookie, `{"message_id":1}`, true); response.Code != http.StatusNotFound {
+			t.Fatalf("own row accepted by speak status/body=%d/%q", response.Code, response.Body.String())
+		}
+	})
+
+	t.Run("cached audio", func(t *testing.T) {
+		c, host, cookie := newHandlerChannel()
+		messageID, err := c.SendReply(c3types.ReplyArgs{Channel: Name, ChatID: 42, Text: "cached reply"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		token, err := c.cacheSpeech(messageID, []byte("ID3-cached"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		response := postSpeak(c, cookie, fmt.Sprintf(`{"message_id":%d}`, messageID), true)
+		if response.Code != http.StatusOK {
+			t.Fatalf("cached status/body=%d/%q", response.Code, response.Body.String())
+		}
+		result := decodeSpeakResponse(t, response)
+		if result.MessageID != messageID || result.URL != "/audio/"+token || host.synthCallCount() != 0 {
+			t.Fatalf("cached result/calls=%+v/%d", result, host.synthCallCount())
+		}
+	})
+
+	t.Run("synthesized despite voice off", func(t *testing.T) {
+		c, host, cookie := newHandlerChannel()
+		host.synthesize = func(_ context.Context, request c3types.SpeechRequest) (c3types.SpeechResult, error) {
+			if request.Text != "edited reply" || request.Language != "" {
+				t.Fatalf("speech request=%+v", request)
+			}
+			return c3types.SpeechResult{Audio: []byte("ID3-explicit"), MIME: "audio/mpeg", Provider: "fake"}, nil
+		}
+		messageID, err := c.SendReply(c3types.ReplyArgs{Channel: Name, ChatID: 42, Text: "original reply"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := c.EditMessage(c3types.EditArgs{Channel: Name, ChatID: 42, MessageID: messageID, Text: "edited reply"}); err != nil {
+			t.Fatal(err)
+		}
+		response := postSpeak(c, cookie, fmt.Sprintf(`{"message_id":%d}`, messageID), true)
+		if response.Code != http.StatusOK {
+			t.Fatalf("synthesized status/body=%d/%q", response.Code, response.Body.String())
+		}
+		result := decodeSpeakResponse(t, response)
+		if result.MessageID != messageID || !strings.HasPrefix(result.URL, "/audio/") || host.synthCallCount() != 1 {
+			t.Fatalf("synthesized result/calls=%+v/%d", result, host.synthCallCount())
+		}
+		token := strings.TrimPrefix(result.URL, "/audio/")
+		if cached, ok := c.audioForToken(token); !ok || cached.messageID != messageID || string(cached.audio) != "ID3-explicit" {
+			t.Fatalf("synthesized cache=%+v/%v", cached, ok)
+		}
+	})
+
+	t.Run("no synthesizer", func(t *testing.T) {
+		c, _, cookie := newHandlerChannel()
+		messageID, err := c.SendReply(c3types.ReplyArgs{Channel: Name, ChatID: 42, Text: "needs speech"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		response := postSpeak(c, cookie, fmt.Sprintf(`{"message_id":%d}`, messageID), true)
+		if response.Code != http.StatusServiceUnavailable || response.Body.String() != "{\"error\":\"speech unavailable\"}\n" {
+			t.Fatalf("no synthesizer status/body=%d/%q", response.Code, response.Body.String())
+		}
+	})
 }
 
 func TestAudioRoutesRequireSessionCookie(t *testing.T) {

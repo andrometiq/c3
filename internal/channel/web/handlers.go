@@ -23,11 +23,14 @@ func (c *Channel) routes() http.Handler {
 	mux.HandleFunc("POST /send", c.handleSend)
 	mux.HandleFunc("POST /voice-note", c.handleVoiceNote)
 	mux.HandleFunc("POST /voice", c.handleVoicePreference)
+	mux.HandleFunc("POST /speak", c.handleSpeak)
 	mux.HandleFunc("GET /audio/unlock", c.handleAudioUnlock)
 	mux.HandleFunc("GET /audio/{token}", c.handleAudio)
 	mux.HandleFunc("GET /manifest.webmanifest", handleWebManifest)
 	mux.HandleFunc("GET /icon.svg", handleWebIcon)
 	mux.HandleFunc("GET /apple-touch-icon.png", handleAppleTouchIcon)
+	mux.HandleFunc("GET /icon-192.png", handleIcon192)
+	mux.HandleFunc("GET /icon-512.png", handleIcon512)
 	mux.HandleFunc("GET /sw.js", handleServiceWorker)
 	mux.HandleFunc("GET /healthz", c.handleHealth)
 	mux.HandleFunc("GET /ca.crt", c.handleCACertificate)
@@ -100,6 +103,14 @@ func handleWebIcon(w http.ResponseWriter, _ *http.Request) {
 
 func handleAppleTouchIcon(w http.ResponseWriter, _ *http.Request) {
 	serveEmbeddedAsset(w, "apple-touch-icon.png", "image/png")
+}
+
+func handleIcon192(w http.ResponseWriter, _ *http.Request) {
+	serveEmbeddedAsset(w, "icon-192.png", "image/png")
+}
+
+func handleIcon512(w http.ResponseWriter, _ *http.Request) {
+	serveEmbeddedAsset(w, "icon-512.png", "image/png")
 }
 
 func handleServiceWorker(w http.ResponseWriter, _ *http.Request) {
