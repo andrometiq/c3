@@ -406,7 +406,7 @@ func TestRecoverBroker_OrdinaryRestartReplayKeepsClaimWithoutResumeNotice(t *tes
 			}
 			topicA := int64(281)
 			a.rememberAttachForIdentity(rememberedIdentityReq("/projects/a", -100, &topicA, "main"), stamp)
-			a.setAttachedTopic("topic-a")
+			setTestOutputRoute(a, "topic-a")
 
 			if !a.recoverBroker(ctx) {
 				t.Fatal("T15 recoverBroker aborted before reconnecting to the fresh broker")
@@ -467,7 +467,7 @@ func TestRecoverBroker_AttachBeforeIdentityReplayAndReregisters(t *testing.T) {
 
 	topicA := int64(281)
 	a.rememberAttachForIdentity(rememberedIdentityReq("/projects/a", -100, &topicA, "main"), "")
-	a.setAttachedTopic("topic-a")
+	setTestOutputRoute(a, "topic-a")
 	writeIdentityHandoff(t, "spawn", "conversation-a", 10)
 	establishSettledIdentity(a, sessionhandoff.Entry{
 		StableSessionID: "conversation-a", CWD: "/projects/a", UnixNano: 10,
@@ -524,7 +524,7 @@ func TestRecoverBroker_IdentitySwitchSkipsStaleReplayAndPreservesAttachments(t *
 	})
 	topicA := int64(281)
 	a.rememberAttach(rememberedIdentityReq("/projects/a", -100, &topicA, "main"))
-	a.setAttachedTopic("topic-a")
+	setTestOutputRoute(a, "topic-a")
 
 	if !a.recoverBroker(ctx) {
 		t.Fatal("recoverBroker aborted before reconnecting to the fresh broker")
@@ -581,7 +581,7 @@ func TestRecoverBroker_UnsettledTimeoutDoesNotReplayPreviousConversation(t *test
 
 	topicA := int64(281)
 	a.rememberAttach(rememberedIdentityReq("/projects/a", -100, &topicA, "main"))
-	a.setAttachedTopic("topic-a")
+	setTestOutputRoute(a, "topic-a")
 	a.amu.Lock()
 	stamp := a.lastAttachStableID
 	a.amu.Unlock()
@@ -625,7 +625,7 @@ func TestReconnectIdentitySwitch_DoesNotBlockBrokerReaderDispatch(t *testing.T) 
 		StableSessionID: "conversation-a", CWD: "/projects/a", UnixNano: 10,
 	})
 	a.rememberAttach(ipc.AttachReq{Op: ipc.OpAttach, Name: "topic-a"})
-	a.setAttachedTopic("topic-a")
+	setTestOutputRoute(a, "topic-a")
 
 	adapterSide, brokerSide := net.Pipe()
 	t.Cleanup(func() {
@@ -819,7 +819,7 @@ func TestSwitchWatch_ReopensGateAndRefires(t *testing.T) {
 	establishSettledIdentity(a, sessionhandoff.Entry{
 		StableSessionID: "conversation-a", CWD: "/projects/a", UnixNano: 10,
 	})
-	a.setAttachedTopic("old-topic")
+	setTestOutputRoute(a, "old-topic")
 	a.rememberAttach(ipc.AttachReq{Op: ipc.OpAttach, Name: "old-topic"})
 
 	oldGate := a.identityGate()
@@ -863,7 +863,7 @@ func TestToolsCall_SwitchCheckRunsBeforeIdentityGate(t *testing.T) {
 	establishSettledIdentity(a, sessionhandoff.Entry{
 		StableSessionID: "conversation-a", CWD: "/projects/a", UnixNano: 10,
 	})
-	a.setAttachedTopic("old-topic")
+	setTestOutputRoute(a, "old-topic")
 
 	attachDone := make(chan struct{})
 	attachReq := newAttachReq(t, map[string]any{"name": "new-topic"})
@@ -925,7 +925,7 @@ func TestPendingRecoverNotice_DroppedOnEpochChange(t *testing.T) {
 		establishSettledIdentity(a, sessionhandoff.Entry{
 			StableSessionID: "conversation-a", CWD: "/projects/a", UnixNano: 10,
 		})
-		a.setAttachedTopic("old-topic")
+		setTestOutputRoute(a, "old-topic")
 		a.rememberAttach(ipc.AttachReq{Op: ipc.OpAttach, Name: "old-topic"})
 		a.setPendingRecoverNotice(`📨 Re-attached to "old-topic"`)
 
@@ -966,7 +966,7 @@ func TestPendingRecoverNotice_DroppedOnEpochChange(t *testing.T) {
 		establishSettledIdentity(a, sessionhandoff.Entry{
 			StableSessionID: "conversation-a", CWD: "/projects/a", UnixNano: 10,
 		})
-		a.setAttachedTopic("old-topic")
+		setTestOutputRoute(a, "old-topic")
 
 		a.checkForIdentitySwitch(ctx)
 		newGate := a.identityGate()

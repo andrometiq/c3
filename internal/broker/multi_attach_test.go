@@ -946,6 +946,23 @@ func TestRecoverReclaimsSetAndOutput(t *testing.T) {
 	})
 }
 
+func TestRecoverSessionRespCarriesSet(t *testing.T) {
+	t.Setenv("C3_QUEUE_DIR", t.TempDir())
+	b, _, _ := brokerWithWeb(t, nil)
+	defer b.Shutdown()
+	b.Mappings().UpsertSessionAttachment("claude", "multi", recoverableMultiAttachment())
+
+	_, done, resp := recoverViaPeer(t, b, "/proj", "multi")
+	defer done()
+
+	if !resp.Recovered || len(resp.Routes) != 2 {
+		t.Fatalf("recover response=%+v, want complete two-route set", resp)
+	}
+	if resp.Output == nil || resp.Output.Channel != "web" {
+		t.Fatalf("recover output=%+v, want web", resp.Output)
+	}
+}
+
 func TestSessionAttachmentMatchesStubIgnoresRouteOrder(t *testing.T) {
 	attachment := recoverableMultiAttachment()
 	stub := &Stub{}

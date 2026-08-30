@@ -182,6 +182,13 @@ func (a *adapter) idleStartupWatchdog(ctx context.Context, cancel context.Cancel
 	}
 }
 
+type routeKey struct {
+	channel  string
+	chatID   int64
+	topicID  int64
+	hasTopic bool
+}
+
 type adapter struct {
 	// transport wraps the stdio transport to expose Notify for the
 	// `notifications/message` log frame the SDK's Log API would normally
@@ -195,6 +202,8 @@ type adapter struct {
 	pmu     sync.Mutex
 	pending map[string]chan ipc.ToolResultMsg
 	nextID  atomic.Uint64
+	// routeResultTimeout is a test seam; zero selects mcptools.RouteResultTimeout.
+	routeResultTimeout time.Duration
 
 	// fetch_queue / retranscribe have their own pending maps keyed by request
 	// ID so the typed broker responses don't have to share the generic
@@ -221,6 +230,9 @@ type adapter struct {
 	// advertisement is then distinguishable rather than an anonymous "N pending"
 	// (spec §5). Empty when unattached. Guarded by amu. Mirrors the Claude adapter.
 	attachedTopic string
+	routes        []ipc.RouteRef
+	outputRoute   *ipc.RouteRef
+	routeNames    map[routeKey]string
 
 	// dispatched is set the first time the SDK routes a method through the
 	// receiving middleware — i.e. Grok has sent at least one MCP frame.
@@ -308,11 +320,12 @@ type adapter struct {
 // consumed + delivered by that drain, so the loop must neither re-inject nor ack
 // it (see forwardEpoch).
 type grokForwardReq struct {
-	inbound c3types.Inbound
-	covered int
-	token   string
-	conn    *ipc.Conn
-	epoch   uint64
+	inbound   c3types.Inbound
+	originTag string
+	covered   int
+	token     string
+	conn      *ipc.Conn
+	epoch     uint64
 }
 
 func newAdapter() *adapter {
@@ -473,6 +486,10 @@ func (a *adapter) brokerReader(ctx context.Context) {
 			a.dispatchToolResult(raw)
 		case ipc.OpAttached:
 			a.dispatchAttached(raw)
+		case ipc.OpReleaseResult:
+			a.dispatchReleaseResult(raw)
+		case ipc.OpSetOutputRouteResult:
+			a.dispatchSetOutputRouteResult(raw)
 		case ipc.OpTopicsList:
 			a.dispatchTopicsList(raw)
 		case ipc.OpFetchQueueResult:
@@ -484,6 +501,7 @@ func (a *adapter) brokerReader(ctx context.Context) {
 		case ipc.OpError:
 			var errMsg ipc.ErrorMsg
 			_ = json.Unmarshal(raw, &errMsg)
+			a.failPendingRouteResults(errMsg.Err)
 			log.Printf("broker error: %s", errMsg.Err)
 		default:
 			// An op this build does not know — normally a NEWER broker (mixed
@@ -623,12 +641,79 @@ func (a *adapter) rememberAttach(req ipc.AttachReq) {
 	a.lastAttach = &cp
 }
 
-// setAttachedTopic records the human-readable name of the currently-attached
-// topic for the fetch_queue nudges (spec §5). Mirrors the Claude adapter.
-func (a *adapter) setAttachedTopic(name string) {
+func routeKeyFor(channel string, chatID int64, topicID *int64) routeKey {
+	key := routeKey{channel: channel, chatID: chatID}
+	if topicID != nil {
+		key.topicID = *topicID
+		key.hasTopic = true
+	}
+	return key
+}
+
+func cloneRouteRef(route ipc.RouteRef) ipc.RouteRef {
+	copy := route
+	if route.TopicID != nil {
+		topicID := *route.TopicID
+		copy.TopicID = &topicID
+	}
+	return copy
+}
+
+func cloneRouteRefs(routes []ipc.RouteRef) []ipc.RouteRef {
+	cloned := make([]ipc.RouteRef, 0, len(routes))
+	for _, route := range routes {
+		cloned = append(cloned, cloneRouteRef(route))
+	}
+	return cloned
+}
+
+func (a *adapter) setRouteState(routes []ipc.RouteRef, output *ipc.RouteRef) {
 	a.amu.Lock()
 	defer a.amu.Unlock()
-	a.attachedTopic = name
+	a.routes = cloneRouteRefs(routes)
+	a.routeNames = make(map[routeKey]string, len(routes))
+	for _, route := range routes {
+		a.routeNames[routeKeyFor(route.Channel, route.ChatID, route.TopicID)] = route.Name
+	}
+	a.outputRoute = nil
+	a.attachedTopic = ""
+	if output != nil {
+		copy := cloneRouteRef(*output)
+		a.outputRoute = &copy
+		a.attachedTopic = ipc.FormatRouteRef(copy)
+	}
+}
+
+func (a *adapter) setOutputRouteState(output *ipc.RouteRef) {
+	a.amu.Lock()
+	routes := cloneRouteRefs(a.routes)
+	a.amu.Unlock()
+	a.setRouteState(routes, output)
+}
+
+func (a *adapter) clearRouteStateLocked() {
+	a.attachedTopic = ""
+	a.routes = nil
+	a.outputRoute = nil
+	a.routeNames = nil
+}
+
+func (a *adapter) originTag(in *c3types.Inbound) string {
+	a.amu.Lock()
+	defer a.amu.Unlock()
+	if len(a.routes) <= 1 {
+		return ""
+	}
+	channel := strings.ToLower(in.Channel)
+	if channel == "" {
+		channel = "unknown"
+	}
+	if channel == "telegram" {
+		if name := a.routeNames[routeKeyFor(in.Channel, in.ChatID, in.TopicID)]; name != "" {
+			return "[telegram · " + name + "] "
+		}
+	}
+	return "[" + channel + "] "
 }
 
 // currentTopicName returns the currently-attached topic name (empty when
@@ -709,6 +794,38 @@ func (a *adapter) replayLastAttach() {
 	}
 }
 
+func (a *adapter) abandonPendingRouteResult(key string, ch chan ipc.ToolResultMsg) bool {
+	a.pmu.Lock()
+	defer a.pmu.Unlock()
+	current, ok := a.pending[key]
+	if !ok {
+		return false
+	}
+	if current != ch {
+		return true
+	}
+	delete(a.pending, key)
+	return true
+}
+
+func (a *adapter) failPendingRouteResults(message string) {
+	if message == "" {
+		message = "broker error"
+	}
+	var waiters []chan ipc.ToolResultMsg
+	a.pmu.Lock()
+	for _, key := range []string{string(ipc.OpReleaseResult), string(ipc.OpSetOutputRouteResult)} {
+		if ch, ok := a.pending[key]; ok {
+			delete(a.pending, key)
+			waiters = append(waiters, ch)
+		}
+	}
+	a.pmu.Unlock()
+	for _, ch := range waiters {
+		ch <- ipc.ToolResultMsg{Error: &ipc.ErrorPayload{Code: -32000, Message: message}}
+	}
+}
+
 func (a *adapter) wakePendingWithErr(msg string) {
 	a.pmu.Lock()
 	pending := a.pending
@@ -732,7 +849,7 @@ func (a *adapter) handleInbound(raw []byte) {
 	}
 	req := grokForwardReq{
 		inbound: msg.Inbound, covered: msg.Covered, token: msg.DeliveryToken,
-		conn: a.currentConn(), epoch: a.forwardEpoch.Load(),
+		originTag: a.originTag(&msg.Inbound), conn: a.currentConn(), epoch: a.forwardEpoch.Load(),
 	}
 	select {
 	case a.forwardCh <- req:
@@ -815,7 +932,7 @@ func (a *adapter) grokForwardLoop() {
 		// drain neither delivers nor consumes them.
 		if req.inbound.IsEvent() {
 			if a.leader != nil {
-				text := formatEventTurnText(&req.inbound)
+				text := req.originTag + formatEventTurnText(&req.inbound)
 				evCtx, cancel := context.WithTimeout(a.baseCtx(), eventInjectBudget)
 				if err := a.injectWithRetry(evCtx, text, req.inbound.MessageID); err != nil {
 					log.Printf("grok event inject dropped kind=%s id=%d: %v (best-effort — events are never queued broker-side)",
@@ -836,7 +953,7 @@ func (a *adapter) grokForwardLoop() {
 			continue
 		}
 
-		text := formatInboundTurnText(&req.inbound)
+		text := req.originTag + formatInboundTurnText(&req.inbound)
 		err := a.injectWithRetry(a.baseCtx(), text, req.inbound.MessageID)
 		if err != nil {
 			if errors.Is(err, errInjectUncertain) {
@@ -1143,6 +1260,18 @@ func (a *adapter) dispatchToolResult(raw []byte) {
 }
 
 func (a *adapter) dispatchAttached(raw []byte) {
+	var attached ipc.AttachedMsg
+	if err := json.Unmarshal(raw, &attached); err != nil {
+		return
+	}
+	if attached.OK {
+		routes, output := attached.Routes, attached.Output
+		if len(routes) == 0 && attached.Channel != "" {
+			legacy := ipc.RouteRef{Channel: attached.Channel, ChatID: attached.ChatID, TopicID: attached.TopicID, Name: attached.Name, Group: attached.Group}
+			routes, output = []ipc.RouteRef{legacy}, &legacy
+		}
+		a.setRouteState(routes, output)
+	}
 	a.pmu.Lock()
 	ch, ok := a.pending["attached"]
 	if ok {
@@ -1150,8 +1279,6 @@ func (a *adapter) dispatchAttached(raw []byte) {
 	}
 	a.pmu.Unlock()
 	if ok {
-		var attached ipc.AttachedMsg
-		_ = json.Unmarshal(raw, &attached)
 		// A successful attach may carry the just-claimed channel's manifest.
 		// Store it as the latest caps so any subsequent instructions rebuild
 		// reflects the attached channel (multi-channel turn-time-refresh seam,
@@ -1161,6 +1288,40 @@ func (a *adapter) dispatchAttached(raw []byte) {
 			a.helloAck.Capabilities = attached.Capabilities
 		}
 		ch <- ipc.ToolResultMsg{Result: map[string]any{"_attached": attached}}
+	}
+}
+
+func (a *adapter) dispatchReleaseResult(raw []byte) {
+	var resp ipc.ReleaseResp
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		return
+	}
+	a.pmu.Lock()
+	ch, ok := a.pending["release_result"]
+	delete(a.pending, "release_result")
+	a.pmu.Unlock()
+	if ok {
+		if resp.OK {
+			a.setRouteState(resp.Routes, resp.Output)
+		}
+		ch <- ipc.ToolResultMsg{Result: map[string]any{"_release": resp}}
+	}
+}
+
+func (a *adapter) dispatchSetOutputRouteResult(raw []byte) {
+	var resp ipc.SetOutputRouteResp
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		return
+	}
+	a.pmu.Lock()
+	ch, ok := a.pending["set_output_route_result"]
+	delete(a.pending, "set_output_route_result")
+	a.pmu.Unlock()
+	if ok {
+		if resp.OK && resp.Output != nil {
+			a.setOutputRouteState(resp.Output)
+		}
+		ch <- ipc.ToolResultMsg{Result: map[string]any{"_set_output": resp}}
 	}
 }
 
@@ -1255,16 +1416,18 @@ func (a *adapter) registerTools(srv *mcp.Server) {
 		{
 			tool: &mcp.Tool{
 				Name:        "attach",
-				Description: "Attach this session to a Telegram topic. Empty = silently re-attach this session's own topic, or (first time) show a picker. `target='dm'` for DM. `name='X'` for a topic name. `topic_id=N` to claim a known thread. `create=true` to confirm creation. `steal=true` only after user-confirmed force_steal.",
+				Description: "Attach this session to a Telegram topic. Empty = silently re-attach this session's own topic, or (first time) show a picker. Prefix a target with `+` (e.g. expr `+web`, `+c3`) to ADD it to your held routes and make it the output route, instead of switching (the default). Structured: `add=true`. `target='dm'` for DM. `name='X'` for a topic name. `topic_id=N` to claim a known thread. `create=true` to confirm creation. `steal=true` only after user-confirmed force_steal.",
 				InputSchema: map[string]any{
 					"type": "object",
 					"properties": map[string]any{
+						"expr":            map[string]any{"type": "string"},
 						"target":          map[string]any{"type": "string"},
 						"name":            map[string]any{"type": "string"},
 						"topic_id":        map[string]any{"type": "integer"},
 						"group":           map[string]any{"type": "string"},
 						"create":          map[string]any{"type": "boolean"},
 						"steal":           map[string]any{"type": "boolean"},
+						"add":             map[string]any{"type": "boolean"},
 						"policy_rejected": map[string]any{"type": "boolean"},
 					},
 				},
@@ -1286,8 +1449,9 @@ func (a *adapter) registerTools(srv *mcp.Server) {
 				InputSchema: map[string]any{
 					"type": "object",
 					"properties": map[string]any{
-						"limit": map[string]any{"description": "integer (default 3, max 50) or the string \"all\""},
-						"ack":   map[string]any{"type": "boolean", "default": true},
+						"limit":   map[string]any{"description": "integer (default 3, max 50) or the string \"all\""},
+						"ack":     map[string]any{"type": "boolean", "default": true},
+						"channel": mcptools.ChannelSelectorProp(),
 					},
 				},
 			},
@@ -1319,6 +1483,7 @@ func (a *adapter) registerTools(srv *mcp.Server) {
 						"reply_to": map[string]any{"type": "integer"},
 						"media":    mcptools.ReplyMediaSchema(caps),
 						"buttons":  mcptools.ReplyButtonsSchema(),
+						"channel":  mcptools.ChannelSelectorProp(),
 					},
 					"required": []string{"text"},
 				},
@@ -1328,12 +1493,13 @@ func (a *adapter) registerTools(srv *mcp.Server) {
 		{
 			tool: &mcp.Tool{
 				Name:        "react",
-				Description: "Set a single-emoji reaction on a Telegram message.",
+				Description: "Set a single-emoji reaction on a Telegram message. To react to a message you sent with a `channel` override, pass the SAME `channel` — message ids are per-route.",
 				InputSchema: map[string]any{
 					"type": "object",
 					"properties": map[string]any{
 						"message_id": map[string]any{"type": "integer"},
 						"emoji":      map[string]any{"type": "string"},
+						"channel":    mcptools.ChannelSelectorProp(),
 					},
 					"required": []string{"message_id", "emoji"},
 				},
@@ -1343,12 +1509,13 @@ func (a *adapter) registerTools(srv *mcp.Server) {
 		{
 			tool: &mcp.Tool{
 				Name:        "edit_message",
-				Description: "Edit a previously-sent Telegram message.",
+				Description: "Edit a previously-sent Telegram message. To edit a message you sent with a `channel` override, pass the SAME `channel` — message ids are per-route.",
 				InputSchema: map[string]any{
 					"type": "object",
 					"properties": map[string]any{
 						"message_id": map[string]any{"type": "integer"},
 						"text":       map[string]any{"type": "string"},
+						"channel":    mcptools.ChannelSelectorProp(),
 					},
 					"required": []string{"message_id", "text"},
 				},
@@ -1395,10 +1562,20 @@ func (a *adapter) registerTools(srv *mcp.Server) {
 		{
 			tool: &mcp.Tool{
 				Name:        "detach",
-				Description: "Release this session's current Telegram topic claim. After detach, inbound messages on that route fall through to the broker's fallback. No-op if not attached.",
-				InputSchema: map[string]any{"type": "object", "properties": map[string]any{}},
+				Description: "Bare = release ALL your routes. `target=<web|telegram|topic-name>` releases just that one held route; if it was your output route, output falls back to your most-recently-added remaining route.",
+				InputSchema: map[string]any{"type": "object", "properties": map[string]any{
+					"target": map[string]any{"type": "string"},
+				}},
 			},
 			handler: a.toolDetach,
+		},
+		{
+			tool: &mcp.Tool{
+				Name:        "output",
+				Description: "Set which HELD route your `reply` tool sends to (your output route). Only a route you currently hold can become the output route.",
+				InputSchema: mcptools.OutputToolSchema(),
+			},
+			handler: a.toolSetOutput,
 		},
 	}
 	for _, t := range tools {
@@ -1434,6 +1611,9 @@ func (a *adapter) toolAttach(ctx context.Context, req *mcp.CallToolRequest) (*mc
 	// for silent resume, and inject targets the right Grok session.
 	a.bindSessionIDForAttach(cwd)
 	attachReq := ipc.AttachReq{Op: ipc.OpAttach, CWD: cwd}
+	if v, ok := args["expr"].(string); ok {
+		attachReq.Expr = v
+	}
 	if v, ok := args["target"].(string); ok {
 		attachReq.Target = v
 	}
@@ -1448,6 +1628,9 @@ func (a *adapter) toolAttach(ctx context.Context, req *mcp.CallToolRequest) (*mc
 	}
 	if v, ok := args["steal"].(bool); ok {
 		attachReq.Steal = v
+	}
+	if v, ok := args["add"].(bool); ok {
+		attachReq.Add = v
 	}
 	if v, ok := args["policy_rejected"].(bool); ok {
 		attachReq.PolicyRejected = v
@@ -1499,7 +1682,6 @@ func (a *adapter) toolAttach(ctx context.Context, req *mcp.CallToolRequest) (*mc
 			// adapter's toolAttach.
 			a.rememberAttach(resolvedAttachReq(attachReq, attached))
 			// Track the resolved topic name for the fetch_queue nudges (§5).
-			a.setAttachedTopic(attached.Name)
 			// Side-effect surface: OSC-0 title-bar escape to stderr
 			// for the currently-attached topic, so the terminal tab
 			// names the topic this session is bound to.
@@ -1595,6 +1777,9 @@ func (a *adapter) toolFetchQueue(ctx context.Context, req *mcp.CallToolRequest) 
 		return nil, fmt.Errorf("invalid params: %w", err)
 	}
 	fq := ipc.FetchQueueReq{Op: ipc.OpFetchQueue, ID: strconv.FormatUint(a.nextID.Add(1), 10), Ack: true}
+	if v, ok := args["channel"].(string); ok {
+		fq.Channel = v
+	}
 	if v, ok := args["ack"].(bool); ok {
 		fq.Ack = v
 	}
@@ -1629,7 +1814,7 @@ func (a *adapter) toolFetchQueue(ctx context.Context, req *mcp.CallToolRequest) 
 		if fq.Ack && resp.Remaining == 0 {
 			a.clearForwardBlocked()
 		}
-		return toolTextResult(renderFetchedMessages(resp.Messages, resp.Remaining, a.currentTopicName())), nil
+		return toolTextResult(a.renderFetchedMessages(resp.Messages, resp.Remaining, a.currentTopicName())), nil
 	}
 }
 
@@ -1778,6 +1963,24 @@ func renderFetchedMessages(msgs []c3types.Inbound, remaining int, route string) 
 	return out
 }
 
+func (a *adapter) renderFetchedMessages(msgs []c3types.Inbound, remaining int, route string) string {
+	if len(msgs) == 0 {
+		return renderFetchedMessages(msgs, remaining, route)
+	}
+	blocks := make([]string, 0, len(msgs))
+	for i := range msgs {
+		blocks = append(blocks, a.originTag(&msgs[i])+c3types.RenderQueuedInbound(&msgs[i]))
+	}
+	out := strings.Join(blocks, "\n\n")
+	if c3types.InboundsHaveAttachment(msgs) {
+		out = c3types.AttachmentFetchHint + "\n\n" + out
+	}
+	if remaining > 0 {
+		out += "\n\n" + pendingNudge(remaining, route)
+	}
+	return out
+}
+
 // renderQueuedInbound renders one queued message for fetch_queue output in the
 // trimmed form approved 2026-07-24 (task #55): bare message text, then a compact
 // metadata line (sender, message_id, reply context, kind+file_id attachment
@@ -1787,7 +1990,16 @@ func renderQueuedInbound(in *c3types.Inbound) string {
 	return c3types.RenderQueuedInbound(in)
 }
 
-func (a *adapter) toolDetach(_ context.Context, _ *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (a *adapter) toolDetach(ctx context.Context, call *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	args := map[string]any{}
+	if call != nil {
+		var err error
+		args, err = decodeArgs(call.Params.Arguments)
+		if err != nil {
+			return nil, fmt.Errorf("invalid params: %w", err)
+		}
+	}
+	target, _ := args["target"].(string)
 	conn := a.currentConn()
 	if conn == nil {
 		return toolErrorResult("broker reconnecting — retry detach in a moment"), nil
@@ -1795,17 +2007,86 @@ func (a *adapter) toolDetach(_ context.Context, _ *mcp.CallToolRequest) (*mcp.Ca
 	if !ipc.ProtocolStateChangesCompatible(int(a.brokerVersion.Load())) {
 		return toolErrorResult("detach refused: broker protocol is outside the state-change compatibility window; restart the CLI"), nil
 	}
-	// OpRelease drops the claim; tool is named "detach" (Claude parity).
-	if err := conn.WriteJSON(struct {
-		Op ipc.Op `json:"op"`
-	}{Op: ipc.OpRelease}); err != nil {
+	releaseReq := ipc.ReleaseReq{Op: ipc.OpRelease, Target: target}
+	if target != "" {
+		ch := make(chan ipc.ToolResultMsg, 1)
+		a.pmu.Lock()
+		a.pending["release_result"] = ch
+		a.pmu.Unlock()
+		if err := conn.WriteJSON(releaseReq); err != nil {
+			a.pmu.Lock()
+			delete(a.pending, "release_result")
+			a.pmu.Unlock()
+			return toolErrorResult("broker write: " + err.Error()), nil
+		}
+		res, waitErr := mcptools.WaitRouteResult(ctx, a.routeResultTimeout, ch, func() bool {
+			return a.abandonPendingRouteResult("release_result", ch)
+		})
+		if waitErr != nil {
+			if errors.Is(waitErr, mcptools.ErrRouteResultTimeout) {
+				return toolErrorResult(waitErr.Error()), nil
+			}
+			return toolErrorResult("canceled"), nil
+		}
+		if res.Error != nil {
+			return toolErrorResult(res.Error.Message), nil
+		}
+		resp, _ := res.Result["_release"].(ipc.ReleaseResp)
+		if resp.Err != "" {
+			return toolErrorResult(resp.Err), nil
+		}
+		return toolTextResult(ipc.FormatRelease(target, resp)), nil
+	}
+	if err := conn.WriteJSON(releaseReq); err != nil {
 		return toolErrorResult("broker write: " + err.Error()), nil
 	}
 	a.amu.Lock()
 	a.lastAttach = nil
-	a.attachedTopic = ""
+	a.clearRouteStateLocked()
 	a.amu.Unlock()
 	return toolTextResult("detached"), nil
+}
+
+func (a *adapter) toolSetOutput(ctx context.Context, call *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	args, err := decodeArgs(call.Params.Arguments)
+	if err != nil {
+		return nil, fmt.Errorf("invalid params: %w", err)
+	}
+	target, _ := args["target"].(string)
+	conn := a.currentConn()
+	if conn == nil {
+		return toolErrorResult("broker reconnecting — retry output in a moment"), nil
+	}
+	if !ipc.ProtocolStateChangesCompatible(int(a.brokerVersion.Load())) {
+		return toolErrorResult("output refused: broker protocol is outside the state-change compatibility window; restart the CLI"), nil
+	}
+	ch := make(chan ipc.ToolResultMsg, 1)
+	a.pmu.Lock()
+	a.pending["set_output_route_result"] = ch
+	a.pmu.Unlock()
+	if err := conn.WriteJSON(ipc.SetOutputRouteReq{Op: ipc.OpSetOutputRoute, Target: target}); err != nil {
+		a.pmu.Lock()
+		delete(a.pending, "set_output_route_result")
+		a.pmu.Unlock()
+		return toolErrorResult("broker write: " + err.Error()), nil
+	}
+	res, waitErr := mcptools.WaitRouteResult(ctx, a.routeResultTimeout, ch, func() bool {
+		return a.abandonPendingRouteResult("set_output_route_result", ch)
+	})
+	if waitErr != nil {
+		if errors.Is(waitErr, mcptools.ErrRouteResultTimeout) {
+			return toolErrorResult(waitErr.Error()), nil
+		}
+		return toolErrorResult("canceled"), nil
+	}
+	if res.Error != nil {
+		return toolErrorResult(res.Error.Message), nil
+	}
+	resp, _ := res.Result["_set_output"].(ipc.SetOutputRouteResp)
+	if resp.Err != "" {
+		return toolErrorResult(resp.Err), nil
+	}
+	return toolTextResult(ipc.FormatSetOutputRoute(resp)), nil
 }
 
 func (a *adapter) toolForward(name string) mcp.ToolHandler {

@@ -56,10 +56,24 @@ name, or topic-id selection. Because the exact words `web` and `telegram` are
 selectors, a Telegram topic literally named either word must be selected with
 structured `name=web` / `name=telegram` or by id.
 
-The web route uses **reply-tool mode**: the agent's `reply` tool lands on the
-claimed web route even if its host UI describes that mode as “Telegram.” A
-session still drives only one route at a time. Messages arriving on the route it
-released are durably held until a session claims it again.
+For on-the-go use, add web without releasing the Telegram topic:
+
+```text
+attach +web
+```
+
+The `+` form keeps the topic as a held input route and makes web the output
+route. `output telegram` or `output <topic-name>` can move the output without
+changing the held set. `detach target=web` ends the add-mode web leg and leaves
+the Telegram route held. Plain `attach web` remains the intentional
+single-route switch shown above.
+
+The web route uses **Drive output mode**: unqualified `reply` calls land on the
+session's output route. A session may hold several routes while driving one
+output route; with more than one held, inbound carries `[web]` or
+`[telegram · <topic>]` so the agent can see its origin. A single reply can use
+`channel=<held-route>` without moving output. Messages on routes the session
+does not hold remain durably queued until claimed.
 
 The Drive chip and the Chat header make that ownership primary. An attached
 route shows the CLI name reported by C3 and a shortened working directory, for
@@ -81,10 +95,10 @@ drive should use permissions that were deliberately pre-approved.
 
 Say **“start on-the-go mode”** or **“switch to the web chat”**
 (or run `/c3:on-the-go`). The agent treats that as an explicit output-mode
-request: it remembers the Telegram topic it currently holds, attaches the
-`web` route, switches to reply-tool (“Telegram”) mode so replies land in the
-browser, and announces the switch in one line. The attach response sends or
-confirms the Telegram DM login link as usual.
+request: `attach +web` adds the web route, keeps the Telegram topic held for
+input, makes web output so replies land in the browser, and announces Drive
+mode in one line. The attach response sends or confirms the Telegram DM login
+link as usual.
 
 When **🔊 Voice** is turned on or off, the web chat sends the agent a system
 notice saying **“Spoken replies ON”** or **“Spoken replies OFF.”** While it is
@@ -92,9 +106,10 @@ on, the agent follows the channel's spoken-reply guidance and writes short,
 speakable prose; when it is off, normal rich-text guidance applies.
 
 Say **“end on-the-go mode,” “back to Telegram,”** or **“back to the topic”**
-(or run `/c3:off-the-go`) to re-attach the Telegram topic held before the
-switch. If the agent no longer knows that topic, it asks instead of guessing,
-then announces the restored route and output mode. Permission prompts and
+(or run `/c3:off-the-go`) to end the web leg. The wrapper uses
+`detach target=web`; because the Telegram topic was never
+released, it remains held and becomes output without re-attachment or guessing.
+The agent then announces Telegram mode. Permission prompts and
 `ask` remain laptop-side throughout on-the-go mode.
 
 ## Sign-in flow

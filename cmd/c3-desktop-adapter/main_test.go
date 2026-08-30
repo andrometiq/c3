@@ -164,7 +164,7 @@ func TestServerInfoAndTools(t *testing.T) {
 		got[tool.Name] = true
 	}
 	wantTools := []string{
-		"attach", "detach", "topics", "fetch_queue", "observe", "retranscribe",
+		"attach", "detach", "output", "topics", "fetch_queue", "observe", "retranscribe",
 		"reply", "react", "edit_message", "poll", "stop_poll", "download_attachment",
 		"open_inbox",
 	}

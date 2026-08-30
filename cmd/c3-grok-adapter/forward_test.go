@@ -326,6 +326,34 @@ func TestGrokForward_InjectSuccess_AcksCovered(t *testing.T) {
 	}
 }
 
+func TestGrokForward_OriginRouteTagsReachTurnText(t *testing.T) {
+	topicID := int64(281)
+	telegram := ipc.RouteRef{Channel: "telegram", ChatID: -100, TopicID: &topicID, Name: "c3"}
+	web := ipc.RouteRef{Channel: "web", ChatID: 42, Name: "web"}
+
+	for _, tc := range []struct {
+		name   string
+		routes []ipc.RouteRef
+		output ipc.RouteRef
+		in     c3types.Inbound
+		prefix string
+	}{
+		{name: "single-route", routes: []ipc.RouteRef{telegram}, output: telegram, in: c3types.Inbound{Channel: "telegram", ChatID: -100, TopicID: &topicID, MessageID: 11, Text: "hello"}},
+		{name: "multi-telegram", routes: []ipc.RouteRef{telegram, web}, output: web, in: c3types.Inbound{Channel: "telegram", ChatID: -100, TopicID: &topicID, MessageID: 12, Text: "hello"}, prefix: "[telegram · c3] "},
+		{name: "multi-web", routes: []ipc.RouteRef{telegram, web}, output: web, in: c3types.Inbound{Channel: "web", ChatID: 42, MessageID: 13, Text: "hello"}, prefix: "[web] "},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			leader := startFakeGrokLeader(t, 0, "")
+			a, _ := newForwardTestAdapter(t, leader.sock)
+			a.setRouteState(tc.routes, &tc.output)
+			a.handleInbound(inboundRaw(t, ipc.InboundMsg{Op: ipc.OpInbound, Inbound: tc.in}))
+			if got, want := waitServed(t, leader, 3*time.Second), tc.prefix+formatInboundTurnText(&tc.in); got != want {
+				t.Fatalf("leader turn text=%q, want %q", got, want)
+			}
+		})
+	}
+}
+
 // Verbatim-Count contract (C1): a zero-covered push covers no stored lines, so
 // the adapter must NOT fabricate a Count=1 ack — the broker forwards Count
 // verbatim and a 0→1 bump would Consume a real backlog line the push never

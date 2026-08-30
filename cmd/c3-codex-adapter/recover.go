@@ -395,7 +395,15 @@ func (a *adapter) fireRecover(ctx context.Context, conn *ipc.Conn, stableID, cwd
 		// or {target:"dm"}), never by name — see rememberedIdentityReq — so a
 		// later broker restart replays a claim that actually re-binds.
 		a.rememberAttach(rememberedIdentityReq(cwd, resp.ChatID, resp.TopicID, resp.Group))
-		a.setAttachedTopic(resp.Name)
+		// Route state becomes visible only AFTER the replay identity above is
+		// remembered (same goroutine): once the session can name its topic, a
+		// broker restart is guaranteed to find a replayable claim.
+		routes, output := resp.Routes, resp.Output
+		if len(routes) == 0 && resp.Channel != "" {
+			legacy := ipc.RouteRef{Channel: resp.Channel, ChatID: resp.ChatID, TopicID: resp.TopicID, Name: resp.Name, Group: resp.Group}
+			routes, output = []ipc.RouteRef{legacy}, &legacy
+		}
+		a.setRouteState(routes, output)
 		log.Printf("recover-session: auto-attached to %q (queued=%d)", resp.Name, resp.QueuedCount)
 		a.emitRecoverNotice(renderCodexRecoverNotice(resp))
 	}

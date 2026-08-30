@@ -1,8 +1,8 @@
-// Package mcptools is the single source of truth for the C3 MCP tool
-// InputSchemas that are shared verbatim between the Claude and Codex adapters.
+// Package mcptools is the single source of truth for C3 MCP tool schema pieces
+// shared verbatim by the CLI adapters.
 //
 // the maintainer's standing principle (2026-05-18, TODO #20): anything duplicated
-// between the Claude and Codex adapters must have ONE source of truth. P3 added
+// between adapters must have ONE source of truth. P3 added
 // per-adapter `replyMediaSchema()` / `pollToolSchema()` helpers that were
 // byte-identical copies; P4 collapses them here so the two adapters stay in
 // lockstep and the schemas can be derived from the capability manifest rather
@@ -14,6 +14,33 @@
 package mcptools
 
 import "github.com/Andrometiq/c3/internal/c3types"
+
+// ChannelSelectorProp is the shared JSON-schema property for selecting one
+// route held by the calling session. It deliberately exposes a symbolic route
+// selector, never raw destination ids; the broker resolves it against the held
+// set and refuses unheld routes.
+func ChannelSelectorProp() map[string]any {
+	return map[string]any{
+		"type":        "string",
+		"description": "Optional. Name a route you currently HOLD (a channel like `web` or `telegram`, or a held Telegram topic name) to send THIS message to that route instead of your output route. Must be a route you hold; an unheld name is refused and nothing is sent. Do NOT pass chat_id/topic_id — those are refused.",
+	}
+}
+
+// OutputToolSchema is the shared JSON-schema for changing a session's output
+// route without changing its held route set.
+func OutputToolSchema() map[string]any {
+	return map[string]any{
+		"type":        "object",
+		"description": "Set which HELD route your `reply` tool sends to (your output route). Only a route you currently hold can become the output route.",
+		"properties": map[string]any{
+			"target": map[string]any{
+				"type":        "string",
+				"description": "A channel (`web` or `telegram`) or a held Telegram topic name.",
+			},
+		},
+		"required": []string{"target"},
+	}
+}
 
 // allMediaKinds is the fallback ordered media-kind enum used when a manifest
 // reports no MediaKinds (e.g. a zero-value Capabilities). Matches the historical

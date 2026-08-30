@@ -36,6 +36,48 @@ func TestFormatAttached_OKWeb(t *testing.T) {
 	}
 }
 
+func TestFormatAttached_MultiRouteLine(t *testing.T) {
+	topicID := int64(281)
+	telegram := RouteRef{Channel: "telegram", ChatID: -100, TopicID: &topicID, Name: "c3"}
+	web := RouteRef{Channel: "web", ChatID: 42, Name: "web"}
+	msg := &AttachedMsg{
+		OK: true, Channel: "web", Name: "web", ChatID: 42,
+		Routes: []RouteRef{telegram, web}, Output: &web,
+	}
+	if got, want := FormatAttached(msg), "attached to \"web\" (on-the-go chat)\nholding: web, c3 · output: web"; got != want {
+		t.Fatalf("FormatAttached(multi)=%q, want %q", got, want)
+	}
+}
+
+func TestFormatAttached_SingleRouteByteIdentical(t *testing.T) {
+	topicID := int64(914)
+	base := &AttachedMsg{OK: true, Channel: "telegram", Name: "c3", ChatID: -100, TopicID: &topicID}
+	want := FormatAttached(base)
+	route := RouteRef{Channel: "telegram", ChatID: -100, TopicID: &topicID, Name: "c3"}
+	base.Routes = []RouteRef{route}
+	base.Output = &route
+	if got := FormatAttached(base); got != want {
+		t.Fatalf("single-route output changed: got %q, want %q", got, want)
+	}
+}
+
+func TestFormatReleaseExactRouteStrings(t *testing.T) {
+	topicID := int64(281)
+	telegram := RouteRef{Channel: "telegram", ChatID: -100, TopicID: &topicID, Name: "c3"}
+	web := RouteRef{Channel: "web", ChatID: 42, Name: "web"}
+
+	if got, want := FormatRelease("web", ReleaseResp{
+		OK: true, Routes: []RouteRef{telegram}, Output: &telegram,
+	}), "released web; still holding c3; replies go to c3"; got != want {
+		t.Fatalf("FormatRelease(single)=%q, want %q", got, want)
+	}
+	if got, want := FormatRelease("archive", ReleaseResp{
+		OK: true, Routes: []RouteRef{telegram, web}, Output: &web,
+	}), "released archive; still holding web, c3; replies go to web"; got != want {
+		t.Fatalf("FormatRelease(multi)=%q, want %q", got, want)
+	}
+}
+
 // TestFormatAttached_ProposalParity confirms every proposal action the
 // broker can emit is rendered with actionable user-facing text — no
 // "unspecified failure" leakage. maintainer 2026-05-18: "I absolutely need

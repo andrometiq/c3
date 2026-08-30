@@ -1,6 +1,6 @@
 ---
-description: Attach this session to a Telegram topic. Empty = silently re-attach this session's own topic, or (first time) show a picker. "dm" = actual DM. "<int>" = topic_id. "<name>" = topic by name. "create <name>" or "-y <name>" = create that topic immediately.
-argument-hint: "[empty | dm | <topic-id> | <name> | \"create <name>\" | \"-y <name>\"]"
+description: Attach this session to a route. A bare target switches; +<target> adds it to the held set and makes it output.
+argument-hint: "[empty | [+]dm | [+]web | [+]<topic-id> | [+]<name> | \"create <name>\" | \"-y <name>\"]"
 allowed-tools: ["mcp__plugin_c3_c3__attach", "mcp__plugin_c3_c3__topics", "AskUserQuestion"]
 ---
 
@@ -9,6 +9,8 @@ User typed: $ARGUMENTS
 Call `mcp__plugin_c3_c3__attach` with `expr` set to the user's argument string ("$ARGUMENTS" verbatim). The broker parses it (rules in `docs/COMMANDS.md`) and either:
 - Silent-claims and returns `attached to "<name>"`
 - Returns a proposal (`create` / `use_existing_other_group` / `disambiguate_dm` / `force_steal`) requiring confirmation
+
+A bare target such as `web` or `c3` SWITCHES: it claims that route and releases the session's other routes. A `+` target such as `+web` or `+c3` ADDS the route, keeps the routes already held, and makes the added route the output. The structured equivalent is `add=true`. Adding a route this session already holds is refused. If the target is held by another session, use the ordinary `force_steal` proposal and explicit confirmation flow below; never steal automatically.
 
 If the response is **needs_confirmation** with proposal action:
 

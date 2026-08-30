@@ -343,7 +343,11 @@ type RecoverSessionResp struct {
 	// the rest via fetch_queue. Additive + omitempty: nil for an empty queue and
 	// for older brokers.
 	QueuedSummary []QueuedItem `json:"queued_summary,omitempty"`
-	Err           string       `json:"err,omitempty"`
+	// Routes and Output describe the complete set restored by a successful
+	// recovery. Additive + omitempty keeps older adapters wire-compatible.
+	Routes []RouteRef `json:"routes,omitempty"`
+	Output *RouteRef  `json:"output,omitempty"`
+	Err    string     `json:"err,omitempty"`
 }
 
 // HelloAckMsg is the broker's response to HelloMsg.

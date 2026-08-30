@@ -34,6 +34,10 @@ type codexWSClient struct {
 }
 
 func forwardInboundToCodexAppServer(ctx context.Context, in *c3types.Inbound, cfg codexForwardConfig) error {
+	return forwardInboundToCodexAppServerWithPrefix(ctx, in, "", cfg)
+}
+
+func forwardInboundToCodexAppServerWithPrefix(ctx context.Context, in *c3types.Inbound, prefix string, cfg codexForwardConfig) error {
 	if cfg.WSURL == "" {
 		return errCodexForwardNoWS
 	}
@@ -75,7 +79,7 @@ func forwardInboundToCodexAppServer(ctx context.Context, in *c3types.Inbound, cf
 		"threadId": threadID,
 		"input": []map[string]any{{
 			"type":          "text",
-			"text":          formatInboundTurnText(in),
+			"text":          prefix + formatInboundTurnText(in),
 			"text_elements": []any{},
 		}},
 	})

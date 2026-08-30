@@ -25,12 +25,13 @@ support.
 | `reload-config` | `pkill -HUP c3-broker`            | pure shell    | Signal the broker to re-read mappings.json. Non-disruptive — no process restart, in-memory pointer swap, live claims preserved. For binary updates, restart Claude Code instead. |
 | `pair`          | `c3-broker pair …` (CLI)          | pure shell    | Arm a Telegram pairing window. A 4-digit code sent from Telegram allowlists the DM `user_id` (`pair dm`) or a group `chat_id` (`pair group <chat_id>`). The setup flow uses this under the hood for id-free discovery. |
 | `ping`          | `c3-broker ping` (CLI)            | pure shell    | Send a one-shot "this is me" message to the attached topic, identifying which CLI session currently owns it. Run in each candidate tab to find the owner before force-stealing. |
-| `sessions`      | `c3-broker sessions` (CLI)        | pure shell    | List every live Claude Code / Codex session the broker tracks — CWD, attached topic, and a "you are here" marker for the calling terminal. |
-| `attach`        | `attach(expr=…)` (MCP tool)       | LLM dispatch  | Attach this session to a Telegram DM/topic or the web route. Broker parses `expr` first, then resolves the requested channel and target. |
-| `on-the-go`     | `attach(expr="web")` + output-mode protocol | LLM dispatch | Remember the current topic, attach web, switch to reply-tool (“Telegram”) mode, announce the switch, and remind that permissions/`ask` stay at the laptop. Claude command: `/c3:on-the-go`. |
-| `off-the-go`    | `attach(name=…)` + output-mode protocol | LLM dispatch | Re-attach the topic held before on-the-go mode (ask if unknown) and announce the restored route and mode. Claude command: `/c3:off-the-go`. |
-| `detach`        | `detach()` (MCP tool)             | LLM dispatch  | Release the session's current claim (sends `OpRelease`). Claude + Codex + Grok + dcode (every adapter with the tool). |
-| `fetch-queue`   | `fetch_queue(limit=…)` (MCP tool) + `fetch-queue` (MCP prompt on Desktop/Cursor) | LLM dispatch / prompt inject | Drain held inbound for this session's topic. Bare = all; optional count fetches the oldest N. Claude: `/c3:fetch-queue` and short alias `/c3:fetch`. Desktop: `/fetch-queue` MCP prompt. Cursor: MCP prompt `fetch-queue` plus `~/.cursor/commands/{fetch,c3-fetch}.md` from `install-cursor`. dcode: `/skill:c3-fetch` user skill from `install-dcode`. |
+| `sessions`      | `c3-broker sessions` (CLI)        | pure shell    | List every live session the broker tracks — CWD, all held routes (output first), and a "you are here" marker for the calling terminal. |
+| `attach`        | `attach(expr=…, add=…)` (MCP tool) | LLM dispatch | Attach this session to a Telegram DM/topic or web. A bare target switches; `+X` / `add=true` keeps prior routes and makes X output. |
+| `on-the-go`     | `attach(expr="+web")` + output-mode protocol | LLM dispatch | Add web while keeping the Telegram topic held, make web output, and announce Drive mode plus the laptop permission/`ask` boundary. Claude command: `/c3:on-the-go`. |
+| `off-the-go`    | `detach(target="web")` + output-mode protocol | LLM dispatch | Release only web; the still-held Telegram route becomes output, then announce Telegram mode. Claude command: `/c3:off-the-go`. |
+| `output`        | `output(target=…)` (MCP tool)     | LLM dispatch  | Make one currently held route the output route without changing the held set. Claude command: `/c3:output`. |
+| `detach`        | `detach(target=…)` (MCP tool)     | LLM dispatch  | Bare releases ALL held routes; optional `target` releases one held channel/topic route. |
+| `fetch-queue`   | `fetch_queue(limit=…, channel=…)` (MCP tool) + `fetch-queue` (MCP prompt on Desktop/Cursor) | LLM dispatch / prompt inject | Drain held inbound across this session's routes (output first), or select one held route with `channel`; optional count fetches the oldest N. Claude: `/c3:fetch-queue` and short alias `/c3:fetch`. Desktop: `/fetch-queue` MCP prompt. Cursor: MCP prompt `fetch-queue` plus `~/.cursor/commands/{fetch,c3-fetch}.md` from `install-cursor`. dcode: `/skill:c3-fetch` user skill from `install-dcode`. |
 | `release`       | `c3-broker release <cwd>` (CLI)   | pure shell    | **Stubbed in v1** — intended to drop a route claim by cwd without restarting the broker; returns 'not yet implemented' today; workaround is `/exit` the holding session. |
 
 ## MCP tools (agent-invoked)
@@ -39,18 +40,19 @@ Beyond `attach` / `detach` / `topics`, the adapters expose a set of message and 
 
 | Tool                 | Claude | Codex | Grok | dcode | What it does                                                                 |
 |----------------------|:------:|:-----:|:----:|:-----:|------------------------------------------------------------------------------|
-| `reply`              |   ✓    |   ✓   |  ✓   |   ✓   | Send a markdown reply (text/media/quote-reply/buttons) into the attached topic. |
-| `react`              |   ✓    |   ✓   |  ✓   |   ✓   | Set a single emoji reaction on a message (validated against Telegram's set).  |
-| `edit_message`       |   ✓    |   ✓   |  ✓   |   ✓   | Edit a previously-sent message's text and/or inline keyboard.                 |
+| `reply`              |   ✓    |   ✓   |  ✓   |   ✓   | Send to the output route, or one held route with `channel=<route>` (text/media/quote-reply/buttons). |
+| `react`              |   ✓    |   ✓   |  ✓   |   ✓   | React on the output route or the held route named by `channel`; use the same route as the message. |
+| `edit_message`       |   ✓    |   ✓   |  ✓   |   ✓   | Edit on the output route or the held route named by `channel`; message ids are per-route. |
+| `output`             |   ✓    |   ✓   |  ✓   |   ✓   | Select the output route from the session's currently held set.                |
 | `poll`               |   ✓    |   ✓   |  ✓   |   ✓   | Send a Telegram poll (regular or quiz; anonymous/multiple/timer options).     |
 | `stop_poll`          |   ✓    |   ✓   |  ✓   |   ✓   | Force-close a bot-sent poll and return its final aggregate tally.             |
 | `download_attachment`|   ✓    |   ✓   |  ✓   |   ✓   | Download an inbound attachment by `file_id` to the local cache.               |
-| `fetch_queue`        |   ✓    |   ✓   |  ✓   |   ✓   | Drain held inbound from the durable queue (`limit` / `"all"`; `ack` peek vs consume). |
+| `fetch_queue`        |   ✓    |   ✓   |  ✓   |   ✓   | Drain all held routes output-first, or one held route via `channel` (`limit` / `"all"`; `ack` peek vs consume). |
 | `retranscribe`       |   ✓    |   ✓   |  ✓   |   ✓   | Re-run saved audio through the durable STT scheduler; resolve a pending row or append a transcript-update row. |
 | `ask`                |   ✓    |   —   |  —   |   —   | Blocking human question (single/multi-select + Skip) via an inline keyboard.  |
 | `codex_forward`      |   —    |   ✓   |  —   |   —   | Env-gated debug tool: forward a payload into the Codex app-server (diagnostics). |
 
-Codex is at parity on the message/queue tools and lacks only `ask` (and `detach`, above). Grok matches that message/queue set **and** has `detach`; live inbound inject requires leader mode (`[cli] use_leader = true`) — see [`GROK-INJECT.md`](GROK-INJECT.md). dcode matches that message/queue set and has `detach` and `topics`; live inbound needs `DEEPAGENTS_CODE_EXTERNAL_EVENT_SOCKET=1` at TUI launch (else pull-only). The permission relay is Claude Code only.
+Codex is at parity on the message/queue and route-management tools and lacks only `ask`. Grok matches that set; live inbound inject requires leader mode (`[cli] use_leader = true`) — see [`GROK-INJECT.md`](GROK-INJECT.md). dcode matches that message/queue set and has the same route-management tools; live inbound needs `DEEPAGENTS_CODE_EXTERNAL_EVENT_SOCKET=1` at TUI launch (else pull-only). The permission relay is Claude Code only.
 
 ## Telegram bot commands (human-typed, broker-owned)
 
@@ -103,12 +105,18 @@ once").
 | `""` (empty)                       | bare attach — never guesses (see below)      |
 | `"dm"` / `"DM"` (case-insensitive) | `target = "dm"` (DM disambiguation may fire) |
 | `"web"` / `"telegram"` (case-insensitive) | channel selector |
+| `"+<selector>"` (for example `+web`, `+c3`) | parse `<selector>` normally, set `add = true` |
 | `"<int>"`                          | `topic_id = <int>`                           |
 | `"create <name>"`                  | `name = <name>, create = true`               |
 | `"-y <name>"` / `"yes <name>"`     | `name = <name>, create = true`               |
 | `"<other string>"`                 | `name = <string>`                            |
 
 Whitespace is trimmed. Unparsable input falls through to `name`.
+
+`+web` / `+c3` add that route to the held set and make it output. The
+structured equivalent is `add=true`. Without `+` or `add=true`, an explicit
+target keeps the established SWITCH behavior: the new route is claimed and
+the session's other routes are released.
 
 Because the two exact tokens are selectors, a Telegram topic literally named
 `web` or `telegram` must be selected with the structured `name="web"` /
@@ -125,7 +133,9 @@ Channel resolution is request-aware:
 | bare attach, no recorded route | the unique topic-capable channel and its picker |
 | two topic-capable channels, no selector | refuse; never guess |
 
-A successful `attach web` claims the operator's web route. If the browser has
+A successful `attach web` switches to the operator's web route and releases
+the session's other routes. `attach +web` instead keeps those routes held and
+makes web output. If the browser has
 no live authenticated session, the broker sends a login link through the
 Telegram DM and the attach response says so. The response also reminds the
 agent to use reply-tool (“Telegram”) mode so `reply` lands on the claimed web
@@ -136,14 +146,15 @@ rules.
 
 ## on-the-go / off-the-go — output-mode wrappers
 
-`/c3:on-the-go` remembers the currently held Telegram topic, calls
-`attach(expr="web")`, switches the agent to reply-tool (“Telegram”) mode, and
-announces the switch plus the laptop-side permission boundary. The phrases
+`/c3:on-the-go` calls `attach(expr="+web")` once. Add-mode keeps the Telegram
+topic held for input and makes web the output route, after which the wrapper
+announces Drive mode plus the laptop-side permission boundary. The phrases
 “start on-the-go mode” and “switch to the web chat” request the same sequence
 explicitly; they are not inferred merely because a message came from a phone.
 
-`/c3:off-the-go` re-attaches the topic held immediately before the switch. If
-that name is unknown, the wrapper asks the user rather than guessing. The
+`/c3:off-the-go` calls `detach(target="web")` once. The Telegram topic was never
+released, so it remains held and becomes output; nothing is re-attached or
+guessed. The
 phrases “end on-the-go mode,” “back to Telegram,” and “back to the topic” do the
 same, followed by a one-line mode announcement. A web system notice says
 “Spoken replies ON” or “Spoken replies OFF”; the agent uses speakable prose only

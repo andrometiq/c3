@@ -182,7 +182,6 @@ func (a *adapter) fireRecoverEpoch(ctx context.Context, stableID, cwd string, ep
 			return
 		}
 		a.rememberAttach(rememberedIdentityReq(cwd, resp.ChatID, resp.TopicID, resp.Group))
-		a.setAttachedTopic(resp.Name)
 		log.Printf("recover-session: auto-attached to %q (queued=%d)", resp.Name, resp.QueuedCount)
 		if text := renderGrokRecoverNotice(resp); text != "" {
 			a.emitRecoverNotice(text)
@@ -194,6 +193,14 @@ func (a *adapter) dispatchRecoverSessionResult(raw []byte) {
 	var resp ipc.RecoverSessionResp
 	if err := json.Unmarshal(raw, &resp); err != nil {
 		return
+	}
+	if resp.Recovered {
+		routes, output := resp.Routes, resp.Output
+		if len(routes) == 0 && resp.Channel != "" {
+			legacy := ipc.RouteRef{Channel: resp.Channel, ChatID: resp.ChatID, TopicID: resp.TopicID, Name: resp.Name, Group: resp.Group}
+			routes, output = []ipc.RouteRef{legacy}, &legacy
+		}
+		a.setRouteState(routes, output)
 	}
 	a.rsmu.Lock()
 	ch := a.rsPending

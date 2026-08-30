@@ -239,6 +239,13 @@ type recoverOutcome struct {
 	processed  bool
 }
 
+type routeKey struct {
+	channel  string
+	chatID   int64
+	topicID  int64
+	hasTopic bool
+}
+
 type adapter struct {
 	// notifyTx wraps the stdio transport to permit emitting custom
 	// `notifications/claude/channel` frames. Set in run() before Server.Run.
@@ -258,6 +265,8 @@ type adapter struct {
 	pmu     sync.Mutex
 	pending map[string]chan ipc.ToolResultMsg
 	nextID  atomic.Uint64
+	// routeResultTimeout is a test seam; zero selects mcptools.RouteResultTimeout.
+	routeResultTimeout time.Duration
 
 	// fetch_queue / retranscribe have their own pending maps keyed by request
 	// id so their typed responses don't overload the ToolResultMsg pending map.
@@ -381,6 +390,12 @@ type adapter struct {
 	// drain — a stale/wrong advertisement is then distinguishable rather than an
 	// anonymous "N pending" (spec §5). Empty when unattached. Guarded by amu.
 	attachedTopic string
+	// routes is the complete held set and outputRoute is the outbound default.
+	// routeNames lets inbound ids recover a human Telegram topic name for the
+	// multi-route origin tag. All three are guarded by amu.
+	routes      []ipc.RouteRef
+	outputRoute *ipc.RouteRef
+	routeNames  map[routeKey]string
 
 	// firstInbound triggers a one-shot wire dump of the first
 	// notifications/claude/channel frame for live debugging.
@@ -548,6 +563,10 @@ func (a *adapter) brokerReader(ctx context.Context) {
 			a.dispatchToolResult(raw)
 		case ipc.OpAttached:
 			a.dispatchAttached(raw)
+		case ipc.OpReleaseResult:
+			a.dispatchReleaseResult(raw)
+		case ipc.OpSetOutputRouteResult:
+			a.dispatchSetOutputRouteResult(raw)
 		case ipc.OpTopicsList:
 			a.dispatchTopicsList(raw)
 		case ipc.OpFetchQueueResult:
@@ -565,6 +584,7 @@ func (a *adapter) brokerReader(ctx context.Context) {
 		case ipc.OpError:
 			var errMsg ipc.ErrorMsg
 			_ = json.Unmarshal(raw, &errMsg)
+			a.failPendingRouteResults(errMsg.Err)
 			a.handleBrokerError(errMsg.Err)
 		default:
 			// An op this build does not know — normally a NEWER broker (mixed
@@ -728,12 +748,80 @@ func (a *adapter) rememberAttachForIdentity(req ipc.AttachReq, stableID string) 
 	a.lastAttachStableID = stableID
 }
 
-// setAttachedTopic records the human-readable name of the currently-attached
-// topic for the fetch_queue nudges (spec §5). Empty string clears it on detach.
-func (a *adapter) setAttachedTopic(name string) {
+func routeKeyFor(channel string, chatID int64, topicID *int64) routeKey {
+	key := routeKey{channel: channel, chatID: chatID}
+	if topicID != nil {
+		key.topicID = *topicID
+		key.hasTopic = true
+	}
+	return key
+}
+
+func cloneRouteRef(route ipc.RouteRef) ipc.RouteRef {
+	copy := route
+	if route.TopicID != nil {
+		topicID := *route.TopicID
+		copy.TopicID = &topicID
+	}
+	return copy
+}
+
+func cloneRouteRefs(routes []ipc.RouteRef) []ipc.RouteRef {
+	cloned := make([]ipc.RouteRef, 0, len(routes))
+	for _, route := range routes {
+		cloned = append(cloned, cloneRouteRef(route))
+	}
+	return cloned
+}
+
+// setRouteState is the only writer for the adapter's held-set snapshot.
+func (a *adapter) setRouteState(routes []ipc.RouteRef, output *ipc.RouteRef) {
 	a.amu.Lock()
 	defer a.amu.Unlock()
-	a.attachedTopic = name
+	a.routes = cloneRouteRefs(routes)
+	a.routeNames = make(map[routeKey]string, len(routes))
+	for _, route := range routes {
+		a.routeNames[routeKeyFor(route.Channel, route.ChatID, route.TopicID)] = route.Name
+	}
+	a.outputRoute = nil
+	a.attachedTopic = ""
+	if output != nil {
+		copy := cloneRouteRef(*output)
+		a.outputRoute = &copy
+		a.attachedTopic = ipc.FormatRouteRef(copy)
+	}
+}
+
+func (a *adapter) setOutputRouteState(output *ipc.RouteRef) {
+	a.amu.Lock()
+	routes := cloneRouteRefs(a.routes)
+	a.amu.Unlock()
+	a.setRouteState(routes, output)
+}
+
+func (a *adapter) clearRouteStateLocked() {
+	a.attachedTopic = ""
+	a.routes = nil
+	a.outputRoute = nil
+	a.routeNames = nil
+}
+
+func (a *adapter) originTag(in *c3types.Inbound) string {
+	a.amu.Lock()
+	defer a.amu.Unlock()
+	if len(a.routes) <= 1 {
+		return ""
+	}
+	channel := strings.ToLower(in.Channel)
+	if channel == "" {
+		channel = "unknown"
+	}
+	if channel == "telegram" {
+		if name := a.routeNames[routeKeyFor(in.Channel, in.ChatID, in.TopicID)]; name != "" {
+			return "[telegram · " + name + "] "
+		}
+	}
+	return "[" + channel + "] "
 }
 
 // currentTopicName returns the currently-attached topic name (empty when
@@ -950,6 +1038,38 @@ func (a *adapter) refireResolvedHandoffOnReconnect(ctx context.Context, entry se
 }
 
 // wakePendingWithErr resolves every pending entry with an error.
+func (a *adapter) abandonPendingRouteResult(key string, ch chan ipc.ToolResultMsg) bool {
+	a.pmu.Lock()
+	defer a.pmu.Unlock()
+	current, ok := a.pending[key]
+	if !ok {
+		return false
+	}
+	if current != ch {
+		return true
+	}
+	delete(a.pending, key)
+	return true
+}
+
+func (a *adapter) failPendingRouteResults(message string) {
+	if message == "" {
+		message = "broker error"
+	}
+	var waiters []chan ipc.ToolResultMsg
+	a.pmu.Lock()
+	for _, key := range []string{string(ipc.OpReleaseResult), string(ipc.OpSetOutputRouteResult)} {
+		if ch, ok := a.pending[key]; ok {
+			delete(a.pending, key)
+			waiters = append(waiters, ch)
+		}
+	}
+	a.pmu.Unlock()
+	for _, ch := range waiters {
+		ch <- ipc.ToolResultMsg{Error: &ipc.ErrorPayload{Code: -32000, Message: message}}
+	}
+}
+
 func (a *adapter) wakePendingWithErr(msg string) {
 	a.pmu.Lock()
 	pending := a.pending
@@ -999,6 +1119,9 @@ func (a *adapter) handleInbound(ctx context.Context, raw []byte) {
 		topic = strconv.FormatInt(*in.Inbound.TopicID, 10)
 	}
 	frame := buildClaudeChannelFrame(&in.Inbound)
+	if content, ok := frame["content"].(string); ok {
+		frame["content"] = a.originTag(&in.Inbound) + content
+	}
 
 	// Push-path recovery nudge (spec Component 3 — the push half of the recovery
 	// net). When the broker reports remaining backlog (in.Pending > 0), append a
@@ -1159,6 +1282,24 @@ func renderFetchedMessages(msgs []c3types.Inbound, remaining int, route string) 
 	// #55 (2026-07-24): the per-message attachment block is trimmed to kind +
 	// file_id; the "how to open it" instruction is shown ONCE per batch instead
 	// of being implied on every line.
+	if c3types.InboundsHaveAttachment(msgs) {
+		out = c3types.AttachmentFetchHint + "\n\n" + out
+	}
+	if remaining > 0 {
+		out += "\n\n" + pendingNudge(remaining, route)
+	}
+	return out
+}
+
+func (a *adapter) renderFetchedMessages(msgs []c3types.Inbound, remaining int, route string) string {
+	if len(msgs) == 0 {
+		return renderFetchedMessages(msgs, remaining, route)
+	}
+	blocks := make([]string, 0, len(msgs))
+	for i := range msgs {
+		blocks = append(blocks, a.originTag(&msgs[i])+renderQueuedInbound(&msgs[i]))
+	}
+	out := strings.Join(blocks, "\n\n")
 	if c3types.InboundsHaveAttachment(msgs) {
 		out = c3types.AttachmentFetchHint + "\n\n" + out
 	}
@@ -1456,6 +1597,18 @@ func (a *adapter) dispatchToolResult(raw []byte) {
 // in flight at a time per adapter (attach is synchronous from the agent's
 // perspective).
 func (a *adapter) dispatchAttached(raw []byte) {
+	var attached ipc.AttachedMsg
+	if err := json.Unmarshal(raw, &attached); err != nil {
+		return
+	}
+	if attached.OK {
+		routes, output := attached.Routes, attached.Output
+		if len(routes) == 0 && attached.Channel != "" {
+			legacy := ipc.RouteRef{Channel: attached.Channel, ChatID: attached.ChatID, TopicID: attached.TopicID, Name: attached.Name, Group: attached.Group}
+			routes, output = []ipc.RouteRef{legacy}, &legacy
+		}
+		a.setRouteState(routes, output)
+	}
 	a.pmu.Lock()
 	ch, ok := a.pending["attached"]
 	if ok {
@@ -1463,8 +1616,6 @@ func (a *adapter) dispatchAttached(raw []byte) {
 	}
 	a.pmu.Unlock()
 	if ok {
-		var attached ipc.AttachedMsg
-		_ = json.Unmarshal(raw, &attached)
 		// A successful attach may carry the just-claimed channel's manifest.
 		// Store it as the latest caps so any subsequent instructions rebuild
 		// (e.g. on a broker reconnect) reflects the attached channel. The MCP
@@ -1476,6 +1627,44 @@ func (a *adapter) dispatchAttached(raw []byte) {
 			a.helloAck.Capabilities = attached.Capabilities
 		}
 		ch <- ipc.ToolResultMsg{Result: map[string]any{"_attached": attached}}
+	}
+}
+
+func (a *adapter) dispatchReleaseResult(raw []byte) {
+	var resp ipc.ReleaseResp
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		return
+	}
+	a.pmu.Lock()
+	ch, ok := a.pending["release_result"]
+	if ok {
+		delete(a.pending, "release_result")
+	}
+	a.pmu.Unlock()
+	if ok {
+		if resp.OK {
+			a.setRouteState(resp.Routes, resp.Output)
+		}
+		ch <- ipc.ToolResultMsg{Result: map[string]any{"_release": resp}}
+	}
+}
+
+func (a *adapter) dispatchSetOutputRouteResult(raw []byte) {
+	var resp ipc.SetOutputRouteResp
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		return
+	}
+	a.pmu.Lock()
+	ch, ok := a.pending["set_output_route_result"]
+	if ok {
+		delete(a.pending, "set_output_route_result")
+	}
+	a.pmu.Unlock()
+	if ok {
+		if resp.OK && resp.Output != nil {
+			a.setOutputRouteState(resp.Output)
+		}
+		ch <- ipc.ToolResultMsg{Result: map[string]any{"_set_output": resp}}
 	}
 }
 
@@ -1643,7 +1832,7 @@ func (a *adapter) registerTools(srv *mcp.Server) {
 		{
 			tool: &mcp.Tool{
 				Name:        "attach",
-				Description: "Attach this session to a Telegram topic. Either pass `expr` (raw user-supplied string the broker parses: empty=cwd-default, 'dm'=DM, '<int>'=topic-id, 'create <name>' or '-y <name>'=create that name, '<other>'=name) OR structured args. `target='dm'` for the user's DM. `name='X'` for a specific name. `topic_id=N` to claim a known thread id. `create=true` to confirm a creation proposal. `steal=true` to displace an existing alive holder (only after user-confirmed force_steal proposal).",
+				Description: "Attach this session to a Telegram topic. Either pass `expr` (raw user-supplied string the broker parses: empty=cwd-default, 'dm'=DM, '<int>'=topic-id, 'create <name>' or '-y <name>'=create that name, '<other>'=name) OR structured args. Prefix a target with `+` (e.g. expr `+web`, `+c3`) to ADD it to your held routes and make it the output route, instead of switching (the default). Structured: `add=true`. `target='dm'` for the user's DM. `name='X'` for a specific name. `topic_id=N` to claim a known thread id. `create=true` to confirm a creation proposal. `steal=true` to displace an existing alive holder (only after user-confirmed force_steal proposal).",
 				InputSchema: map[string]any{
 					"type": "object",
 					"properties": map[string]any{
@@ -1654,6 +1843,7 @@ func (a *adapter) registerTools(srv *mcp.Server) {
 						"group":    map[string]any{"type": "string"},
 						"create":   map[string]any{"type": "boolean"},
 						"steal":    map[string]any{"type": "boolean"},
+						"add":      map[string]any{"type": "boolean"},
 					},
 				},
 			},
@@ -1662,10 +1852,20 @@ func (a *adapter) registerTools(srv *mcp.Server) {
 		{
 			tool: &mcp.Tool{
 				Name:        "detach",
-				Description: "Release this session's current Telegram topic claim. After detach, inbound messages on that route fall through to the broker's fallback. No-op if not attached.",
-				InputSchema: map[string]any{"type": "object", "properties": map[string]any{}},
+				Description: "Bare = release ALL your routes. `target=<web|telegram|topic-name>` releases just that one held route; if it was your output route, output falls back to your most-recently-added remaining route.",
+				InputSchema: map[string]any{"type": "object", "properties": map[string]any{
+					"target": map[string]any{"type": "string"},
+				}},
 			},
 			handler: a.toolDetach,
+		},
+		{
+			tool: &mcp.Tool{
+				Name:        "output",
+				Description: "Set which HELD route your `reply` tool sends to (your output route). Only a route you currently hold can become the output route.",
+				InputSchema: mcptools.OutputToolSchema(),
+			},
+			handler: a.toolSetOutput,
 		},
 		{
 			tool: &mcp.Tool{
@@ -1686,6 +1886,7 @@ func (a *adapter) registerTools(srv *mcp.Server) {
 						"reply_to": map[string]any{"type": "integer"},
 						"media":    mcptools.ReplyMediaSchema(caps),
 						"buttons":  mcptools.ReplyButtonsSchema(),
+						"channel":  mcptools.ChannelSelectorProp(),
 					},
 					"required": []string{"text"},
 				},
@@ -1695,12 +1896,13 @@ func (a *adapter) registerTools(srv *mcp.Server) {
 		{
 			tool: &mcp.Tool{
 				Name:        "react",
-				Description: "Set a single-emoji reaction on a Telegram message.",
+				Description: "Set a single-emoji reaction on a Telegram message. To react to a message you sent with a `channel` override, pass the SAME `channel` — message ids are per-route.",
 				InputSchema: map[string]any{
 					"type": "object",
 					"properties": map[string]any{
 						"message_id": map[string]any{"type": "integer"},
 						"emoji":      map[string]any{"type": "string"},
+						"channel":    mcptools.ChannelSelectorProp(),
 					},
 					"required": []string{"message_id", "emoji"},
 				},
@@ -1710,12 +1912,13 @@ func (a *adapter) registerTools(srv *mcp.Server) {
 		{
 			tool: &mcp.Tool{
 				Name:        "edit_message",
-				Description: "Edit a previously-sent Telegram message.",
+				Description: "Edit a previously-sent Telegram message. To edit a message you sent with a `channel` override, pass the SAME `channel` — message ids are per-route.",
 				InputSchema: map[string]any{
 					"type": "object",
 					"properties": map[string]any{
 						"message_id": map[string]any{"type": "integer"},
 						"text":       map[string]any{"type": "string"},
+						"channel":    mcptools.ChannelSelectorProp(),
 					},
 					"required": []string{"message_id", "text"},
 				},
@@ -1774,8 +1977,9 @@ func (a *adapter) registerTools(srv *mcp.Server) {
 				InputSchema: map[string]any{
 					"type": "object",
 					"properties": map[string]any{
-						"limit": map[string]any{"description": "integer (default 3, max 50) or the string \"all\""},
-						"ack":   map[string]any{"type": "boolean", "default": true},
+						"limit":   map[string]any{"description": "integer (default 3, max 50) or the string \"all\""},
+						"ack":     map[string]any{"type": "boolean", "default": true},
+						"channel": mcptools.ChannelSelectorProp(),
 					},
 				},
 			},
@@ -1865,6 +2069,9 @@ func (a *adapter) toolAttach(ctx context.Context, req *mcp.CallToolRequest) (*mc
 	if v, ok := args["steal"].(bool); ok {
 		attachReq.Steal = v
 	}
+	if v, ok := args["add"].(bool); ok {
+		attachReq.Add = v
+	}
 	if v, ok := args["topic_id"]; ok {
 		switch x := v.(type) {
 		case float64:
@@ -1902,8 +2109,6 @@ func (a *adapter) toolAttach(ctx context.Context, req *mcp.CallToolRequest) (*mc
 			// §3d1: remember the RESOLVED identity for a bare attach so a
 			// post-broker-restart replay re-binds the same topic explicitly.
 			a.rememberAttachForIdentity(resolvedAttachReq(attachReq, attached), attachStableID)
-			// Track the resolved topic name for the fetch_queue nudges (§5).
-			a.setAttachedTopic(attached.Name)
 			// Side-effect surface: write OSC-0 title-bar escape to
 			// stderr so the user's terminal-emulator title reflects
 			// the currently-attached topic. Closes TODO #19(a).
@@ -1939,9 +2144,17 @@ func (a *adapter) toolAttach(ctx context.Context, req *mcp.CallToolRequest) (*mc
 	}
 }
 
-// toolDetach implements the `detach` tool: send OpRelease and forget the
-// last-attach replay.
-func (a *adapter) toolDetach(_ context.Context, _ *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+// toolDetach implements bare release-all and targeted single-route release.
+func (a *adapter) toolDetach(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	args := map[string]any{}
+	if req != nil {
+		var err error
+		args, err = decodeArgs(req.Params.Arguments)
+		if err != nil {
+			return nil, fmt.Errorf("invalid params: %w", err)
+		}
+	}
+	target, _ := args["target"].(string)
 	conn := a.currentConn()
 	if conn == nil {
 		return toolErrorResult("broker not connected"), nil
@@ -1949,20 +2162,90 @@ func (a *adapter) toolDetach(_ context.Context, _ *mcp.CallToolRequest) (*mcp.Ca
 	if !ipc.ProtocolStateChangesCompatible(int(a.brokerVersion.Load())) {
 		return toolErrorResult("detach refused: broker protocol is outside the state-change compatibility window; restart the CLI"), nil
 	}
-	if err := conn.WriteJSON(struct {
-		Op ipc.Op `json:"op"`
-	}{Op: ipc.OpRelease}); err != nil {
+	releaseReq := ipc.ReleaseReq{Op: ipc.OpRelease, Target: target}
+	if target != "" {
+		ch := make(chan ipc.ToolResultMsg, 1)
+		a.pmu.Lock()
+		a.pending["release_result"] = ch
+		a.pmu.Unlock()
+		if err := conn.WriteJSON(releaseReq); err != nil {
+			a.pmu.Lock()
+			delete(a.pending, "release_result")
+			a.pmu.Unlock()
+			return toolErrorResult("broker write: " + err.Error()), nil
+		}
+		res, waitErr := mcptools.WaitRouteResult(ctx, a.routeResultTimeout, ch, func() bool {
+			return a.abandonPendingRouteResult("release_result", ch)
+		})
+		if waitErr != nil {
+			if errors.Is(waitErr, mcptools.ErrRouteResultTimeout) {
+				return toolErrorResult(waitErr.Error()), nil
+			}
+			return toolErrorResult("canceled"), nil
+		}
+		if res.Error != nil {
+			return toolErrorResult(res.Error.Message), nil
+		}
+		resp, _ := res.Result["_release"].(ipc.ReleaseResp)
+		if resp.Err != "" {
+			return toolErrorResult(resp.Err), nil
+		}
+		return toolTextResult(ipc.FormatRelease(target, resp)), nil
+	}
+	if err := conn.WriteJSON(releaseReq); err != nil {
 		return toolErrorResult("broker write: " + err.Error()), nil
 	}
 	a.amu.Lock()
 	a.lastAttach = nil
 	a.lastAttachStableID = ""
-	a.attachedTopic = ""
+	a.clearRouteStateLocked()
 	a.amu.Unlock()
 	// Restore the terminal-emulator's default title — see
 	// EmitAttach call-site comment in toolAttach for context.
 	termtitle.Clear()
 	return toolTextResult("detached"), nil
+}
+
+func (a *adapter) toolSetOutput(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	args, err := decodeArgs(req.Params.Arguments)
+	if err != nil {
+		return nil, fmt.Errorf("invalid params: %w", err)
+	}
+	target, _ := args["target"].(string)
+	conn := a.currentConn()
+	if conn == nil {
+		return toolErrorResult("broker not connected"), nil
+	}
+	if !ipc.ProtocolStateChangesCompatible(int(a.brokerVersion.Load())) {
+		return toolErrorResult("output refused: broker protocol is outside the state-change compatibility window; restart the CLI"), nil
+	}
+	ch := make(chan ipc.ToolResultMsg, 1)
+	a.pmu.Lock()
+	a.pending["set_output_route_result"] = ch
+	a.pmu.Unlock()
+	if err := conn.WriteJSON(ipc.SetOutputRouteReq{Op: ipc.OpSetOutputRoute, Target: target}); err != nil {
+		a.pmu.Lock()
+		delete(a.pending, "set_output_route_result")
+		a.pmu.Unlock()
+		return toolErrorResult("broker write: " + err.Error()), nil
+	}
+	res, waitErr := mcptools.WaitRouteResult(ctx, a.routeResultTimeout, ch, func() bool {
+		return a.abandonPendingRouteResult("set_output_route_result", ch)
+	})
+	if waitErr != nil {
+		if errors.Is(waitErr, mcptools.ErrRouteResultTimeout) {
+			return toolErrorResult(waitErr.Error()), nil
+		}
+		return toolErrorResult("canceled"), nil
+	}
+	if res.Error != nil {
+		return toolErrorResult(res.Error.Message), nil
+	}
+	resp, _ := res.Result["_set_output"].(ipc.SetOutputRouteResp)
+	if resp.Err != "" {
+		return toolErrorResult(resp.Err), nil
+	}
+	return toolTextResult(ipc.FormatSetOutputRoute(resp)), nil
 }
 
 // toolTopics implements the `topics` tool.
@@ -2088,6 +2371,9 @@ func (a *adapter) toolFetchQueue(ctx context.Context, req *mcp.CallToolRequest) 
 		return nil, fmt.Errorf("invalid params: %w", err)
 	}
 	fq := ipc.FetchQueueReq{Op: ipc.OpFetchQueue, ID: strconv.FormatUint(a.nextID.Add(1), 10), Ack: true}
+	if v, ok := args["channel"].(string); ok {
+		fq.Channel = v
+	}
 	if v, ok := args["ack"].(bool); ok {
 		fq.Ack = v
 	}
@@ -2115,7 +2401,7 @@ func (a *adapter) toolFetchQueue(ctx context.Context, req *mcp.CallToolRequest) 
 		if resp.Err != "" {
 			return toolErrorResult(resp.Err), nil
 		}
-		return toolTextResult(renderFetchedMessages(resp.Messages, resp.Remaining, a.currentTopicName())), nil
+		return toolTextResult(a.renderFetchedMessages(resp.Messages, resp.Remaining, a.currentTopicName())), nil
 	}
 }
 
@@ -2436,7 +2722,7 @@ func (a *adapter) clearConversationStateForSwitch() string {
 	oldTopic := a.attachedTopic
 	a.lastAttach = nil
 	a.lastAttachStableID = ""
-	a.attachedTopic = ""
+	a.clearRouteStateLocked()
 	return oldTopic
 }
 
@@ -2697,8 +2983,6 @@ func (a *adapter) fireRecoverLocked(ctx context.Context, entry sessionhandoff.En
 		// resp.TopicID==nil → {Target:"dm"} and a topic → {TopicID, Group}, which a
 		// fresh broker re-claims via attachByTopicID (item B, shared with item C).
 		a.rememberAttachForIdentity(rememberedIdentityReq(entry.CWD, resp.ChatID, resp.TopicID, resp.Group), entry.StableSessionID)
-		// Track the recovered topic name for the fetch_queue nudges (§5).
-		a.setAttachedTopic(resp.Name)
 		log.Printf("recover-session: auto-attached to %q (queued=%d)", resp.Name, resp.QueuedCount)
 		if text := renderRecoverNotice(resp); text != "" {
 			// Defer rather than emit now: this may run in the resume idle gap,
@@ -2973,6 +3257,14 @@ func (a *adapter) dispatchRecoverSessionResult(raw []byte) {
 	var resp ipc.RecoverSessionResp
 	if err := json.Unmarshal(raw, &resp); err != nil {
 		return
+	}
+	if resp.Recovered {
+		routes, output := resp.Routes, resp.Output
+		if len(routes) == 0 && resp.Channel != "" {
+			legacy := ipc.RouteRef{Channel: resp.Channel, ChatID: resp.ChatID, TopicID: resp.TopicID, Name: resp.Name, Group: resp.Group}
+			routes, output = []ipc.RouteRef{legacy}, &legacy
+		}
+		a.setRouteState(routes, output)
 	}
 	a.rsmu.Lock()
 	ch := a.rsPending

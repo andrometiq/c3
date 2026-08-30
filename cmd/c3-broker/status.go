@@ -210,8 +210,12 @@ func runStatus() error {
 			if !c.Connected {
 				liveness = "disconnected (claim survives while pid alive)"
 			}
-			fmt.Fprintf(&b, "  • %s — held by %s pid %d conn=%d [%s]\n",
-				route, c.HolderCLI, c.HolderPID, c.ConnID, liveness)
+			role := "input"
+			if c.IsOutput {
+				role = "output"
+			}
+			fmt.Fprintf(&b, "  • %s — held by %s pid %d conn=%d [%s] [%s]\n",
+				route, c.HolderCLI, c.HolderPID, c.ConnID, role, liveness)
 		}
 	}
 

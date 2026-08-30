@@ -6,6 +6,8 @@ import (
 	"sync"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"github.com/Andrometiq/c3/internal/ipc"
 )
 
 // safeBuffer wraps bytes.Buffer with a mutex so concurrent writes from the
@@ -51,4 +53,12 @@ func newInMemoryTransports() (*mcp.InMemoryTransport, *mcp.InMemoryTransport) {
 // newTestClient constructs a minimal mcp.Client used in adapter tests.
 func newTestClient() *mcp.Client {
 	return mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "0.0.0"}, nil)
+}
+
+// setTestOutputRoute seeds the same coherent route snapshot production receives
+// from attach/recover results. Tests that only need a topic label must not write
+// attachedTopic independently of routes/outputRoute.
+func setTestOutputRoute(a *adapter, name string) {
+	route := ipc.RouteRef{Channel: "telegram", Name: name}
+	a.setRouteState([]ipc.RouteRef{route}, &route)
 }

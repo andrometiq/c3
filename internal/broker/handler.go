@@ -563,6 +563,7 @@ func (b *Broker) handleRecoverSession(conn *ipc.Conn, stub *Stub, raw []byte, ro
 				resp.Name = nonTopicRouteName(key.Channel)
 			}
 		}
+		resp.Routes, resp.Output = b.routeSetRefs(stub)
 		// Guaranteed-visible confirmation: post a one-shot Telegram note to the
 		// recovered topic. The adapter's CLI notice can be dropped by Claude Code
 		// when it fires in the resume idle gap (2026-06-24), so the Telegram
