@@ -71,6 +71,16 @@
     .header-control { min-width: 2.6rem; min-height: 2.6rem; border: 1px solid #46515e; border-radius: .55rem; padding: .3rem .5rem; background: #1a2027; color: #f4f6f8; font: inherit; flex: 0 0 auto; }
     .header-control:disabled { opacity: .45; }
     #logout { border: 0; padding: .25rem; background: transparent; color: #aeb8c4; text-decoration: underline; font: inherit; font-size: .82rem; flex: 0 0 auto; }
+    #presence-sheet-backdrop { position: fixed; z-index: 10; inset: 0; display: grid; align-items: end; padding: 1rem; background: rgba(0,0,0,.62); }
+    #presence-sheet-backdrop[hidden] { display: none; }
+    #presence-sheet { width: min(34rem, 100%); margin: 0 auto; border: 1px solid #46515e; border-radius: 1rem; padding: 1rem; background: #161c23; box-shadow: 0 8px 32px rgba(0,0,0,.55); }
+    #presence-sheet-header { display: flex; align-items: center; justify-content: space-between; gap: 1rem; }
+    #presence-sheet h2 { margin: 0; font-size: 1.05rem; }
+    #presence-sheet-close { min-width: 2.6rem; min-height: 2.6rem; border: 1px solid #46515e; border-radius: 50%; background: #222b35; color: #fff; font: 700 1.1rem/1 system-ui, sans-serif; }
+    #presence-empty { margin: .85rem 0 .2rem; color: #aeb8c4; }
+    #presence-details { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: .45rem .8rem; margin: .85rem 0 .2rem; }
+    #presence-details dt { color: #9ba7b4; }
+    #presence-details dd { min-width: 0; margin: 0; overflow-wrap: anywhere; font-family: ui-monospace, monospace; }
     #messages { position: relative; min-height: 0; overflow-y: auto; padding: 1rem; scroll-padding-block: 4rem 9rem; }
     #message-list { min-height: 1px; }
     #load-earlier { display: block; min-height: 2.6rem; margin: 0 auto 1rem; border: 1px solid #46515e; border-radius: 999px; padding: .35rem .9rem; background: #1a2027; color: #d9e1e9; font: inherit; }
@@ -152,7 +162,7 @@
   <section id="view-drive" class="view-panel lamp-idle" aria-label="Drive view">
     <div class="drive-top">
       <button id="drive-mute" class="drive-control" type="button" aria-label="Mute spoken replies" aria-pressed="false"><span class="drive-icon">🔊</span>Mute</button>
-      <div id="drive-chip" role="status" aria-live="polite">web&nbsp;&nbsp;reconnecting…</div>
+      <button id="drive-chip" type="button" role="status" aria-live="polite" aria-haspopup="dialog">reconnecting…</button>
       <button id="drive-chat" class="drive-control" type="button" aria-label="Open Chat"><span class="drive-icon">💬</span>Chat</button>
     </div>
     <div class="drive-centre">
@@ -203,6 +213,22 @@
         </form>
       </div>
     </main>
+  </section>
+</div>
+<div id="presence-sheet-backdrop" hidden>
+  <section id="presence-sheet" role="dialog" aria-modal="true" aria-labelledby="presence-sheet-title" tabindex="-1">
+    <div id="presence-sheet-header">
+      <h2 id="presence-sheet-title">Session presence</h2>
+      <button id="presence-sheet-close" type="button" aria-label="Close session presence">×</button>
+    </div>
+    <p id="presence-empty">No session attached.</p>
+    <dl id="presence-details" hidden>
+      <dt>CLI</dt><dd id="presence-cli"></dd>
+      <dt>Working directory</dt><dd id="presence-cwd"></dd>
+      <dt>PID</dt><dd id="presence-pid"></dd>
+      <dt>Session ID</dt><dd id="presence-session-id"></dd>
+      <dt>Since</dt><dd id="presence-since"></dd>
+    </dl>
   </section>
 </div>
 <script>
@@ -348,6 +374,16 @@
   const driveReplyPlayButton = document.getElementById('drive-reply-play');
   const driveLastReply = document.getElementById('drive-last-reply');
   const driveTranscript = document.getElementById('drive-transcript');
+  const presenceSheetBackdrop = document.getElementById('presence-sheet-backdrop');
+  const presenceSheet = document.getElementById('presence-sheet');
+  const presenceSheetClose = document.getElementById('presence-sheet-close');
+  const presenceEmpty = document.getElementById('presence-empty');
+  const presenceDetails = document.getElementById('presence-details');
+  const presenceCLI = document.getElementById('presence-cli');
+  const presenceCWD = document.getElementById('presence-cwd');
+  const presencePID = document.getElementById('presence-pid');
+  const presenceSessionID = document.getElementById('presence-session-id');
+  const presenceSince = document.getElementById('presence-since');
   const rows = new Map();
   const pendingRows = new Map();
   let typingTimer;
@@ -356,6 +392,9 @@
   let permissionHeld = false;
   let connectionText = 'reconnecting…';
   let connectionClass = '';
+  let presenceKnown = false;
+  let presence = {attached: false, cli: '', cwd: '', pid: 0, sessionID: '', since: ''};
+  let lastPresenceSignature = '';
   let handsFreeEnabled = false;
   let state = 'idle';
   let currentView = storedView();
@@ -519,15 +558,88 @@
     speakLocalNotice(notice[0]);
   }
 
+  function shortenHome(path) {
+    const value = String(path || '');
+    return value
+      .replace(/^\/home\/[^/]+(?=\/|$)/, '~')
+      .replace(/^\/Users\/[^/]+(?=\/|$)/, '~')
+      .replace(/^[A-Za-z]:\\Users\\[^\\]+(?=\\|$)/, '~');
+  }
+
+  function middleEllipsis(value, limit) {
+    const text = String(value || '');
+    if (text.length <= limit) return text;
+    const left = Math.ceil((limit - 1) / 2);
+    const right = Math.floor((limit - 1) / 2);
+    return text.slice(0, left) + '…' + text.slice(text.length - right);
+  }
+
+  function presenceShortText() {
+    if (!presenceKnown) return connectionText;
+    if (!presence.attached) return '○ no session';
+    const parts = [];
+    if (presence.cli) parts.push(presence.cli);
+    if (presence.cwd) parts.push(middleEllipsis(shortenHome(presence.cwd), 28));
+    return parts.length ? '● ' + parts.join(' · ') : '● connected';
+  }
+
+  function presenceDirectoryName(path) {
+    const parts = String(path || '').replace(/[\\/]+$/, '').split(/[\\/]/);
+    return parts[parts.length - 1] || '';
+  }
+
+  function presenceSignature(data) {
+    return [Boolean(data.attached), data.cli || '', data.cwd || '', Number(data.pid || 0), data.session_id || '', data.since || ''].join('\u0000');
+  }
+
+  function announcePresenceChange() {
+    try { createAudioContext(); } catch (_) {}
+    if (!presence.attached) {
+      playEarcon('error');
+      vibrate(30);
+      speakLocalNotice('no session');
+      return;
+    }
+    playEarcon('armed');
+    vibrate(15);
+    const directory = presenceDirectoryName(presence.cwd);
+    let notice = 'connected';
+    if (presence.cli) notice += ' to ' + presence.cli;
+    if (directory) notice += ' in ' + directory;
+    speakLocalNotice(notice);
+  }
+
+  function renderPresenceSheet() {
+    presenceEmpty.hidden = presence.attached;
+    presenceDetails.hidden = !presence.attached;
+    presenceCLI.textContent = presence.cli || 'unknown';
+    presenceCWD.textContent = presence.cwd || 'unknown';
+    presencePID.textContent = presence.pid ? String(presence.pid) : 'unknown';
+    presenceSessionID.textContent = presence.sessionID || 'unknown';
+    let since = presence.since || 'unknown';
+    if (presence.since) {
+      const parsed = new Date(presence.since);
+      if (!Number.isNaN(parsed.getTime())) since = parsed.toLocaleString();
+    }
+    presenceSince.textContent = since;
+  }
+
+  function openPresenceSheet() {
+    renderPresenceSheet();
+    presenceSheetBackdrop.hidden = false;
+    presenceSheet.focus();
+  }
+
+  function closePresenceSheet() {
+    if (presenceSheetBackdrop.hidden) return;
+    presenceSheetBackdrop.hidden = true;
+    driveChip.focus();
+  }
+
   function renderDriveConnection() {
     driveChip.className = driveIsHeld() ? 'held' : '';
-    if (driveIsHeld()) {
-      driveChip.textContent = 'web  🔒 ⏸ held';
-    } else if (connectionClass === 'connected') {
-      driveChip.textContent = 'web  ● connected';
-    } else {
-      driveChip.textContent = 'web  reconnecting…';
-    }
+    driveChip.textContent = presenceShortText();
+    driveChip.setAttribute('aria-label', 'Session presence: ' + presenceShortText());
   }
 
   function renderDrive() {
@@ -632,7 +744,7 @@
   }
 
   function renderConnection() {
-    connection.textContent = connectionText;
+    connection.textContent = presenceShortText();
     connection.className = connectionClass;
     renderDriveConnection();
   }
@@ -2406,10 +2518,8 @@
     events.onopen = () => {
       const reconnected = streamOpenedOnce;
       streamOpenedOnce = true;
-      const announce = detached || connectionClass !== 'connected';
-      setConnection(detached ? 'no session attached — reconnected' : 'connected', detached ? 'detached' : 'connected');
+      setConnection(detached ? 'no session attached — reconnected' : '● connected', detached ? 'detached' : 'connected');
       if (handsFreeEnabled && awaitingMessageID && !activeReplyID && state === 'listening') setState('thinking');
-      if (announce && !driveIsHeld()) localNotice('connected');
       if (reconnected) {
         reconnectCatchUpPending = true;
         scheduleReconnectCatchUp();
@@ -2426,12 +2536,33 @@
       }
     };
     function markConnected() {
+      if (presenceKnown) return;
       const announce = driveIsHeld() || connectionClass !== 'connected';
       detached = false;
       permissionHeld = false;
       setConnection('connected', 'connected');
       if (announce) localNotice('connected');
     }
+    events.addEventListener('presence', event => {
+      const data = JSON.parse(event.data);
+      const signature = presenceSignature(data);
+      const changed = signature !== lastPresenceSignature;
+      lastPresenceSignature = signature;
+      presenceKnown = true;
+      presence = {
+        attached: Boolean(data.attached),
+        cli: String(data.cli || ''),
+        cwd: String(data.cwd || ''),
+        pid: Number(data.pid || 0),
+        sessionID: String(data.session_id || ''),
+        since: String(data.since || '')
+      };
+      detached = !presence.attached;
+      if (presence.attached && changed) permissionHeld = false;
+      setConnection(presenceShortText(), presence.attached ? 'connected' : 'detached');
+      renderPresenceSheet();
+      if (changed && !data.replay) announcePresenceChange();
+    });
     events.addEventListener('message', event => {
       markConnected();
       const data = JSON.parse(event.data);
@@ -2458,10 +2589,12 @@
       const data = JSON.parse(event.data);
       addMessage('status', data);
       if (String(data.text || '').startsWith('📨 Held')) {
-        const announce = !detached;
-        detached = true;
-        setConnection('no session attached', 'detached');
-        if (announce) localNotice('no-session');
+        if (!presenceKnown) {
+          const announce = !detached;
+          detached = true;
+          setConnection('no session attached', 'detached');
+          if (announce) localNotice('no-session');
+        }
       } else if (String(data.text || '').startsWith('⏸ Permission')) {
         const announce = !permissionHeld;
         permissionHeld = true;
@@ -2777,6 +2910,15 @@
   driveChatButton.addEventListener('click', () => switchView('chat'));
   chatDriveButton.addEventListener('click', () => switchView('drive'));
   driveLastReply.addEventListener('click', () => switchView('chat'));
+  driveChip.addEventListener('click', event => {
+    event.stopPropagation();
+    openPresenceSheet();
+  });
+  presenceSheetClose.addEventListener('click', closePresenceSheet);
+  presenceSheet.addEventListener('click', closePresenceSheet);
+  presenceSheetBackdrop.addEventListener('click', event => {
+    if (event.target === presenceSheetBackdrop) closePresenceSheet();
+  });
   loadEarlierButton.addEventListener('click', loadEarlierHistory);
   newMessagesButton.addEventListener('click', scrollBottom);
   messages.addEventListener('scroll', () => {
@@ -2785,6 +2927,11 @@
   });
 
   document.addEventListener('keydown', event => {
+    if (event.key === 'Escape' && !presenceSheetBackdrop.hidden) {
+      event.preventDefault();
+      closePresenceSheet();
+      return;
+    }
     if (currentView === 'drive' && !driveMuteButton.contains(event.target)) activateDriveAudio();
     if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
     const target = event.target;

@@ -5,6 +5,7 @@ package channel
 import (
 	"context"
 	"errors"
+	"time"
 
 	"github.com/Andrometiq/c3/internal/c3types"
 )
@@ -64,6 +65,24 @@ type ReadbackSender interface {
 type LoginLinker interface {
 	HasLiveSession(userID int64) bool
 	MintLoginLink(userID int64) (string, error)
+}
+
+// RouteHolder describes the CLI session currently driving one channel route.
+// Since is the time at which that route claim was established.
+type RouteHolder struct {
+	CLI       string
+	PID       int
+	CWD       string
+	SessionID string
+	Since     time.Time
+}
+
+// PresenceNotifier is the optional live-route bridge implemented by a channel
+// that shows its operator which CLI session currently drives a route. The
+// broker calls it asynchronously after ownership changes; holder == nil means
+// the route was released.
+type PresenceNotifier interface {
+	SetRouteHolder(chatID int64, topicID *int64, holder *RouteHolder)
 }
 
 // LocalAudioProvider is the optional retained-audio bridge implemented by a

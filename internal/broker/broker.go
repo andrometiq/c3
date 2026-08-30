@@ -103,6 +103,13 @@ type Broker struct {
 	loginLinkMu   sync.Mutex
 	loginLinkLast map[int64]time.Time
 
+	// presencePending is an unbounded, in-memory handoff from the serialized
+	// route table to optional channel presence notifiers. Route changes only
+	// append and wake; channel code runs on the dispatcher goroutine.
+	presenceMu      sync.Mutex
+	presencePending []routePresenceChange
+	presenceWake    chan struct{}
+
 	ctx    context.Context
 	cancel context.CancelFunc
 
@@ -160,11 +167,14 @@ func New(mf *mappings.MappingsFile) *Broker {
 		persistedCB:         map[string]func(in *c3types.Inbound){},
 		persistFailedCB:     map[string]func(in *c3types.Inbound){},
 		loginLinkLast:       map[int64]time.Time{},
+		presenceWake:        make(chan struct{}, 1),
 		desktopNotifier:     newDesktopNotifier(), // desktop notifications removed 2026-07-07 per maintainer; retained dormant, health surfaces only on the status line
 		lastHealth:          map[string]c3types.HealthEvent{},
 		sessionPIDResolver:  proctree.CLISessionPID,
 	}
 	b.mappings.Store(mf)
+	b.Routes.SetPresenceChangeHandler(b.enqueuePresenceChange)
+	go b.dispatchPresenceChanges()
 	// Durable inbound queue. A queue init failure must NOT stop the broker (it
 	// degrades to the old in-memory-only path), but log loudly so the operator
 	// knows durable hold is disabled for this run.
@@ -260,6 +270,7 @@ func (b *Broker) RegisterChannel(ch channel.Channel) error {
 	b.chMu.Lock()
 	b.channels[ch.Name()] = &channelRegistration{Channel: ch, Host: host}
 	b.chMu.Unlock()
+	b.replayRouteHolders(ch)
 	b.voiceRecoveryOnce.Do(b.Voice.RecoverPending)
 	// Degraded mode is announced HERE, not in New(): New() has no channel to speak
 	// through and no session to speak to, so its loud log line is the only trace —

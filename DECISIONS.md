@@ -3,6 +3,24 @@
 Entries are newest first. This is the public architecture record: it records
 rulings and rationale, never private operational details.
 
+## D027: Web presence follows broker route ownership
+
+**Date:** 2026-08-30
+
+**Decision:** The broker publishes every route claim, transfer, and release to
+an optional channel presence interface after updating its route table, and
+replays current holders when a channel registers. Notification runs outside the
+claim path and contains channel panics. Web keeps its operator-route holder only
+in memory, sends it as a live-only SSE event on changes and stream open, and
+makes the CLI plus shortened working directory the primary Drive and Chat
+connection label. Full holder details remain available in a tap-open sheet.
+
+**Why:** The broker is the authority for which CLI session can receive and act
+on a route. Showing generic transport connectivity can look healthy while the
+page is unclaimed or driven by a different session; presenting broker ownership
+directly makes the agent-driving boundary visible without creating a second
+source of truth.
+
 ## D026: Drive is the web landing screen; its circle only talks
 
 **Date:** 2026-08-30

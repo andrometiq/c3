@@ -87,6 +87,27 @@ Notes that are true today:
 - `SendReply` returns the sent message id as a bare `int64`, not a result struct.
 - `StopPoll`, `CreateTopic`, and `ValidateTopic` are Telegram-shaped. A transport without forum topics or bot polls can stub them with an unsupported error — but see §"Known blockers", because the identifier types are the deeper problem, not these three methods.
 
+Channels may optionally implement live route presence:
+
+```go
+type RouteHolder struct {
+    CLI       string
+    PID       int
+    CWD       string
+    SessionID string
+    Since     time.Time
+}
+
+type PresenceNotifier interface {
+    SetRouteHolder(chatID int64, topicID *int64, holder *RouteHolder)
+}
+```
+
+The broker calls `SetRouteHolder` asynchronously after a claim is created,
+transferred, or released; a nil holder means released. It also replays current
+holders just after channel registration. Notifications run outside the route
+ownership path, and a channel panic is recovered and logged.
+
 ## The Host interface
 
 ```go
