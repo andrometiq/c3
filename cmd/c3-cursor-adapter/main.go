@@ -20,6 +20,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -538,6 +539,70 @@ var recoverSettleBudget = recoverRespTimeout + 2*time.Second
 
 var errIdentityStillResolving = errors.New("identity still resolving; retry attach")
 
+const headlessAttachDisabledMessage = "attach is disabled for a non-interactive cursor-agent run (headless review/tool run); set C3_ALLOW_HEADLESS_ATTACH=1 to allow"
+
+// cursorAncestorCommandLines is replaceable in tests. Production reads at most four
+// parents from Linux procfs; an unreadable procfs yields no ancestors.
+var cursorAncestorCommandLines = func() [][]string {
+	if runtime.GOOS != "linux" {
+		return nil
+	}
+	var commandLines [][]string
+	processID := os.Getpid()
+	for depth := 0; depth < 4; depth++ {
+		processStat, err := os.ReadFile("/proc/" + strconv.Itoa(processID) + "/stat")
+		if err != nil {
+			break
+		}
+		closingParenthesis := strings.LastIndexByte(string(processStat), ')')
+		if closingParenthesis < 0 {
+			break
+		}
+		fields := strings.Fields(string(processStat[closingParenthesis+1:]))
+		if len(fields) < 2 {
+			break
+		}
+		parentPID, err := strconv.Atoi(fields[1])
+		if err != nil || parentPID <= 1 || parentPID == processID {
+			break
+		}
+		commandLine, err := os.ReadFile("/proc/" + strconv.Itoa(parentPID) + "/cmdline")
+		if err == nil && len(commandLine) > 0 {
+			arguments := strings.Split(strings.TrimRight(string(commandLine), "\x00"), "\x00")
+			if len(arguments) > 0 && arguments[0] != "" {
+				commandLines = append(commandLines, arguments)
+			}
+		}
+		processID = parentPID
+	}
+	return commandLines
+}
+
+// headlessCursorRun reports a Cursor parent carrying a non-interactive output
+// flag. The returned command line is bounded for safe, single-line logging.
+func headlessCursorRun() (bool, string) {
+	for _, arguments := range cursorAncestorCommandLines() {
+		if len(arguments) == 0 {
+			continue
+		}
+		command := filepath.Base(arguments[0])
+		if command != "cursor-agent" && command != "cursor" {
+			continue
+		}
+		for _, argument := range arguments[1:] {
+			if argument != "--print" && argument != "-p" && argument != "--output-format" && !strings.HasPrefix(argument, "--output-format=") {
+				continue
+			}
+			commandLine := strings.Join(arguments, " ")
+			if len(commandLine) > 200 {
+				commandLine = commandLine[:200]
+			}
+			return true, commandLine
+		}
+	}
+	return false, ""
+}
+
 // resolveCursorSessionID returns the first non-empty candidate env Cursor may
 // expose for a stable conversation/chat id. Empty means skip auto-recover.
 func resolveCursorSessionID() string {
@@ -683,6 +748,12 @@ func (a *adapter) fireRecover(ctx context.Context, stableID, cwd string) {
 	// NOT settle — the winner is still working, and letting the loser answer for
 	// it is the exact entry-read-as-completion mistake this guards against.)
 	defer a.settleIdentity(epoch)
+	if os.Getenv("C3_ALLOW_HEADLESS_ATTACH") != "1" {
+		if headless, commandLine := headlessCursorRun(); headless {
+			log.Printf("recover-session: %s; command_line=%q", headlessAttachDisabledMessage, commandLine)
+			return
+		}
+	}
 
 	respCh := make(chan ipc.RecoverSessionResp, 1)
 	a.rsmu.Lock()
@@ -1042,7 +1113,7 @@ func (a *adapter) buildInstructions() string {
 	default:
 		head = "C3 connected. Use `attach` to claim a Telegram topic, `fetch_queue` to read held/new inbound, `reply` to send. Cursor doesn't render unsolicited MCP notifications today — call `fetch_queue`, or use the `/fetch-queue` MCP prompt / `/c3-fetch` slash command to drop the queue into the turn."
 	}
-	return head + mode.Combined(a.capsOrDefault())
+	return head + " A headless run must not attach unless the operator explicitly allowed it." + mode.Combined(a.capsOrDefault())
 }
 
 func (a *adapter) capsOrDefault() c3types.Capabilities {
@@ -1087,6 +1158,15 @@ func (a *adapter) toolForward(name string) mcp.ToolHandler {
 }
 
 func (a *adapter) toolAttach(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	if os.Getenv("C3_ALLOW_HEADLESS_ATTACH") != "1" {
+		if headless, commandLine := headlessCursorRun(); headless {
+			log.Printf("attach: %s; command_line=%q", headlessAttachDisabledMessage, commandLine)
+			return &mcp.CallToolResult{
+				Content: []mcp.Content{&mcp.TextContent{Text: headlessAttachDisabledMessage}},
+				IsError: true,
+			}, nil
+		}
+	}
 	args, err := decodeArgs(req.Params.Arguments)
 	if err != nil {
 		return nil, fmt.Errorf("invalid params: %w", err)
@@ -1337,7 +1417,7 @@ func (a *adapter) registerTools(srv *mcp.Server) {
 		{
 			tool: &mcp.Tool{
 				Name:        "attach",
-				Description: "Attach this session to a Telegram topic. Empty = silently re-attach this session's own topic, or (first time) show a picker. `target='dm'` for DM. `name='X'` for a topic name. `topic_id=N` to claim a known thread. `create=true` to confirm creation. `steal=true` only after user-confirmed force_steal.",
+				Description: "Attach this session to a Telegram topic. Empty = silently re-attach this session's own topic, or (first time) show a picker. `target='dm'` for DM. `name='X'` for a topic name. `topic_id=N` to claim a known thread. `create=true` to confirm creation. `steal=true` only after user-confirmed force_steal. A headless run must not attach unless the operator explicitly allowed it.",
 				InputSchema: map[string]any{
 					"type": "object",
 					"properties": map[string]any{
