@@ -124,13 +124,15 @@ Sign in first, open `/`, then install from that page so the app's start URL is
 the chat root. On Android, use Chrome's menu and choose **Add to Home screen**.
 On iOS, use Safari's **Share** menu and choose **Add to Home Screen**. iOS
 ignores the SVG app icon, so C3 also serves the required 180×180 PNG touch icon.
+The manifest lists 192×192 and 512×512 PNG icons first, both with the `any`
+purpose, so Chrome on Android can offer installation as well as a shortcut.
 
 The installed app has its own cookie jar. Open a fresh Telegram magic link
 inside the installed app and sign in there again; signing in in an ordinary
-browser tab does not authenticate the installed copy. While Voice or
-Hands-free is on, C3 requests a screen wake lock and re-acquires it after the
-page becomes visible or the browser releases it. Unsupported browsers simply
-continue without a wake lock.
+browser tab does not authenticate the installed copy. While Drive is visible,
+or while Voice or Hands-free is on in Chat, C3 requests a screen wake lock and
+re-acquires it after the page becomes visible or the browser releases it.
+Unsupported browsers simply continue without a wake lock.
 
 The v1 mobile boundary is foreground-only: keep the installed app visible and
 the phone screen on, in a cradle or on loudspeaker. The wake lock supports that
@@ -209,6 +211,13 @@ ring, the page says **history may be incomplete**. Reply ids and SSE sequence
 ids remain monotonic across broker restarts. Typing and status notices are live
 only and are not replayed.
 
+On a fresh page, Chat reconciles those replayed messages, own rows, and edits
+in memory, renders only the newest 20 rows, positions the conversation at the
+bottom before revealing the Chat panel, and keeps earlier rows behind **Load
+earlier**. Reaching the top loads 20 more while preserving the visible scroll
+position. A live row scrolls automatically only when the reader was within 80
+px of the bottom; otherwise a **↓ new** pill offers the jump.
+
 Agent replies and edits render a safe Markdown subset in the browser: fenced
 and inline code, bold, italic, strike, click-to-reveal `||spoilers||`, links and
 bare HTTP(S) URLs, headings, one-level ordered and unordered lists,
@@ -217,6 +226,72 @@ channel advertises both `RichText` and `RichTables`; tables render in a
 horizontal-scroll wrapper. Link targets are created only for
 `http:`, `https:`, `mailto:`, and `tel:` schemes. Operator messages and status
 notices remain literal text with line breaks.
+
+## Drive view
+
+The signed-in page lands on **Drive**, a full-screen audio appliance layered over
+the same recorder, VAD, upload retry, playback queue, MediaSession, wake-lock,
+and earcon state used by Chat. **Chat** remains the complete conversation UI and
+keeps its composer, microphone, Voice, Hands-free, Stop, Replay, logout, rows,
+safe Markdown rendering, and persistence behavior. The Drive **Chat** corner
+target and the Chat-header **Drive** target switch panels. A horizontal view
+swipe is accepted only when it begins within 24 px of the left or right screen
+edge, travels at least 80 px, and drifts less than 30 px vertically. Left and
+right arrow keys also switch views when focus is not in an editor. The last view
+is remembered in guarded local storage; the first visit uses Drive. Panel and
+lamp transitions take 150 ms and are removed by reduced-motion preferences.
+
+Drive makes the whole canvas the state lamp: charcoal **TALK**, red **REC**,
+amber **WAIT**, green **SPEAKING**, blue **LIVE**, or deep-red **NO SESSION**.
+The word carries the state independently of colour. Only recording/listening
+breathes, and reduced motion removes that and the press scale. The centre circle
+is only a hold-to-talk target; it has no idle tap or multi-tap command. During a
+push-to-talk hold, an **▲ lock** affordance appears above the circle and brightens
+after 30 px of upward movement. Upward movement of at least 60 px locks the
+recording; downward or sideways movement of at least 60 px cancels it. Movement
+under 30 px does nothing, and movement from 30–59 px only previews the lock.
+The synthetic click after release is ignored for 400 ms.
+
+| State | Circle press | Circle release | Mute | Live (700 ms hold) | Replay |
+| --- | --- | --- | --- | --- | --- |
+| `idle` | Starts the existing push-to-talk recorder; the first use opens the browser microphone prompt. During the hold, slide up 60 px to lock or down/sideways 60 px to cancel. | Stops and uploads immediately with the existing client-id and retry path unless the hold locked or cancelled. | Latches mute. | Enters Live. | Requests and replays the newest agent reply. |
+| `recording · held` | Keeps recording; up 60 px locks, while down/sideways 60 px cancels. | Sends when unlocked; a locked release keeps recording. | Ignored. | Ignored. | Ignored. |
+| `recording · locked` | A tap stops and sends. A hold of at least 700 ms cancels with the spoken **cancelled** notice. Pointer movement is ignored. | The locking hold's release does nothing; the later short tap sends. | Ignored. | Ignored. | Ignored. |
+| `sending` / `thinking` | Ignored, except that a press during Live's 1.2-second send beat cancels that not-yet-started upload. | Ignored. | Latches mute and prevents the upcoming readout. | Ignored. | Ignored. |
+| `speaking` | Stops and marks this reply interrupted, drops its remaining chunks, and starts push-to-talk; in Live it starts the existing VAD barge-in capture. Push-to-talk retains the lock/cancel slides. | Push-to-talk sends unless locked/cancelled; Live capture still ends through VAD. | Cuts this reply immediately. | Ignored. | Requests and restarts the newest reply. |
+| `live · listening` | Starts recording immediately. Down/sideways 60 px cancels; the push-to-talk lock does not change Live's VAD lifecycle. | Does not end the recording; VAD ends the utterance. | Latches mute without closing the live microphone. | Exits Live. | Requests and replays the newest reply. |
+| `held / no session` | Records like idle and permits the same lock/cancel slides so the driver's action is preserved locally. | Refuses an unlocked send, or keeps a locked recording until its send tap, then gives the fixed **send refused** notice. | Ignored. | Ignored. | Ignored. |
+
+When Live VAD accepts an utterance, the sending earcon starts a 1.2-second beat
+before the upload. Pressing the circle during that beat cancels the pending
+upload and shows **cancelled** on the transcript line. Push-to-talk has no delay.
+The Live corner target is deliberately hold-only; a short tap shows **hold to
+switch live**. A lock vibrates twice for 20 ms; send and directional cancel use
+30 ms. Directional cancel also sounds the error earcon and leaves **cancelled**
+on the transcript line.
+
+Entering Drive requests spoken replies unless the Drive mute latch is set. If
+mobile autoplay has not been unlocked, the first Drive gesture performs the
+existing same-origin unlock and `/voice` preference change. **Mute** is not
+pause: it stops current audio locally at once, clears queued chunks, turns the
+server preference off so later replies are not synthesized for this session,
+and never resumes mid-sentence. Unmute affects the next clean reply. **Stop** in
+Drive is the speaking-state circle barge-in; **Replay** remains a corner target
+and the existing MediaSession replay actions remain available. Replay actions
+request that persisted agent message through `POST /speak`, so an expired or
+missed live audio event is served from cache or synthesized again. The
+MediaSession pause action has stop semantics rather than resumable pause.
+
+The fixed notices **no session**, **permission held**, **connected**, **live on**,
+**live off**, **muted**, **send cancelled**, **cancelled**, and **send refused** use guarded
+browser speech synthesis only for those exact local strings, plus an earcon and
+guarded haptic.
+Agent text is never sent to browser speech synthesis. The last reply beneath the
+circle is plain text preprocessed with the same Markdown, URL, emoji, and glyph
+stripping rules as the bundled TTS plugin; tapping its text opens Chat, while
+its small play button requests that reply's audio. The one-line
+voice-note label is replaced by its transcript edit. A screen wake lock is held
+for the whole time Drive is visible, even when Voice and Live are off.
 
 ## Voice
 
@@ -248,12 +323,28 @@ replies enabled and a connected SSE stream. Web leaves the speech language
 automatic; the web mapping accepts no voice-language key.
 
 Replies play in arrival order through one reusable player. **Stop** ends the
-current queue and **Replay** repeats the last reply. Browser media-session
+current queue and **Replay** requests the last reply through authenticated,
+same-origin `POST /speak`. Every agent bubble, including a persisted row, has a
+keyboard-accessible play button; it reads **…** during on-demand synthesis and
+**⏸** while that message is playing. Operator bubbles never have one. Browser media-session
 controls expose play, pause, stop, replay-last, and replay-previous actions on
 supported lock screens. Synthesized MP3 is memory-only: audio URLs expire after
-15 minutes, are not written to replay history or `sessions.json`, and are not
-replayed after an SSE reconnect. Text delivery never waits for or fails with
-TTS; a provider failure produces at most one short live notice per minute.
+15 minutes and are not written to replay history or `sessions.json`. If Android
+freezes the tab and loses the live-only audio event, the reconnected page asks
+`/speak` for only the newest agent id when it is newer than the last audio that
+actually played and spoken replies remain on; it never walks backward through
+older replay rows. `/speak` accepts only an agent reply id still present in the
+persisted replay ring, returns 404 otherwise, uses cached audio first, and runs
+explicit synthesis even when the stored Voice preference is off. It shares the
+normal two-worker/eight-waiting synthesis bound and returns 503 when synthesis
+is unavailable. Text delivery never waits for or fails with TTS; a provider
+failure produces at most one short live notice per minute.
+
+Voice-note transcript edits remain literal text. Above roughly 240 characters,
+Chat shows their first two approximate lines and final line with a real
+**✂ ⋯ ✂** button between them. The button expands or folds the middle in place,
+reports `aria-expanded`, and uses a short height transition that is removed by
+the reduced-motion preference.
 
 ## Hands-free
 
@@ -348,9 +439,10 @@ the live audio event and play each spoken reply.
   edits the same `🎤` row. On iOS, verify the `audio/mp4` recorder path.
 - Install from `/` after login on Android and iOS; open a fresh magic link
   inside the installed app and verify its separate cookie jar signs in.
-- Enable spoken replies with one tap, hear a reply, then exercise Stop, Replay,
-  and lock-screen media controls. Reconnect SSE and confirm old audio is not
-  replayed.
+- Enable spoken replies with one tap, hear a reply, then exercise each bubble's
+  play button, Stop, Replay, and lock-screen media controls. Drop SSE before an
+  audio event, reconnect, and confirm only the newest unheard agent reply is
+  requested through `/speak`.
 - Enable Hands-free with one tap and complete a full
   listening→recording→sending→thinking→speaking turn with the phone foregrounded
   in a cradle. Verify the wake lock survives a visibility change and its own

@@ -3,6 +3,29 @@
 Entries are newest first. This is the public architecture record: it records
 rulings and rationale, never private operational details.
 
+## D026: Drive is the web landing screen; its circle only talks
+
+**Date:** 2026-08-30
+
+**Decision:** The signed-in web page lands on a full-screen Drive lamp, with the
+complete Chat surface behind an explicit corner target, remembered panel choice,
+edge-only swipe, or arrow key. The Drive circle has one operation: talk; it has
+no idle tap or multi-tap command. Sliding a held push-to-talk upward locks it,
+after which one tap finishes that same recording. Live remains a deliberate
+long-press target.
+Mute cuts local playback and its queue immediately and disables server-side
+synthesis for the session; speaking-state circle press is Stop through barge-in,
+not resumable pause. Drive is only a presentation and gesture layer over the
+existing recorder, VAD, upload, playback, MediaSession, wake-lock, and earcon
+state.
+
+**Why:** A driver must be able to identify and operate the current audio turn
+with one glance and one large, unambiguous target. Keeping rich conversation
+controls intact but behind a deliberate transition avoids accidental Chat
+interaction, while reusing the audio state machine prevents Drive and Chat from
+disagreeing about recording, synthesis, interruption, or Live state. Turning
+synthesis off at Mute avoids both surprise playback and needless provider work.
+
 ## D025: Headless Cursor runs cannot claim routes by default
 
 **Date:** 2026-08-30
@@ -17,6 +40,7 @@ background agent can discover and call `attach` even though it cannot render
 channel pushes. The guard belongs in the adapter because the broker sees only a
 Cursor connection and cannot distinguish the interactive TUI from a headless
 process.
+
 
 ## D024: Hands-free uses local energy VAD; the web app caches nothing
 

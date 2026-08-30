@@ -3,6 +3,7 @@ package web
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -32,8 +33,16 @@ type synthesizerHost interface {
 }
 
 type speechJob struct {
-	messageID int64
-	text      string
+	messageID      int64
+	text           string
+	explicit       bool
+	requestContext context.Context
+	result         chan speechResult
+}
+
+type speechResult struct {
+	token string
+	err   error
 }
 
 type cachedAudio struct {
@@ -138,66 +147,181 @@ func (c *Channel) hasVoiceSession() bool {
 	return false
 }
 
-func (c *Channel) enqueueSpeech(job speechJob) {
+func (c *Channel) enqueueSpeech(job speechJob) bool {
 	c.speechMu.Lock()
 	if c.speechContext == nil || c.speechContext.Err() != nil {
 		c.speechMu.Unlock()
-		return
+		return false
 	}
 	if c.speechActive < speechConcurrency {
 		c.speechActive++
 		c.speechMu.Unlock()
 		go c.runSpeech(job)
-		return
+		return true
 	}
 	if len(c.speechQueue) >= speechQueueLimit {
 		c.speechMu.Unlock()
 		if c.host != nil {
 			c.host.Logf("web: speech queue full; dropped message_id=%d", job.messageID)
 		}
-		return
+		return false
 	}
 	c.speechQueue = append(c.speechQueue, job)
 	c.speechMu.Unlock()
+	return true
 }
 
 func (c *Channel) runSpeech(job speechJob) {
+	outcome := speechResult{}
 	defer func() {
-		if recovered := recover(); recovered != nil && c.host != nil {
-			c.host.Logf("web: speech panic for message_id=%d: %v", job.messageID, recovered)
+		if recovered := recover(); recovered != nil {
+			outcome.err = fmt.Errorf("speech synthesis panic")
+			if c.host != nil {
+				c.host.Logf("web: speech panic for message_id=%d: %v", job.messageID, recovered)
+			}
+		}
+		if job.result != nil {
+			job.result <- outcome
 		}
 		c.finishSpeech()
 	}()
-	if !c.hasVoiceSession() {
+	if !job.explicit && !c.hasVoiceSession() {
 		return
 	}
 	host, ok := c.host.(synthesizerHost)
 	if !ok {
-		c.speechFailed(job.messageID, c3types.ErrNoSynthesizer)
+		outcome.err = c3types.ErrNoSynthesizer
+		if !job.explicit {
+			c.speechFailed(job.messageID, outcome.err)
+		}
 		return
 	}
 	ctx, cancel := context.WithTimeout(c.speechContext, speechTimeout)
+	stopRequestCancel := func() bool { return false }
+	if job.requestContext != nil {
+		stopRequestCancel = context.AfterFunc(job.requestContext, cancel)
+	}
 	result, err := host.Synthesize(ctx, c3types.SpeechRequest{Text: job.text, Language: ""})
+	stopRequestCancel()
 	cancel()
 	if err != nil {
 		if errors.Is(err, c3types.ErrNothingToSay) || c.speechContext.Err() != nil {
+			outcome.err = err
 			return
 		}
-		c.speechFailed(job.messageID, err)
+		outcome.err = err
+		if !job.explicit {
+			c.speechFailed(job.messageID, err)
+		} else if c.host != nil {
+			c.host.Logf("web: explicit speech unavailable for message_id=%d: %v", job.messageID, err)
+		}
 		return
 	}
 	if len(result.Audio) == 0 || result.MIME != "audio/mpeg" {
-		c.speechFailed(job.messageID, fmt.Errorf("invalid synthesizer result"))
+		outcome.err = fmt.Errorf("invalid synthesizer result")
+		if !job.explicit {
+			c.speechFailed(job.messageID, outcome.err)
+		}
 		return
 	}
 	token, err := c.cacheSpeech(job.messageID, result.Audio)
 	if err != nil {
-		c.speechFailed(job.messageID, err)
+		outcome.err = err
+		if !job.explicit {
+			c.speechFailed(job.messageID, err)
+		}
+		return
+	}
+	outcome.token = token
+	if job.explicit {
 		return
 	}
 	c.broadcastVoiceSessions(streamEvent{kind: "audio", payload: streamPayload{
 		MessageID: job.messageID, URL: "/audio/" + token, Bytes: len(result.Audio), Provider: result.Provider,
 	}})
+}
+
+func (c *Channel) handleSpeak(w http.ResponseWriter, r *http.Request) {
+	c.postDeadline(w, r)
+	if !c.sameOrigin(r) {
+		writeSendError(w, http.StatusForbidden, "not allowed")
+		return
+	}
+	if _, _, ok := c.authenticate(r, true); !ok {
+		writeSendError(w, http.StatusUnauthorized, "sign in again")
+		return
+	}
+	var body struct {
+		MessageID int64 `json:"message_id"`
+	}
+	if err := decodeJSON(w, r, &body); err != nil || body.MessageID <= 0 {
+		writeSendError(w, http.StatusBadRequest, "invalid request")
+		return
+	}
+	controller := http.NewResponseController(w)
+	_ = controller.SetReadDeadline(time.Time{})
+	_ = controller.SetWriteDeadline(time.Time{})
+	text, ok := c.agentReplyText(body.MessageID)
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	if token, ok := c.audioTokenForMessage(body.MessageID); ok {
+		writeSpeakResult(w, body.MessageID, token)
+		return
+	}
+	if _, ok := c.host.(synthesizerHost); !ok {
+		writeSendError(w, http.StatusServiceUnavailable, "speech unavailable")
+		return
+	}
+	result := make(chan speechResult, 1)
+	if !c.enqueueSpeech(speechJob{
+		messageID: body.MessageID, text: text, explicit: true,
+		requestContext: r.Context(), result: result,
+	}) {
+		writeSendError(w, http.StatusServiceUnavailable, "speech busy")
+		return
+	}
+	select {
+	case outcome := <-result:
+		if outcome.err != nil || outcome.token == "" {
+			writeSendError(w, http.StatusServiceUnavailable, "speech unavailable")
+			return
+		}
+		writeSpeakResult(w, body.MessageID, outcome.token)
+	case <-r.Context().Done():
+		return
+	}
+}
+
+func writeSpeakResult(w http.ResponseWriter, messageID int64, token string) {
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(struct {
+		URL       string `json:"url"`
+		MessageID int64  `json:"message_id"`
+	}{URL: "/audio/" + token, MessageID: messageID})
+}
+
+func (c *Channel) agentReplyText(messageID int64) (string, bool) {
+	c.replayMu.Lock()
+	defer c.replayMu.Unlock()
+	text := ""
+	found := false
+	for _, event := range c.replay {
+		if event.payload.MessageID != messageID {
+			continue
+		}
+		switch event.kind {
+		case "message":
+			text = event.payload.Text
+			found = true
+		case "edit":
+			if found && (event.payload.Voice == nil || !*event.payload.Voice) {
+				text = event.payload.Text
+			}
+		}
+	}
+	return text, found
 }
 
 func (c *Channel) finishSpeech() {
@@ -308,6 +432,22 @@ func (c *Channel) audioForToken(token string) (cachedAudio, bool) {
 	c.evictExpiredAudioLocked(c.now())
 	audio, ok := c.audioCache[token]
 	return audio, ok
+}
+
+func (c *Channel) audioTokenForMessage(messageID int64) (string, bool) {
+	c.audioMu.Lock()
+	defer c.audioMu.Unlock()
+	c.evictExpiredAudioLocked(c.now())
+	token := ""
+	var newest time.Time
+	for candidate, audio := range c.audioCache {
+		if audio.messageID != messageID || (!newest.IsZero() && audio.created.Before(newest)) {
+			continue
+		}
+		token = candidate
+		newest = audio.created
+	}
+	return token, token != ""
 }
 
 func (c *Channel) handleAudio(w http.ResponseWriter, r *http.Request) {

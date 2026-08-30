@@ -1,4 +1,4 @@
-// Command genicon generates the iOS PNG from the web icon's flat design.
+// Command genicon generates installable PNGs from the web icon's flat design.
 package main
 
 import (
@@ -9,9 +9,9 @@ import (
 )
 
 const (
-	size   = 180
-	radius = 28
-	scale  = 14
+	baseSize   = 180
+	baseRadius = 28
+	baseScale  = 14
 )
 
 var glyphs = []struct {
@@ -23,12 +23,29 @@ var glyphs = []struct {
 }
 
 func main() {
+	for _, output := range []struct {
+		name string
+		size int
+	}{
+		{name: "apple-touch-icon.png", size: 180},
+		{name: "icon-192.png", size: 192},
+		{name: "icon-512.png", size: 512},
+	} {
+		if err := generate(output.name, output.size); err != nil {
+			panic(err)
+		}
+	}
+}
+
+func generate(name string, size int) error {
 	canvas := image.NewRGBA(image.Rect(0, 0, size, size))
 	dark := color.RGBA{R: 0x0b, G: 0x0d, B: 0x10, A: 0xff}
 	white := color.RGBA{R: 0xff, G: 0xff, B: 0xff, A: 0xff}
+	radius := scaled(baseRadius, size)
+	glyphScale := scaled(baseScale, size)
 	for y := 0; y < size; y++ {
 		for x := 0; x < size; x++ {
-			if insideRoundedSquare(x, y) {
+			if insideRoundedSquare(x, y, size, radius) {
 				canvas.SetRGBA(x, y, dark)
 			}
 		}
@@ -39,24 +56,26 @@ func main() {
 				if pixel != '1' {
 					continue
 				}
-				fill(canvas, glyph.x+column*scale, 41+row*scale, scale, scale, white)
+				fill(canvas, scaled(glyph.x, size)+column*glyphScale, scaled(41, size)+row*glyphScale, glyphScale, glyphScale, white)
 			}
 		}
 	}
-	file, err := os.OpenFile("apple-touch-icon.png", os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
+	file, err := os.OpenFile(name, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
 	if err != nil {
-		panic(err)
+		return err
 	}
 	if err := png.Encode(file, canvas); err != nil {
 		_ = file.Close()
-		panic(err)
+		return err
 	}
-	if err := file.Close(); err != nil {
-		panic(err)
-	}
+	return file.Close()
 }
 
-func insideRoundedSquare(x, y int) bool {
+func scaled(value, size int) int {
+	return (value*size + baseSize/2) / baseSize
+}
+
+func insideRoundedSquare(x, y, size, radius int) bool {
 	nearX := x
 	if x >= size-radius {
 		nearX = size - 1 - x
