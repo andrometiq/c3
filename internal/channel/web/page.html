@@ -19,7 +19,7 @@
     #view-shell { width: 200vw; height: 100dvh; display: flex; transform: translateX(0); transition: transform 150ms ease; }
     #view-shell.show-chat { transform: translateX(-50%); }
     .view-panel { width: 100vw; height: 100dvh; min-width: 0; flex: 0 0 100vw; }
-    #view-drive { --drive-colour: #14181d; --drive-cancel: #b3261e; position: relative; display: grid; grid-template-rows: auto minmax(0, 1fr) auto; overflow: hidden; padding: max(.65rem, env(safe-area-inset-top)) max(.75rem, env(safe-area-inset-right)) max(.75rem, env(safe-area-inset-bottom)) max(.75rem, env(safe-area-inset-left)); background: var(--drive-colour); color: #fff; transition: background-color 150ms linear; touch-action: none; }
+    #view-drive { --drive-colour: #14181d; --drive-cancel: #b3261e; position: relative; display: grid; grid-template-rows: auto minmax(0, 1fr) auto; overflow: hidden; padding: max(.65rem, env(safe-area-inset-top)) max(.75rem, env(safe-area-inset-right)) max(.75rem, env(safe-area-inset-bottom)) max(.75rem, env(safe-area-inset-left)); background: var(--drive-colour); color: #fff; transition: background-color 150ms linear; touch-action: none; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
     #view-drive.lamp-recording { --drive-colour: #b3261e; }
     #view-drive.lamp-wait { --drive-colour: #8a5a00; }
     #view-drive.lamp-speaking { --drive-colour: #1e6b3a; }

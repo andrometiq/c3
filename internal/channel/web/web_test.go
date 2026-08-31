@@ -1226,6 +1226,7 @@ func TestDriveViewPageRules(t *testing.T) {
 		"return currentView === 'drive' || voiceEnabled || handsFreeEnabled;",
 		"await changeVoicePreference(false, true);",
 		"if (handsFreeEnabled || currentView === 'drive') enterHandsFreeSpeaking();",
+		"touch-action: none; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }",
 	} {
 		if !strings.Contains(text, rule) {
 			t.Errorf("page is missing Drive rule %q", rule)
