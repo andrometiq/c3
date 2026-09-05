@@ -211,6 +211,7 @@ type adapter struct {
 	// pending[ToolResultMsg] slot. Mirrors the Claude adapter.
 	fqmu      sync.Mutex
 	fqPending map[string]chan ipc.FetchQueueResp
+	fqAck     map[string]bool
 	rtmu      sync.Mutex
 	rtPending map[string]chan ipc.RetranscribeResp
 
@@ -309,6 +310,7 @@ func newAdapter() *adapter {
 	a := &adapter{
 		pending:   map[string]chan ipc.ToolResultMsg{},
 		fqPending: map[string]chan ipc.FetchQueueResp{},
+		fqAck:     map[string]bool{},
 		rtPending: map[string]chan ipc.RetranscribeResp{},
 		rsPending: map[*ipc.Conn]chan ipc.RecoverSessionResp{},
 		forwardCh: make(chan codexForwardReq, 256),
@@ -1785,8 +1787,17 @@ func (a *adapter) toolFetchQueue(ctx context.Context, req *mcp.CallToolRequest) 
 	ch := make(chan ipc.FetchQueueResp, 1)
 	a.fqmu.Lock()
 	a.fqPending[fq.ID] = ch
+	if a.fqAck == nil {
+		a.fqAck = make(map[string]bool)
+	}
+	a.fqAck[fq.ID] = fq.Ack
 	a.fqmu.Unlock()
-	defer func() { a.fqmu.Lock(); delete(a.fqPending, fq.ID); a.fqmu.Unlock() }()
+	defer func() {
+		a.fqmu.Lock()
+		delete(a.fqPending, fq.ID)
+		delete(a.fqAck, fq.ID)
+		a.fqmu.Unlock()
+	}()
 
 	conn := a.currentConn()
 	if conn == nil {
@@ -1803,9 +1814,6 @@ func (a *adapter) toolFetchQueue(ctx context.Context, req *mcp.CallToolRequest) 
 	case resp := <-ch:
 		if resp.Err != "" {
 			return toolErrorResult(resp.Err), nil
-		}
-		if fq.Ack && resp.Remaining == 0 {
-			a.clearForwardBlocked()
 		}
 		return toolTextResult(a.renderFetchedMessages(resp.Messages, resp.Remaining, a.currentTopicName())), nil
 	}
@@ -1860,11 +1868,19 @@ func (a *adapter) dispatchFetchQueueResult(raw []byte) {
 	}
 	a.fqmu.Lock()
 	ch, ok := a.fqPending[resp.ID]
+	ack := a.fqAck[resp.ID]
 	if ok {
 		delete(a.fqPending, resp.ID)
+		delete(a.fqAck, resp.ID)
 	}
 	a.fqmu.Unlock()
 	if ok {
+		// Advance before reading the next broker frame, not when the waiting
+		// tool goroutine happens to resume. Otherwise a fresh inbound arriving
+		// after this drain can be stamped with the old epoch and discarded.
+		if ack && resp.Err == "" && resp.Remaining == 0 {
+			a.clearForwardBlocked()
+		}
 		ch <- resp
 	}
 }
