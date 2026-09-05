@@ -4,6 +4,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -200,10 +201,25 @@ func TestStartAppServer_MovesToAnotherPortAfterLosingOne(t *testing.T) {
 	}
 }
 
+// fakeCodexEntrypoint supplies a distinct executable for the real-Codex slot.
+// Some supported Go versions identify the re-executed test binary itself as
+// cmd/codex in its build info, which correctly trips the launcher recursion
+// guard. A shell exec preserves the test process/signal behavior without
+// weakening that guard or depending on a toolchain's test-binary metadata.
+func fakeCodexEntrypoint(t *testing.T, dir string) string {
+	t.Helper()
+	path := filepath.Join(dir, "fake-real-codex")
+	quoted := "'" + strings.ReplaceAll(os.Args[0], "'", "'\"'\"'") + "'"
+	if err := os.WriteFile(path, []byte("#!/bin/sh\nexec "+quoted+" \"$@\"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
 func TestRun_ReapsAppServerWhenTUIExits(t *testing.T) {
 	dir := t.TempDir()
 	pidFile := filepath.Join(dir, "fake-app-server-pids")
-	t.Setenv("C3_CODEX_REAL", os.Args[0])
+	t.Setenv("C3_CODEX_REAL", fakeCodexEntrypoint(t, dir))
 	t.Setenv("C3_CODEX_ADAPTER", filepath.Join(dir, "adapter"))
 	t.Setenv(fakeAppServerEnv, "1")
 	t.Setenv(fakeAppServerPIDsEnv, pidFile)
@@ -211,8 +227,13 @@ func TestRun_ReapsAppServerWhenTUIExits(t *testing.T) {
 
 	// The app-server child sees --listen and binds. The TUI child is the same
 	// re-executed test binary without --listen, so the fake init exits
-	// immediately. run must then reap the app-server process group.
-	_ = run(nil, filepath.Join(dir, "launcher"))
+	// immediately with status 2. run must then reap the app-server process
+	// group and propagate that exit, rather than fail before starting it.
+	err := run(nil, filepath.Join(dir, "launcher"))
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 2 {
+		t.Fatalf("test TUI exit = %v, want exit status 2", err)
+	}
 	data, err := os.ReadFile(pidFile)
 	if err != nil {
 		t.Fatal(err)
@@ -274,7 +295,7 @@ func TestRun_SignalsReapAppServerTree(t *testing.T) {
 			launcher.Dir = dir
 			launcher.Env = append(os.Environ(),
 				signalLauncherHelperEnv+"=1",
-				"C3_CODEX_REAL="+os.Args[0],
+				"C3_CODEX_REAL="+fakeCodexEntrypoint(t, dir),
 				"C3_CODEX_ADAPTER="+filepath.Join(dir, "adapter"),
 				"C3_CODEX_APP_SERVER_WS=",
 				"C3_CODEX_DISABLE=0",
