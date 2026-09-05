@@ -125,3 +125,40 @@ func TestCodexFullDrainRestoresAckAndDiscardsStaleForward(t *testing.T) {
 		t.Fatalf("stale message was acked or recovery remained blocked: %+v, %t", ack, ok)
 	}
 }
+
+func TestDrainResetPrecedesNextInboundWithoutToolScheduling(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		ack       bool
+		remaining int
+		err       string
+		wantReset bool
+	}{
+		{"drained", true, 0, "", true},
+		{"peek", false, 0, "", false},
+		{"partial", true, 1, "", false},
+		{"failed", true, 0, "unavailable", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a := newAdapter()
+			a.forwardBlocked.Store(true)
+			ch := make(chan ipc.FetchQueueResp, 1)
+			a.fqPending["fetch"] = ch
+			a.fqAck["fetch"] = tc.ack
+			raw, _ := json.Marshal(ipc.FetchQueueResp{ID: "fetch", Remaining: tc.remaining, Err: tc.err})
+			a.dispatchFetchQueueResult(raw)
+			// The tool goroutine has deliberately not consumed its response.
+			// A following IPC inbound must already see the correct epoch.
+			if got := a.forwardEpoch.Load() != 0; got != tc.wantReset {
+				t.Fatalf("reset before next frame = %t, want %t", got, tc.wantReset)
+			}
+			if a.forwardBlocked.Load() == tc.wantReset {
+				t.Fatal("forwarding latch does not match drain result")
+			}
+			a.dispatchFetchQueueResult(raw)
+			if a.forwardEpoch.Load() > 1 {
+				t.Fatal("duplicate response invalidated fresh inbound")
+			}
+		})
+	}
+}
