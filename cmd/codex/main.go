@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/Andrometiq/c3/internal/broker"
+	"github.com/Andrometiq/c3/internal/codexlauncher"
 )
 
 const defaultWSURL = "ws://127.0.0.1:8766"
@@ -28,25 +29,33 @@ const defaultWSURL = "ws://127.0.0.1:8766"
 const tuiTerminationGrace = 2 * time.Second
 
 var codexSubcommands = map[string]bool{
-	"exec":        true,
-	"e":           true,
-	"review":      true,
-	"login":       true,
-	"logout":      true,
-	"mcp":         true,
-	"plugin":      true,
-	"mcp-server":  true,
-	"app-server":  true,
-	"completion":  true,
-	"update":      true,
-	"sandbox":     true,
-	"debug":       true,
-	"apply":       true,
-	"a":           true,
-	"cloud":       true,
-	"exec-server": true,
-	"features":    true,
-	"help":        true,
+	"exec":             true,
+	"e":                true,
+	"review":           true,
+	"login":            true,
+	"logout":           true,
+	"mcp":              true,
+	"plugin":           true,
+	"mcp-server":       true,
+	"app-server":       true,
+	"completion":       true,
+	"update":           true,
+	"sandbox":          true,
+	"debug":            true,
+	"apply":            true,
+	"a":                true,
+	"cloud":            true,
+	"exec-server":      true,
+	"features":         true,
+	"help":             true,
+	"queue":            true,
+	"agents":           true,
+	"archive":          true,
+	"unarchive":        true,
+	"delete":           true,
+	"doctor":           true,
+	"remote-control":   true,
+	"migrate-rollouts": true,
 }
 
 func main() {
@@ -77,6 +86,7 @@ func run(args []string, self string) error {
 	if err != nil {
 		return err
 	}
+	cwd = effectiveLauncherCWD(args, cwd)
 	sharedRoot := os.Getenv("C3_CODEX_SHARED_ROOT")
 	topic := inferTopicName(cwd, sharedRoot)
 	if override, ok := os.LookupEnv("C3_ATTACH_NAME"); ok {
@@ -604,11 +614,35 @@ func hasFeatureArg(args []string, feature string) bool {
 
 func hasCWDArg(args []string) bool {
 	for _, arg := range args {
-		if arg == "-C" || arg == "--cd" {
+		if arg == "-C" || arg == "--cd" || strings.HasPrefix(arg, "--cd=") || (strings.HasPrefix(arg, "-C") && len(arg) > 2) {
 			return true
 		}
 	}
 	return false
+}
+
+func effectiveLauncherCWD(args []string, base string) string {
+	for i, arg := range args {
+		if arg == "--" {
+			break
+		}
+		value := ""
+		switch {
+		case (arg == "-C" || arg == "--cd") && i+1 < len(args):
+			value = args[i+1]
+		case strings.HasPrefix(arg, "--cd="):
+			value = strings.TrimPrefix(arg, "--cd=")
+		case strings.HasPrefix(arg, "-C") && len(arg) > 2:
+			value = arg[2:]
+		}
+		if value != "" {
+			if filepath.IsAbs(value) {
+				return filepath.Clean(value)
+			}
+			return filepath.Join(base, value)
+		}
+	}
+	return base
 }
 
 // appServerMetaPath is per-UID **and per-port**. It used to be one file per
@@ -699,10 +733,14 @@ func writeAppServerMeta(wsURL, cwd, topic, adapterPath string, pid int) {
 }
 
 func findRealCodex(self string) (string, error) {
+	selfAbs, _ := filepath.EvalSymlinks(self)
 	if explicit := os.Getenv("C3_CODEX_REAL"); explicit != "" {
+		resolved, _ := filepath.EvalSymlinks(explicit)
+		if (resolved != "" && resolved == selfAbs) || codexlauncher.IsC3(explicit) {
+			return "", fmt.Errorf("C3_CODEX_REAL points to a C3 launcher; specify the real Codex executable")
+		}
 		return explicit, nil
 	}
-	selfAbs, _ := filepath.EvalSymlinks(self)
 	pathParts := filepath.SplitList(os.Getenv("PATH"))
 	for _, dir := range pathParts {
 		candidate := filepath.Join(dir, "codex")
@@ -711,12 +749,19 @@ func findRealCodex(self string) (string, error) {
 			continue
 		}
 		resolved, _ := filepath.EvalSymlinks(candidate)
-		if resolved == selfAbs {
+		if resolved == selfAbs || codexlauncher.IsC3(candidate) {
 			continue
 		}
 		return candidate, nil
 	}
 	home, _ := os.UserHomeDir()
+	codexHome := os.Getenv("CODEX_HOME")
+	if codexHome == "" {
+		codexHome = filepath.Join(home, ".codex")
+	}
+	if standalone := standaloneCodexPath(codexHome); standalone != "" {
+		return standalone, nil
+	}
 	matches, _ := filepath.Glob(filepath.Join(home, ".nvm", "versions", "node", "*", "lib", "node_modules", "@openai", "codex", "bin", "codex.js"))
 	for i := len(matches) - 1; i >= 0; i-- {
 		return matches[i], nil
@@ -724,17 +769,28 @@ func findRealCodex(self string) (string, error) {
 	return "", fmt.Errorf("could not find real codex; set C3_CODEX_REAL")
 }
 
+func standaloneCodexPath(codexHome string) string {
+	path := filepath.Join(codexHome, "packages", "standalone", "current", "bin", "codex")
+	if info, err := os.Stat(path); err == nil && !info.IsDir() && info.Mode()&0o111 != 0 && !codexlauncher.IsC3(path) {
+		return path
+	}
+	return ""
+}
+
 func findAdapter(self string) (string, error) {
 	if explicit := os.Getenv("C3_CODEX_ADAPTER"); explicit != "" {
 		return explicit, nil
 	}
+	selfAbs, _ := filepath.Abs(self)
+	if resolved, err := filepath.EvalSymlinks(selfAbs); err == nil {
+		selfAbs = resolved
+	}
+	sibling := filepath.Join(filepath.Dir(selfAbs), "c3-codex-adapter")
+	if info, err := os.Stat(sibling); err == nil && !info.IsDir() && info.Mode()&0o111 != 0 {
+		return sibling, nil
+	}
 	if found, err := exec.LookPath("c3-codex-adapter"); err == nil {
 		return found, nil
-	}
-	selfAbs, _ := filepath.Abs(self)
-	sibling := filepath.Join(filepath.Dir(selfAbs), "c3-codex-adapter")
-	if _, err := os.Stat(sibling); err == nil {
-		return sibling, nil
 	}
 	return "", fmt.Errorf("could not find c3-codex-adapter in PATH")
 }

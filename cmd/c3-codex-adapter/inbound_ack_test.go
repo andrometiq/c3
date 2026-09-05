@@ -82,6 +82,10 @@ func startFakeCodexAppServer(t *testing.T) string {
 				continue
 			}
 			method, _ := msg["method"].(string)
+			if method == "thread/queue/add" {
+				_ = c.WriteJSON(map[string]any{"id": id, "error": map[string]any{"code": -32601, "message": "method not found"}})
+				continue
+			}
 			result := map[string]any{}
 			switch method {
 			case "thread/loaded/list":
@@ -133,6 +137,10 @@ func startFlakyCodexAppServer(t *testing.T, failFirstN int) (wsURL string, turns
 				continue
 			}
 			method, _ := msg["method"].(string)
+			if method == "thread/queue/add" {
+				_ = c.WriteJSON(map[string]any{"id": id, "error": map[string]any{"code": -32601, "message": "method not found"}})
+				continue
+			}
 			result := map[string]any{}
 			switch method {
 			case "thread/loaded/list":
