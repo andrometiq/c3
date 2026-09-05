@@ -137,7 +137,8 @@ func isLauncherItself(target, launcher string) bool {
 }
 
 func installCodexShims(home, launcher string, force bool) ([]string, error) {
-	targets := []string{filepath.Join(home, ".local", "bin", "codex")}
+	// Preserve an explicit C3 entrypoint if a Codex self-update replaces `codex`.
+	targets := []string{filepath.Join(home, ".local", "bin", "codex"), filepath.Join(home, ".local", "bin", "c3-codex")}
 	nvmBins, err := filepath.Glob(filepath.Join(home, ".nvm", "versions", "node", "*", "bin"))
 	if err != nil {
 		return nil, err

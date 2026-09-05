@@ -122,11 +122,12 @@ func TestInstallCodexShimsCreatesLocalAndNVMSymlinks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(installed) != 2 {
-		t.Fatalf("installed %d shims, want 2: %#v", len(installed), installed)
+	if len(installed) != 3 {
+		t.Fatalf("installed %d shims, want 3: %#v", len(installed), installed)
 	}
 	for _, path := range []string{
 		filepath.Join(home, ".local", "bin", "codex"),
+		filepath.Join(home, ".local", "bin", "c3-codex"),
 		filepath.Join(nvmBin, "codex"),
 	} {
 		target, err := os.Readlink(path)

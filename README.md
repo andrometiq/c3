@@ -85,7 +85,7 @@ An adapter is a small MCP server that connects one host CLI to the broker. Seven
 | Adapter | Host | Inbound delivery | Tools | Notes |
 |---|---|---|---|---|
 | `c3-claude-adapter` | Claude Code | live push (native `<channel>` turns) | 12 | The reference adapter. Only one with `ask` and the permission relay. |
-| `c3-codex-adapter` | Codex | live push through the Codex app-server | 12 | Adds `codex_forward`. No `ask`, no permission relay. Heavier install: launcher → app-server → adapter → TUI. |
+| `c3-codex-adapter` | Codex | durable input queue on modern Codex; legacy app-server turn delivery | 12 | Adds `codex_forward` diagnostics. No `ask`, no permission relay. Launcher → app-server → adapter → TUI; explicit native queue mode also supports an existing local conversation. |
 | `c3-desktop-adapter` | Claude Desktop | pull only | 13 | Adds `observe` and `open_inbox`, plus an inbox panel. You ask Claude to check; it calls `fetch_queue`. |
 | `c3-grok-adapter` | Grok Build | live push, needs leader mode | 11 | Requires `[cli] use_leader = true` in Grok's config. Without it, pull only. |
 | `c3-agy-adapter` | Antigravity CLI | pull only | 11 | The host has no async push. Newest and least travelled; no dedicated doc yet. |

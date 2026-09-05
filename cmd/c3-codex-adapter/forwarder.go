@@ -2,10 +2,15 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
+	"path/filepath"
+	"regexp"
+	"strings"
 	"time"
 
 	"github.com/Andrometiq/c3/internal/c3types"
@@ -21,6 +26,7 @@ import (
 var errCodexForwardNoWS = errors.New("codex forward: no app-server WS URL configured (C3_CODEX_APP_SERVER_WS unset)")
 
 type codexForwardConfig struct {
+	QueueBin string
 	WSURL    string
 	ThreadID string
 	CWD      string
@@ -34,6 +40,9 @@ type codexWSClient struct {
 }
 
 func forwardInboundToCodexAppServer(ctx context.Context, in *c3types.Inbound, cfg codexForwardConfig) error {
+	if cfg.QueueBin != "" {
+		return forwardInboundToCodexQueue(ctx, in, cfg)
+	}
 	if cfg.WSURL == "" {
 		return errCodexForwardNoWS
 	}
@@ -65,6 +74,26 @@ func forwardInboundToCodexAppServer(ctx context.Context, in *c3types.Inbound, cf
 	if threadID == "" {
 		return fmt.Errorf("no loaded Codex thread found")
 	}
+	// Modern Codex accepts durable input while the visible TUI is busy. Only
+	// an explicit method-not-found permits the legacy turn/start fallback:
+	// a timeout may mean the queue accepted the message but its reply was lost.
+	queued, err := client.request(ctx, "thread/queue/add", map[string]any{
+		"threadId":            threadID,
+		"clientUserMessageId": codexInboundMessageID(threadID, in),
+		"input":               []map[string]any{{"type": "text", "text": formatInboundTurnText(in), "text_elements": []any{}}},
+	})
+	if err == nil {
+		if submission, ok := queued["queuedSubmission"].(map[string]any); ok {
+			if id, ok := submission["id"].(string); ok && id != "" {
+				return nil
+			}
+		}
+		return errors.New("Codex queue did not confirm a queued submission")
+	}
+	var rpcErr *codexRPCError
+	if !errors.As(err, &rpcErr) || rpcErr.Code != -32601 {
+		return err
+	}
 	if _, err := client.request(ctx, "thread/resume", map[string]any{
 		"threadId":     threadID,
 		"excludeTurns": true,
@@ -80,6 +109,53 @@ func forwardInboundToCodexAppServer(ctx context.Context, in *c3types.Inbound, cf
 		}},
 	})
 	return err
+}
+
+func codexInboundMessageID(threadID string, in *c3types.Inbound) string {
+	// Stable across retries but different for edits and different recipients.
+	h := sha256.Sum256([]byte(fmt.Sprintf("%s\x00%s\x00%d\x00%d\x00%s", threadID, in.Channel, in.ChatID, in.MessageID, formatInboundTurnText(in))))
+	h[6] = h[6]&0x0f | 0x50
+	h[8] = h[8]&0x3f | 0x80
+	return fmt.Sprintf("%x-%x-%x-%x-%x", h[:4], h[4:6], h[6:8], h[8:10], h[10:16])
+}
+
+type codexRPCError struct {
+	Method  string
+	Code    int
+	Message string
+}
+
+func (e *codexRPCError) Error() string {
+	return fmt.Sprintf("%s: RPC error %d: %s", e.Method, e.Code, e.Message)
+}
+
+var codexThreadUUID = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
+
+// Native queue delivery reaches the existing local TUI without creating or
+// resuming a second app-server thread. Explicit executable and UUID pins are
+// required: never infer a recipient from cwd, a session name, or loaded[0].
+// A successful queue acknowledgement transfers durability to Codex; while the
+// TUI is busy, it handles queued input after the current turn.
+func forwardInboundToCodexQueue(ctx context.Context, in *c3types.Inbound, cfg codexForwardConfig) error {
+	if !filepath.IsAbs(cfg.QueueBin) || !codexThreadUUID.MatchString(cfg.ThreadID) {
+		return errors.New("codex queue requires an absolute C3_CODEX_QUEUE_BIN and explicit C3_CODEX_THREAD_ID UUID")
+	}
+	if cfg.Timeout <= 0 {
+		cfg.Timeout = 15 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(ctx, cfg.Timeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, cfg.QueueBin, "queue", "--thread", cfg.ThreadID, "--message", formatInboundTurnText(in))
+	cmd.Dir = cfg.CWD
+	output, err := cmd.Output()
+	if err != nil {
+		return fmt.Errorf("codex queue did not accept inbound: %w", err)
+	}
+	ack := strings.TrimSpace(string(output))
+	if !strings.HasPrefix(ack, "Queued message ") || !strings.HasSuffix(ack, " for thread "+cfg.ThreadID+".") {
+		return errors.New("codex queue returned no acknowledgement for the pinned thread")
+	}
+	return nil
 }
 
 // codexInitializeParams is the app-server `initialize` payload every C3 → Codex
@@ -108,7 +184,10 @@ func (c *codexWSClient) discoverThread(ctx context.Context, cwd string) (string,
 	if err != nil {
 		return "", err
 	}
-	loaded := stringSlice(loadedResp["data"])
+	loaded, err := loadedThreadIDs(loadedResp["data"])
+	if err != nil {
+		return "", err
+	}
 	if len(loaded) == 0 {
 		return "", nil
 	}
@@ -116,33 +195,7 @@ func (c *codexWSClient) discoverThread(ctx context.Context, cwd string) (string,
 		return loaded[0], nil
 	}
 
-	listResp, err := c.request(ctx, "thread/list", map[string]any{
-		"limit":          50,
-		"sortKey":        "updated_at",
-		"sortDirection":  "desc",
-		"cwd":            cwd,
-		"useStateDbOnly": true,
-	})
-	if err != nil {
-		return "", err
-	}
-	loadedSet := map[string]bool{}
-	for _, id := range loaded {
-		loadedSet[id] = true
-	}
-	if threads, ok := listResp["data"].([]any); ok {
-		for _, raw := range threads {
-			thread, ok := raw.(map[string]any)
-			if !ok {
-				continue
-			}
-			id := fmt.Sprint(thread["id"])
-			if loadedSet[id] {
-				return id, nil
-			}
-		}
-	}
-	return loaded[0], nil
+	return "", fmt.Errorf("%w: pin C3_CODEX_THREAD_ID; cwd %q does not identify a conversation", errCodexThreadAmbiguous, cwd)
 }
 
 func (c *codexWSClient) request(ctx context.Context, method string, params map[string]any) (map[string]any, error) {
@@ -167,6 +220,12 @@ func (c *codexWSClient) request(ctx context.Context, method string, params map[s
 		}
 		if gotID, ok := numericID(resp["id"]); ok && gotID == id {
 			if rawErr, ok := resp["error"]; ok && rawErr != nil {
+				if rpc, ok := rawErr.(map[string]any); ok {
+					if code, ok := numericID(rpc["code"]); ok {
+						message, _ := rpc["message"].(string)
+						return nil, &codexRPCError{Method: method, Code: code, Message: message}
+					}
+				}
 				encoded, _ := json.Marshal(rawErr)
 				return nil, fmt.Errorf("%s: %s", method, encoded)
 			}
@@ -208,6 +267,13 @@ func (c *codexWSClient) notify(method string, params map[string]any) error {
 // agent needs to thread a reply) and a compact kind+file_id attachment reference,
 // while dropping the verbose per-message attachment block the maintainer flagged.
 func formatInboundTurnText(in *c3types.Inbound) string {
+	if in.IsEvent() {
+		if in.Event != nil && in.Event.System != nil {
+			return "C3 system notice: " + in.Event.System.Message
+		}
+		payload, _ := json.Marshal(in.Event)
+		return fmt.Sprintf("C3 %s event: %s", in.Kind, payload)
+	}
 	return c3types.RenderQueuedInbound(in)
 }
 
@@ -243,6 +309,7 @@ func codexForwardConfigFromEnv() codexForwardConfig {
 		cwd, _ = os.Getwd()
 	}
 	return codexForwardConfig{
+		QueueBin: os.Getenv("C3_CODEX_QUEUE_BIN"),
 		WSURL:    os.Getenv("C3_CODEX_APP_SERVER_WS"),
 		ThreadID: os.Getenv("C3_CODEX_THREAD_ID"),
 		CWD:      cwd,

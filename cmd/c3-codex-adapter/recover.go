@@ -96,13 +96,9 @@ var (
 // conversation reports exactly one id, and the id matches the rollout filename
 // under the Codex home, so it is stable across a resume.
 //
-// Deliberately NOT reused here: forwarder.go's discoverThread, which narrows a
-// multi-thread list by cwd and then falls back to `loaded[0]`. That fallback is
-// tolerable for DELIVERY (a misdirected turn is visible and recoverable) and
-// unacceptable for IDENTITY (a wrong id binds this session to another session's
-// topic and drains its queue). Ambiguity here is refused, never narrowed —
-// which is also what keeps a sub-agent thread's adapter from claiming the
-// session's topic: while both threads are loaded it can resolve nothing.
+// Recovery and delivery both refuse ambiguous loaded-thread lists. Delivery
+// subsequently uses this cached identity, so another loaded thread cannot
+// redirect an existing claim. Never infer a conversation from its cwd.
 //
 // C3_CODEX_THREAD_ID (already the forwarder's pin) is honoured first: an
 // operator naming the thread is a KNOWN identity, not a guess, and it is the
@@ -341,6 +337,18 @@ func (a *adapter) stableSessionID(ctx context.Context, cfg codexForwardConfig) (
 	return id, nil
 }
 
+// Delivery uses the same identity already registered with the broker. A second
+// loaded conversation must never redirect a session's existing topic claim.
+func (a *adapter) codexForwardConfig() codexForwardConfig {
+	cfg := codexForwardConfigFromEnv()
+	a.tidmu.Lock()
+	if a.threadID != "" {
+		cfg.ThreadID = a.threadID
+	}
+	a.tidmu.Unlock()
+	return cfg
+}
+
 // fireRecover sends the recover request on conn and handles the response.
 //
 // conn is passed in (captured when the recovery was kicked off) rather than
@@ -397,6 +405,9 @@ func (a *adapter) fireRecover(ctx context.Context, conn *ipc.Conn, stableID, cwd
 		a.rememberAttach(rememberedIdentityReq(cwd, resp.ChatID, resp.TopicID, resp.Group))
 		a.setAttachedTopic(resp.Name)
 		log.Printf("recover-session: auto-attached to %q (queued=%d)", resp.Name, resp.QueuedCount)
+		if resp.QueuedCount > 0 {
+			a.forwardStatusNotice(renderCodexRecoverNotice(resp))
+		}
 		a.emitRecoverNotice(renderCodexRecoverNotice(resp))
 	}
 }
@@ -414,6 +425,9 @@ func (a *adapter) dispatchRecoverSessionResult(conn *ipc.Conn, raw []byte) {
 	a.rsmu.Unlock()
 	if ch == nil {
 		return
+	}
+	if resp.Recovered && resp.QueuedCount > 0 && resp.Err == "" {
+		a.forwardBlocked.Store(true)
 	}
 	select {
 	case ch <- resp:

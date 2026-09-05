@@ -267,9 +267,11 @@ type adapter struct {
 	// the loop's local scope). Once set, codexForwardLoop stops acking, so no later
 	// successful forward's count-off-head ack can Consume the undelivered head
 	// message off the queue → no silent loss. Shared across two goroutines, so it
-	// is atomic. Latched for the session (a process restart resets it); the
-	// false→true transition fires exactly one fetch_queue recovery nudge.
+	// is atomic. A full fetch_queue drain resets it and invalidates older
+	// forward requests; the false→true transition emits a recovery notice.
 	forwardBlocked atomic.Bool
+	// A completed manual drain invalidates older buffered/in-flight forwards.
+	forwardEpoch atomic.Uint64
 }
 
 // codexForwardReq is one inbound queued for the serial Codex-forward goroutine.
@@ -281,6 +283,7 @@ type codexForwardReq struct {
 	covered int
 	token   string
 	conn    *ipc.Conn
+	epoch   uint64
 }
 
 func newAdapter() *adapter {
@@ -774,6 +777,7 @@ func (a *adapter) handleInbound(raw []byte) {
 		req := codexForwardReq{
 			inbound: msg.Inbound, covered: msg.Covered,
 			token: msg.DeliveryToken, conn: a.currentConn(),
+			epoch: a.forwardEpoch.Load(),
 		}
 		select {
 		case a.forwardCh <- req:
@@ -834,7 +838,8 @@ func capRunes(s string, n int) string {
 }
 
 func codexForwardingAllowed() bool {
-	return os.Getenv("C3_CODEX_REMOTE_BRIDGE") == "1" ||
+	return os.Getenv("C3_CODEX_QUEUE_BIN") != "" ||
+		os.Getenv("C3_CODEX_REMOTE_BRIDGE") == "1" ||
 		os.Getenv("C3_CODEX_ALLOW_MANUAL_FORWARD") == "1"
 }
 
@@ -866,7 +871,16 @@ func codexForwardingAllowed() bool {
 // handleInbound (the IPC-read goroutine) latches it too.
 func (a *adapter) codexForwardLoop() {
 	for req := range a.forwardCh {
-		err := forwardInboundToCodexAppServer(context.Background(), &req.inbound, codexForwardConfigFromEnv())
+		if !req.inbound.IsEvent() && req.epoch != a.forwardEpoch.Load() {
+			continue
+		}
+		err := forwardInboundToCodexAppServer(context.Background(), &req.inbound, a.codexForwardConfig())
+		if req.inbound.IsEvent() {
+			if err != nil {
+				log.Printf("codex event delivery failed kind=%s: %v", req.inbound.Kind, err)
+			}
+			continue // Events never represent durable message queue rows.
+		}
 		if err != nil {
 			// errCodexForwardNoWS = forwarding enabled but unconfigured (no WS URL):
 			// the forward delivered nothing. It's a benign config state, not a real
@@ -875,12 +889,12 @@ func (a *adapter) codexForwardLoop() {
 			// the head is now an undelivered message and any later ack would consume
 			// IT off the head → set blocked and never ack.
 			if !errors.Is(err, errCodexForwardNoWS) {
-				fmt.Fprintf(os.Stderr, "c3-codex-adapter: WS forward failed for inbound id=%d: %v\n", req.inbound.MessageID, err)
+				fmt.Fprintf(os.Stderr, "c3-codex-adapter: forward failed for inbound id=%d: %v\n", req.inbound.MessageID, err)
 			}
-			a.latchForwardBlocked("WS forward failed")
+			a.latchForwardBlocked("Codex delivery failed")
 			continue // DO NOT ack — content stays queued (recovery via fetch_queue).
 		}
-		if a.forwardBlocked.Load() {
+		if a.forwardBlocked.Load() || req.epoch != a.forwardEpoch.Load() {
 			// Delivered live, but an earlier message is still the undelivered head.
 			// Acking now would Consume that earlier message off the head → loss. So
 			// skip the ack: this (delivered) message stays queued and fetch_queue
@@ -929,18 +943,43 @@ func (a *adapter) latchForwardBlocked(reason string) {
 	if !a.forwardBlocked.CompareAndSwap(false, true) {
 		return // already latched this session — the one-shot nudge already fired
 	}
-	if a.transport == nil {
-		return
-	}
 	// Name the topic (§5) so a stale/wrong nudge is human-distinguishable.
 	target := "pending Telegram messages"
 	if route := a.currentTopicName(); route != "" {
 		target = fmt.Sprintf("pending Telegram messages for topic %q", route)
 	}
+	notice := "c3: live message forwarding interrupted (" + reason + ") — call `fetch_queue` to read " + target + "."
+	a.forwardStatusNotice(notice)
+	if a.transport == nil {
+		return
+	}
 	if err := a.transport.Notify(context.Background(), "notifications/message", map[string]any{
-		"data": "c3: live message forwarding interrupted (" + reason + ") — call `fetch_queue` to read " + target + ".",
+		"data": notice,
 	}); err != nil {
 		log.Printf("codex forwardBlocked recovery nudge FAIL (%s): %v — content durably queued; call fetch_queue to drain", reason, err)
+	}
+}
+
+func (a *adapter) clearForwardBlocked() {
+	a.forwardEpoch.Add(1)
+	if a.forwardBlocked.CompareAndSwap(true, false) {
+		log.Printf("codex forwarding recovered after full fetch_queue drain")
+	}
+}
+
+// An operational notice must wake Codex through its delivery transport, not
+// only an MCP log notification that the TUI does not render as agent input.
+func (a *adapter) forwardStatusNotice(text string) {
+	if text == "" || !codexForwardingAllowed() {
+		return
+	}
+	in := c3types.Inbound{Kind: c3types.InboundSystem, Event: &c3types.InboundEvent{
+		System: &c3types.SystemEvent{Source: "c3", Level: "info", Message: text},
+	}}
+	select {
+	case a.forwardCh <- codexForwardReq{inbound: in}:
+	default:
+		log.Printf("codex status notice could not be queued; durable messages retained")
 	}
 }
 
@@ -970,6 +1009,9 @@ func (a *adapter) dispatchAttached(raw []byte) {
 	if ok {
 		var attached ipc.AttachedMsg
 		_ = json.Unmarshal(raw, &attached)
+		if attached.OK && attached.QueuedCount > 0 {
+			a.forwardBlocked.Store(true)
+		}
 		// A successful attach may carry the just-claimed channel's manifest.
 		// Store it as the latest caps so any subsequent instructions rebuild
 		// reflects the attached channel (multi-channel turn-time-refresh seam,
@@ -1030,6 +1072,8 @@ func (a *adapter) buildInstructions() string {
 	switch {
 	case a.helloAck.NoConfig:
 		head = "C3 not yet configured. Run `c3-broker setup` from a shell to provide your Telegram bot token, DM chat id, and at least one group chat id, then restart this Codex session."
+	case a.currentTopicName() != "":
+		head = fmt.Sprintf("C3 attached to topic %q. Use `reply` to send and `fetch_queue` to recover held messages.", a.currentTopicName())
 	case a.helloAck.NoMapping:
 		cwd := os.Getenv("C3_CODEX_CWD")
 		if cwd == "" {
@@ -1037,7 +1081,12 @@ func (a *adapter) buildInstructions() string {
 		}
 		head = fmt.Sprintf("No saved C3 topic for this session (cwd %q). Call the `attach` tool with no argument: the broker returns a picker of suggested topics — list them for the user and let them choose (never guess), then re-invoke `attach` with the chosen `topic_id` or `name`. Or attach a specific topic directly with `attach(name=\"<name>\")`. Inbound Telegram messages are held in C3's durable queue; call `fetch_queue` to read them.", cwd)
 	default:
-		head = "C3 connected. Use `attach` to claim a Telegram topic, `fetch_queue` to read held/new inbound, `reply` to send. Codex doesn't render unsolicited MCP notifications today; call `fetch_queue` when you see a 'new Telegram message' nudge or periodically."
+		head = "C3 connected. Use `attach` to claim a Telegram topic, `fetch_queue` to recover held inbound, and `reply` to send."
+	}
+	if codexForwardingAllowed() {
+		head += " Live delivery is enabled. Codex queues inbound during active work for a subsequent turn. Do not fetch_queue concurrently with healthy live delivery; use it when a recovery notice requests it."
+	} else {
+		head += " Live delivery is NOT configured: topic attachment alone does not wake Codex. Start with the C3 launcher, or configure native queue delivery for this exact session."
 	}
 	return head + mode.Combined(a.capsOrDefault())
 }
@@ -1214,14 +1263,13 @@ func (a *adapter) registerTools(srv *mcp.Server) {
 		{
 			tool: &mcp.Tool{
 				Name:        "codex_forward",
-				Description: "Debugging/manual override for the Codex app-server WebSocket forwarder. Refused unless C3_CODEX_REMOTE_BRIDGE=1 (set by the codex launcher) or C3_CODEX_ALLOW_MANUAL_FORWARD=1.",
+				Description: "Inspect the configured Codex delivery transport and pinned conversation. Supplied endpoint/thread must match the current configuration; this tool cannot rebind a live topic to another conversation.",
 				InputSchema: map[string]any{
 					"type": "object",
 					"properties": map[string]any{
 						"app_server_ws": map[string]any{"type": "string"},
 						"thread_id":     map[string]any{"type": "string"},
 					},
-					"required": []string{"app_server_ws"},
 				},
 			},
 			handler: a.toolCodexForward,
@@ -1473,6 +1521,9 @@ func (a *adapter) toolFetchQueue(ctx context.Context, req *mcp.CallToolRequest) 
 		if resp.Err != "" {
 			return toolErrorResult(resp.Err), nil
 		}
+		if fq.Ack && resp.Remaining == 0 {
+			a.clearForwardBlocked()
+		}
 		return toolTextResult(renderFetchedMessages(resp.Messages, resp.Remaining, a.currentTopicName())), nil
 	}
 }
@@ -1641,14 +1692,20 @@ func (a *adapter) toolCodexForward(_ context.Context, req *mcp.CallToolRequest) 
 		return toolErrorResult(
 			"codex_forward refused: requires C3_CODEX_REMOTE_BRIDGE=1 (set by the codex launcher) or C3_CODEX_ALLOW_MANUAL_FORWARD=1 (debug). Split-brain guard."), nil
 	}
-	wsURL, _ := args["app_server_ws"].(string)
-	if wsURL == "" {
-		wsURL = os.Getenv("C3_CODEX_APP_SERVER_WS")
+	cfg := a.codexForwardConfig()
+	if ws, _ := args["app_server_ws"].(string); ws != "" && ws != cfg.WSURL {
+		return toolErrorResult("requested endpoint differs from the configured session; restart with the intended C3 configuration"), nil
 	}
-	if wsURL == "" {
-		return toolErrorResult("app_server_ws is required (or set C3_CODEX_APP_SERVER_WS)"), nil
+	if thread, _ := args["thread_id"].(string); thread != "" && thread != cfg.ThreadID {
+		return toolErrorResult("requested thread differs from this adapter's pinned conversation"), nil
 	}
-	return toolTextResult(fmt.Sprintf("codex_forward registered ws=%s", wsURL)), nil
+	transport := "websocket"
+	if cfg.QueueBin != "" {
+		transport = "native queue"
+	} else if cfg.WSURL == "" {
+		return toolErrorResult("no delivery endpoint configured"), nil
+	}
+	return toolTextResult(fmt.Sprintf("C3 delivery: %s; thread=%s; topic=%s; recovery_required=%t", transport, cfg.ThreadID, a.currentTopicName(), a.forwardBlocked.Load())), nil
 }
 
 func (a *adapter) toolForward(name string) mcp.ToolHandler {

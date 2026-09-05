@@ -2,7 +2,7 @@ package main
 
 import (
 	"context"
-	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -34,6 +34,10 @@ func TestForwardInboundToCodexAppServerStartsTurn(t *testing.T) {
 				continue
 			}
 			method, _ := msg["method"].(string)
+			if method == "thread/queue/add" {
+				_ = c.WriteJSON(map[string]any{"id": id, "error": map[string]any{"code": -32601, "message": "method not found"}})
+				continue
+			}
 			result := map[string]any{}
 			switch method {
 			case "thread/loaded/list":
@@ -74,7 +78,7 @@ func TestForwardInboundToCodexAppServerStartsTurn(t *testing.T) {
 			methods = append(methods, method)
 		}
 	}
-	wantMethods := []string{"initialize", "initialized", "thread/loaded/list", "thread/resume", "turn/start"}
+	wantMethods := []string{"initialize", "initialized", "thread/loaded/list", "thread/queue/add", "thread/resume", "turn/start"}
 	if len(methods) != len(wantMethods) {
 		t.Fatalf("methods = %#v, want %#v", methods, wantMethods)
 	}
@@ -101,7 +105,7 @@ func TestForwardInboundToCodexAppServerStartsTurn(t *testing.T) {
 	}
 }
 
-func TestForwardInboundToCodexAppServerPicksLoadedThreadForCWD(t *testing.T) {
+func TestForwardInboundToCodexAppServerRefusesAmbiguousCWD(t *testing.T) {
 	var threadListParams map[string]any
 	upgrader := websocket.Upgrader{}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -121,6 +125,10 @@ func TestForwardInboundToCodexAppServerPicksLoadedThreadForCWD(t *testing.T) {
 				continue
 			}
 			method, _ := msg["method"].(string)
+			if method == "thread/queue/add" {
+				_ = c.WriteJSON(map[string]any{"id": id, "error": map[string]any{"code": -32601, "message": "method not found"}})
+				continue
+			}
 			result := map[string]any{"ok": true}
 			switch method {
 			case "thread/loaded/list":
@@ -143,12 +151,11 @@ func TestForwardInboundToCodexAppServerPicksLoadedThreadForCWD(t *testing.T) {
 		Sender:  c3types.Sender{Username: "alice"},
 		Text:    "hi",
 	}, codexForwardConfig{WSURL: wsURL, CWD: "/home/user/projects/c3", Timeout: time.Second})
-	if err != nil {
-		t.Fatalf("forward failed: %v", err)
+	if !errors.Is(err, errCodexThreadAmbiguous) {
+		t.Fatalf("ambiguous loaded threads must fail closed: %v", err)
 	}
-	if threadListParams["cwd"] != "/home/user/projects/c3" {
-		encoded, _ := json.Marshal(threadListParams)
-		t.Fatalf("thread/list params = %s", encoded)
+	if threadListParams != nil {
+		t.Fatal("cwd must not be used to guess a thread")
 	}
 }
 
