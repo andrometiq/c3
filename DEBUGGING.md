@@ -118,35 +118,40 @@ What to look for, in order:
 
 ### "Broker says delivered but Claude Code doesn't show the message"
 
-**First, the flagless case (v0.1).** If this session was launched without
-`--dangerously-load-development-channels=plugin:c3@c3`, it can't render
-`<channel>` blocks at all. As of v0.1 the adapter detects a host that can't
-render (a lightweight ancestor-process check) and reports it at hello, so
-the broker **holds** that session's inbound in the durable queue instead of
-dropping it — a held-notice fires in the topic, the broker log shows
-`deliver HELD … cannot render`, and `fetch_queue` recovers the messages.
-The session keeps its claim for outbound. Relaunch with the flag for live
-rendering. The rest of this section covers the case where the flag *is* set
-but frames still don't appear.
+Read the **Live route** line in `attach`, `c3-broker status` / `/c3:status`,
+or Telegram `/status`:
 
-The adapter logs to its own stderr (transient). To capture it for one
-session, run the adapter outside Claude Code:
+- `channel`: live pushes are eligible; each durable message still needs a
+  transcript receipt before it is consumed.
+- `probing (channels flag present, awaiting confirmation)`: the host has
+  `--channels plugin:c3@c3`; C3 is waiting for its first channel receipt.
+- `queue-only (reason)`: inbound remains on disk for `fetch_queue`. Outbound
+  tools still work. This is a route status, not a request to resend messages.
 
-```bash
-c3-claude-adapter 2>/tmp/c3-adapter-debug.log
-```
+The MCP preamble reports `Permission relay: available/unavailable` separately.
+A transcript being unavailable need not disable an already registered permission
+channel. An unproven host channel cannot be assumed to relay permissions.
 
-…and point Claude Code's MCP config at this wrapper, OR temporarily edit
-`~/.claude/plugins/cache/*/c3/.mcp.json` to redirect stderr.
+Previously, the detector used `/proc` everywhere and treated uncertainty as
+capable. macOS has no `/proc`, so even flagless hosts were reported capable.
+The adapter acknowledged successful stdout writes while Claude silently dropped
+unregistered channel notifications, consuming the only durable copy. Detection
+now fails closed and macOS reads native process ancestry. Only the nearest
+Claude host's flags count; an outer flagged session cannot qualify a nested one.
 
-Look for `notified chan=… msg=…` lines. If they appear, the MCP frame was
-written to stdout — the receiver (Claude Code) is silently dropping it.
-This usually means the notification method (`notifications/claude/channel`)
-isn't recognized; check that against the official Telegram plugin's
-notification name and the adapter's `Notify` call.
+`live push not confirmed` means no matching complete user channel record was
+observed within 15 seconds. No acknowledgement is sent; the durable copy stays
+available, a coalesced held notice reports it, and subsequent messages are held.
+Explicit attach or reconnect retries the route. `session transcript unavailable`
+means the SessionStart handoff did not resolve a readable regular transcript.
 
-If `notify FAIL …` appears, stdin/stdout is broken — usually means Claude
-Code closed its end.
+Readback requires `type=user`, `message.role=user`, and channel content bearing
+`c3_delivery_id`; an enqueue-only `queue-operation` is insufficient. Partial
+JSONL writes are retried. If Claude changes that record shape, C3 falls back to
+queue-only. A record arriving after the window may produce a duplicate on fetch;
+check the existing conversation before repeating work. The broker's `delivered`
+log records its socket write, not host confirmation; durable consumption is
+controlled by the later receipt.
 
 ### "Broker won't start"
 

@@ -273,6 +273,15 @@ tool finishing, a Telegram tap can still render as effective even though the
 host drops it; only an upstream `permission_resolved` notification can close
 that window.
 
+**2026-09-08 inbound extension:** Reuse the complete-record reader and session
+transcript resolver to confirm Claude channel injection before acknowledging
+live inbound. Match a per-push `c3_delivery_id` in a user message's channel tag,
+not merely a `queue-operation` enqueue record. A 15-second unconfirmed push
+keeps its durable copy and changes the route to queue-only until attach or
+reconnect. Additive render-state hello fields and updates keep protocol v1.
+Transcript format drift may cause duplicate recovery; it must never authorize
+consumption on a successful stdout write alone.
+
 ## D019: dcode adapter — live push via the external-event socket; slash commands as user skills
 
 **Date:** 2026-08-16

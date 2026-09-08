@@ -122,15 +122,8 @@ func run() error {
 		log.Printf("adapter: exit pid=%d reason=cursor-host — use c3-cursor-adapter (c3-broker install-cursor); disable plugin-c3-c3 via: agent mcp disable plugin-c3-c3", os.Getpid())
 		return fmt.Errorf("c3-claude-adapter must not run under Cursor Agent CLI; use c3-cursor-adapter (c3-broker install-cursor). Disable the Claude-plugin MCP: agent mcp disable plugin-c3-c3")
 	}
-	// Detect once whether this host can render channel push notifications. A
-	// flagless launch (typically a --fork-session background job) silently drops
-	// them, so the broker must hold such a session's inbound in the durable queue
-	// rather than let the adapter ack it as delivered. Cheap /proc walk; the
-	// process tree is fixed for the session.
-	a.hostRenderCapable = hostCanRenderChannels()
-	if !a.hostRenderCapable {
-		log.Printf("adapter: host CANNOT render channel pushes (launched without %s naming plugin c3) — inbound will be QUEUED for fetch_queue, not pushed", devChannelsFlag)
-	}
+	a.initialRenderRoute = hostRenderRoute()
+	a.renderRoute = a.initialRenderRoute
 	if err := a.connectBroker(); err != nil {
 		log.Printf("adapter: exit pid=%d reason=connect-broker err=%v", os.Getpid(), err)
 		return fmt.Errorf("connect broker: %w", err)
@@ -356,14 +349,17 @@ type adapter struct {
 	permTranscriptPath string
 	permSettleDisabled atomic.Bool
 
-	// hostRenderCapable is whether the launching Claude Code host can render
-	// notifications/claude/channel pushes. Detected once from the /proc ancestor
-	// chain in run() (hostCanRenderChannels). Default TRUE (set in newAdapter) so
-	// an uncertain environment — and unrelated unit tests that never run detection
-	// — keep the normal fast path. Reported to the broker at hello (inverted, as
-	// CannotRenderChannels) and surfaced to the agent in buildInstructions when
-	// false. See render_detect.go for the detection + the blackhole it defends.
-	hostRenderCapable bool
+	// liveMu owns route state and outstanding readbacks. Scans run off the MCP
+	// and broker request loops; liveScanMu bounds aggregate scan memory.
+	liveMu             sync.Mutex
+	liveScanMu         sync.Mutex
+	initialRenderRoute ipc.RenderRoute
+	renderRoute        ipc.RenderRoute
+	liveGeneration     uint64
+	livePending        map[string]bool
+	liveActive         int
+	liveTimeout        time.Duration // zero selects liveReadbackWindow; tests inject
+	liveTranscriptPath func() string // tests inject without personal files
 
 	// Hello-ack response state, captured on connect.
 	helloAck      ipc.HelloAckMsg
@@ -396,10 +392,6 @@ type adapter struct {
 	routes      []ipc.RouteRef
 	outputRoute *ipc.RouteRef
 	routeNames  map[routeKey]string
-
-	// firstInbound triggers a one-shot wire dump of the first
-	// notifications/claude/channel frame for live debugging.
-	firstInbound atomic.Bool
 
 	// brokerDownAdvised guards the D5 one-shot "broker unreachable" advisory so
 	// it surfaces once per outage, not on every recovery cycle. Cleared on a
@@ -439,10 +431,7 @@ func newAdapter() *adapter {
 		rtPending:     map[string]chan ipc.RetranscribeResp{},
 		askRegPending: map[string]chan ipc.AskRegisteredMsg{},
 		askPending:    map[string]chan ipc.AskResultMsg{},
-		// Default capable; run() overwrites with the real /proc detection. Keeping
-		// the default TRUE means every unit test that constructs an adapter without
-		// running detection behaves as a normal (renderable) session.
-		hostRenderCapable: true,
+		renderRoute:   ipc.RenderRoute{State: ipc.RenderQueueOnly, Reason: "host not detected"},
 	}
 }
 
@@ -491,13 +480,15 @@ func (a *adapter) hello() error {
 	if conn == nil {
 		return errors.New("broker connection unavailable for hello")
 	}
+	a.resetLiveRoute(false)
+	route := a.liveRoute()
 	if err := conn.WriteJSON(ipc.HelloMsg{
 		Op: ipc.OpHello, CLI: "claude", PID: os.Getpid(), CWD: cwd,
 		Capabilities: []string{"claude/channel"},
-		// Inverted: set only when we're confident the host drops channel pushes,
-		// so the broker holds our inbound in the queue instead of acking it lost.
-		CannotRenderChannels: !a.hostRenderCapable,
-		ProtocolVersion:      ipc.ProtocolVersion,
+		// Conservative fallback for old brokers: probing is also queue-only.
+		CannotRenderChannels: route.State != ipc.RenderCapable,
+		RenderState:          route.State, RenderReason: route.Reason,
+		ProtocolVersion: ipc.ProtocolVersion,
 	}); err != nil {
 		return err
 	}
@@ -584,6 +575,10 @@ func (a *adapter) brokerReader(ctx context.Context) {
 		case ipc.OpError:
 			var errMsg ipc.ErrorMsg
 			_ = json.Unmarshal(raw, &errMsg)
+			if errMsg.Err == "op not implemented yet: render_state" {
+				log.Print("broker predates render_state; local receipt gating remains active")
+				continue
+			}
 			a.failPendingRouteResults(errMsg.Err)
 			a.handleBrokerError(errMsg.Err)
 		default:
@@ -1108,16 +1103,6 @@ func (a *adapter) handleInbound(ctx context.Context, raw []byte) {
 		log.Printf("handleInbound unmarshal: %v", err)
 		return
 	}
-	kind := "text"
-	if in.Inbound.IsEvent() {
-		kind = string(in.Inbound.Kind) // poll_result / reaction / callback
-	} else if len(in.Inbound.Attachments) > 0 && in.Inbound.Attachments[0].Kind != "" {
-		kind = in.Inbound.Attachments[0].Kind
-	}
-	topic := "-"
-	if in.Inbound.TopicID != nil {
-		topic = strconv.FormatInt(*in.Inbound.TopicID, 10)
-	}
 	frame := buildClaudeChannelFrame(&in.Inbound)
 	if content, ok := frame["content"].(string); ok {
 		frame["content"] = a.originTag(&in.Inbound) + content
@@ -1131,54 +1116,7 @@ func (a *adapter) handleInbound(ctx context.Context, raw []byte) {
 		frame["content"] = decoratePushContent(s, in.Pending, a.currentTopicName())
 	}
 
-	// One-shot wire dump for diagnosing "broker delivers but CLI silent" —
-	// captures the exact bytes we send so we can prove the shape from outside
-	// the adapter. Logged on FIRST inbound only to avoid noise.
-	if a.firstInbound.CompareAndSwap(false, true) {
-		if raw, err := json.Marshal(map[string]any{
-			"jsonrpc": "2.0",
-			"method":  "notifications/claude/channel",
-			"params":  frame,
-		}); err == nil {
-			log.Printf("notify FIRST-WIRE-DUMP: %s", string(raw))
-		}
-	}
-
-	if err := a.notifyTx.Notify(ctx, "notifications/claude/channel", frame); err != nil {
-		// D4 (adapter-ipc-4): the broker already counted this inbound as
-		// "delivered" the moment it wrote it to our IPC socket — if the
-		// adapter→CLI notify now fails, the message is otherwise lost with no
-		// record anywhere. Log the FULL content (not just metadata) so it's
-		// recoverable from adapter.log. This is the same "don't lose
-		// undelivered content" rule the broker's failure paths follow
-		// (DEBUGGING.md / worker.go fallbackSummary). A broker-side nack op
-		// to bounce to the Telegram fallback is out of scope here.
-		log.Printf("notify FAIL chan=%s chat=%d topic=%s msg=%d kind=%s: %v — LOST CONTENT: %s",
-			in.Inbound.Channel, in.Inbound.ChatID, topic, in.Inbound.MessageID, kind, err,
-			inboundContentSummary(&in.Inbound))
-		return
-	}
-	log.Printf("notified chan=%s chat=%d topic=%s msg=%d kind=%s",
-		in.Inbound.Channel, in.Inbound.ChatID, topic, in.Inbound.MessageID, kind)
-
-	// Tell the broker we accepted this push so it Consumes the queued copy/copies.
-	// Echo Covered back as Count so a MERGED push of N stored lines consumes all N
-	// (not just 1, which would orphan N-1 as phantom backlog). This is broker↔
-	// adapter plumbing the agent never sees (lifecycle B). On the notify-FAIL
-	// branch above we returned WITHOUT acking — the message stays queued as
-	// backlog, exactly as the recovery-nudge design requires.
-	//
-	// C1: a synthesized EVENT (poll_result / reaction / callback) is NEVER queued,
-	// so it covers zero stored lines — do NOT send a delivered-ack for one. The
-	// broker stamps Covered=1 via covEffective on a push (overridden to 0 for
-	// events broker-side too), and handleConsume would otherwise Consume a real
-	// queued backlog message the event never delivered, silently dropping it.
-	if conn := a.currentConn(); conn != nil && !in.Inbound.IsEvent() {
-		_ = conn.WriteJSON(ipc.InboundDeliveredMsg{
-			Op: ipc.OpInboundDelivered, UpdateID: in.Inbound.MessageID, OK: true,
-			Count: in.Covered, DeliveryToken: in.DeliveryToken,
-		})
-	}
+	a.pushWithReadback(ctx, in, frame)
 }
 
 // inboundContentSummary renders a one-line, content-bearing summary of an
@@ -1786,17 +1724,7 @@ func (a *adapter) buildInstructions() string {
 	// returned in the MCP initialize RESULT (a normal JSON-RPC response the CLI
 	// always processes), NOT a channel push, so they render even in the broken
 	// session. The human separately sees the Telegram held-notice.
-	return renderDegradedNote(a.hostRenderCapable) + head + permissionContractNote + mode.Combined(caps)
-}
-
-// renderDegradedNote returns the leading init-instructions warning for a session
-// whose host silently drops channel push notifications, or "" when the host can
-// render normally (zero change to the capable fast path).
-func renderDegradedNote(canRender bool) string {
-	if canRender {
-		return ""
-	}
-	return "⚠️ Inbound delivery is DEGRADED: this session was launched without the development-channels flag, so incoming Telegram messages CANNOT be pushed into this conversation (the host silently drops them). C3 is holding them in a durable queue instead — call the `fetch_queue` tool to retrieve queued messages (they arrive as a tool result, which renders here). For normal live delivery, relaunch with `--dangerously-load-development-channels=plugin:c3@c3`.\n\n"
+	return a.liveRoutePreamble() + head + permissionContractNote + mode.Combined(caps)
 }
 
 // permissionContractNote is the security contract carried in the MCP instructions
@@ -2093,6 +2021,7 @@ func (a *adapter) toolAttach(ctx context.Context, req *mcp.CallToolRequest) (*mc
 		a.pmu.Unlock()
 		return toolErrorResult("broker reconnecting — retry attach in a moment"), nil
 	}
+	a.resetLiveRoute(true)
 	if err := identityConn.WriteJSON(attachReq); err != nil {
 		a.pmu.Lock()
 		delete(a.pending, "attached")
@@ -2120,6 +2049,9 @@ func (a *adapter) toolAttach(ctx context.Context, req *mcp.CallToolRequest) (*mc
 			termtitle.EmitAttach(&attached)
 		}
 		text := ipc.FormatAttached(&attached)
+		if attached.OK {
+			text += "\n\n" + a.liveRoutePreamble()
+		}
 		// A successful attach can switch channels after initialize. Surface the
 		// just-attached manifest immediately only when it differs from the channel
 		// whose guidance the agent already received (or that channel was unknown).

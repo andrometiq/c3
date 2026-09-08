@@ -233,19 +233,10 @@ type RouteWorker struct {
 	// the worker's single run goroutine (flushInbounds), so it needs no lock.
 	dedup *deliveredDedup
 
-	// pendingAck holds the discrete source rows behind human pushes delivered to
-	// the current holder that it has not yet demonstrably processed (no outbound
-	// since delivery). The adapter acks a push as delivered the moment it writes to
-	// the CLI's stdin — a blind ack that CONSUMES the durable copies — so if the
-	// holder then dies/exits without handling them, they vanish silently (the
-	// 2026-07-12 dentist incident: a stolen-then-dead session ate two messages with
-	// no warning). A debounced push is presentation-merged, but its pending-ack
-	// entry retains every original row so confirmed holder death can restore the
-	// exact message boundaries and attachments. On death these are re-queued + a
-	// notice fires (flushPendingAck); any outbound from the holder clears them (it
-	// is alive and handling the turn). Worker-goroutine-only (delivered path +
-	// dispatchOutbound + pulseTyping), so it needs no lock.
-	pendingAck [][]*c3types.Inbound
+	// pendingAck retains discrete sources until their delivery token is
+	// confirmed, or holder death restores them. Outbound activity proves nothing
+	// about any particular inbound. Worker goroutine owns this bounded tracker.
+	pendingAck []pendingDelivery
 
 	// coveredByPush records, per live push, the durable queue lines that push
 	// actually covered. The broker-minted DeliveryToken is the primary
@@ -1094,8 +1085,7 @@ func (w *RouteWorker) forwardOrFallbackCovering(_ context.Context, in *c3types.I
 			w.key.Channel, w.key.ChatID, TopicKeyStr(w.key), in.MessageID,
 			holder.CLI, holder.PID)
 		w.broker.Routes.Release(w.key, holder.ConnID)
-		// Silent-loss net: any earlier pushes this now-dead holder never handled
-		// were consumed on its blind delivered-ack — re-queue them + notify.
+		// Restore any earlier unconfirmed deliveries from this dead holder.
 		w.flushPendingAck("The session exited")
 		claimed = false
 		holder = nil
@@ -1115,7 +1105,7 @@ func (w *RouteWorker) forwardOrFallbackCovering(_ context.Context, in *c3types.I
 	// still work). Gated to NON-events: events are never queued and carry no lost
 	// content, so leaving them on the current push path is zero behavior change
 	// (they'd be dropped by the host anyway, same as today).
-	if claimed && !in.IsEvent() && !holder.CanRenderPush() {
+	if claimed && !in.IsEvent() && !holder.tryRenderPush() {
 		log.Printf("deliver HELD chan=%s chat=%d topic=%s msg=%d: holder cli=%s pid=%d cannot render channel push — queuing for fetch_queue — %s",
 			w.key.Channel, w.key.ChatID, TopicKeyStr(w.key), in.MessageID,
 			holder.CLI, holder.PID, fallbackSummary(in))
@@ -1251,12 +1241,10 @@ func (w *RouteWorker) forwardOrFallbackCovering(_ context.Context, in *c3types.I
 		// (the deterministic per-route reply gate; see Stub.HasReplied) and
 		// the channel supports typing. armTyping enforces both gates.
 		w.armTyping(holder)
-		// Silent-loss net: this push was acked-as-delivered and its durable copy
-		// gets consumed on the adapter's blind ack, so track it until the holder
-		// proves it handled the turn (any outbound clears pendingAck) — else it is
-		// re-queued if the holder dies. Events carry no lost content, never queued.
+		// Track discrete sources until this delivery token is confirmed, so holder
+		// death can restore them. Events are never queued or recovery-tracked.
 		if !in.IsEvent() {
-			w.trackPendingAck(sources)
+			w.trackPendingAck(sources, deliveryToken)
 		}
 		return
 	}
@@ -2013,6 +2001,7 @@ func (w *RouteWorker) takeCoveredByPush(pushID int64, token string) []string {
 	}
 	ids := records[idx].ids
 	recordToken := records[idx].token
+	w.confirmPendingAck(recordToken)
 	records = append(records[:idx], records[idx+1:]...)
 	if len(records) == 0 {
 		delete(w.coveredByPush, pushID)
@@ -2316,9 +2305,6 @@ func (w *RouteWorker) dispatchOutbound(_ context.Context, job *OutboundJob) {
 	//     gated the same way as the initial arm (holder HasReplied + Typing cap)
 	//     via armTyping.
 	if err == nil {
-		// The holder produced outbound this turn — it is alive and processing, so
-		// its delivered backlog is being handled: clear the silent-loss tracker.
-		w.pendingAck = nil
 		if job.Tool == "reply" {
 			if holder, ok := w.broker.Routes.Holder(w.key); ok {
 				holder.MarkReplied(w.key)
@@ -2384,7 +2370,12 @@ func (w *RouteWorker) disarmTyping() {
 // unconfirmed human push for the silent-loss net, bounded by maxPendingAck
 // pushes (oldest dropped + logged past the cap). See the pendingAck field and
 // flushPendingAck.
-func (w *RouteWorker) trackPendingAck(sources []*c3types.Inbound) {
+type pendingDelivery struct {
+	token   string
+	sources []*c3types.Inbound
+}
+
+func (w *RouteWorker) trackPendingAck(sources []*c3types.Inbound, tokens ...string) {
 	discrete := make([]*c3types.Inbound, 0, len(sources))
 	for _, source := range sources {
 		if source != nil && !source.IsEvent() {
@@ -2394,7 +2385,11 @@ func (w *RouteWorker) trackPendingAck(sources []*c3types.Inbound) {
 	if len(discrete) == 0 {
 		return
 	}
-	w.pendingAck = append(w.pendingAck, discrete)
+	token := ""
+	if len(tokens) > 0 {
+		token = tokens[0]
+	}
+	w.pendingAck = append(w.pendingAck, pendingDelivery{token: token, sources: discrete})
 	if over := len(w.pendingAck) - maxPendingAck; over > 0 {
 		log.Printf("pendingAck chan=%s chat=%d topic=%s: over cap, dropping %d oldest tracked delivery(ies)",
 			w.key.Channel, w.key.ChatID, TopicKeyStr(w.key), over)
@@ -2404,14 +2399,13 @@ func (w *RouteWorker) trackPendingAck(sources []*c3types.Inbound) {
 
 // flushPendingAck re-queues every inbound that was delivered to a now-dead holder
 // but never handled, then posts one notice to the topic so the operator is told.
-// This closes the silent-loss gap: the adapter acked those pushes as delivered
-// (consuming the durable copy) on a blind stdin write, but the holder exited
-// without processing them. Called ONLY on confirmed holder death, so it never
+// This preserves the existing holder-death recovery semantics for deliveries
+// whose tokens were never confirmed. Called ONLY on confirmed holder death, so it never
 // fires for a merely-slow live session. No-op when nothing is tracked.
 func (w *RouteWorker) flushPendingAck(reason string) {
 	// The holder is confirmed dead, so none of its outstanding push records may
 	// bleed into a replacement holder. Clear them even when pendingAck is empty
-	// (an outbound may already have cleared that separate handled-turn tracker).
+	// (confirmed receipts may already have emptied the recovery tracker).
 	w.coveredByPush = nil
 	w.coveredOrder = nil
 	if len(w.pendingAck) == 0 {
@@ -2421,12 +2415,12 @@ func (w *RouteWorker) flushPendingAck(reason string) {
 	w.pendingAck = nil
 	lostRows := 0
 	for _, sources := range lost {
-		lostRows += len(sources)
+		lostRows += len(sources.sources)
 	}
 	requeued := 0
 	if w.broker != nil && w.broker.Queue != nil {
 		for _, sources := range lost {
-			for _, in := range sources {
+			for _, in := range sources.sources {
 				if err := w.broker.Queue.Append(queueRouteKey(w.key), in); err != nil {
 					log.Printf("pendingAck flush FAIL chan=%s chat=%d topic=%s msg=%d: re-queue: %v",
 						w.key.Channel, w.key.ChatID, TopicKeyStr(w.key), in.MessageID, err)
@@ -2725,4 +2719,16 @@ func (w *RouteWorker) debounceMaxMessages() int {
 		return defaultDebounceMaxMsgs
 	}
 	return cc.DebounceMaxMessages
+}
+
+func (w *RouteWorker) confirmPendingAck(token string) {
+	if token == "" {
+		return
+	} // cannot identify an un-tokened recovery entry
+	for i, pending := range w.pendingAck {
+		if pending.token == token {
+			w.pendingAck = append(w.pendingAck[:i], w.pendingAck[i+1:]...)
+			return
+		}
+	}
 }

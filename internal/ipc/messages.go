@@ -280,23 +280,13 @@ type HelloMsg struct {
 	CWD          string   `json:"cwd"`
 	Capabilities []string `json:"capabilities,omitempty"`
 
-	// CannotRenderChannels marks a session whose HOST cannot render channel push
-	// notifications — a Claude Code session launched WITHOUT the
-	// development-channels flag for this plugin (typically a --fork-session
-	// background job). Such a host silently DROPS notifications/claude/channel
-	// frames before rendering, so an inbound the adapter "delivered" and acked
-	// would vanish (the forked-session blackhole). When set, the broker never
-	// marks this holder's inbound delivered: durable human messages fall through
-	// to the queue + held-notice (recoverable via fetch_queue, an MCP tool-result
-	// that DOES render), while the session keeps its claim for OUTBOUND.
-	//
-	// Inverted sense on purpose: absent/false = renderable. The adapter sets true
-	// ONLY when it is confident it cannot render (see the adapter's
-	// hostCanRenderChannels detection). Additive + omitempty keeps old adapters
-	// (field absent → broker reads renderable → today's behavior) and old brokers
-	// (unknown field ignored) compatible; the fix engages only new-adapter↔
-	// new-broker, matching the single-host-lockstep note above.
-	CannotRenderChannels bool `json:"cannot_render_channels,omitempty"`
+	// CannotRenderChannels is the legacy delivery gate. New adapters set it true
+	// for both queue_only and probing, so old brokers safely hold unproven routes.
+	// Absent fields retain the old adapter default. RenderState/RenderReason are
+	// additive; a new broker permits exactly one probing push pending confirmation.
+	CannotRenderChannels bool   `json:"cannot_render_channels,omitempty"`
+	RenderState          string `json:"render_state,omitempty"`
+	RenderReason         string `json:"render_reason,omitempty"`
 
 	// ProtocolVersion is the IPC wire-protocol version this adapter speaks (see
 	// ipc.ProtocolVersion for the bump rule). Additive + omitempty: an adapter
@@ -452,17 +442,19 @@ type ClaimsListMsg struct {
 // when the route corresponds to a known topic in mappings.json (lookup is
 // best-effort; empty when the route is a DM or a yet-unregistered topic).
 type ClaimEntry struct {
-	Channel   string `json:"channel"`
-	ChatID    int64  `json:"chat_id"`
-	HasTopic  bool   `json:"has_topic"`
-	TopicID   int64  `json:"topic_id,omitempty"`
-	TopicName string `json:"topic_name,omitempty"`
-	GroupName string `json:"group_name,omitempty"`
-	HolderCLI string `json:"holder_cli"`
-	HolderPID int    `json:"holder_pid"`
-	HolderCWD string `json:"holder_cwd,omitempty"`
-	ConnID    uint64 `json:"conn_id"`
-	Connected bool   `json:"connected"`
+	RenderState  string `json:"render_state,omitempty"`
+	RenderReason string `json:"render_reason,omitempty"`
+	Channel      string `json:"channel"`
+	ChatID       int64  `json:"chat_id"`
+	HasTopic     bool   `json:"has_topic"`
+	TopicID      int64  `json:"topic_id,omitempty"`
+	TopicName    string `json:"topic_name,omitempty"`
+	GroupName    string `json:"group_name,omitempty"`
+	HolderCLI    string `json:"holder_cli"`
+	HolderPID    int    `json:"holder_pid"`
+	HolderCWD    string `json:"holder_cwd,omitempty"`
+	ConnID       uint64 `json:"conn_id"`
+	Connected    bool   `json:"connected"`
 	// IsOutput marks the holder's outbound-default route. It is additive and
 	// omitted for input-only routes and older brokers.
 	IsOutput bool `json:"is_output,omitempty"`
@@ -898,10 +890,12 @@ type ListSessionsReplyMsg struct {
 // SessionEntry is one row of ListSessionsReplyMsg.Sessions. Mirrors
 // what the user would see in the rendered table.
 type SessionEntry struct {
-	CLI    string `json:"cli"`
-	PID    int    `json:"pid"`
-	CWD    string `json:"cwd"`
-	ConnID uint64 `json:"conn_id"`
+	RenderState  string `json:"render_state,omitempty"`
+	RenderReason string `json:"render_reason,omitempty"`
+	CLI          string `json:"cli"`
+	PID          int    `json:"pid"`
+	CWD          string `json:"cwd"`
+	ConnID       uint64 `json:"conn_id"`
 	// AttachedTo is the human-formatted topic label — "<name> (<group>)"
 	// for a regular topic, "dm" for a DM route, "topic-<id>" when the
 	// route refers to an unknown topic id, or "" when the stub holds no routes.

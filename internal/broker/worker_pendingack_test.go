@@ -49,7 +49,7 @@ func TestFlushPendingAck_RequeuesAndNotifies(t *testing.T) {
 	w := newRouteWorker(context.Background(), key, time.Hour, b)
 	defer w.Stop()
 
-	w.pendingAck = [][]*c3types.Inbound{{inbound(tid, 1, "first")}, {inbound(tid, 2, "second")}}
+	w.pendingAck = []pendingDelivery{{sources: []*c3types.Inbound{inbound(tid, 1, "first")}}, {sources: []*c3types.Inbound{inbound(tid, 2, "second")}}}
 	w.flushPendingAck("The session exited")
 
 	if n, _ := b.Queue.Pending(queueRouteKey(key)); n != 2 {
@@ -111,7 +111,7 @@ func TestDelivered_TracksPendingAck(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("capable holder must be delivered the message")
 	}
-	if len(w.pendingAck) != 1 || len(w.pendingAck[0]) != 1 || w.pendingAck[0][0].MessageID != 1 {
+	if len(w.pendingAck) != 1 || len(w.pendingAck[0].sources) != 1 || w.pendingAck[0].sources[0].MessageID != 1 {
 		t.Fatalf("a delivered human message must be tracked; got %+v", w.pendingAck)
 	}
 
@@ -141,8 +141,8 @@ func TestTrackPendingAck_CapDropsOldest(t *testing.T) {
 	if len(w.pendingAck) != maxPendingAck {
 		t.Fatalf("tracker must cap at %d; got %d", maxPendingAck, len(w.pendingAck))
 	}
-	if w.pendingAck[0][0].MessageID != 4 {
-		t.Errorf("the 3 oldest must be dropped (newest kept); oldest kept id=%d, want 4", w.pendingAck[0][0].MessageID)
+	if w.pendingAck[0].sources[0].MessageID != 4 {
+		t.Errorf("the 3 oldest must be dropped (newest kept); oldest kept id=%d, want 4", w.pendingAck[0].sources[0].MessageID)
 	}
 }
 
@@ -166,7 +166,7 @@ func TestStalePath_FlushesPendingAck(t *testing.T) {
 
 	w := newRouteWorker(context.Background(), key, time.Hour, b)
 	defer w.Stop()
-	w.pendingAck = [][]*c3types.Inbound{{inbound(tid, 1, "earlier")}} // an earlier delivery
+	w.pendingAck = []pendingDelivery{{sources: []*c3types.Inbound{inbound(tid, 1, "earlier")}}} // an earlier delivery
 
 	w.forwardOrFallback(context.Background(), inbound(tid, 2, "new"), 1)
 

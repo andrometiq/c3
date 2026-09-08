@@ -179,6 +179,9 @@ func (b *Broker) routeSetRefs(stub *Stub) ([]mappings.RouteRef, *mappings.RouteR
 
 func (b *Broker) withRouteSet(stub *Stub, msg ipc.AttachedMsg) ipc.AttachedMsg {
 	routes, output := b.routeSetRefs(stub)
+	if msg.OK {
+		b.notifyRenderRoute(stub)
+	}
 	msg.Routes = routes
 	msg.Output = output
 	return msg

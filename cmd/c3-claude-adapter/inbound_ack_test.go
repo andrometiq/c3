@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"net"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -49,6 +51,7 @@ func readDeliveredAck(t *testing.T, c *ipc.Conn, within time.Duration) (ipc.Inbo
 func adapterWithConn(t *testing.T) (*adapter, *ipc.Conn) {
 	t.Helper()
 	a := newAdapter()
+	seedLiveTranscript(t, a)
 
 	// A notifyTx backed by an in-memory IOTransport so Notify succeeds.
 	var buf safeBuffer
@@ -83,7 +86,8 @@ func TestHandleInbound_TextPushSendsDeliveredAck(t *testing.T) {
 		Inbound:       c3types.Inbound{Channel: "telegram", ChatID: -100, MessageID: 7, Text: "hi"},
 	}
 	raw, _ := json.Marshal(msg)
-	go a.handleInbound(context.Background(), raw)
+	a.handleInbound(context.Background(), raw)
+	appendChannelReceipt(t, a.livePath(), "broker-a-7")
 
 	ack, got := readDeliveredAck(t, peer, time.Second)
 	if !got {
@@ -126,6 +130,7 @@ func TestHandleInbound_EventPushSkipsDeliveredAck(t *testing.T) {
 // the nudge text lands on the notify push itself.
 func TestHandleInbound_PendingDecoratesPushWithNudge(t *testing.T) {
 	a := newAdapter()
+	seedLiveTranscript(t, a)
 
 	// A notifyTx backed by an in-memory buffer we can inspect for the pushed frame.
 	var buf safeBuffer
@@ -167,5 +172,34 @@ func TestHandleInbound_PendingDecoratesPushWithNudge(t *testing.T) {
 	out := string(buf.Bytes())
 	if !strings.Contains(out, "3 pending") || !strings.Contains(out, "fetch_queue") {
 		t.Fatalf("push content must carry the recovery nudge '(3 pending — call fetch_queue)'; pushed frame was:\n%s", out)
+	}
+}
+
+func seedLiveTranscript(t *testing.T, a *adapter) string {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	a.runCtx = ctx
+	t.Cleanup(cancel)
+	path := filepath.Join(t.TempDir(), "session.jsonl")
+	if err := os.WriteFile(path, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	a.liveTranscriptPath = func() string { return path }
+	a.renderRoute = ipc.RenderRoute{State: ipc.RenderCapable}
+	return path
+}
+
+func appendChannelReceipt(t *testing.T, path, marker string) {
+	t.Helper()
+	line, _ := json.Marshal(map[string]any{"type": "user", "message": map[string]any{
+		"role": "user", "content": `<channel source="c3" c3_delivery_id="` + marker + `">hello</channel>`,
+	}})
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if _, err := f.Write(append(line, '\n')); err != nil {
+		t.Fatal(err)
 	}
 }

@@ -1,6 +1,7 @@
 package broker
 
 import (
+	"github.com/Andrometiq/c3/internal/ipc"
 	"sync"
 	"sync/atomic"
 )
@@ -62,16 +63,11 @@ type Stub struct {
 	// separate acts, so a future silent AddRoute leaves the tripwire armed.
 	// Guarded by stubMu.
 	confirmed map[RouteKey]bool
-	// cannotRender is set from HelloMsg.CannotRenderChannels: the host silently
-	// drops channel push notifications (a Claude Code session launched without the
-	// development-channels flag — typically a --fork-session background job). When
-	// true, forwardOrFallback never marks this holder's durable inbound delivered:
-	// human messages fall through to the queue + held-notice (recoverable via
-	// fetch_queue) while the session keeps its claim for OUTBOUND. Default false
-	// (renderable) so old adapters and the normal fast path are unaffected. Set
-	// once at hello via SetCannotRender; read on the delivery path via
-	// CanRenderPush. Guarded by stubMu.
-	cannotRender bool
+	// Delivery eligibility, probe reservation, and notice history are owned by
+	// stubMu. Empty state preserves the legacy adapter default (capable).
+	renderRoute        ipc.RenderRoute
+	renderProbeSent    bool
+	renderNoticeRoutes map[RouteKey]string
 	// peerProtocolVersion is the normalized IPC dialect observed on hello.
 	// Sensitive dispatch reads this stored connection identity rather than
 	// re-decoding or assuming the current build's dialect.
@@ -371,9 +367,7 @@ func (s *Stub) ExplicitlyDetached() bool {
 // push notifications (from HelloMsg.CannotRenderChannels). Set once at hello,
 // before the stub is claimable. Guarded by stubMu like the route set.
 func (s *Stub) SetCannotRender(v bool) {
-	s.stubMu.Lock()
-	defer s.stubMu.Unlock()
-	s.cannotRender = v
+	s.SetRenderRoute("", "", v)
 }
 
 // CanRenderPush reports whether the broker may push channel notifications to this
@@ -384,7 +378,7 @@ func (s *Stub) SetCannotRender(v bool) {
 func (s *Stub) CanRenderPush() bool {
 	s.stubMu.Lock()
 	defer s.stubMu.Unlock()
-	return !s.cannotRender
+	return s.renderRoute.State != ipc.RenderQueueOnly
 }
 
 func (s *Stub) SetPeerProtocolVersion(version int) {
@@ -581,4 +575,64 @@ func (r *StubRegistry) Snapshot() []*Stub {
 		out = append(out, s)
 	}
 	return out
+}
+
+// SetRenderRoute applies additive hello/update fields; legacy adapters retain
+// the old boolean default. Unknown explicit states fail closed.
+func (s *Stub) SetRenderRoute(state, reason string, cannot bool) {
+	s.stubMu.Lock()
+	defer s.stubMu.Unlock()
+	if state == "" {
+		if cannot {
+			state = ipc.RenderQueueOnly
+		} else {
+			state = ipc.RenderCapable
+		}
+	}
+	if state != ipc.RenderCapable && state != ipc.RenderProbing {
+		state = ipc.RenderQueueOnly
+	}
+	s.renderRoute = ipc.RenderRoute{State: state, Reason: reason}
+	s.renderProbeSent = false
+	if state == ipc.RenderCapable {
+		s.renderNoticeRoutes = nil
+	}
+}
+
+func (s *Stub) RenderRoute() ipc.RenderRoute {
+	s.stubMu.Lock()
+	defer s.stubMu.Unlock()
+	if s.renderRoute.State == "" {
+		return ipc.RenderRoute{State: ipc.RenderCapable}
+	}
+	return s.renderRoute
+}
+
+func (s *Stub) takeRenderNotice(key RouteKey) bool {
+	s.stubMu.Lock()
+	defer s.stubMu.Unlock()
+	state := s.renderRoute.State + ":" + s.renderRoute.Reason
+	if s.renderNoticeRoutes[key] == state {
+		return false
+	}
+	if s.renderNoticeRoutes == nil {
+		s.renderNoticeRoutes = map[RouteKey]string{}
+	}
+	s.renderNoticeRoutes[key] = state
+	return true
+}
+
+// Reserve the first probe across all routes held by this session. Later human
+// messages use the normal durable hold path until its receipt arrives.
+func (s *Stub) tryRenderPush() bool {
+	s.stubMu.Lock()
+	defer s.stubMu.Unlock()
+	if s.renderRoute.State == ipc.RenderProbing {
+		if s.renderProbeSent {
+			return false
+		}
+		s.renderProbeSent = true
+		return true
+	}
+	return s.renderRoute.State != ipc.RenderQueueOnly
 }

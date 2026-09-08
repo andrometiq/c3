@@ -137,7 +137,7 @@ The broker never rejects unknown JSON fields, and neither should you.
 
 ## Op reference
 
-38 ops exist. This section documents all of them: **15 Frozen**, **11 Provisional**, **10 belonging to the bundled CLI rather than to adapters**, and **2 that are not implemented and must not be sent**.
+39 ops exist. This section documents all of them: **15 Frozen**, **12 Provisional**, **10 belonging to the bundled CLI rather than to adapters**, and **2 that are not implemented and must not be sent**.
 
 Field names below are the literal JSON keys. `?` marks an optional field (omitted when empty/zero).
 
@@ -160,14 +160,21 @@ An adapter that implements only these is correct and complete for a CLI with no 
 | `pid` | int | your adapter's pid. The broker keeps a claim alive as long as this pid lives, so it must be a real, live process id. A future version may additionally bind this pid to its process start time, so that a *recycled* pid is not treated as the same session; an honest pid is unaffected. |
 | `cwd` | string | resolved-absolute path. Seeds the attach picker's "current project" suggestion and the cwd→mapping lookup. |
 | `capabilities`? | []string | free-form tags. **Currently recorded on the wire but not read by the broker** — informational only. |
-| `cannot_render_channels`? | bool | **inverted sense, and load-bearing — read the next paragraph.** |
+| `cannot_render_channels`? | bool | True for both `queue_only` and `probing`; absent preserves the legacy adapter default. |
+| `render_state`? | string | `capable`, `probing`, or `queue_only`. Additive; protocol remains 1. |
+| `render_reason`? | string | Short generic explanation, without personal paths or identifiers. |
 | `protocol_version`? | int | absent ⇒ 1. |
 
 **The identity rule: `cli`, `pid` and `cwd` together are your session identity, and identity is what buys persistence.** A hello with an empty `cli` or `pid ≤ 0` is **accepted** — it is not a protocol error and your connection works normally — but it is **anonymous**, and the broker will never match it to any other connection. Concretely, an anonymous adapter gets no reconnect claim transfer (its claims are released when the connection drops, since a pid of `0` is never live), and no cross-connection continuation: a permission verdict arriving after a reconnect, or a "held by you" report, is refused rather than guessed at. Everything within one connection — attach, tools, inbound, permissions — works exactly as documented.
 
 The broker rejects only *malformed JSON*. It does not reject an incomplete identity; it declines to treat one as an identity. The reason is a rule this project holds without exception: **two unknown identities must never compare equal.** Two adapters that both omit these fields are not the same session, and the broker will not hand one's topic to the other on the strength of them matching in their emptiness.
 
-**`cannot_render_channels` is the one field a naive adapter gets wrong with data-loss consequences.** Absent or `false` means *"my host can render unsolicited channel pushes."* Set it to `true` only when you are confident your host **cannot** display a push. When true, the broker never marks that session's inbound as delivered: durable human messages fall through to the queue plus a held-notice (recoverable via `fetch_queue`, which is a tool *result* and therefore always renders), while the session keeps its claim for outbound.
+**Fail closed when host delivery is uncertain.** New Claude adapters set
+`cannot_render_channels: true` for both `queue_only` and `probing`. Old brokers
+ignore the new fields and hold these messages for `fetch_queue`. New brokers
+use `render_state` to allow one probe; old adapters that omit the new fields
+retain their boolean behavior. The session keeps its claims for outbound.
+A false queue-only costs a fetch; a false capable can lose a message.
 
 If your CLI has no unsolicited-notification path at all — the exact case this document tells you to expect — and you leave this field absent, the broker reads your host as renderable, pushes to it, acks, and the user loses every message. The poll-only built-ins (`c3-desktop-adapter`, `c3-agy-adapter`, `c3-cursor-adapter`) set it `true` unconditionally.
 
@@ -340,7 +347,7 @@ Sent by either side. **Not correlated to any request** — you cannot match it t
 
 ---
 
-### Provisional — 11 ops
+### Provisional — 12 ops
 
 Implemented and shipping, but the shapes are not frozen for v0.1.0. Each entry names why.
 
@@ -523,11 +530,71 @@ This is the part a doc-conformant adapter previously got wrong in a way that wor
 
 **While the durable queue is healthy, a delivered message stays there until you acknowledge it.** The broker writes the push to your socket and then waits. It does not consider the message done. If the broker reports that durability is degraded, live delivery still works but there is no queued copy to protect.
 
+Claude Code has three route states, shown by `attach`, the MCP instructions,
+`c3-broker status` / `/c3:status`, and Telegram `/status`:
+
+- **`capable`** (displayed as **channel**): the nearest Claude host has the
+  development-channels flag naming C3, or a probe was confirmed. Every push
+  still needs its own transcript receipt before acknowledgement.
+- **`probing`**: the nearest host has `--channels plugin:c3@c3` (also accepts
+  `--channels=plugin:c3@c3`). This establishes eligibility, not registration.
+  Only the first human push is sent; subsequent messages stay queued until
+  confirmation changes the state to `capable`.
+- **`queue_only`** (displayed as **queue-only**): no identified host, unreadable
+  or truncated ancestry, no qualifying flag, Windows, unavailable transcript,
+  or a failed live confirmation. Retrieve inbound with `fetch_queue`.
+
+Linux reads `/proc`; macOS uses the existing `golang.org/x/sys/unix` dependency
+for `kern.procargs2` and `kern.proc.pid`, preserving actual argv boundaries.
+Only the **nearest** host's argv counts. An outer session's flag cannot qualify
+an inner flagless session. Both development-flag forms (`--flag value` and
+`--flag=value`) are accepted.
+
+The Claude adapter reuses D020's bounded complete-record JSONL reader and
+session transcript resolver. Existing `message_id` metadata is not unique to
+an occurrence (edits and different routes may reuse it), so it adds string
+metadata `c3_delivery_id`, carrying the broker's `delivery_token`. With an old
+broker lacking tokens, it generates a fresh random marker for readback while
+keeping the legacy ack token empty. Claude's channel renderer is expected to
+copy metadata into `<channel ...>` attributes.
+
+**A successful notification write is not a receipt.** The adapter observes new
+complete records after the pre-push file offset. It requires `"type":"user"`,
+`"message":{"role":"user","content":...}`, with the matching
+`c3_delivery_id` in a channel opening tag and a closing `</channel>`. `content`
+may be a string or an array of `{"type":"text","text":...}` blocks. A
+`{"type":"queue-operation","operation":"enqueue",...}` record alone is
+insufficient: enqueue is not proof of injection into the conversation.
+
+Confirmation waits **15 seconds** (`liveReadbackWindow`), off the MCP request
+loop. Each scan uses a file-size snapshot capped at 32 MiB; incomplete final lines are retried,
+lines beyond 16 MiB cannot confirm delivery, and at most 64 receipts are pending.
+On timeout the adapter sends no ack, changes to `queue_only` with reason
+`live push not confirmed`, and stops human pushes until explicit attach or
+reconnect retries detection. The broker uses the existing coalesced
+**📨 Held — nothing lost** notice when durable messages are pending. Attach also
+posts a one-time route notice for an unproven route. Readback proves transcript
+injection, not completion of the requested work; host transcript format drift
+fails toward retaining a duplicate, never blind consumption.
+
+The additive adapter → broker `render_state` op publishes transitions:
+
+```json
+{"op":"render_state","render_state":"queue_only",
+ "render_reason":"live push not confirmed"}
+```
+
+There is no reply and no protocol-version bump. Old brokers log/ignore this
+unknown op; local adapter gating and withholding the ack still protect the
+queue. `claims_list` and `list_sessions_reply` also carry optional
+`render_state` and `render_reason` per session. An unrelated successful outbound
+tool call never clears unconfirmed delivery tokens.
+
 The full loop:
 
 1. Receive `inbound` with `inbound`, `pending`, `covered`.
-2. Render it into your host's dialect.
-3. **On success**, send:
+2. Render it into your host's dialect and confirm acceptance (Claude: transcript readback).
+3. **Only on confirmed acceptance**, send:
    ```json
    {"op":"inbound_delivered","update_id":<inbound.MessageID>,"ok":true,
     "count":<covered>,"delivery_token":"<inbound.delivery_token>"}

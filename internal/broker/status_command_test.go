@@ -68,7 +68,7 @@ func TestStatusForTopic_LiveHolderReadsAttached(t *testing.T) {
 		t.Fatal("claim should succeed")
 	}
 	got := b.statusForTopic("telegram", -1001234567890, &tid)
-	if !strings.Contains(got, "· Claude Code attached · broker up") {
+	if !strings.Contains(got, "· Claude Code attached · Live route: channel. · broker up") {
 		t.Fatalf("live claude holder should read 'Claude Code attached', got %q", got)
 	}
 }
@@ -88,7 +88,7 @@ func TestStatusForTopic_NamesTheSurface(t *testing.T) {
 		t.Fatal("claim should succeed")
 	}
 	got := b.statusForTopic("telegram", -1001234567890, &tid)
-	if !strings.Contains(got, "· Claude Desktop attached · broker up") {
+	if !strings.Contains(got, "· Claude Desktop attached · Live route: channel. · broker up") {
 		t.Fatalf("desktop holder should read 'Claude Desktop attached', got %q", got)
 	}
 	if strings.Contains(got, "CLI attached") {

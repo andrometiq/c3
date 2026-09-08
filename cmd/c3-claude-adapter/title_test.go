@@ -180,7 +180,7 @@ func TestToolAttach_TelegramResultMatchesPreModeText(t *testing.T) {
 	if result.IsError {
 		t.Fatalf("toolAttach returned an error: %q", resultText(t, result))
 	}
-	if got, want := resultText(t, result), `attached to "project" (chat -1001, thread 42)`; got != want {
+	if got, want := resultText(t, result), `attached to "project" (chat -1001, thread 42)`; !strings.HasPrefix(got, want+"\n\nLive route: queue-only") {
 		t.Fatalf("Telegram attach result changed:\n got: %q\nwant: %q", got, want)
 	}
 	if strings.Contains(resultText(t, result), "CHANNEL CAPABILITIES") {

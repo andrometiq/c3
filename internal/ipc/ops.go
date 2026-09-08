@@ -10,11 +10,13 @@ type Op string
 
 const (
 	// adapter → broker
-	OpHello      Op = "hello"
-	OpServerInfo Op = "server_info"
-	OpToolsList  Op = "tools_list"
-	OpAttach     Op = "attach"
-	OpRelease    Op = "release"
+	// OpRenderState updates delivery eligibility without changing claims.
+	OpRenderState Op = "render_state"
+	OpHello       Op = "hello"
+	OpServerInfo  Op = "server_info"
+	OpToolsList   Op = "tools_list"
+	OpAttach      Op = "attach"
+	OpRelease     Op = "release"
 	// OpSetOutputRoute changes only the outbound default within the caller's
 	// held route set. It is a brand-new additive op (no version bump).
 	OpSetOutputRoute  Op = "set_output_route"

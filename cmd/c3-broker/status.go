@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/Andrometiq/c3/internal/broker"
+	"github.com/Andrometiq/c3/internal/ipc"
 	"github.com/Andrometiq/c3/internal/mappings"
 	"github.com/Andrometiq/c3/internal/plugin/builtins/stt"
 	"github.com/Andrometiq/c3/internal/plugin/builtins/tts"
@@ -216,6 +217,9 @@ func runStatus() error {
 			}
 			fmt.Fprintf(&b, "  • %s — held by %s pid %d conn=%d [%s] [%s]\n",
 				route, c.HolderCLI, c.HolderPID, c.ConnID, role, liveness)
+			if c.RenderState != "" {
+				fmt.Fprintln(&b, "    "+(ipc.RenderRoute{State: c.RenderState, Reason: c.RenderReason}).Text())
+			}
 		}
 	}
 

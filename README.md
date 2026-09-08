@@ -16,7 +16,8 @@ topic answers there. Claude Code on one project, Codex on the next, no app switc
   tap is ignored.
 - **Voice in.** Send a voice note; the session receives the transcript as a native turn.
 - **Nothing gets lost.** No session attached, laptop asleep, agent mid-task: the message waits
-  on disk and is delivered once, in order, when a session can take it.
+  on disk until delivery is confirmed. If the live route is unavailable, retrieve it with
+  `fetch_queue`.
 - **A web chat for when Telegram isn't where you are.** Same broker, same topics, phone-friendly,
   reachable only over your own network.
 

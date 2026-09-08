@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -160,7 +161,7 @@ func TestHandleInboundEndToEnd(t *testing.T) {
 		},
 		Timestamp: time.Date(2026, 5, 9, 9, 17, 55, 0, time.UTC),
 	}
-	raw, err := json.Marshal(ipc.InboundMsg{Op: ipc.OpInbound, Inbound: in})
+	raw, err := json.Marshal(ipc.InboundMsg{Op: ipc.OpInbound, Inbound: in, DeliveryToken: fmt.Sprintf("test-delivery-%d", in.MessageID)})
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
@@ -168,7 +169,7 @@ func TestHandleInboundEndToEnd(t *testing.T) {
 	// Capture the wire bytes by wrapping an IOTransport with a buffer
 	// writer. Connection.Write goes straight to this buffer.
 	var buf safeBuffer
-	a := newAdapter()
+	a, _ := adapterWithConn(t)
 	a.notifyTx = newNotifyTransport(&mcp.IOTransport{
 		Reader: nopCloseReader{strings.NewReader("")},
 		Writer: nopCloseWriter{&buf},
@@ -206,6 +207,15 @@ func TestHandleInboundEndToEnd(t *testing.T) {
 
 func captureClaudeInboundFrame(t *testing.T, a *adapter, in c3types.Inbound) []byte {
 	t.Helper()
+	if a.liveTranscriptPath == nil {
+		seedLiveTranscript(t, a)
+	}
+	if a.currentConn() == nil {
+		donor, _ := adapterWithConn(t)
+		a.bmu.Lock()
+		a.conn = donor.conn
+		a.bmu.Unlock()
+	}
 	var buf safeBuffer
 	a.notifyTx = newNotifyTransport(&mcp.IOTransport{
 		Reader: nopCloseReader{strings.NewReader("")},
@@ -214,7 +224,7 @@ func captureClaudeInboundFrame(t *testing.T, a *adapter, in c3types.Inbound) []b
 	if _, err := a.notifyTx.Connect(context.Background()); err != nil {
 		t.Fatalf("notifyTx.Connect: %v", err)
 	}
-	raw, err := json.Marshal(ipc.InboundMsg{Op: ipc.OpInbound, Inbound: in})
+	raw, err := json.Marshal(ipc.InboundMsg{Op: ipc.OpInbound, Inbound: in, DeliveryToken: fmt.Sprintf("test-delivery-%d", in.MessageID)})
 	if err != nil {
 		t.Fatalf("marshal inbound: %v", err)
 	}
@@ -232,7 +242,9 @@ func captureClaudeGoldenFrame(t *testing.T, in c3types.Inbound) []byte {
 	if _, err := tx.Connect(context.Background()); err != nil {
 		t.Fatalf("notifyTx.Connect: %v", err)
 	}
-	if err := tx.Notify(context.Background(), "notifications/claude/channel", buildClaudeChannelFrame(&in)); err != nil {
+	frame := buildClaudeChannelFrame(&in)
+	frame["meta"].(map[string]any)["c3_delivery_id"] = fmt.Sprintf("test-delivery-%d", in.MessageID)
+	if err := tx.Notify(context.Background(), "notifications/claude/channel", frame); err != nil {
 		t.Fatalf("Notify: %v", err)
 	}
 	return buf.Bytes()

@@ -24,6 +24,8 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+
+	"github.com/Andrometiq/c3/internal/ipc"
 )
 
 // devChannelsFlag is the Claude Code launch flag that loads development channel
@@ -41,70 +43,56 @@ type procReaders struct {
 	ppid func(pid int) (int, bool)
 }
 
-// hostCanRenderChannels reports whether the Claude Code process that launched
-// this adapter can render channel push notifications. Computed once at startup
-// (the process tree is fixed for the session).
-//
-// Windows is a special case: there is no /proc, so the ancestor-cmdline walk
-// can't run and would fall through to "capable" for EVERY session — dangerous,
-// because the Claude Desktop app launches Claude Code WITHOUT the dev-channels
-// flag, so the host silently drops the channel frame and a false "capable"
-// makes the broker deliver+RETIRE the durable copy → the message is LOST (not
-// even fetch_queue-recoverable). So on Windows we fail SAFE: report NOT capable
-// so inbound is HELD in the durable queue (recoverable via fetch_queue). Worst
-// case is a needless fetch, never silent loss. (Windows is beta / poll-only
-// until a real Windows render detector exists.)
-//
-// On Linux it returns TRUE (capable) on ANY uncertainty — unreadable ancestors
-// or no identifiable Claude Code host in the chain — so an unknown environment
-// never regresses the normal fast path. Returns FALSE only when it positively
-// identifies a Claude Code host launched WITHOUT the flag.
-func hostCanRenderChannels() bool {
-	// Windows has no /proc; fail safe to not-renderable so inbound is HELD, not
-	// silently lost (see the doc comment above). Windows delivery is poll-only.
-	if runtime.GOOS == "windows" {
-		return false
-	}
-	return detectRenderCapable(os.Getpid(), procReaders{cmdline: readProcCmdline, ppid: readProcPPID})
+// Detection fails closed: a false queue-only costs a fetch; a false capable
+// can lose a message. Only the NEAREST positively identified host counts.
+func hostCanRenderChannels() bool { return hostRenderRoute().State == ipc.RenderCapable }
+
+func hostRenderRoute() ipc.RenderRoute {
+	return detectRenderRoute(runtime.GOOS, os.Getpid(), platformProcReaders())
 }
 
-// detectRenderCapable walks the ancestor chain from startPID upward.
-//
-//   - Flag (naming c3) found on any ancestor        → true  (confident capable).
-//   - Chain walked, a Claude host seen, no flag      → false (confident blackhole).
-//   - Otherwise (walk truncated before a host,
-//     no /proc, no host identified)                  → true  (uncertain → capable).
-//
-// The "confident false" requires positively seeing a Claude Code host ancestor so
-// a truncated/failed walk can never falsely mark a working session not-capable
-// (which would be a fast-path regression). The asymmetry is deliberate: a false
-// "not capable" is a visible regression (needless queuing + held-notice); a
-// missed blackhole degrades to today's behavior, not worse.
 func detectRenderCapable(startPID int, r procReaders) bool {
-	const maxDepth = 40
-	pid := startPID
-	sawClaudeHost := false
-	for depth := 0; depth < maxDepth; depth++ {
-		args, ok := r.cmdline(pid)
-		if !ok {
-			break // can't read this ancestor — stop and decide on what we saw.
-		}
-		if cmdlineHasDevChannelForC3(args) {
-			return true // confident: the c3 dev-channels flag is present.
+	return detectRenderRoute("linux", startPID, r).State == ipc.RenderCapable
+}
+
+func detectRenderRoute(goos string, startPID int, r procReaders) ipc.RenderRoute {
+	queue := func(reason string) ipc.RenderRoute {
+		return ipc.RenderRoute{State: ipc.RenderQueueOnly, Reason: reason}
+	}
+	if goos == "windows" {
+		return queue("windows")
+	}
+	if r.cmdline == nil || r.ppid == nil {
+		return queue("process tree unreadable")
+	}
+	pid, ok := r.ppid(startPID)
+	if !ok {
+		return queue("process tree unreadable")
+	}
+	for depth := 0; depth < 40 && pid > 1; depth++ {
+		args, readable := r.cmdline(pid)
+		if !readable {
+			return queue("process tree unreadable")
 		}
 		if isClaudeHost(args) {
-			sawClaudeHost = true
+			if cmdlineHasDevChannelForC3(args) {
+				return ipc.RenderRoute{State: ipc.RenderCapable}
+			}
+			if cmdlineHasChannelForC3(args, "--channels") {
+				return ipc.RenderRoute{State: ipc.RenderProbing, Reason: "channels flag present, awaiting confirmation"}
+			}
+			return queue("no dev-channels flag on host")
 		}
-		parent, ok := r.ppid(pid)
-		if !ok || parent <= 1 || parent == pid {
-			break // reached init / self-loop / unreadable — stop.
+		parent, readable := r.ppid(pid)
+		if !readable {
+			return queue("process tree unreadable")
+		}
+		if parent == pid {
+			return queue("process tree truncated")
 		}
 		pid = parent
 	}
-	if sawClaudeHost {
-		return false // a Claude host with no flag anywhere → the blackhole.
-	}
-	return true // uncertain → prefer renderable (no fast-path regression).
+	return queue("no host identified or process tree truncated")
 }
 
 // cmdlineHasDevChannelForC3 reports whether argv carries the dev-channels flag
@@ -113,15 +101,22 @@ func detectRenderCapable(startPID int, r procReaders) bool {
 // multi-plugin lists. Requires the c3 token specifically so that enabling a
 // DIFFERENT dev plugin does not read as capable for c3.
 func cmdlineHasDevChannelForC3(args []string) bool {
+	return cmdlineHasChannelForC3(args, devChannelsFlag)
+}
+
+func cmdlineHasChannelForC3(args []string, flag string) bool {
 	for i := 0; i < len(args); i++ {
 		a := args[i]
-		if v, ok := strings.CutPrefix(a, devChannelsFlag+"="); ok {
+		if a == "--" {
+			break
+		}
+		if v, ok := strings.CutPrefix(a, flag+"="); ok {
 			if pluginTokenMatchesC3(v) {
 				return true
 			}
 			continue
 		}
-		if a == devChannelsFlag {
+		if a == flag {
 			for j := i + 1; j < len(args); j++ {
 				if strings.HasPrefix(args[j], "-") {
 					break // reached the next flag; the value list ended.
@@ -160,10 +155,8 @@ func isClaudeHost(args []string) bool {
 	if filepath.Base(args[0]) == "claude" {
 		return true
 	}
-	for _, a := range args {
-		if strings.Contains(a, "claude-code") || strings.Contains(a, "@anthropic-ai/claude") {
-			return true
-		}
+	if (filepath.Base(args[0]) == "node" || filepath.Base(args[0]) == "nodejs") && len(args) > 1 {
+		return strings.HasSuffix(args[1], "/@anthropic-ai/claude-code/cli.js")
 	}
 	return false
 }
@@ -196,7 +189,7 @@ func hostIsCursorAgent() bool {
 	if runtime.GOOS == "windows" {
 		return false // no /proc walk; Cursor-on-Windows dual-load is rarer today
 	}
-	return detectCursorHost(os.Getpid(), procReaders{cmdline: readProcCmdline, ppid: readProcPPID})
+	return detectCursorHost(os.Getpid(), platformProcReaders())
 }
 
 func detectCursorHost(startPID int, r procReaders) bool {

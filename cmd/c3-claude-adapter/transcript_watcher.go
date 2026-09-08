@@ -1,10 +1,8 @@
 package main
 
 import (
-	"bufio"
 	"bytes"
 	"encoding/json"
-	"errors"
 	"io"
 	"io/fs"
 	"log"
@@ -360,64 +358,34 @@ func (a *adapter) scanPermissionTranscript(path string, offset int64, isSubagent
 		return nil, stats, err
 	}
 
-	reader := bufio.NewReaderSize(file, transcriptReadBufferBytes)
-	lineStart := offset
-	var line []byte
-	oversized := false
 	scanner := oversizedToolIDScanner{}
 	lineMatches := map[string]permissionSettlement{}
 	allMatches := map[string]permissionSettlement{}
-
-	for {
-		fragment, readErr := reader.ReadSlice('\n')
-		stats.bytesRead += int64(len(fragment))
-		if !oversized && len(line)+len(fragment) <= maxTranscriptLineBytes+2 {
-			line = append(line, fragment...)
-		} else {
-			if !oversized {
-				oversized = true
-				scanner.Write(line, func(hash uint32) {
-					mergeSettlements(lineMatches, a.matchPermissionHash(path, isSubagent, lineStart, hash, "unknown"))
-				})
-				line = nil
-			}
-			scanner.Write(fragment, func(hash uint32) {
-				mergeSettlements(lineMatches, a.matchPermissionHash(path, isSubagent, lineStart, hash, "unknown"))
-			})
-		}
-
-		if readErr == nil {
-			lineEnd := stats.start + stats.bytesRead
-			if !oversized {
-				content := bytes.TrimSuffix(line, []byte{'\n'})
-				content = bytes.TrimSuffix(content, []byte{'\r'})
-				if len(content) > maxTranscriptLineBytes {
-					scanner.Write(content, func(hash uint32) {
-						mergeSettlements(lineMatches, a.matchPermissionHash(path, isSubagent, lineStart, hash, "unknown"))
-					})
-				} else {
-					for _, result := range parseTranscriptToolResults(content) {
-						mergeSettlements(lineMatches, a.matchPermissionToolUse(path, isSubagent, lineStart, result.toolUseID, result.outcome))
-					}
+	lineStart := offset
+	feed := func(fragment []byte) {
+		scanner.Write(fragment, func(hash uint32) {
+			mergeSettlements(lineMatches, a.matchPermissionHash(path, isSubagent, lineStart, hash, "unknown"))
+		})
+	}
+	stats, err = scanTranscriptRecords(file, offset, func(start, end int64, line []byte, oversized bool) bool {
+		if !oversized {
+			content := bytes.TrimSuffix(bytes.TrimSuffix(line, []byte{'\n'}), []byte{'\r'})
+			if len(content) > maxTranscriptLineBytes {
+				feed(content)
+			} else {
+				for _, result := range parseTranscriptToolResults(content) {
+					mergeSettlements(lineMatches, a.matchPermissionToolUse(path, isSubagent, start, result.toolUseID, result.outcome))
 				}
 			}
-			mergeSettlementMap(allMatches, lineMatches)
-			a.advancePermissionOffsets(path, isSubagent, lineStart, lineEnd)
-			lineStart = lineEnd
-			line = nil
-			oversized = false
-			scanner = oversizedToolIDScanner{}
-			lineMatches = map[string]permissionSettlement{}
-			continue
 		}
-		if errors.Is(readErr, bufio.ErrBufferFull) {
-			continue
-		}
-		if errors.Is(readErr, io.EOF) {
-			return settlementValues(allMatches), stats, nil
-		}
-		return settlementValues(allMatches), stats, readErr
-	}
+		mergeSettlementMap(allMatches, lineMatches)
+		a.advancePermissionOffsets(path, isSubagent, start, end)
+		lineStart = end
+		scanner = oversizedToolIDScanner{}
+		lineMatches = map[string]permissionSettlement{}
+		return true
+	}, feed)
+	return settlementValues(allMatches), stats, err
 }
 
 type transcriptToolResult struct {

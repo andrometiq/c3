@@ -68,3 +68,24 @@ func TestRunStatus_HealthyQueueDoesNotCryWolf(t *testing.T) {
 		t.Fatalf("c3-broker status warns that the durable queue is disabled when health_list says it is healthy, training operators to ignore the real warning. Output:\n%s", out)
 	}
 }
+
+func TestRunStatusShowsRenderRoute(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	oldHealth, oldClaims := statusFetchHealth, statusFetchClaims
+	statusFetchHealth = func() (*ipc.HealthListMsg, error) { return &ipc.HealthListMsg{}, nil }
+	statusFetchClaims = func() (*ipc.ClaimsListMsg, error) {
+		return &ipc.ClaimsListMsg{Claims: []ipc.ClaimEntry{{Channel: "telegram", HolderCLI: "claude", Connected: true,
+			RenderState: ipc.RenderQueueOnly, RenderReason: "live push not confirmed"}}}, nil
+	}
+	t.Cleanup(func() { statusFetchHealth, statusFetchClaims = oldHealth, oldClaims })
+	out := captureStdout(t, func() {
+		if err := runStatus(); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if !strings.Contains(out, "Live route: queue-only (live push not confirmed)") {
+		t.Fatalf("status: %s", out)
+	}
+}

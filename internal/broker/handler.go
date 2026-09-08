@@ -84,9 +84,7 @@ func (b *Broker) HandleConn(nc net.Conn) {
 		// setting the flag only in the shared block below would leave a window
 		// where one inbound could still take the push path into a host that
 		// can't render. Idempotent with the shared block below.
-		if hello.CannotRenderChannels {
-			stub.SetCannotRender(true)
-		}
+		stub.SetRenderRoute(hello.RenderState, hello.RenderReason, hello.CannotRenderChannels)
 		// Unregister the OLD stub (now superseded) and transfer its claims.
 		b.Stubs.Unregister(oldConnID)
 		transferred := b.Routes.TransferAllByConnID(oldConnID, stub)
@@ -152,22 +150,14 @@ func (b *Broker) HandleConn(nc net.Conn) {
 			hello.CLI, hello.PID, hello.CWD, oldConnID, stub.ConnID)
 	} else {
 		stub = b.Stubs.Register(hello.CLI, hello.PID, hello.CWD, conn)
+		stub.SetRenderRoute(hello.RenderState, hello.RenderReason, hello.CannotRenderChannels)
 		log.Printf("hello: NEW cli=%s pid=%d cwd=%q conn=%d",
 			hello.CLI, hello.PID, hello.CWD, stub.ConnID)
 	}
 	stub.SetPeerProtocolVersion(ipc.PeerProtocolVersion(hello.ProtocolVersion))
 
-	// Record whether this host can render channel pushes (from the adapter's
-	// /proc detection). Set for BOTH new and reconnect stubs so a reconnecting
-	// adapter re-reports it. When it cannot render, forwardOrFallback holds this
-	// holder's inbound in the durable queue instead of acking it lost — the
-	// forked-session blackhole fix. Absent field (old adapter) → false →
-	// renderable, no regression.
-	if hello.CannotRenderChannels {
-		stub.SetCannotRender(true)
-		log.Printf("hello: cli=%s pid=%d conn=%d reports it CANNOT render channel pushes — inbound will be HELD (queue + fetch_queue)",
-			hello.CLI, hello.PID, stub.ConnID)
-	}
+	render := stub.RenderRoute()
+	log.Printf("hello: cli=%s pid=%d conn=%d %s", hello.CLI, hello.PID, stub.ConnID, render.Text())
 
 	// Defer: mark the stub as disconnected and decide whether to release
 	// its claims based on PID liveness. The "claims preserved while PID
@@ -277,6 +267,8 @@ func (b *Broker) HandleConn(nc net.Conn) {
 			b.handleRetranscribe(conn, stub, raw)
 		case ipc.OpRecoverSession:
 			b.handleRecoverSession(conn, stub, raw, &routeIdentity)
+		case ipc.OpRenderState:
+			b.handleRenderState(stub, raw)
 		case ipc.OpInboundDelivered:
 			b.handleInboundDelivered(stub, raw)
 		case ipc.OpPairModeStart:
@@ -960,6 +952,8 @@ func (b *Broker) handleListClaims(conn *ipc.Conn) {
 			ConnID:    e.Stub.ConnID,
 			Connected: e.Stub.IsConnected(),
 		}
+		render := e.Stub.RenderRoute()
+		entry.RenderState, entry.RenderReason = render.State, render.Reason
 		if output := e.Stub.OutputRoute(); output != nil && *output == e.Key {
 			entry.IsOutput = true
 		}
@@ -1321,6 +1315,8 @@ func (b *Broker) handleListSessions(conn *ipc.Conn, raw []byte) {
 			CWD:    s.CWD,
 			ConnID: s.ConnID,
 		}
+		render := s.RenderRoute()
+		e.RenderState, e.RenderReason = render.State, render.Reason
 		routes := orderedHeldRoutes(s)
 		if len(routes) > 0 {
 			labels := make([]string, 0, len(routes))

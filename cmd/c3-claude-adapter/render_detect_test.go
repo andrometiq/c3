@@ -3,40 +3,11 @@ package main
 import (
 	"encoding/json"
 	"net"
-	"os"
 	"testing"
 	"time"
 
 	"github.com/Andrometiq/c3/internal/ipc"
 )
-
-// The fake-tree tests exercise detectRenderCapable's logic; this grounds the REAL
-// /proc parsers (readProcCmdline / readProcPPID) against this live test process so
-// the production accessors are proven, not just the injected ones. Skipped where
-// /proc is absent (non-Linux).
-func TestRealProcReaders_Smoke(t *testing.T) {
-	if _, err := os.Stat("/proc/self/stat"); err != nil {
-		t.Skip("no /proc on this host")
-	}
-	self := os.Getpid()
-	args, ok := readProcCmdline(self)
-	if !ok || len(args) == 0 {
-		t.Fatalf("readProcCmdline(self) = %v, %v; want a non-empty argv", args, ok)
-	}
-	ppid, ok := readProcPPID(self)
-	if !ok {
-		t.Fatal("readProcPPID(self) not ok")
-	}
-	if ppid != os.Getppid() {
-		t.Errorf("readProcPPID(self) = %d, want os.Getppid() = %d", ppid, os.Getppid())
-	}
-	// End-to-end through the real readers: the test process's ancestry is `go
-	// test`, not a Claude host, so detection must default to capable (true) — never
-	// a false blackhole in a non-Claude environment.
-	if !hostCanRenderChannels() {
-		t.Error("in a non-Claude test process, detection must default to renderable")
-	}
-}
 
 // fakeTree builds procReaders over a synthetic process tree: cmdlines maps a pid
 // to its argv, parents maps a pid to its ppid. A missing pid in cmdlines reads as
@@ -109,29 +80,29 @@ func TestDetectRenderCapable(t *testing.T) {
 			want:    false,
 		},
 		{
-			// No Claude host identifiable in the chain → uncertain → capable.
-			name:     "no claude host in chain → capable (uncertain)",
+			// No identified host: fail closed to queue-only.
+			name:     "no claude host in chain → queue-only (uncertain)",
 			cmdlines: map[int][]string{10: adapter, 11: {"zsh"}, 12: {"systemd"}},
 			parents:  map[int]int{10: 11, 11: 12, 12: 1},
 			start:    10,
-			want:     true,
+			want:     false,
 		},
 		{
-			// /proc unreadable from the start → uncertain → capable (non-Linux).
-			name:     "unreadable start pid → capable (uncertain)",
+			// Unreadable process tree: fail closed to queue-only.
+			name:     "unreadable start pid → queue-only (uncertain)",
 			cmdlines: map[int][]string{},
 			parents:  map[int]int{},
 			start:    10,
-			want:     true,
+			want:     false,
 		},
 		{
 			// Walk truncates (parent cmdline unreadable) BEFORE reaching a host and
-			// with no flag seen → must default capable, never a false blackhole.
-			name:     "truncated walk before host → capable (uncertain)",
+			// with no host seen: retain inbound for fetch_queue.
+			name:     "truncated walk before host → queue-only (uncertain)",
 			cmdlines: map[int][]string{10: adapter}, // parent 11 has no cmdline entry
 			parents:  map[int]int{10: 11},
 			start:    10,
-			want:     true,
+			want:     false,
 		},
 		{
 			// --flag=value form with a comma-joined multi-plugin list including c3.
@@ -288,13 +259,14 @@ func TestDetectCursorHost_AncestorWalk(t *testing.T) {
 // buildInstructions must carry the degraded-delivery warning only when the host
 // cannot render, and never on the capable fast path.
 func TestBuildInstructions_DegradedWarningGate(t *testing.T) {
-	a := newAdapter() // hostRenderCapable defaults true
+	a := newAdapter()
+	a.renderRoute = ipc.RenderRoute{State: ipc.RenderCapable}
 	if got := a.buildInstructions(); containsSub(got, "fetch_queue` tool to retrieve") {
 		t.Error("capable session must NOT carry the degraded-delivery warning")
 	}
-	a.hostRenderCapable = false
+	a.renderRoute = ipc.RenderRoute{State: ipc.RenderQueueOnly, Reason: "no dev-channels flag on host"}
 	got := a.buildInstructions()
-	if !containsSub(got, "DEGRADED") || !containsSub(got, "fetch_queue") {
+	if !containsSub(got, "Live route: queue-only") || !containsSub(got, "fetch_queue") {
 		t.Errorf("render-incapable session must carry the degraded warning; got:\n%s", got)
 	}
 }
@@ -308,20 +280,20 @@ func containsSub(s, sub string) bool {
 	return false
 }
 
-// hello() must report CannotRenderChannels as the inverse of hostRenderCapable so
-// the broker learns to hold this session's inbound in the queue.
+// Hello keeps the legacy gate conservative and reports all three route states.
 func TestHello_ReportsCannotRenderChannels(t *testing.T) {
 	for _, tc := range []struct {
 		name         string
-		canRender    bool
+		state        string
 		wantCannotRC bool
 	}{
-		{"capable session omits/false", true, false},
-		{"incapable session sets true", false, true},
+		{"capable session omits/false", ipc.RenderCapable, false},
+		{"incapable session sets true", ipc.RenderQueueOnly, true},
+		{"probing conservatively sets true", ipc.RenderProbing, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			a := newAdapter()
-			a.hostRenderCapable = tc.canRender
+			a.renderRoute = ipc.RenderRoute{State: tc.state, Reason: "test reason"}
 
 			pipeA, pipeB := net.Pipe()
 			defer pipeA.Close()
@@ -360,6 +332,9 @@ func TestHello_ReportsCannotRenderChannels(t *testing.T) {
 			var hello ipc.HelloMsg
 			if err := json.Unmarshal(r.raw, &hello); err != nil {
 				t.Fatalf("unmarshal hello: %v", err)
+			}
+			if hello.RenderState != tc.state || hello.RenderReason != "test reason" {
+				t.Fatalf("hello state = %q", hello.RenderState)
 			}
 			if hello.CannotRenderChannels != tc.wantCannotRC {
 				t.Errorf("CannotRenderChannels = %v, want %v", hello.CannotRenderChannels, tc.wantCannotRC)
