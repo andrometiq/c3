@@ -394,6 +394,12 @@ func (c *Channel) Start(ctx context.Context, host channel.Host) error {
 		bh.SetPersistFailedCallback(c.onPersistFailed)
 	}
 
+	if bh, ok := host.(interface {
+		SetPersistFrozenCallback(func(*c3types.Inbound))
+	}); ok {
+		bh.SetPersistFrozenCallback(c.onPersistFrozen)
+	}
+
 	c.ctx, c.cancel = context.WithCancel(ctx)
 
 	// Token check is deferred (offline-safe boot), so bot.Username is "<missing>"
@@ -507,6 +513,15 @@ func (c *Channel) onPersisted(in *c3types.Inbound) {
 	if found && c.offTrk != nil {
 		c.offTrk.MarkDone(uid)
 	}
+}
+
+// onPersistFrozen completes queue-disabled intake without marking the update
+// done. Keep poll dedup so redeliveries use the paced no-progress loop; discard
+// the seam entry so subsequent dispatches after dedup expiry stage fresh entries.
+func (c *Channel) onPersistFrozen(in *c3types.Inbound) {
+	c.mu.Lock()
+	c.seamPopFrontLocked(in.ChatID, in.MessageID)
+	c.mu.Unlock()
 }
 
 // onPersistFailed is the durable-persist-FAILURE callback (SetPersistFailedCallback).

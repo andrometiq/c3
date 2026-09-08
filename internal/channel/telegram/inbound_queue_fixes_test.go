@@ -451,3 +451,48 @@ func TestDispatchMessage_StatusFromAllowlisted_StillAnswered(t *testing.T) {
 		t.Fatalf("an answered /status must MarkDone its update; committed=%d, want 301", got)
 	}
 }
+
+// Freeze completion must drain the FIFO seam without acking or forgetting dedup,
+// including when an edit shares the original message's association key.
+func TestDegradedFreeze_CleansSeamKeepsDedupAndOffset(t *testing.T) {
+	h := &fakeHost{}
+	c := makeChannel(h)
+	c.offTrk = newOffsetTracker(100)
+	c.msgToUpdate = map[seamKey][]int64{}
+	c.dedup = newUpdateDedup(2000, 5*time.Minute)
+	u := gotgbot.Update{UpdateId: 101, Message: textMsg("held", 42)}
+	edit := gotgbot.Update{UpdateId: 102, EditedMessage: textMsg("edited", 42)}
+	for _, update := range []*gotgbot.Update{&u, &edit} {
+		c.offTrk.Register(update.UpdateId)
+		if c.dedup.SeenOrAdd(update) {
+			t.Fatal("first delivery was dedup-skipped")
+		}
+		c.dispatchUpdate(update, nil)
+	}
+	in := &c3types.Inbound{ChatID: u.Message.Chat.Id, MessageID: u.Message.MessageId}
+	c.onPersistFrozen(in)
+	c.mu.Lock()
+	ids := append([]int64(nil), c.msgToUpdate[seamKey{chatID: in.ChatID, msgID: in.MessageID}]...)
+	c.mu.Unlock()
+	if len(ids) != 1 || ids[0] != 102 {
+		t.Fatalf("freeze must pop only the first association; remaining=%v", ids)
+	}
+	c.onPersistFrozen(in)
+	c.mu.Lock()
+	remaining := len(c.msgToUpdate)
+	c.mu.Unlock()
+	if remaining != 0 {
+		t.Fatalf("freeze leaked %d seam entries", remaining)
+	}
+	for _, update := range []*gotgbot.Update{&u, &edit} {
+		if !c.dedup.SeenOrAdd(update) {
+			t.Fatalf("frozen update %d must remain dedup-skipped", update.UpdateId)
+		}
+	}
+	if got := c.offTrk.Committed(); got != 100 {
+		t.Fatalf("freeze advanced offset to %d, want 100", got)
+	}
+	if got := h.emitCount(); got != 2 {
+		t.Fatalf("original and edit must both dispatch once; got %d", got)
+	}
+}

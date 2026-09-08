@@ -32,6 +32,8 @@ Every op below is labelled.
 
 The Frozen core is deliberately small: handshake, ownership, message delivery with its acknowledgement, tool forwarding, durable-queue recovery, and errors.
 
+**Contract pin (D033; later phases implement negotiation and receipt enforcement):** duplicates after expiry, restart, or degraded mode are allowed; silent loss is not. Adapters will declare `transcript`, `accept`, or `none` in an explicit optional hello field; nothing weaker than the session's declared milestone retires a durable row. A hello without that field will retain the existing protocol-v1 path unchanged.
+
 **"Frozen" is a promise about shape, not a requirement to implement.** The two are easy to conflate and this document used to. Every Frozen op's shape is part of the release contract — but of the 15, **12 are required** and 3 are frozen conveniences you may skip: `bye` (an optional graceful close; closing the socket is equivalent, and no built-in sends it) and the `list_topics` → `topics_list` pair (discovery only — an adapter that attaches explicitly, and surfaces the broker's picker response when it does not, is complete without them). Implementing them is a choice; their shape not changing under you is not.
 
 One boundary inside a Frozen op, stated explicitly because it is genuinely mixed: `attach`'s **envelope** is frozen, while the optional **proposal payload** it can carry is still Provisional. The actions today are exactly five — `create`, `use_existing_other_group`, `disambiguate_dm`, `force_steal`, `pick_topic` — and two of them vary by *field*, not by name: `use_existing_other_group` may carry an `alternative` proposal, and `force_steal` renders differently when the holder is a desktop session. Treat the five as a snapshot rather than a closed set: **handle an unrecognised proposal action the way you handle an unknown op**, surfacing it to the user rather than failing.
@@ -528,7 +530,7 @@ On the broker dropping the connection:
 
 This is the part a doc-conformant adapter previously got wrong in a way that works perfectly in a demo and then quietly corrupts the user's queue.
 
-**While the durable queue is healthy, a delivered message stays there until acknowledged, within the per-route limit of 1,000 messages / 14 days.** The broker writes the push to your socket and then waits. It does not consider the message done. If the broker reports that durability is degraded, live delivery still works but there is no queued copy to protect.
+**While the durable queue is healthy, a delivered message stays there until acknowledged, within the per-route limit of 1,000 messages / 14 days.** The broker writes the push to your socket and then waits. It does not consider the message done. If the queue is disabled, live delivery continues best-effort and Telegram offsets hold for replay when the broker restarts with a working queue; anything delivered live will arrive again.
 
 Claude Code has four route states, shown by `attach`, the MCP instructions,
 `c3-broker status` / `/c3:status`, and Telegram `/status`:

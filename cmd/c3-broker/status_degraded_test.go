@@ -36,7 +36,7 @@ func TestRunStatus_DegradedQueueCannotReadAsHealthy(t *testing.T) {
 		t.Fatalf("runStatus: %v", statusErr)
 	}
 	if !strings.Contains(out, "durable queue: DISABLED") ||
-		!strings.Contains(out, "not saved and cannot be recovered") {
+		!strings.Contains(out, "inbound is held at Telegram and replayed when the broker restarts with a working queue; anything delivered live in the meantime will arrive again") {
 		t.Fatalf("c3-broker status omitted the persistent durable-queue warning, so a live broker destroying unattached messages reads as healthy. Output:\n%s", out)
 	}
 }

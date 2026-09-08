@@ -251,12 +251,8 @@ func TestFlushInbounds_AppendFailNotifiesPersistFailed(t *testing.T) {
 	}
 }
 
-// Item 3: with the durable queue DISABLED (b.Queue == nil — init failed), a
-// ROUTED inbound must STILL fire the persist callback so its source update_id is
-// marked done and the offset advances. Otherwise every inbound wedges the
-// contiguous-prefix offset forever (no routed message ever marks done). The
-// in-memory-only degrade is accepted; the offset must not stall.
-func TestFlushInbounds_NilQueueStillMarksPersisted(t *testing.T) {
+// Queue-disabled intake holds offsets and completes only the staged association.
+func TestFlushInbounds_NilQueueNeverMarksPersisted(t *testing.T) {
 	t.Setenv("C3_QUEUE_DIR", t.TempDir())
 	b := brokerWithChannel(t, mfWithTelegram(), &fakeChannel{})
 	defer b.Shutdown()
@@ -269,8 +265,11 @@ func TestFlushInbounds_NilQueueStillMarksPersisted(t *testing.T) {
 	w := newRouteWorker(context.Background(), key, time.Hour, b)
 	defer w.Stop()
 
-	var marked []int64
+	var marked, failed, frozen []int64
 	b.SetPersistedCallback("telegram", func(in *c3types.Inbound) { marked = append(marked, in.MessageID) })
+	b.SetPersistFailedCallback("telegram", func(in *c3types.Inbound) { failed = append(failed, in.MessageID) })
+	NewBrokerHost(b, "telegram").SetPersistFrozenCallback(func(in *c3types.Inbound) { frozen = append(frozen, in.MessageID) })
+	NewBrokerHost(b, "web").SetPersistFrozenCallback(func(*c3types.Inbound) { t.Error("Telegram intake notified web") })
 
 	batch := []*c3types.Inbound{
 		{Channel: "telegram", ChatID: -100, TopicID: &tid, MessageID: 10, Text: "a", Timestamp: time.Now()},
@@ -278,8 +277,11 @@ func TestFlushInbounds_NilQueueStillMarksPersisted(t *testing.T) {
 	}
 	w.flushInbounds(context.Background(), batch)
 
-	if len(marked) != 2 || marked[0] != 10 || marked[1] != 11 {
-		t.Fatalf("nil-Queue routed inbounds must STILL markPersisted (offset advances); marked=%v, want [10 11]", marked)
+	if len(marked) != 0 || len(failed) != 0 {
+		t.Fatalf("nil-Queue must neither acknowledge nor forget dedup; persisted=%v failed=%v", marked, failed)
+	}
+	if len(frozen) != 2 || frozen[0] != 10 || frozen[1] != 11 {
+		t.Fatalf("nil-Queue must complete each staged association; frozen=%v, want [10 11]", frozen)
 	}
 }
 

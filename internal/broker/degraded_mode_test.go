@@ -15,18 +15,9 @@ import (
 	"github.com/Andrometiq/c3/internal/queue"
 )
 
-// Degraded mode is Broker.Queue == nil: queue.NewStore failed at startup and
-// broker.go New() chose to keep running without a durable queue. In that mode
-// flushInbounds still calls markPersisted on every inbound — it must, or the
-// source update_id wedges in-flight forever and ALL inbound re-polls forever —
-// so the update is acked to Telegram with nothing written anywhere, and Telegram
-// never redelivers an acked update. Everything arriving with no session attached
-// is destroyed for the whole run.
-//
-// That trade ("lose it" over "wedge the bridge") stands. What these tests pin is
-// that it is never SILENT: the operator is told at startup, on `/status`, and —
-// on the exact path that destroys the message — by a warning instead of the
-// "nothing lost" reassurance.
+// Queue-disabled intake holds Telegram offsets for replay after restart with a
+// working queue. These tests pin the startup, status, and held notices explaining
+// that recovery and the duplicates from any best-effort live deliveries.
 
 // degradeQueueDir points C3_QUEUE_DIR at a path whose parent is a regular FILE,
 // so queue.NewStore's os.MkdirAll fails with ENOTDIR. That is a real instance of
@@ -56,7 +47,7 @@ func degradedBrokerWithChannel(t *testing.T, fc *fakeChannel) *Broker {
 }
 
 // unclaimedWorker returns a worker for a route no session holds — the path that
-// destroys the message in degraded mode.
+// leaves the message at Telegram in degraded mode.
 func unclaimedWorker(t *testing.T, b *Broker, key RouteKey) *RouteWorker {
 	t.Helper()
 	w := newRouteWorker(context.Background(), key, time.Hour, b)
@@ -72,7 +63,7 @@ func heldInbound(msgID int64) []*c3types.Inbound {
 }
 
 // TestDegradedMode_HeldNoticeWarnsInsteadOfSayingNothingLost pins the auto-reply
-// on the losing path itself (flushInbounds → forwardOrFallbackCovering → no
+// on the held path itself (flushInbounds → forwardOrFallbackCovering → no
 // claim), not the text helper: reverting the one call-site line that picks
 // heldDegradedText brings the whole lie back, and this fails.
 //
@@ -96,20 +87,20 @@ func TestDegradedMode_HeldNoticeWarnsInsteadOfSayingNothingLost(t *testing.T) {
 
 			replies := fc.sendRepliesSnapshot()
 			if len(replies) != 1 {
-				t.Fatalf("a message destroyed by degraded mode produced %d auto-replies; want exactly 1 warning telling the operator it is gone", len(replies))
+				t.Fatalf("degraded intake produced %d auto-replies; want exactly 1 replay warning", len(replies))
 			}
 			got := replies[0].Text
 			if strings.Contains(got, "nothing lost") {
-				t.Fatalf("the auto-reply still promises \"nothing lost\" while the durable queue is DISABLED — this message has already been acked to Telegram, written nowhere, and is unrecoverable. Reply was:\n%s", got)
+				t.Fatalf("the auto-reply still promises \"nothing lost\" while the durable queue is DISABLED — this message is held at Telegram, not in the local queue. Reply was:\n%s", got)
 			}
 			if !strings.Contains(got, queueDisabledWarning) {
-				t.Fatalf("the auto-reply never says the durable queue is disabled, so the operator has no way to know their message was dropped. Reply was:\n%s", got)
+				t.Fatalf("the auto-reply never says the durable queue is disabled, so the operator has no way to know their message awaits replay. Reply was:\n%s", got)
 			}
 		})
 	}
 }
 
-func TestDegradedMode_LiveWriteFailureWarnsThatMessageWasDropped(t *testing.T) {
+func TestDegradedMode_LiveWriteFailureWarnsAboutReplay(t *testing.T) {
 	fc := &fakeChannel{}
 	b := degradedBrokerWithChannel(t, fc)
 	defer b.Shutdown()
@@ -128,7 +119,7 @@ func TestDegradedMode_LiveWriteFailureWarnsThatMessageWasDropped(t *testing.T) {
 
 	replies := fc.sendRepliesSnapshot()
 	if len(replies) != 1 || !strings.Contains(replies[0].Text, queueDisabledWarning) {
-		t.Fatalf("live write failure with no durable queue produced no operator-visible loss warning: %+v", replies)
+		t.Fatalf("live write failure with no durable queue produced no operator-visible replay warning: %+v", replies)
 	}
 }
 
@@ -153,7 +144,7 @@ func TestDegradedMode_WarningIsOnTheFiveMinuteCooldown(t *testing.T) {
 	w.flushInbounds(context.Background(), heldInbound(8))
 
 	if n := len(fc.sendRepliesSnapshot()); n != 0 {
-		t.Fatalf("%d lost-message warning(s) fired inside the 5-minute cooldown: the degraded warning is riding the 10s held-notice debounce, so a burst repeats it six times a minute and the operator learns to ignore the one alert that means data is being destroyed", n)
+		t.Fatalf("%d replay warning(s) fired inside the 5-minute cooldown: the degraded warning is riding the 10s held-notice debounce, so a burst repeats it six times a minute and the operator learns to ignore the one alert that means local storage is unavailable", n)
 	}
 }
 
@@ -234,7 +225,7 @@ func TestRegisterChannel_AnnouncesDegradedQueueAtStartup(t *testing.T) {
 
 	msg, ok := readBroadcastWithin(agentConn, 2*time.Second)
 	if !ok {
-		t.Fatal("the broker came up with its durable queue DISABLED and told no live session — the degrade stays silent until messages start disappearing")
+		t.Fatal("the broker came up with its durable queue DISABLED and told no live session — the degrade stays silent until messages stop reaching sessions")
 	}
 	if msg.Inbound.Kind != c3types.InboundSystem || msg.Inbound.Event == nil || msg.Inbound.Event.System == nil {
 		t.Fatalf("startup advisory is not a broker-originated system event: %+v", msg.Inbound)
@@ -312,7 +303,7 @@ func TestStatus_ReportsDegradedQueue(t *testing.T) {
 		t.Fatal("/status in a topic should be handled")
 	}
 	if !strings.Contains(topicReply, queueDisabledWarning) {
-		t.Fatalf("/status in a topic reads as a healthy broker with an empty queue, when in fact nothing CAN be queued and every held message is being destroyed. Reply was:\n%s", topicReply)
+		t.Fatalf("/status in a topic reads as a healthy broker with an empty queue, when in fact nothing CAN be queued locally and inbound awaits Telegram replay. Reply was:\n%s", topicReply)
 	}
 
 	dmReply, handled := host.HandleCommand(&c3types.Inbound{Channel: "telegram", ChatID: 42, Text: "/status"})
@@ -388,9 +379,9 @@ func TestDocsQuoteTheRealNotices(t *testing.T) {
 		// operator what to grep broker.log for, and a paraphrase there sends
 		// them looking for a line C3 never writes. Quote it, don't describe it.
 		{"../../docs/USAGE.md", []string{
-			"⚠️ NOT held — that message was dropped.",
+			"⚠️ Held at Telegram — local queue unavailable.",
 			"📨 Held — nothing lost.",
-			degradedDropLogPhrase,
+			degradedHoldLogPhrase,
 		}},
 	} {
 		body, err := os.ReadFile(doc.path)

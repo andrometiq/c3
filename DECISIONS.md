@@ -3,6 +3,32 @@
 Entries are newest first. This is the public architecture record: it records
 rulings and rationale, never private operational details.
 
+## D033: Inbound delivery contract pins
+
+**Date:** 2026-09-08
+
+**Decision:** Pin three receipt milestones, declared by the adapter at hello,
+never inferred: `transcript` means the host transcript records the attempt token;
+`accept` means the host positively accepted the submission, not proven displayed;
+`none` means pull-only. Nothing weaker than the session's declared milestone
+retires a durable row.
+
+Rows survive until confirmed or the documented limits (1,000 messages / 14 days).
+A queue-disabled broker never advances Telegram offsets: inbound stays at
+Telegram for replay after restart with a working queue. Holding the earliest
+unpersisted update holds the global frontier across topics. Live delivery remains
+best-effort; anything delivered live in the meantime will arrive again.
+Duplicates after expiry, restart, or degraded mode are allowed and documented;
+silent loss is not.
+
+Capability negotiation will use an explicit optional hello field. A hello without
+it runs the existing protocol-v1 path unchanged. Later phases implement negotiation
+and receipt enforcement; this phase implements only the queue-disabled offset hold.
+
+**Why:** A live handoff is not durable storage. Explicit receipt milestones keep
+retirement tied to the evidence each host can provide, while compatibility stays
+opt-in.
+
 ## D032: Codex queues busy-session input and keeps the user's TUI
 
 **Date:** 2026-09-08

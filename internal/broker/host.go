@@ -164,6 +164,11 @@ func (h *BrokerHost) SetPersistFailedCallback(fn func(in *c3types.Inbound)) {
 	h.broker.SetPersistFailedCallback(h.channel, fn)
 }
 
+// SetPersistFrozenCallback registers completion for queue-disabled intake.
+func (h *BrokerHost) SetPersistFrozenCallback(fn func(in *c3types.Inbound)) {
+	h.broker.SetPersistFrozenCallback(h.channel, fn)
+}
+
 // Done returns the broker's shutdown channel.
 func (h *BrokerHost) Done() <-chan struct{} {
 	return h.broker.ctx.Done()

@@ -59,7 +59,7 @@ const fallbackText = "No CLI is currently attached to this topic. Run `c3-broker
 // count of queued messages. Cadence is the existing 5-min fallback cooldown.
 //
 // ONLY valid while the durable queue is live. When it is not, the reassurance is
-// a lie told at the exact moment the message is destroyed — use
+// inaccurate about local storage — use
 // heldDegradedText() instead (worker.go picks between them on Broker.Queue).
 func heldReplyText(channelName string, n int) string {
 	if channelName == "web" {
@@ -72,31 +72,20 @@ func heldReplyText(channelName string, n int) string {
 	return fmt.Sprintf("📨 Held — nothing lost.\n%d %s queued.\n\n\nSend /status to check.", n, plural)
 }
 
-// queueDisabledWarning is the ONE sentence every degraded-mode operator surface
-// says — the startup announcement (broker.go announceQueueDegraded), the
-// held-notice below, and `/status` (status_command.go) — so the three can never
-// drift apart.
-//
-// "Degraded mode" is exactly Broker.Queue == nil: queue.NewStore failed at
-// startup and the broker chose to keep running (broker.go New). In that mode
-// flushInbounds still marks every inbound persisted — it must, or the source
-// update_id wedges in-flight forever and ALL inbound re-polls forever — so the
-// update is acked to Telegram with nothing written anywhere. Telegram never
-// redelivers it, so ANY inbound that does not complete a live handoff — no
-// claim, reconnect-race write failure, or holder failure — is destroyed.
-const queueDisabledWarning = "C3's durable queue is DISABLED for this run — it failed to open at startup, so inbound has no durable safety: anything not successfully handed to a live session is NOT saved and cannot be recovered."
+// queueDisabledWarning is shared by startup, held notices, and status.
+// Queue-disabled intake holds Telegram offsets; only restart with a working
+// queue restores durable intake. Live handoffs do not acknowledge updates.
+const queueDisabledWarning = "C3's durable queue is DISABLED for this run — inbound is held at Telegram and replayed when the broker restarts with a working queue; anything delivered live in the meantime will arrive again."
 
-// degradedDropLogPhrase is the phrase every dropped-message log line carries in
-// degraded mode, and the exact string docs/USAGE.md tells operators to grep
-// broker.log for. A const rather than a literal so the doc and the log cannot
-// drift into naming different things (TestDocsQuoteTheRealNotices pins it).
-const degradedDropLogPhrase = "DROPPED — durable queue disabled"
+// degradedHoldLogPhrase is also quoted in docs/USAGE.md for log searches.
+// TestDocsQuoteTheRealNotices keeps the documentation and code in sync.
+const degradedHoldLogPhrase = "HELD AT TELEGRAM — durable queue disabled"
 
 // heldDegradedText is what the auto-reply says INSTEAD of heldReplyText when the
 // durable queue is disabled. It carries no count on purpose: nothing was queued,
 // so there is nothing to count and nothing for `fetch_queue` to find later.
 func heldDegradedText() string {
-	return "⚠️ NOT held — that message was dropped.\n" + queueDisabledWarning + "\n\n\nSend /status to check."
+	return "⚠️ Held at Telegram — local queue unavailable.\n" + queueDisabledWarning + "\n\n\nSend /status to check."
 }
 
 func (f *fallbackTracker) remaining(key RouteKey) time.Duration {

@@ -98,6 +98,9 @@ type Broker struct {
 	// update's poll-side dedup entry and let the held Telegram offset redeliver +
 	// genuinely retry (item 1). Guarded by the same persistedMu.
 	persistFailedCB map[string]func(in *c3types.Inbound)
+	// persistFrozenCB completes queue-disabled intake without acknowledging it
+	// or forgetting poll dedup. Guarded by persistedMu.
+	persistFrozenCB map[string]func(in *c3types.Inbound)
 
 	// loginLinkLast is the broker-side attach debounce: near-simultaneous web
 	// claims for one operator send one Telegram DM, not one per connection.
@@ -284,7 +287,7 @@ func (b *Broker) RegisterChannel(ch channel.Channel) error {
 
 // announceQueueDegraded tells the operator, once per channel per broker run, that
 // the durable inbound queue is disabled and messages arriving with no session
-// attached are destroyed (see queueDisabledWarning in fallback.go for the
+// attached stay at Telegram (see queueDisabledWarning in fallback.go for the
 // mechanism). It invents no new notification path: it reuses the same pair
 // notifyUpdateRestart uses — the trusted broker-originated system-event broadcast
 // to live CLI sessions, and a direct SendReply on the channel.
@@ -511,6 +514,30 @@ func (b *Broker) notifyPersistFailed(in *c3types.Inbound) {
 	}
 	b.persistedMu.RLock()
 	fn := b.persistFailedCB[in.Channel]
+	b.persistedMu.RUnlock()
+	if fn != nil {
+		fn(in)
+	}
+}
+
+// SetPersistFrozenCallback registers queue-disabled intake completion.
+// The channel clears its staged association while retaining dedup and offsets.
+func (b *Broker) SetPersistFrozenCallback(channelName string, fn func(in *c3types.Inbound)) {
+	b.persistedMu.Lock()
+	defer b.persistedMu.Unlock()
+	if b.persistFrozenCB == nil {
+		b.persistFrozenCB = map[string]func(in *c3types.Inbound){}
+	}
+	b.persistFrozenCB[channelName] = fn
+}
+
+// notifyPersistFrozen invokes only the source channel's freeze callback.
+func (b *Broker) notifyPersistFrozen(in *c3types.Inbound) {
+	if in == nil {
+		return
+	}
+	b.persistedMu.RLock()
+	fn := b.persistFrozenCB[in.Channel]
 	b.persistedMu.RUnlock()
 	if fn != nil {
 		fn(in)

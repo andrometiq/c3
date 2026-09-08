@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/PaulSonOfLars/gotgbot/v2"
@@ -272,4 +273,57 @@ func TestPollLoop_PersistentConflictAlertsAndKeepsPolling(t *testing.T) {
 
 	c.cancel()
 	awaitDone(t, done)
+}
+
+// Exercise degraded completion with immediate Telegram redelivery and a virtual
+// clock. Transport delay must remain zero: pacing belongs to the poller.
+func TestPollLoop_DegradedFreezePacesAndCancels(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		h := &fakeHost{}
+		fb := &funcBotClient{}
+		c := newConflictTestChannel(h, fb)
+		c.offTrk = newOffsetTracker(100)
+		c.msgToUpdate = map[seamKey][]int64{}
+		c.dedup = newUpdateDedup(2000, 5*time.Minute)
+		u := gotgbot.Update{UpdateId: 101, Message: textMsg("held", 42)}
+		raw, err := json.Marshal([]gotgbot.Update{u})
+		if err != nil {
+			t.Fatal(err)
+		}
+		fb.fn = func(call int) (json.RawMessage, error) {
+			// Bound a broken unpaced loop so virtual time can still progress
+			// and the test fails instead of hanging.
+			if call > 8 {
+				c.cancel()
+				return nil, context.Canceled
+			}
+			return raw, nil
+		}
+		done := startPollLoop(c)
+		defer func() { c.cancel(); awaitDone(t, done) }()
+		synctest.Wait()
+		c.onPersistFrozen(&c3types.Inbound{ChatID: u.Message.Chat.Id, MessageID: u.Message.MessageId})
+		time.Sleep(2500 * time.Millisecond)
+		synctest.Wait()
+		if got := fb.count(); got != 4 {
+			t.Fatalf("getUpdates calls=%d, want 4 in 2.5s (two initial calls, then one per second)", got)
+		}
+		if got := h.emitCount(); got != 1 {
+			t.Fatalf("frozen redelivery re-dispatched: emits=%d, want 1", got)
+		}
+		if got := c.offTrk.Committed(); got != 100 {
+			t.Fatalf("frozen frontier advanced to %d, want 100", got)
+		}
+		start := time.Now()
+		c.cancel()
+		synctest.Wait()
+		select {
+		case <-done:
+		default:
+			t.Fatal("cancellation did not interrupt no-progress backoff")
+		}
+		if time.Since(start) != 0 {
+			t.Fatal("cancellation waited for the backoff timer")
+		}
+	})
 }

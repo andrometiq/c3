@@ -161,7 +161,7 @@ func runStatus() error {
 		fmt.Fprintf(&b, "  (broker unreachable: %v)\n", healthErr)
 	} else {
 		if healthList.QueueDegraded {
-			fmt.Fprintln(&b, "  ⚠ durable queue: DISABLED — messages arriving without an attached session are not saved and cannot be recovered")
+			fmt.Fprintln(&b, "  ⚠ durable queue: DISABLED — inbound is held at Telegram and replayed when the broker restarts with a working queue; anything delivered live in the meantime will arrive again")
 		}
 		if len(healthList.Health) == 0 {
 			fmt.Fprintln(&b, "  (no health events reported yet)")

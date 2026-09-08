@@ -710,23 +710,11 @@ func (w *RouteWorker) flushInbounds(ctx context.Context, batch []*c3types.Inboun
 			deliverySources = append(deliverySources, in)
 		}
 	} else if w.broker != nil {
-		// Item 3: durable queue disabled (init failed → "durable inbound hold
-		// DISABLED for this run", broker.go). We cannot persist, but the
-		// persisted-offset tracker is still live, so a ROUTED message must STILL be
-		// marked persisted — otherwise its source update_id wedges in-flight
-		// forever: the committed offset never advances, so EVERY inbound re-polls
-		// forever. Advancing the offset here matches the already-accepted
-		// in-memory-only degrade (non-durable hold). No Append happened, so this
-		// deliberately does NOT touch w.dedup. The loud DISABLED log fires once at
-		// queue init (broker.go); we don't re-log per message here to avoid spam.
-		//
-		// The message is therefore DESTROYED unless it reaches a live claim below.
-		// That is deliberate ("lose it" beats "wedge the bridge") but it must never
-		// be silent: the operator is told at startup (announceQueueDegraded), on
-		// `/status` (status_command.go) and — on the exact no-claim path that loses
-		// it — by heldDegradedText instead of the "nothing lost" reassurance.
+		// No durable copy exists: hold the Telegram frontier for replay after
+		// restart with a working queue. Clear the staged association but retain
+		// poll dedup, so redeliveries stay paced. Live delivery remains best-effort.
 		for _, in := range batch {
-			w.markPersisted(in)
+			w.broker.notifyPersistFrozen(in)
 			if plan, ok := voicePlans[in]; ok {
 				if len(plan.pending) > 0 {
 					echo := w.reserveVoiceReadback()
@@ -1205,10 +1193,10 @@ func (w *RouteWorker) forwardOrFallbackCovering(_ context.Context, in *c3types.I
 			if w.broker.Queue == nil {
 				log.Printf("deliver FAIL chan=%s chat=%d topic=%s msg=%d to cli=%s pid=%d: %v — %s, nothing stored — %s",
 					w.key.Channel, w.key.ChatID, TopicKeyStr(w.key), in.MessageID,
-					holder.CLI, holder.PID, err, degradedDropLogPhrase, fallbackSummary(in))
-				// The source update was already advanced and there is no durable
-				// copy. Warn on the same route, cooldown-gated like the no-claim
-				// degraded path, so a reconnect race is visible rather than loss.
+					holder.CLI, holder.PID, err, degradedHoldLogPhrase, fallbackSummary(in))
+				// The source update stays at Telegram without a local durable
+				// copy. Explain replay on the same route, cooldown-gated like
+				// the no-claim degraded path.
 				if ch, chErr := w.broker.Channel(in.Channel); chErr == nil &&
 					(w.broker.Fallbacks == nil || w.broker.Fallbacks.ShouldSend(w.key)) {
 					if _, sendErr := ch.SendReply(c3types.ReplyArgs{
@@ -1310,18 +1298,14 @@ func (w *RouteWorker) forwardOrFallbackCovering(_ context.Context, in *c3types.I
 			count = n
 		}
 	}
-	// Degraded mode (Broker.Queue == nil — queue init failed at startup): nothing
-	// above stored this message and nothing will recover it, because flushInbounds
-	// already marked it persisted and Telegram will never redeliver an acked
-	// update. Sending the reassurance here would tell the operator "nothing lost"
-	// at the exact moment the message is destroyed, so warn instead.
+	// With no local queue, Telegram retains the unacknowledged inbound.
+	// Explain replay on restart instead of claiming a locally queued count.
 	degraded := w.broker.Queue == nil
 	text := heldReplyText(in.Channel, count)
 	held := fmt.Sprintf("no claim, queued (count=%d)", count)
 	if degraded {
-		// No count: nothing was stored, and printing "count=1" next to a DROPPED
-		// line reads as "1 queued" to whoever greps this log looking for it.
-		text, held = heldDegradedText(), "no claim, "+degradedDropLogPhrase+", nothing stored"
+		// No count: nothing was stored in the local queue.
+		text, held = heldDegradedText(), "no claim, "+degradedHoldLogPhrase+", nothing stored"
 	}
 	args := c3types.ReplyArgs{Channel: in.Channel, ChatID: in.ChatID, TopicID: in.TopicID, Text: text}
 
