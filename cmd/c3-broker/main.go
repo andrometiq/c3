@@ -265,9 +265,9 @@ Usage:
   c3-broker install-claude-shim [--force] [--path PATH]
                         Install a Claude Code wrapper at PATH (default
                         ~/.local/bin/claude) that auto-injects
-                        --dangerously-load-development-channels plugin:c3@c3
-                        when the user runs claude. Idempotent — preserves
-                        the flag if already passed.
+                        --dangerously-load-development-channels=plugin:c3@c3
+                        for interactive launches; subcommands pass through
+                        untouched. Idempotent — preserves an existing flag.
   c3-broker uninstall-claude-shim [--force] [--path PATH]
                         Remove the installed Claude Code wrapper.
   c3-broker install-grok

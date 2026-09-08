@@ -13,7 +13,7 @@ import (
 
 func TestInjectC3Plugin_FlagAbsent_Prepends(t *testing.T) {
 	got := injectC3Plugin([]string{"--resume"})
-	want := []string{devChannelsFlag, c3PluginTag, "--resume"}
+	want := []string{devChannelsFlag + "=" + c3PluginTag, "--resume"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("got %#v, want %#v", got, want)
 	}
@@ -21,7 +21,7 @@ func TestInjectC3Plugin_FlagAbsent_Prepends(t *testing.T) {
 
 func TestInjectC3Plugin_FlagAbsent_NoArgs(t *testing.T) {
 	got := injectC3Plugin(nil)
-	want := []string{devChannelsFlag, c3PluginTag}
+	want := []string{devChannelsFlag + "=" + c3PluginTag}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("got %#v, want %#v", got, want)
 	}
@@ -78,10 +78,10 @@ func TestInjectC3Plugin_EqualsForm_C3AlreadyThere_NoChange(t *testing.T) {
 	}
 }
 
-func TestInjectC3Plugin_EqualsForm_DifferentValue_AppendsC3AfterFlag(t *testing.T) {
+func TestInjectC3Plugin_EqualsForm_DifferentValue_ExtendsListAtEnd(t *testing.T) {
 	in := []string{devChannelsFlag + "=plugin:other@x", "--resume"}
 	got := injectC3Plugin(in)
-	want := []string{devChannelsFlag + "=plugin:other@x", c3PluginTag, "--resume"}
+	want := []string{"--resume", devChannelsFlag, "plugin:other@x", c3PluginTag}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("got %#v, want %#v", got, want)
 	}
@@ -92,7 +92,7 @@ func TestInjectC3Plugin_DoubleDashTerminator_PrependsBefore(t *testing.T) {
 	// prepend at the start.
 	in := []string{"--", devChannelsFlag, c3PluginTag}
 	got := injectC3Plugin(in)
-	want := []string{devChannelsFlag, c3PluginTag, "--", devChannelsFlag, c3PluginTag}
+	want := []string{devChannelsFlag + "=" + c3PluginTag, "--", devChannelsFlag, c3PluginTag}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("got %#v, want %#v", got, want)
 	}
@@ -395,6 +395,7 @@ func TestFindRealClaude_ErrorsWhenNoneFound(t *testing.T) {
 // fake binary writes argv to a file we then read back. Verifies the
 // happy-path injection contract through a real process exec.
 func TestShim_EndToEnd_ExecsRealClaudeWithInjectedFlag(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	if _, err := exec.LookPath("go"); err != nil {
 		t.Skip("go toolchain unavailable; can't build shim binary")
 	}
@@ -409,9 +410,9 @@ func TestShim_EndToEnd_ExecsRealClaudeWithInjectedFlag(t *testing.T) {
 	realDir := t.TempDir()
 	realClaude := filepath.Join(realDir, "claude")
 	argvLog := filepath.Join(realDir, "argv.txt")
-	// Fake claude writes its argv (one arg per line) to argvLog.
+	// Fake claude records exact argument boundaries, including empty args and newlines.
 	script := "#!/bin/sh\n" +
-		"printf '%s\\n' \"$@\" > " + argvLog + "\n"
+		"printf '%s\\0' \"$@\" > \"$C3_TEST_ARGV_LOG\"\n"
 	if err := os.WriteFile(realClaude, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -424,15 +425,20 @@ func TestShim_EndToEnd_ExecsRealClaudeWithInjectedFlag(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cases := []struct {
+	type testCase struct {
 		name string
 		args []string
 		want []string
-	}{
+	}
+	cases := []testCase{
 		{
 			name: "flag-absent",
-			args: []string{"--resume"},
-			want: []string{devChannelsFlag, c3PluginTag, "--resume"},
+			args: []string{"--resume", "session-id-1"},
+			want: []string{devChannelsFlag + "=" + c3PluginTag, "--resume", "session-id-1"},
+		},
+		{
+			name: "bare-launch",
+			want: []string{devChannelsFlag + "=" + c3PluginTag},
 		},
 		{
 			name: "flag-present-c3-there",
@@ -444,6 +450,45 @@ func TestShim_EndToEnd_ExecsRealClaudeWithInjectedFlag(t *testing.T) {
 			args: []string{devChannelsFlag, "plugin:other@x", "--resume"},
 			want: []string{devChannelsFlag, "plugin:other@x", c3PluginTag, "--resume"},
 		},
+		{
+			name: "equals-flag-present-no-c3-preserves-prompt",
+			args: []string{devChannelsFlag + "=plugin:other@x", "hello\nworld", "--model", "sonnet", "--", "daemon"},
+			want: []string{"hello\nworld", "--model", "sonnet", devChannelsFlag, "plugin:other@x", c3PluginTag, "--", "daemon"},
+		},
+	}
+	// Exercise every published command and alias independently of the production
+	// set, plus the hidden daemon invocation used by agent mode.
+	for _, command := range []string{
+		"agents", "attach", "auth", "auto-mode", "daemon", "doctor", "gateway",
+		"import", "install", "logs", "mcp", "plugin", "plugins", "project",
+		"respawn", "rm", "setup-token", "stop", "kill", "ultrareview", "update", "upgrade",
+	} {
+		cases = append(cases, testCase{"command-" + command, []string{command}, []string{command}})
+	}
+	for _, args := range [][]string{
+		{"daemon", "--origin", "cli"},
+		{"daemon", "--help"},
+		{"daemon", "--origin", "cli", "--help"},
+		{"mcp", "list"},
+		{"plugin", "install", "x"},
+		{"--verbose", "daemon", "--origin", "cli"},
+		{"--resume", "daemon"}, // Deliberate conservative guess for an option value.
+		{"--model", "agents"},
+		{"daemon", devChannelsFlag, "plugin:other@x", "--", "", "two\nlines"},
+		{"daemon", devChannelsFlag + "=plugin:other@x"},
+	} {
+		cases = append(cases, testCase{"passthrough-" + strings.Join(args, " "), args, args})
+	}
+	for _, args := range [][]string{
+		{"hello world"},
+		{""},
+		{"--", "daemon"},
+		{"--", devChannelsFlag, c3PluginTag},
+		{"--model", "sonnet", "daemon"}, // Only the first non-dash token counts.
+		{"explain", "daemon"},
+		{"--resume=session-id-1", "explain daemon"},
+	} {
+		cases = append(cases, testCase{"interactive-" + strings.Join(args, " "), args, append([]string{devChannelsFlag + "=" + c3PluginTag}, args...)})
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -452,6 +497,7 @@ func TestShim_EndToEnd_ExecsRealClaudeWithInjectedFlag(t *testing.T) {
 			cmd.Env = append(os.Environ(),
 				"PATH="+shimDir+string(os.PathListSeparator)+realDir,
 				"C3_CLAUDE_REAL=", // force PATH walk
+				"C3_TEST_ARGV_LOG="+argvLog,
 			)
 			cmd.Stderr = os.Stderr
 			if err := cmd.Run(); err != nil {
@@ -461,9 +507,23 @@ func TestShim_EndToEnd_ExecsRealClaudeWithInjectedFlag(t *testing.T) {
 			if err != nil {
 				t.Fatalf("read argv log: %v", err)
 			}
-			lines := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
+			lines := strings.Split(strings.TrimSuffix(string(data), "\x00"), "\x00")
 			if !reflect.DeepEqual(lines, tc.want) {
 				t.Fatalf("real-claude saw argv %#v, want %#v", lines, tc.want)
+			}
+			// Re-enter with the delivered argv to prove the launcher is idempotent
+			// in both flag forms, including a list extended from an attached flag.
+			again := exec.Command(shimLink, lines...)
+			again.Env = cmd.Env
+			if out, err := again.CombinedOutput(); err != nil {
+				t.Fatalf("second shim run: %v\n%s", err, out)
+			}
+			second, err := os.ReadFile(argvLog)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(second) != string(data) {
+				t.Fatalf("second run changed argv: got %q, want %q", second, data)
 			}
 		})
 	}

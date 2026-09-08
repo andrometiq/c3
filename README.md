@@ -206,13 +206,14 @@ See [`INSTALL.md`](INSTALL.md) for the agent-driven playbook and
 Live inbound to Claude Code currently starts with:
 
 ```text
-claude --dangerously-load-development-channels plugin:c3@c3
+claude --dangerously-load-development-channels=plugin:c3@c3
 ```
 
 Claude Code applies that preview guardrail to every locally-installed channel plugin — it
 isn't a C3 hack. Without the flag, C3 detects that the host can't render live channel turns
 and keeps inbound in the queue for `fetch_queue` rather than dropping it; the installer can
-also drop in a small `claude` shim so the flag is automatic. See Anthropic's
+also drop in a small `claude` shim so the flag is automatic for interactive
+launches. Known Claude subcommands pass through untouched. See Anthropic's
 [Channels documentation](https://code.claude.com/docs/en/channels).
 
 ## Stability

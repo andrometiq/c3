@@ -325,7 +325,7 @@ be running yet — that's fine; the next CLI session will spawn it.
 >
 > **Restart this Claude Code session with the dev-channels flag**:
 >
->     claude --dangerously-load-development-channels plugin:c3@c3
+>     claude --dangerously-load-development-channels=plugin:c3@c3
 >
 > A plain `claude` works for sending outbound, but **inbound won't render
 > live** in that session (Claude Code only surfaces channel notifications

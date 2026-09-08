@@ -233,7 +233,7 @@ append `c3` alongside.
 Then **restart Claude Code with the development-channels flag**:
 
 ```
-claude --dangerously-load-development-channels plugin:c3@c3
+claude --dangerously-load-development-channels=plugin:c3@c3
 ```
 
 The plain `claude` command keeps `allowedChannelPlugins` enabled but
@@ -258,10 +258,14 @@ c3-broker install-claude-shim
 ```
 
 The shim is a tiny launcher symlinked at `~/.local/bin/claude` that
-transparently adds `--dangerously-load-development-channels plugin:c3@c3`
-to every `claude` invocation. Without it you type the long flag form by
-hand on every session start — easy to forget, which is why v0.1 holds
-flagless inbound in the durable queue instead of dropping it (the shim
+transparently adds `--dangerously-load-development-channels=plugin:c3@c3`
+to interactive `claude` launches. The `=` form keeps a positional prompt
+from being consumed as another plugin tag. Known subcommands such as
+`daemon`, `agents`, `auth`, `mcp`, `plugin`, and `update` pass through
+untouched so Claude can dispatch them normally. An existing flag is kept
+without duplication; C3 is added to its values only if missing. Without
+the shim you type the long flag form by hand on every session start — easy
+to forget, which is why v0.1 holds flagless inbound in the durable queue instead of dropping it (the shim
 still saves you the missed-live-rendering papercut).
 
 The most common manual-install hiccup is an existing non-shim

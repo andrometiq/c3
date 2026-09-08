@@ -1796,7 +1796,7 @@ func renderDegradedNote(canRender bool) string {
 	if canRender {
 		return ""
 	}
-	return "⚠️ Inbound delivery is DEGRADED: this session was launched without the development-channels flag, so incoming Telegram messages CANNOT be pushed into this conversation (the host silently drops them). C3 is holding them in a durable queue instead — call the `fetch_queue` tool to retrieve queued messages (they arrive as a tool result, which renders here). For normal live delivery, relaunch with `--dangerously-load-development-channels plugin:c3@c3`.\n\n"
+	return "⚠️ Inbound delivery is DEGRADED: this session was launched without the development-channels flag, so incoming Telegram messages CANNOT be pushed into this conversation (the host silently drops them). C3 is holding them in a durable queue instead — call the `fetch_queue` tool to retrieve queued messages (they arrive as a tool result, which renders here). For normal live delivery, relaunch with `--dangerously-load-development-channels=plugin:c3@c3`.\n\n"
 }
 
 // permissionContractNote is the security contract carried in the MCP instructions

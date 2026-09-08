@@ -1460,7 +1460,7 @@ func postSetupWhatNow(host HostCLI) string {
 	}
 	return `Setup complete — what now
   1. Launch Claude Code with the C3 channel enabled:
-       claude --dangerously-load-development-channels plugin:c3@c3
+       claude --dangerously-load-development-channels=plugin:c3@c3
      (append --resume yourself only if you want to pick up a previous session)
   2. In the session, run /c3:attach to bind this project to a Telegram topic.
   3. From your phone, send a text or voice note to that topic — it surfaces in the CLI.

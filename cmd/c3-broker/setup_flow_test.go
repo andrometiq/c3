@@ -914,7 +914,7 @@ func TestPairIntros_ContainCodeAndNoIDHunting(t *testing.T) {
 func TestPostSetupWhatNow_Claude_NoDefaultResume(t *testing.T) {
 	for _, host := range []HostCLI{HostClaude, HostUnknown} {
 		out := postSetupWhatNow(host)
-		if !strings.Contains(out, "claude --dangerously-load-development-channels plugin:c3@c3") {
+		if !strings.Contains(out, "claude --dangerously-load-development-channels=plugin:c3@c3") {
 			t.Fatalf("host %v: missing the stand-alone launch command:\n%s", host, out)
 		}
 		for _, line := range strings.Split(out, "\n") {

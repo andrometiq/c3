@@ -3,7 +3,7 @@ package main
 // Render-capability detection for the forked-session inbound blackhole.
 //
 // A Claude Code session launched WITHOUT
-// `--dangerously-load-development-channels plugin:c3@c3` (typically a
+// `--dangerously-load-development-channels=plugin:c3@c3` (typically a
 // --fork-session background job) still spawns this adapter and receives every
 // inbound, but Claude Code SILENTLY DROPS the notifications/claude/channel frame
 // before rendering. The adapter's write to stdin succeeds, so it would ack the

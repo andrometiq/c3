@@ -20,7 +20,7 @@ For the Telegram channel to actually surface inbound messages in this CLI,
 Claude Code must be started with the development-channels flag:
 
 ```
-claude --dangerously-load-development-channels plugin:c3@c3
+claude --dangerously-load-development-channels=plugin:c3@c3
 ```
 
 (or the same with `--resume` / `--resume <id>` appended)

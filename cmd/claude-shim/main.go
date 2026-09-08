@@ -1,15 +1,18 @@
 // claude-shim is the C3 Claude Code launcher wrapper. It auto-injects
-// `--dangerously-load-development-channels plugin:c3@c3` before exec'ing the
-// real claude binary, so users don't have to remember the flag.
+// `--dangerously-load-development-channels=plugin:c3@c3` for interactive
+// launches before exec'ing the real claude binary. Known Claude subcommands
+// pass through untouched, so the flag cannot interfere with command dispatch.
 //
 // Idempotency contract (load-bearing — see TODO #17, 2026-05-18):
 //
-//  1. Flag absent in argv → prepend the flag with `plugin:c3@c3`.
+//  1. Flag absent in argv → prepend the `=`-attached flag with `plugin:c3@c3`,
+//     so a positional prompt cannot be consumed as another plugin tag.
 //  2. Flag present and `plugin:c3@c3` already in its argument list → exec
 //     real claude unmodified. No double-injection.
 //  3. Flag present but `plugin:c3@c3` not in its list → append
 //     `plugin:c3@c3` to the existing flag's value list, preserving other
-//     plugin tags.
+//     plugin tags. An attached value becomes a space-separated list at the
+//     end of the options (before `--`) so existing prompts remain positional.
 //
 // Resolves the real claude binary by walking $PATH and skipping any entry
 // that resolves (via symlink) to this shim. Uses syscall.Exec so signals
@@ -21,6 +24,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/Andrometiq/c3/internal/shimconfig"
@@ -30,6 +34,18 @@ const (
 	devChannelsFlag = "--dangerously-load-development-channels"
 	c3PluginTag     = "plugin:c3@c3"
 )
+
+// claudeSubcommands comes from the Commands section of Claude Code 2.1.263's
+// `claude --help`, including aliases, plus the hidden daemon command used by
+// agent mode.
+var claudeSubcommands = map[string]bool{
+	"agents": true, "attach": true, "auth": true, "auto-mode": true,
+	"daemon": true, "doctor": true, "gateway": true, "import": true,
+	"install": true, "logs": true, "mcp": true, "plugin": true,
+	"plugins": true, "project": true, "respawn": true, "rm": true,
+	"setup-token": true, "stop": true, "kill": true, "ultrareview": true,
+	"update": true, "upgrade": true,
+}
 
 func main() {
 	if err := run(os.Args, os.Environ()); err != nil {
@@ -72,12 +88,29 @@ func run(argv0AndArgs, env []string) error {
 //     value (mirrors how plugin tags like `plugin:foo@bar` look).
 //   - `--` terminates the value list.
 func injectC3Plugin(args []string) []string {
+	// Only inspect the first non-dash token before `--`. Option values (e.g.
+	// --resume <id> or --model <name>) and prompts can look like subcommands
+	// only when they literally equal a known command name. Bias toward passing
+	// those through: a flagless session can use the durable queue, whereas
+	// injecting the flag before a subcommand breaks Claude's dispatch.
+	for _, arg := range args {
+		if arg == "--" {
+			break
+		}
+		if !strings.HasPrefix(arg, "-") {
+			if claudeSubcommands[arg] {
+				return append([]string(nil), args...)
+			}
+			break
+		}
+	}
+
 	flagIdx, valStart, valEnd, attachedValue := findDevChannelsFlag(args)
 
 	if flagIdx < 0 {
 		// Case 1: flag absent → prepend.
-		out := make([]string, 0, len(args)+2)
-		out = append(out, devChannelsFlag, c3PluginTag)
+		out := make([]string, 0, len(args)+1)
+		out = append(out, devChannelsFlag+"="+c3PluginTag)
 		out = append(out, args...)
 		return out
 	}
@@ -87,19 +120,23 @@ func injectC3Plugin(args []string) []string {
 	// (no space-separated values), and the single value is in
 	// attachedValue.
 	values := args[valStart:valEnd]
-	if attachedValue != "" {
+	if strings.HasPrefix(args[flagIdx], devChannelsFlag+"=") {
 		if attachedValue == c3PluginTag {
 			return append([]string(nil), args...)
 		}
-		// `=` form with a different value — append a new space-separated
-		// c3 tag after the `=` form so we don't mangle the existing
-		// attached value. We insert it as a separate `plugin:c3@c3`
-		// positional value, which claude will pick up as a second value
-		// for the same flag.
-		out := make([]string, 0, len(args)+1)
-		out = append(out, args[:flagIdx+1]...)
-		out = append(out, c3PluginTag)
-		out = append(out, args[flagIdx+1:]...)
+		// Expand to one space-separated list, placed at the end of the
+		// options (before `--`, if present). A bare tag after an attached
+		// flag would be a prompt; leaving the expanded list in place could
+		// swallow an existing prompt. Preserve the attached value verbatim.
+		end := slices.Index(args, "--")
+		if end < 0 {
+			end = len(args)
+		}
+		out := make([]string, 0, len(args)+2)
+		out = append(out, args[:flagIdx]...)
+		out = append(out, args[flagIdx+1:end]...)
+		out = append(out, devChannelsFlag, attachedValue, c3PluginTag)
+		out = append(out, args[end:]...)
 		return out
 	}
 	for _, v := range values {
