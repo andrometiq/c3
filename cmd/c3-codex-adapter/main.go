@@ -225,11 +225,13 @@ type adapter struct {
 
 	// Last successful attach request — replayed on broker reconnect so a
 	// session that survives a broker restart auto-reclaims its route (D3 /
-	// adapter-ipc-3). Nil until the session attaches. (Codex has no detach tool
-	// today, so it is never cleared once set.) Mirrors the Claude adapter's
+	// adapter-ipc-3). Cleared when every route is released; targeted detach
+	// rebuilds it from the surviving output route. Mirrors the Claude adapter's
 	// rememberAttach/replayLastAttach machinery.
 	amu        sync.Mutex
 	lastAttach *ipc.AttachReq
+	// releaseVersion prevents an in-flight recovery from undoing a detach.
+	releaseVersion uint64 // guarded by amu
 	// attachedTopic is the human-readable name of the currently-attached topic
 	// (attached.Name at attach time). Read when rendering the backlog / pending-fetch
 	// nudges so a human can see WHICH topic a fetch_queue would drain — a stale/wrong
@@ -304,6 +306,7 @@ type codexForwardReq struct {
 
 type codexForwardState struct {
 	ids      []string
+	route    routeKey
 	obsolete bool
 }
 
@@ -628,6 +631,10 @@ func (a *adapter) clearBrokerDownAdvisory() {
 func (a *adapter) rememberAttach(req ipc.AttachReq) {
 	a.amu.Lock()
 	defer a.amu.Unlock()
+	a.rememberAttachLocked(req)
+}
+
+func (a *adapter) rememberAttachLocked(req ipc.AttachReq) {
 	cp := req
 	// A steal is a ONE-SHOT human confirmation, not a standing property (item D).
 	// Replaying steal=true verbatim after a broker bounce would silently
@@ -668,6 +675,10 @@ func cloneRouteRefs(routes []ipc.RouteRef) []ipc.RouteRef {
 func (a *adapter) setRouteState(routes []ipc.RouteRef, output *ipc.RouteRef) {
 	a.amu.Lock()
 	defer a.amu.Unlock()
+	a.setRouteStateLocked(routes, output)
+}
+
+func (a *adapter) setRouteStateLocked(routes []ipc.RouteRef, output *ipc.RouteRef) {
 	a.routes = cloneRouteRefs(routes)
 	a.routeNames = make(map[routeKey]string, len(routes))
 	for _, route := range routes {
@@ -699,6 +710,10 @@ func (a *adapter) clearRouteStateLocked() {
 func (a *adapter) originTag(in *c3types.Inbound) string {
 	a.amu.Lock()
 	defer a.amu.Unlock()
+	return a.originTagLocked(in)
+}
+
+func (a *adapter) originTagLocked(in *c3types.Inbound) string {
 	if len(a.routes) <= 1 {
 		return ""
 	}
@@ -775,19 +790,74 @@ func resolvedAttachReq(req ipc.AttachReq, attached ipc.AttachedMsg) ipc.AttachRe
 // simply absorbed. The point is to re-claim the route, not to confirm.
 func (a *adapter) replayLastAttach() {
 	a.amu.Lock()
-	req := a.lastAttach
-	a.amu.Unlock()
-	if req == nil {
+	defer a.amu.Unlock()
+	if a.lastAttach == nil {
 		return
 	}
-	if conn := a.currentConn(); conn != nil {
-		replay := *req
-		replay.Replay = true
-		if err := conn.WriteJSON(replay); err != nil {
-			log.Printf("replay attach failed: %v", err)
-			return
+	requests := []ipc.AttachReq{*a.lastAttach}
+	// Replay the confirmed set additively, with output last. A single cached
+	// request may have been an expression that also named a released route.
+	if len(a.routes) > 0 {
+		requests = nil
+		for _, route := range a.routes {
+			if a.outputRoute != nil && routeKeyFor(route.Channel, route.ChatID, route.TopicID) == routeKeyFor(a.outputRoute.Channel, a.outputRoute.ChatID, a.outputRoute.TopicID) {
+				continue
+			}
+			requests = append(requests, rememberedRouteReq(a.lastAttach.CWD, route))
 		}
-		log.Printf("replayed attach (target=%q name=%q)", req.Target, req.Name)
+		if a.outputRoute != nil {
+			requests = append(requests, rememberedRouteReq(a.lastAttach.CWD, *a.outputRoute))
+		}
+	}
+	if conn := a.currentConn(); conn != nil {
+		for _, replay := range requests {
+			replay.Replay = true
+			replay.Add = len(a.routes) > 0
+			if err := conn.WriteJSON(replay); err != nil {
+				log.Printf("replay attach failed: %v", err)
+				return
+			}
+			log.Printf("replayed attach (target=%q name=%q)", replay.Target, replay.Name)
+		}
+	}
+}
+
+func rememberedRouteReq(cwd string, route ipc.RouteRef) ipc.AttachReq {
+	req := rememberedIdentityReq(cwd, route.ChatID, route.TopicID, route.Group)
+	req.Channel = route.Channel
+	if route.Channel == "web" {
+		req.Target = "web"
+	}
+	return req
+}
+
+// applyReleaseLocked replaces only route-owned state with the broker's surviving
+// set. Call with amu held, including across the release-all write, so replay
+// cannot snapshot a claim and write it after that claim was released.
+func (a *adapter) applyReleaseLocked(routes []ipc.RouteRef, output *ipc.RouteRef) {
+	a.releaseVersion++
+	cwd := ""
+	if a.lastAttach != nil {
+		cwd = a.lastAttach.CWD
+	}
+	a.lastAttach = nil
+	if output != nil {
+		a.rememberAttachLocked(rememberedRouteReq(cwd, *output))
+	}
+	if len(routes) == 0 {
+		a.clearRouteStateLocked()
+	} else {
+		a.setRouteStateLocked(routes, output)
+	}
+	a.deliveryStateMu.Lock()
+	defer a.deliveryStateMu.Unlock()
+	for state := range a.forwards {
+		if _, held := a.routeNames[state.route]; !held {
+			state.obsolete = true
+		}
+	}
+	if len(routes) == 0 {
+		a.clearForwardBlocked()
 	}
 }
 
@@ -845,30 +915,39 @@ func (a *adapter) handleInbound(raw []byte) {
 		return
 	}
 
+	// A broker frame already in transit can arrive after release. Check and
+	// register its delivery under the same lock as detach's invalidation.
+	a.amu.Lock()
+	key := routeKeyFor(msg.Inbound.Channel, msg.Inbound.ChatID, msg.Inbound.TopicID)
+	if _, held := a.routeNames[key]; a.releaseVersion > 0 && key.channel != "" && !held {
+		a.amu.Unlock()
+		return
+	}
 	if !codexForwardingAllowed() {
+		a.amu.Unlock()
 		a.nudgeFetchQueue(msg)
+		return
 	}
 
-	if codexForwardingAllowed() {
-		req := codexForwardReq{
-			inbound: msg.Inbound, covered: msg.Covered, pending: msg.Pending,
-			originTag: a.originTag(&msg.Inbound), token: msg.DeliveryToken, conn: a.currentConn(),
-			state: &codexForwardState{ids: msg.RecordIDs},
-		}
+	req := codexForwardReq{
+		inbound: msg.Inbound, covered: msg.Covered, pending: msg.Pending,
+		originTag: a.originTagLocked(&msg.Inbound), token: msg.DeliveryToken, conn: a.currentConn(),
+		state: &codexForwardState{ids: msg.RecordIDs, route: key},
+	}
+	a.deliveryStateMu.Lock()
+	if a.forwards == nil {
+		a.forwards = make(map[*codexForwardState]struct{})
+	}
+	a.forwards[req.state] = struct{}{}
+	a.deliveryStateMu.Unlock()
+	a.amu.Unlock()
+	select {
+	case a.forwardCh <- req:
+	default:
 		a.deliveryStateMu.Lock()
-		if a.forwards == nil {
-			a.forwards = make(map[*codexForwardState]struct{})
-		}
-		a.forwards[req.state] = struct{}{}
+		delete(a.forwards, req.state)
+		a.latchForwardBlocked("forward queue full; message held")
 		a.deliveryStateMu.Unlock()
-		select {
-		case a.forwardCh <- req:
-		default:
-			a.deliveryStateMu.Lock()
-			delete(a.forwards, req.state)
-			a.latchForwardBlocked("forward queue full; message held")
-			a.deliveryStateMu.Unlock()
-		}
 	}
 }
 
@@ -1044,7 +1123,7 @@ func (a *adapter) latchForwardBlocked(reason string) {
 
 func (a *adapter) clearForwardBlocked() {
 	if a.recoveryNoticeSent.CompareAndSwap(true, false) {
-		log.Printf("codex recovery notice rearmed after selected fetch_queue drain")
+		log.Printf("codex recovery notice rearmed")
 	}
 }
 
@@ -1085,20 +1164,27 @@ func (a *adapter) dispatchAttached(raw []byte) {
 	if err := json.Unmarshal(raw, &attached); err != nil {
 		return
 	}
-	if attached.OK {
-		routes, output := attached.Routes, attached.Output
-		if len(routes) == 0 && attached.Channel != "" {
-			legacy := ipc.RouteRef{Channel: attached.Channel, ChatID: attached.ChatID, TopicID: attached.TopicID, Name: attached.Name, Group: attached.Group}
-			routes, output = []ipc.RouteRef{legacy}, &legacy
-		}
-		a.setRouteState(routes, output)
-	}
 	a.pmu.Lock()
 	ch, ok := a.pending["attached"]
 	if ok {
 		delete(a.pending, "attached")
 	}
 	a.pmu.Unlock()
+	if attached.OK {
+		routes, output := attached.Routes, attached.Output
+		if len(routes) == 0 && attached.Channel != "" {
+			legacy := ipc.RouteRef{Channel: attached.Channel, ChatID: attached.ChatID, TopicID: attached.TopicID, Name: attached.Name, Group: attached.Group}
+			routes, output = []ipc.RouteRef{legacy}, &legacy
+		}
+		a.amu.Lock()
+		// A replay has no tool waiter. After detach, its delayed response must
+		// not overwrite the confirmed surviving set. Explicit attach can still
+		// establish a new route (including one the user previously released).
+		if ok || a.releaseVersion == 0 {
+			a.setRouteStateLocked(routes, output)
+		}
+		a.amu.Unlock()
+	}
 	if ok {
 		// A successful attach may carry the just-claimed channel's manifest.
 		// Store it as the latest caps so any subsequent instructions rebuild
@@ -1123,7 +1209,14 @@ func (a *adapter) dispatchReleaseResult(raw []byte) {
 	a.pmu.Unlock()
 	if ok {
 		if resp.OK {
-			a.setRouteState(resp.Routes, resp.Output)
+			a.amu.Lock()
+			a.applyReleaseLocked(resp.Routes, resp.Output)
+			a.amu.Unlock()
+			if resp.Output == nil {
+				termtitle.Clear()
+			} else {
+				termtitle.EmitAttach(&ipc.AttachedMsg{OK: true, Name: resp.Output.Name, Group: resp.Output.Group})
+			}
 		}
 		ch <- ipc.ToolResultMsg{Result: map[string]any{"_release": resp}}
 	}
@@ -1602,12 +1695,12 @@ func (a *adapter) toolDetach(ctx context.Context, req *mcp.CallToolRequest) (*mc
 		}
 		return toolTextResult(ipc.FormatRelease(target, resp)), nil
 	}
+	a.amu.Lock()
 	if err := conn.WriteJSON(releaseReq); err != nil {
+		a.amu.Unlock()
 		return toolErrorResult("broker write: " + err.Error()), nil
 	}
-	a.amu.Lock()
-	a.lastAttach = nil
-	a.clearRouteStateLocked()
+	a.applyReleaseLocked(nil, nil)
 	a.amu.Unlock()
 	// Restore the terminal-emulator's default title — see the EmitAttach
 	// call-site comment in toolAttach for context.

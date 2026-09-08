@@ -832,6 +832,17 @@ allowed with a pull-only notice; live delivery refuses to rediscover a recipient
 A restart with `C3_CODEX_THREAD_ID`, or successful resolution on broker reconnect,
 can establish the pin. Per-route origin tags are captured when input is enqueued.
 
+Detach forgets released routes in both the visible route set and reconnect
+replay. A targeted detach preserves the remaining routes and output and updates
+the terminal title. Late recovery and replay responses cannot restore the
+released snapshot. Buffered delivery
+attempts for released routes are invalidated, and late inbound frames for those
+routes are ignored. A submission already sent to Codex cannot be recalled, but
+its obsolete completion cannot acknowledge or emit a failure notice. Releasing
+the last route rearms the shared recovery notice. The conversation pin,
+unsupported-queue detection, and unknown-fetch safety pause remain session-wide;
+changing topics does not reset them.
+
 Destructive fetch and in-flight submission are serialized. Inbound IPC includes
 `record_ids`, the broker's durable source identities; destructive fetch response
 messages carry `ConsumedRecordID`. The worker includes this field before frame

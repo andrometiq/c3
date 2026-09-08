@@ -365,6 +365,9 @@ func (a *adapter) fireRecover(ctx context.Context, conn *ipc.Conn, stableID, cwd
 	if conn == nil || stableID == "" {
 		return
 	}
+	a.amu.Lock()
+	releaseVersion := a.releaseVersion
+	a.amu.Unlock()
 	respCh := make(chan ipc.RecoverSessionResp, 1)
 	a.rsmu.Lock()
 	if a.rsPending == nil {
@@ -408,7 +411,12 @@ func (a *adapter) fireRecover(ctx context.Context, conn *ipc.Conn, stableID, cwd
 		// Remember the recovered route ADDRESSED BY IDENTITY ({topic_id, group}
 		// or {target:"dm"}), never by name — see rememberedIdentityReq — so a
 		// later broker restart replays a claim that actually re-binds.
-		a.rememberAttach(rememberedIdentityReq(cwd, resp.ChatID, resp.TopicID, resp.Group))
+		a.amu.Lock()
+		if a.releaseVersion != releaseVersion {
+			a.amu.Unlock()
+			return // a detach superseded this recovery's route snapshot
+		}
+		a.rememberAttachLocked(rememberedIdentityReq(cwd, resp.ChatID, resp.TopicID, resp.Group))
 		// Route state becomes visible only AFTER the replay identity above is
 		// remembered (same goroutine): once the session can name its topic, a
 		// broker restart is guaranteed to find a replayable claim.
@@ -417,7 +425,8 @@ func (a *adapter) fireRecover(ctx context.Context, conn *ipc.Conn, stableID, cwd
 			legacy := ipc.RouteRef{Channel: resp.Channel, ChatID: resp.ChatID, TopicID: resp.TopicID, Name: resp.Name, Group: resp.Group}
 			routes, output = []ipc.RouteRef{legacy}, &legacy
 		}
-		a.setRouteState(routes, output)
+		a.setRouteStateLocked(routes, output)
+		a.amu.Unlock()
 		log.Printf("recover-session: auto-attached to %q (queued=%d)", resp.Name, resp.QueuedCount)
 		if resp.QueuedCount > 0 {
 			a.forwardStatusNotice(renderCodexRecoverNotice(resp))
