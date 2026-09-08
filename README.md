@@ -1,13 +1,26 @@
-# C3 — your coding agents, one Telegram inbox
+# C3 — every coding agent you run, in one Telegram chat
 
-C3 puts the coding-agent sessions already running on your machine behind a single Telegram
-bot, with one forum topic per project. Send a message from your phone; the session attached
-to that topic receives it, works, and answers in the same topic. If no session is attached,
-the message waits on disk instead of disappearing.
+Every vendor's remote mode gives you one agent, in that vendor's app. C3 gives you all of
+them in one Telegram group: a forum topic per project, and whichever CLI is attached to the
+topic answers there. Claude Code on one project, Codex on the next, no app switch.
 
-It's a bridge to CLIs you already run — Claude Code, Codex, Claude Desktop, Grok Build, the
-Antigravity CLI — not another agent runtime, not a hosted service. Your bot token, your queue,
-your hardware. Go, MIT, Linux and macOS (Windows in beta).
+## Why C3
+
+- **One inbox for every agent.** Claude Code, Codex, Cursor, Grok Build, Antigravity, dcode,
+  Claude Desktop. Attach any of them to a project topic; you message the project, not the vendor.
+- **The sessions are the ones already in your terminal.** C3 is a bridge, not a runtime. No
+  hosted copy of your repo, no second agent, no subscription. Your bot token, your queue, your
+  hardware.
+- **Approve tool calls from your phone.** With Claude Code, the topic shows the literal command
+  and an Allow/Deny keyboard. A tap from an allowlisted operator authorizes it; anyone else's
+  tap is ignored.
+- **Voice in.** Send a voice note; the session receives the transcript as a native turn.
+- **Nothing gets lost.** No session attached, laptop asleep, agent mid-task: the message waits
+  on disk and is delivered once, in order, when a session can take it.
+- **A web chat for when Telegram isn't where you are.** Same broker, same topics, phone-friendly,
+  reachable only over your own network.
+
+Go, MIT, Linux and macOS (Windows in beta).
 
 ```text
 Telegram topic "api" ─┐
