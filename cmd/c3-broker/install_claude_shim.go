@@ -2,12 +2,16 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
+	"time"
 
 	"github.com/Andrometiq/c3/internal/shimconfig"
 )
@@ -56,7 +60,8 @@ func runInstallClaudeShim(args []string) error {
 	return nil
 }
 
-// installClaudeShim places a symlink at installPath pointing at launcher.
+// installClaudeShim places and tests a symlink at installPath pointing at launcher.
+// A failed test removes the new link and restores any replaced entry.
 // Safety contract:
 //   - If installPath doesn't exist → create the symlink.
 //   - If installPath is a symlink (any target) → replace it. We assume any
@@ -72,6 +77,7 @@ func installClaudeShim(installPath, launcher string, force bool) error {
 		return err
 	}
 
+	previousTarget := ""
 	info, statErr := os.Lstat(installPath)
 	switch {
 	case statErr != nil && errors.Is(statErr, os.ErrNotExist):
@@ -79,12 +85,16 @@ func installClaudeShim(installPath, launcher string, force bool) error {
 	case statErr != nil:
 		return statErr
 	case info.Mode()&os.ModeSymlink != 0:
+		var err error
+		previousTarget, err = os.Readlink(installPath)
+		if err != nil {
+			return err
+		}
 		// Existing symlink — may be a previous shim install (target ==
 		// launcher), or a user-curated link pointing at the real claude
 		// binary. In the latter case, persist the resolved real-claude
 		// path to ~/.config/c3/claude-shim.json so the shim runtime can
-		// re-find it after we replace this symlink. See TODO.md #17 fix
-		// option (a), locked 2026-05-18.
+		// re-find it after we replace this symlink.
 		if resolved, err := filepath.EvalSymlinks(installPath); err == nil {
 			resolvedLauncher, lerr := filepath.EvalSymlinks(launcher)
 			if lerr != nil {
@@ -97,7 +107,7 @@ func installClaudeShim(installPath, launcher string, force bool) error {
 				// installPath wouldn't exist on disk (race with a
 				// concurrent `claude` invocation). Closes report
 				// MINOR m6 (2026-05-19).
-				return nil
+				return testClaudeShim(installPath)
 			}
 			if rinfo, sErr := os.Stat(resolved); sErr == nil && !rinfo.IsDir() && rinfo.Mode()&0o111 != 0 {
 				if cfgPath, pErr := shimconfig.Path(); pErr == nil {
@@ -122,12 +132,95 @@ func installClaudeShim(installPath, launcher string, force bool) error {
 		}
 	}
 
-	if statErr == nil {
+	// Preserve regular files too (including --force installs) until validation
+	// succeeds. Keep the backup beside the destination so rename stays local.
+	backup := ""
+	if statErr == nil && previousTarget == "" {
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("refusing to replace non-regular file at %s", installPath)
+		}
+		f, err := os.CreateTemp(filepath.Dir(installPath), ".claude-backup-*")
+		if err != nil {
+			return err
+		}
+		backup = f.Name()
+		if err := f.Close(); err != nil {
+			_ = os.Remove(backup)
+			return err
+		}
+		if err := os.Rename(installPath, backup); err != nil {
+			_ = os.Remove(backup)
+			return err
+		}
+	} else if statErr == nil {
 		if err := os.Remove(installPath); err != nil {
 			return err
 		}
 	}
-	return os.Symlink(launcher, installPath)
+	installErr := os.Symlink(launcher, installPath)
+	if installErr == nil {
+		installErr = testClaudeShim(installPath)
+		if installErr != nil {
+			if err := os.Remove(installPath); err != nil {
+				return fmt.Errorf("%w; rollback could not remove %s: %v", installErr, installPath, err)
+			}
+		}
+	}
+	if installErr != nil {
+		var restoreErr error
+		if previousTarget != "" {
+			restoreErr = os.Symlink(previousTarget, installPath)
+		} else if backup != "" {
+			restoreErr = os.Rename(backup, installPath)
+		}
+		if restoreErr != nil {
+			return fmt.Errorf("%w; rollback failed: %v (backup: %s)", installErr, restoreErr, backup)
+		}
+		return fmt.Errorf("%w; restored previous launcher state at %s", installErr, installPath)
+	}
+	if backup != "" {
+		return os.Remove(backup)
+	}
+	return nil
+}
+
+// testClaudeShim exercises the installed path, including real-Claude resolution.
+// Daemon help may exit nonzero when agent view is disabled; that notice still
+// proves dispatch reached the daemon command. --version must always exit zero.
+func testClaudeShim(installPath string) error {
+	// --path may be relative; never let exec resolve a bare name via PATH.
+	installPath, err := filepath.Abs(installPath)
+	if err != nil {
+		return err
+	}
+	for _, args := range [][]string{{"daemon", "--help"}, {"--version"}} {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		cmd := exec.CommandContext(ctx, installPath, args...)
+		cmd.WaitDelay = time.Second // bound inherited output pipes as well
+		out, err := cmd.CombinedOutput()
+		ctxErr := ctx.Err()
+		cancel()
+		if ctxErr != nil {
+			return fmt.Errorf("Claude wrapper self-test %s: %w", strings.Join(args, " "), ctxErr)
+		}
+		if args[0] == "daemon" {
+			firstLine, _, _ := strings.Cut(strings.ToLower(strings.TrimSpace(string(out))), "\n")
+			disabled := (strings.Contains(firstLine, "agent view") || strings.Contains(firstLine, "agent-view")) &&
+				(strings.Contains(firstLine, "disabled") || strings.Contains(firstLine, "not enabled"))
+			var exitErr *exec.ExitError
+			if disabled && (err == nil || errors.As(err, &exitErr)) {
+				continue
+			}
+			if err == nil && strings.Contains(firstLine, "claude daemon") {
+				continue
+			}
+			return fmt.Errorf("Claude wrapper self-test daemon --help: expected daemon usage or agent-view-disabled notice (exit: %v), got %q", err, out)
+		}
+		if err != nil {
+			return fmt.Errorf("Claude wrapper self-test --version: %w; output: %q", err, out)
+		}
+	}
+	return nil
 }
 
 func runUninstallClaudeShim(args []string) error {

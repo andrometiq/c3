@@ -32,7 +32,7 @@ import (
 const telegramChannelName = "telegram"
 
 // printShimInstallFailure renders the structured failure surface for a
-// failed compulsory claude-shim install. Writes the same block to BOTH
+// failed opt-in claude-shim install. Writes the same block to BOTH
 // stdout AND stderr so the user sees it regardless of whether setup is
 // driven from a Claude Code agent (which captures stdout in its
 // transcript and only intermittently surfaces stderr) or from a raw
@@ -50,21 +50,18 @@ func printShimInstallFailure(stdout, stderr io.Writer, err error) {
 	block := fmt.Sprintf(`[claude shim NOT installed]
   error: %v
 
-  The shim is required for c3 channels to surface in Claude Code.
-  Most common cause: an existing non-shim `+"`~/.local/bin/claude`"+`
-  (e.g. one installed by NVM, npm, or a manual symlink to the real
-  claude binary).
-
-  To overwrite the existing file:
+  The optional wrapper could not be installed. You can still launch with
+  claude --dangerously-load-development-channels=plugin:c3@c3.
+  If the post-install self-test failed, fix the reported dispatch/version
+  error before retrying; --force does not bypass the self-test.
+  An existing non-shim regular file at ~/.local/bin/claude requires
+  explicit permission to overwrite:
     c3-broker install-claude-shim --force
 
-  --force overwrites a non-shim file at ~/.local/bin/claude. If this
-  is the first time you have run install-claude-shim, the original
-  claude symlink target may not have been persisted to
-  ~/.config/c3/claude-shim.json yet, and --force will lose the path
-  to your real claude binary. Verify a successful one-time install
-  without --force first when possible — it persists the resolved
-  real-claude path before the shim takes over.
+  --force overwrites a non-shim file at ~/.local/bin/claude. Keep the
+  real Claude executable elsewhere on PATH or set C3_CLAUDE_REAL first.
+  Existing symlinks do not require --force: the installer remembers
+  their resolved executable target in ~/.config/c3/claude-shim.json.
 `, err)
 	// Write errors on stdout/stderr at this point in setup are
 	// non-actionable: the process is about to print the restart
@@ -98,9 +95,11 @@ Usage:
                                   group (default: the group's title, else "main").
   c3-broker setup stt             Voice-transcription key setup (interactive or
                                   piped answers).
-  c3-broker setup finish          Host integrations (claude shim / codex MCP),
+  c3-broker setup finish [--claude-shim]
+                                  Host integrations (optional Claude wrapper / Codex MCP),
                                   broker restart with the new config, and the
-                                  post-setup "what now" summary.
+                                  post-setup "what now" summary. The Claude
+                                  wrapper is off unless --claude-shim is passed.
 
 The primary setup experience is /c3:setup inside Claude Code — the agent
 drives these phases and walks you through each step.
@@ -127,7 +126,7 @@ func runSetupWithArgs(args []string) error {
 	case "stt":
 		return runSetupSTT()
 	case "finish":
-		return runSetupFinish()
+		return runSetupFinish(args[1:])
 	case "--help", "-h", "help":
 		// WriteString (not fmt.Print) — the usage text contains a literal
 		// printf example that would trip vet's format-directive check.
@@ -339,7 +338,12 @@ func runSetupInteractive() error {
 		sttWritten = written
 	}
 
-	installHostIntegrations(host)
+	claudeShim := false
+	if host == HostClaude {
+		fmt.Print("Install the C3 claude launcher wrapper at ~/.local/bin/claude? It adds the C3 channel flag to interactive launches; you can add it later with 'c3-broker install-claude-shim'. [y/N]: ")
+		claudeShim = readBoolDefault(r, false)
+	}
+	installHostIntegrations(host, claudeShim)
 
 	// #10 (2026-05-18): under Codex, setup typically runs without a
 	// connected TTY (the agent invokes it programmatically), so the STT
@@ -562,7 +566,16 @@ func runSetupSTT() error {
 // runSetupFinish is the `c3-broker setup finish` phase: verify the config,
 // install host integrations, restart the broker so the new config is live,
 // and print the stand-alone post-setup guidance (#8/#10).
-func runSetupFinish() error {
+func runSetupFinish(args []string) error {
+	fs := flag.NewFlagSet("setup finish", flag.ContinueOnError)
+	claudeShim := fs.Bool("claude-shim", false, "install the optional C3 Claude launcher wrapper")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 {
+		return fmt.Errorf("unexpected setup finish arguments: %v", fs.Args())
+	}
+
 	mfPath, err := mappings.DefaultPath()
 	if err != nil {
 		return err
@@ -597,7 +610,7 @@ func runSetupFinish() error {
 	}
 
 	host := DetectHostCLI()
-	installHostIntegrations(host)
+	installHostIntegrations(host, *claudeShim)
 	if !progress.STTConfigured {
 		sttHint(host)
 	}
@@ -612,7 +625,7 @@ func runSetupFinish() error {
 
 // installHostIntegrations runs the host-CLI-specific install steps shared
 // by the interactive flow and `setup finish`.
-func installHostIntegrations(host HostCLI) {
+func installHostIntegrations(host HostCLI, claudeShim bool) {
 	// #9 (2026-05-18): when setup is driven from Codex CLI, register the
 	// c3 MCP server into Codex's persistent config so the user doesn't
 	// have to do it by hand. (The `codex` launcher shim already wires up
@@ -649,20 +662,9 @@ func installHostIntegrations(host HostCLI) {
 		}
 	}
 
-	// #17 (2026-05-18): when setup is driven from Claude Code, install the
-	// claude-shim symlink at ~/.local/bin/claude unconditionally. This is
-	// COMPULSORY, no prompt, no opt-out — the shim is the only supported
-	// path for getting the dev-channels flag right, and a failed/skipped
-	// install is the misconfiguration item #18 was meant to catch (now
-	// closed as subsumed). Non-fatal if it fails (e.g. a real `claude`
-	// binary already lives at the target path without a sentinel) —
-	// surface a hint so the user can run install manually with --force.
-	if err := maybeInstallClaudeShim(host); err != nil {
-		// Compulsory under HostClaude — a silent skip is the exact
-		// failure mode item #18 was meant to close. Print to BOTH
-		// stdout and stderr so the agent transcript (stdout) and the
-		// raw shell (stderr) both see the structured failure block.
-		// Reasoning recorded in the 2026-05-19 code-review pass (item M2).
+	// An explicit yes or --claude-shim is required before changing claude on PATH.
+	if err := maybeInstallClaudeShim(host, claudeShim); err != nil {
+		// Keep failed opt-in installs visible in both agent transcripts and shells.
 		printShimInstallFailure(os.Stdout, os.Stderr, err)
 	}
 }
@@ -1465,6 +1467,8 @@ func postSetupWhatNow(host HostCLI) string {
   2. In the session, run /c3:attach to bind this project to a Telegram topic.
   3. From your phone, send a text or voice note to that topic — it surfaces in the CLI.
 
+  /c3:status is a Claude slash command; c3-broker status is the shell command.
+
   30-second tour: /c3:status shows broker health; /c3:topics lists topics +
   claims; /c3:pair allowlists another person or group later; voice notes are
   transcribed automatically once STT keys are configured (` + "`c3-broker setup stt`" + `).`
@@ -1847,17 +1851,13 @@ func promptSTTSetup(r *bufio.Reader) (bool, error) {
 // claude-shim launcher binary next to the test exe.
 var installClaudeShimFn = runInstallClaudeShim
 
-// maybeInstallClaudeShim runs the claude-shim installer with defaults
-// (i.e. no flag args — default install path of ~/.local/bin/claude,
-// no --force) when the host CLI is Claude Code. Other hosts (Codex,
-// Unknown) are a no-op.
-//
-// This is the runSetup() Claude-host branch factored into a testable
-// helper. See item #17 in TODO.md: the shim install is COMPULSORY
-// under Claude Code per the maintainer's 2026-05-18 call — no prompt,
-// no opt-out.
-func maybeInstallClaudeShim(host HostCLI) error {
+// maybeInstallClaudeShim installs with defaults only for a Claude host that opted in.
+func maybeInstallClaudeShim(host HostCLI, optedIn bool) error {
 	if host != HostClaude {
+		return nil
+	}
+	if !optedIn {
+		fmt.Println("Claude launcher wrapper NOT installed by this setup; add it later with 'c3-broker install-claude-shim'.")
 		return nil
 	}
 	return installClaudeShimFn(nil)

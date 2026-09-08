@@ -5,10 +5,12 @@ package main
 import (
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/Andrometiq/c3/internal/shimconfig"
 )
@@ -16,7 +18,7 @@ import (
 func TestInstallClaudeShim_FreshInstall_CreatesSymlink(t *testing.T) {
 	dir := t.TempDir()
 	launcher := filepath.Join(dir, "claude-shim")
-	if err := os.WriteFile(launcher, []byte("#!/bin/sh\n"), 0o755); err != nil {
+	if err := os.WriteFile(launcher, []byte("#!/bin/sh\necho 'Usage: claude daemon [options]'\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	installPath := filepath.Join(dir, "bin", "claude")
@@ -36,7 +38,7 @@ func TestInstallClaudeShim_FreshInstall_CreatesSymlink(t *testing.T) {
 func TestInstallClaudeShim_RefusesNonShimFile(t *testing.T) {
 	dir := t.TempDir()
 	launcher := filepath.Join(dir, "claude-shim")
-	if err := os.WriteFile(launcher, []byte("#!/bin/sh\n"), 0o755); err != nil {
+	if err := os.WriteFile(launcher, []byte("#!/bin/sh\necho 'Usage: claude daemon [options]'\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	installPath := filepath.Join(dir, "claude")
@@ -61,7 +63,7 @@ func TestInstallClaudeShim_RefusesNonShimFile(t *testing.T) {
 func TestInstallClaudeShim_ForceOverwritesNonShimFile(t *testing.T) {
 	dir := t.TempDir()
 	launcher := filepath.Join(dir, "claude-shim")
-	if err := os.WriteFile(launcher, []byte("#!/bin/sh\n"), 0o755); err != nil {
+	if err := os.WriteFile(launcher, []byte("#!/bin/sh\necho 'Usage: claude daemon [options]'\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	installPath := filepath.Join(dir, "claude")
@@ -89,7 +91,7 @@ func TestInstallClaudeShim_ReplacesExistingSymlink(t *testing.T) {
 
 	dir := t.TempDir()
 	launcher := filepath.Join(dir, "claude-shim")
-	if err := os.WriteFile(launcher, []byte("#!/bin/sh\n"), 0o755); err != nil {
+	if err := os.WriteFile(launcher, []byte("#!/bin/sh\necho 'Usage: claude daemon [options]'\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	stale := filepath.Join(dir, "old-target")
@@ -121,7 +123,7 @@ func TestInstallClaudeShim_SymlinkToRealClaude_PersistsConfig(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", xdg)
 
 	launcher := filepath.Join(dir, "claude-shim")
-	if err := os.WriteFile(launcher, []byte("#!/bin/sh\n"), 0o755); err != nil {
+	if err := os.WriteFile(launcher, []byte("#!/bin/sh\necho 'Usage: claude daemon [options]'\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	// Existing "real claude" the user installed (e.g. via npm/nvm).
@@ -185,7 +187,7 @@ func TestInstallClaudeShim_SymlinkAlreadyPointsAtLauncher_DoesNotRemove(t *testi
 	t.Setenv("XDG_CONFIG_HOME", xdg)
 
 	launcher := filepath.Join(dir, "claude-shim")
-	if err := os.WriteFile(launcher, []byte("#!/bin/sh\n"), 0o755); err != nil {
+	if err := os.WriteFile(launcher, []byte("#!/bin/sh\necho 'Usage: claude daemon [options]'\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	installPath := filepath.Join(dir, "claude")
@@ -237,7 +239,7 @@ func TestInstallClaudeShim_SymlinkAlreadyPointsAtLauncher_NoConfigWrite(t *testi
 	t.Setenv("XDG_CONFIG_HOME", xdg)
 
 	launcher := filepath.Join(dir, "claude-shim")
-	if err := os.WriteFile(launcher, []byte("#!/bin/sh\n"), 0o755); err != nil {
+	if err := os.WriteFile(launcher, []byte("#!/bin/sh\necho 'Usage: claude daemon [options]'\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	installPath := filepath.Join(dir, "claude")
@@ -272,7 +274,7 @@ func TestInstallClaudeShim_SymlinkAlreadyPointsAtLauncher_NoConfigWrite(t *testi
 func TestInstallClaudeShim_AllowsOverwriteWhenSentinelPresent(t *testing.T) {
 	dir := t.TempDir()
 	launcher := filepath.Join(dir, "claude-shim")
-	if err := os.WriteFile(launcher, []byte("#!/bin/sh\n"), 0o755); err != nil {
+	if err := os.WriteFile(launcher, []byte("#!/bin/sh\necho 'Usage: claude daemon [options]'\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	installPath := filepath.Join(dir, "claude")
@@ -402,5 +404,131 @@ func TestFileContainsSentinel_StraddlesChunkBoundary(t *testing.T) {
 	}
 	if !got {
 		t.Fatal("sentinel not detected across chunk boundary")
+	}
+}
+
+// Build the actual shim, but resolve only a fake Claude under TempDir. Checking
+// exact argv catches the original bug where the injected channel flag swallowed
+// "daemon" and prevents a test from accidentally validating the real CLI.
+func TestInstallClaudeShim_SelfTest(t *testing.T) {
+	launcher := filepath.Join(t.TempDir(), "claude-shim")
+	if out, err := exec.Command("go", "build", "-o", launcher, "../claude-shim").CombinedOutput(); err != nil {
+		t.Fatalf("build shim: %v\n%s", err, out)
+	}
+	for _, tc := range []struct {
+		name, daemon, version, previous, wantError string
+	}{
+		{name: "fresh", daemon: "echo 'Usage: claude daemon [options]'"},
+		{name: "relative-path", daemon: "echo 'Usage: claude daemon [options]'"},
+		{name: "replace-symlink", daemon: "echo 'Usage: claude daemon [options]'", previous: "symlink"},
+		{name: "disabled", daemon: "echo 'Agent view is not enabled' >&2; exit 1"},
+		{name: "disabled-hyphen", daemon: "echo 'Agent-view disabled'"},
+		{name: "wrong-help", daemon: "echo 'Usage: claude [options]'; echo 'Try claude daemon'", wantError: "daemon --help"},
+		{name: "daemon-exit", daemon: "echo 'Usage: claude daemon [options]'; exit 2", wantError: "daemon --help"},
+		{name: "version-exit", daemon: "echo 'Usage: claude daemon [options]'", version: "exit 3", wantError: "--version"},
+		{name: "restore-relative-symlink", daemon: "echo 'wrong dispatch'", previous: "symlink", wantError: "daemon --help"},
+		{name: "restore-dangling-symlink", daemon: "echo 'wrong dispatch'", previous: "dangling", wantError: "daemon --help"},
+		{name: "restore-forced-file", daemon: "echo 'wrong dispatch'", previous: "file", wantError: "daemon --help"},
+		{name: "keep-existing-shim", daemon: "echo 'wrong dispatch'", previous: "shim", wantError: "daemon --help"},
+		{name: "timeout", daemon: "while :; do :; done", wantError: "deadline exceeded"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			t.Setenv("HOME", dir)
+			t.Setenv("XDG_CONFIG_HOME", filepath.Join(dir, "config"))
+			t.Setenv("C3_CLAUDE_REAL", "")
+			realDir := filepath.Join(dir, "real")
+			if err := os.MkdirAll(realDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			realClaude := filepath.Join(realDir, "claude")
+			log := filepath.Join(dir, "calls")
+			t.Setenv("C3_TEST_CALLS", log)
+			t.Setenv("PATH", dir+string(os.PathListSeparator)+realDir)
+			if tc.previous == "symlink" {
+				// Replacing the only Claude link must resolve through saved config.
+				t.Setenv("PATH", dir)
+			}
+			script := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$C3_TEST_CALLS\"\n" +
+				"if [ \"$#\" = 2 ] && [ \"$1\" = daemon ] && [ \"$2\" = --help ]; then\n" + tc.daemon + "\n" +
+				"elif [ \"$#\" = 2 ] && [ \"$1\" = --dangerously-load-development-channels=plugin:c3@c3 ] && [ \"$2\" = --version ]; then\n" +
+				"echo 'test version'\n" + tc.version + "\nelse\necho 'wrong argv' >&2; exit 99\nfi\n"
+			if err := os.WriteFile(realClaude, []byte(script), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			installPath := filepath.Join(dir, "claude")
+			if tc.name == "relative-path" {
+				t.Chdir(dir)
+				installPath = "claude"
+			}
+			previousTarget := ""
+			switch tc.previous {
+			case "symlink":
+				previousTarget = "real/claude"
+			case "dangling":
+				previousTarget = "missing-claude"
+			case "shim":
+				previousTarget = launcher
+			case "file":
+				if err := os.WriteFile(installPath, []byte("previous executable"), 0o751); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if previousTarget != "" {
+				if err := os.Symlink(previousTarget, installPath); err != nil {
+					t.Fatal(err)
+				}
+			}
+			started := time.Now()
+			err := installClaudeShim(installPath, launcher, tc.previous == "file")
+			if time.Since(started) > 8*time.Second {
+				t.Fatal("self-test exceeded timeout budget")
+			}
+			if tc.wantError == "" {
+				if err != nil {
+					t.Fatal(err)
+				}
+				if target, err := os.Readlink(installPath); err != nil || target != launcher {
+					t.Fatalf("installed link = %q, %v", target, err)
+				}
+				calls, err := os.ReadFile(log)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if string(calls) != "daemon --help\n--dangerously-load-development-channels=plugin:c3@c3 --version\n" {
+					t.Fatalf("self-test did not exercise both commands: %q", calls)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantError) {
+				t.Fatalf("error = %v, want %q", err, tc.wantError)
+			}
+			if previousTarget != "" {
+				if target, err := os.Readlink(installPath); err != nil || target != previousTarget {
+					t.Fatalf("restored link = %q, %v; want %q", target, err, previousTarget)
+				}
+			} else if tc.previous == "file" {
+				data, err := os.ReadFile(installPath)
+				if err != nil || string(data) != "previous executable" {
+					t.Fatalf("restored file = %q, %v", data, err)
+				}
+				info, err := os.Stat(installPath)
+				if err != nil || info.Mode().Perm() != 0o751 {
+					t.Fatalf("restored mode: %v, %v", info, err)
+				}
+			} else if _, err := os.Lstat(installPath); !os.IsNotExist(err) {
+				t.Fatalf("failed install left a link: %v", err)
+			}
+		})
+	}
+}
+
+func TestInstallClaudeShim_RefusesDirectory(t *testing.T) {
+	path := t.TempDir()
+	if err := installClaudeShim(path, filepath.Join(t.TempDir(), "claude-shim"), true); err == nil {
+		t.Fatal("expected refusal to replace a directory")
+	}
+	if info, err := os.Stat(path); err != nil || !info.IsDir() {
+		t.Fatalf("directory was modified: %v, %v", info, err)
 	}
 }

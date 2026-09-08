@@ -3,94 +3,115 @@ package main
 import (
 	"bytes"
 	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
 
-// TestMaybeInstallClaudeShim_ClaudeHostInvokesInstaller asserts that the
-// Claude-host branch of runSetup() (factored out as maybeInstallClaudeShim
-// for testability) calls into the shim installer with default args. See
-// TODO.md item #17 — under Claude Code, shim install is COMPULSORY at
-// setup time per the maintainer's 2026-05-18 call; no prompt, no opt-out.
-func TestMaybeInstallClaudeShim_ClaudeHostInvokesInstaller(t *testing.T) {
-	called := false
-	var gotArgs []string
-	prev := installClaudeShimFn
-	installClaudeShimFn = func(args []string) error {
-		called = true
-		gotArgs = args
-		return nil
-	}
-	t.Cleanup(func() { installClaudeShimFn = prev })
-
-	if err := maybeInstallClaudeShim(HostClaude); err != nil {
-		t.Fatalf("maybeInstallClaudeShim(HostClaude) returned %v, want nil", err)
-	}
-	if !called {
-		t.Fatal("installer was not invoked under HostClaude")
-	}
-	// Defaults: empty/nil flag args so runInstallClaudeShim picks
-	// ~/.local/bin/claude as the install path and force=false.
-	if len(gotArgs) != 0 {
-		t.Fatalf("installer args = %v, want empty/nil for defaults", gotArgs)
+// Exercise both setup entry points: accepting the general setup consent must
+// never imply consent to replacing claude on PATH.
+func TestSetupClaudeShim_OptIn(t *testing.T) {
+	for _, tc := range []struct {
+		name, answer string
+		args         []string
+		want         bool
+	}{
+		{name: "interactive-default", answer: "\n"},
+		{name: "interactive-eof"},
+		{name: "interactive-no", answer: "no\n"},
+		{name: "interactive-invalid", answer: "maybe\n"},
+		{name: "interactive-yes", answer: "yes\n", want: true},
+		{name: "finish-default", args: []string{"finish"}},
+		{name: "finish-no", args: []string{"finish", "--claude-shim=false"}},
+		{name: "finish-yes", args: []string{"finish", "--claude-shim"}, want: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sandboxSetupEnv(t)
+			t.Setenv("C3_NO_PROMPT", "1")
+			writeTestMappings(t, legacyNoAllowlistMappings())
+			if err := os.MkdirAll(filepath.Dir(defaultSTTEnvPath()), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(defaultSTTEnvPath(), []byte("# already configured\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				fmt.Fprint(w, `{"ok":true,"result":{"username":"test_bot"}}`)
+			}))
+			defer srv.Close()
+			t.Setenv("C3_TELEGRAM_API_URL", srv.URL)
+			calls := 0
+			installClaudeShimFn = func(args []string) error {
+				calls++
+				if len(args) != 0 {
+					t.Errorf("installer args = %v, want defaults", args)
+				}
+				return nil
+			}
+			out := captureStdout(t, func() {
+				// Continue and keep existing token, followed by the wrapper answer.
+				withStdin(t, "\n\n"+tc.answer, func() {
+					if err := runSetupWithArgs(tc.args); err != nil {
+						t.Fatal(err)
+					}
+				})
+			})
+			wantCalls := 0
+			if tc.want {
+				wantCalls = 1
+			}
+			if calls != wantCalls {
+				t.Fatalf("installer called %d times, want %d", calls, wantCalls)
+			}
+			if tc.args == nil && strings.Count(out, "Install the C3 claude launcher wrapper") != 1 {
+				t.Fatalf("missing single wrapper prompt: %s", out)
+			}
+			if !tc.want && (!strings.Contains(out, "wrapper NOT installed") || !strings.Contains(out, "c3-broker install-claude-shim")) {
+				t.Fatalf("missing skip notice / recovery command: %s", out)
+			}
+			if !strings.Contains(out, "/c3:status is a Claude slash command; c3-broker status is the shell command") {
+				t.Fatalf("missing command distinction: %s", out)
+			}
+		})
 	}
 }
 
-// TestMaybeInstallClaudeShim_CodexHostSkipsInstaller asserts that under
-// Codex the installer is NOT invoked — Codex has its own setup path
-// (MCP TOML + AGENTS.md) and doesn't use the claude wrapper.
-func TestMaybeInstallClaudeShim_CodexHostSkipsInstaller(t *testing.T) {
-	called := false
+func TestMaybeInstallClaudeShim_OtherHostsSkip(t *testing.T) {
 	prev := installClaudeShimFn
-	installClaudeShimFn = func(args []string) error {
-		called = true
-		return nil
-	}
+	installClaudeShimFn = func(args []string) error { t.Fatal("unexpected installer call"); return nil }
 	t.Cleanup(func() { installClaudeShimFn = prev })
-
-	if err := maybeInstallClaudeShim(HostCodex); err != nil {
-		t.Fatalf("maybeInstallClaudeShim(HostCodex) returned %v, want nil", err)
-	}
-	if called {
-		t.Fatal("installer was invoked under HostCodex; should have been skipped")
+	for _, host := range []HostCLI{HostCodex, HostUnknown} {
+		for _, optedIn := range []bool{false, true} {
+			if err := maybeInstallClaudeShim(host, optedIn); err != nil {
+				t.Fatal(err)
+			}
+		}
 	}
 }
 
-// TestMaybeInstallClaudeShim_UnknownHostSkipsInstaller covers the
-// HostUnknown branch — we don't want a surprise shim install when host
-// detection fell back from an explicit override.
-func TestMaybeInstallClaudeShim_UnknownHostSkipsInstaller(t *testing.T) {
-	called := false
-	prev := installClaudeShimFn
-	installClaudeShimFn = func(args []string) error {
-		called = true
-		return nil
-	}
-	t.Cleanup(func() { installClaudeShimFn = prev })
-
-	if err := maybeInstallClaudeShim(HostUnknown); err != nil {
-		t.Fatalf("maybeInstallClaudeShim(HostUnknown) returned %v, want nil", err)
-	}
-	if called {
-		t.Fatal("installer was invoked under HostUnknown; should have been skipped")
+func TestSetupFinish_ClaudeShimFailureIsLoud(t *testing.T) {
+	sandboxSetupEnv(t)
+	writeTestMappings(t, legacyNoAllowlistMappings())
+	installClaudeShimFn = func(args []string) error { return errors.New("self-test failed") }
+	out := captureStdout(t, func() {
+		if err := runSetupWithArgs([]string{"finish", "--claude-shim"}); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if !strings.Contains(out, "[claude shim NOT installed]") || !strings.Contains(out, "self-test failed") {
+		t.Fatalf("failed opt-in install was not surfaced: %s", out)
 	}
 }
 
-// TestMaybeInstallClaudeShim_PropagatesInstallerError ensures the helper
-// surfaces the installer's error verbatim so runSetup() can log it as a
-// warning (non-fatal — setup proceeds, the user just gets a hint to run
-// install manually).
-func TestMaybeInstallClaudeShim_PropagatesInstallerError(t *testing.T) {
-	want := errors.New("simulated: claude-shim launcher not found")
-	prev := installClaudeShimFn
-	installClaudeShimFn = func(args []string) error {
-		return want
-	}
-	t.Cleanup(func() { installClaudeShimFn = prev })
-
-	got := maybeInstallClaudeShim(HostClaude)
-	if !errors.Is(got, want) {
-		t.Fatalf("got err %v, want %v", got, want)
+func TestSetupFinish_RejectsInvalidArguments(t *testing.T) {
+	for _, args := range [][]string{{"finish", "--claude-shim=maybe"}, {"finish", "--unknown"}, {"finish", "unexpected"}} {
+		if err := runSetupWithArgs(args); err == nil {
+			t.Fatalf("accepted %v", args)
+		}
 	}
 }
 

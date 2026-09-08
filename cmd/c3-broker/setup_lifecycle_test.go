@@ -263,7 +263,7 @@ func TestRunSetupFinish_RepairsLegacyAllowlist(t *testing.T) {
 	sandboxSetupEnv(t)
 	mfPath := writeTestMappings(t, legacyNoAllowlistMappings())
 
-	if err := runSetupFinish(); err != nil {
+	if err := runSetupFinish(nil); err != nil {
 		t.Fatalf("runSetupFinish: %v", err)
 	}
 

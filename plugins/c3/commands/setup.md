@@ -48,12 +48,14 @@ printf 'y\n%s\n%s\n' 'OPENROUTER_KEY' 'SARVAM_KEY' | c3-broker setup stt
 
 Mention in passing: users can add their OWN STT provider — a `transcribe()` module dropped at `plugins/c3/stt/stt-pkg/providers/<name>.py` joins the `--chain` (see `plugins/c3/stt/stt-pkg/README.md`).
 
-**Step 5 — finish.** Run:
+**Step 5 — finish.** For Claude Code, ask the user: "Install the C3 claude launcher wrapper? (default: no)" Explain: `~/.local/bin/claude` becomes a symlink to `claude-shim`, which adds the C3 channel flag to interactive launches. Only an explicit yes authorizes passing `--claude-shim`; otherwise run:
 
 ```
 c3-broker setup finish
 ```
 
-It installs the host launcher shim (Claude) or MCP registration (Codex), restarts the broker so the new config is live, and prints a stand-alone "Setup complete — what now" summary. Relay that summary to the user.
+On an explicit yes, run `c3-broker setup finish --claude-shim` instead. The wrapper can also be added later with `c3-broker install-claude-shim` and removed with `c3-broker uninstall-claude-shim`.
 
-**Step 6 — first use (the 30-second tour).** Offer to attach this session right now: call the c3 `attach` tool (or point the user at `/c3:attach`) to bind this project to a Telegram topic. Then have them send a text or voice note from their phone to that topic and confirm it surfaces here as a `<channel>` block. Point out `/c3:status` (broker health), `/c3:topics` (topics + claims), and `/c3:pair` (allowlist another person or group later). If inbound doesn't surface, the session was likely launched without the dev-channels flag — have them relaunch with `claude --dangerously-load-development-channels=plugin:c3@c3` (they can append `--resume` themselves only if they want the previous session back).
+It installs the Claude wrapper only when requested (or MCP registration for Codex), restarts the broker so the new config is live, and prints a stand-alone "Setup complete — what now" summary. Relay that summary to the user. Include: `/c3:status` is a Claude slash command; `c3-broker status` is the shell command.
+
+**Step 6 — first use (the 30-second tour).** Offer to attach this session right now: call the c3 `attach` tool (or point the user at `/c3:attach`) to bind this project to a Telegram topic. Then have them send a text or voice note from their phone to that topic and confirm it surfaces here as a `<channel>` block. Point out `/c3:status` (broker health), `/c3:topics` (topics + claims), and `/c3:pair` (allowlist another person or group later). Channel loading also requires `"channelsEnabled": true` and `"allowedChannelPlugins": [{"marketplace":"c3","plugin":"c3"}]` in `~/.claude/settings.json`; preserve other allowed plugins when merging, as documented in `docs/INSTALL.md` Step 4. For the local C3 plugin those settings work together with the development-channels flag. If inbound doesn't surface, check those settings and the launch flag — have them relaunch with `claude --dangerously-load-development-channels=plugin:c3@c3` (they can append `--resume` themselves only if they want the previous session back).

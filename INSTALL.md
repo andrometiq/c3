@@ -216,10 +216,14 @@ read it and drive the phased subcommands it describes). In short:
    chat id is discovered and recorded automatically (no `-100…` hunt).
 4. `c3-broker setup stt` — optional voice-transcription keys. **On Windows,
    STT needs extra setup (real Python, not the Store stub) — §7.**
-5. `c3-broker setup finish` — installs the host launcher shim + restarts the
-   broker + prints a stand-alone "what now" summary to relay to the user.
-   (The shim it installs is the Claude Code `claude` wrapper — harmless if
-   you only use Claude Desktop; the Desktop wiring is §3B.)
+5. Ask Claude Code users "Install the C3 claude launcher wrapper? (default: no)"
+   Explain that `~/.local/bin/claude` becomes a symlink to `claude-shim`, adding
+   the channel flag to interactive launches. Only on an explicit yes run
+   `c3-broker setup finish --claude-shim`; otherwise run `c3-broker setup finish`.
+   Finish restarts the broker and prints a stand-alone "what now" summary.
+   Manual opt-in: `c3-broker install-claude-shim`; undo:
+   `c3-broker uninstall-claude-shim` (see `docs/INSTALL.md` Step 4.5 for restoring
+   a previous link). The wrapper is unnecessary for Desktop; its wiring is §3B.
 
 Completed steps are skipped automatically on re-runs. (Bare
 `c3-broker setup` remains the interactive fallback for a plain terminal

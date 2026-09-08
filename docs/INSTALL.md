@@ -7,6 +7,18 @@ Set-up steps for someone who has never run C3 before. Five minutes if everything
 > [`INSTALL.md`](../INSTALL.md), which also has the environment/platform routing
 > table in its §0.
 
+## What setup changes on your machine
+
+For the Claude Code path below (default paths shown; C3 respects XDG overrides):
+
+- **Binaries and assets:** Step 2 copies the ten core binaries and runtime assets under `~/.local/bin`, and stages the optional Codex launcher at `~/.local/libexec/c3/codex`. Source setup runs `go install` into `$GOBIN` or `$(go env GOPATH)/bin`. Remove those C3 binaries/assets to undo; remove a source clone separately if you created one. Installing `claude-shim` itself does not replace `claude`.
+- **Plugin:** Step 1 registers the marketplace and installs C3 through Claude Code's plugin manager. Undo inside Claude with `/plugin uninstall c3@c3` and `/plugin marketplace remove c3`.
+- **Configuration:** setup creates `~/.config/c3/mappings.json` (0600), with a one-generation `mappings.json.bak` on rewrites, for the token, pairing allowlist, groups, and mappings. Restore a saved config to undo edits, or remove these files when retiring C3.
+- **Voice keys (optional):** `setup stt` writes `~/.claude/stt.env` (0600), creating its parent directory if needed. Restore your previous file or remove the added keys to undo.
+- **Claude settings:** Step 4 merges `channelsEnabled: true` and the C3 entry in `allowedChannelPlugins` into `~/.claude/settings.json`; the Go setup command does not edit these keys. Remove the C3 entry and restore the previous `channelsEnabled` value to undo, preserving other plugins' settings.
+- **Launcher symlink (optional, default off):** only an explicit yes or `setup finish --claude-shim` creates/replaces `~/.local/bin/claude` → `claude-shim`, and may save the previous executable target in `~/.config/c3/claude-shim.json`. Undo with `c3-broker uninstall-claude-shim`; restore a previous Claude link if needed, then remove the shim config (Step 4.5).
+- **Broker runtime:** setup restarts the broker with the new config. It creates runtime socket/PID/capability files and state under `~/.local/state/c3` (including queue and Telegram offsets). Uninstall the host plugin and stop the broker before deleting C3 runtime/state files; deleting the queue discards held messages. See Uninstalling below.
+
 ## Choose your environment and platform
 
 C3 runs under three host environments. Pick yours — the binary install and
@@ -245,37 +257,55 @@ in the topic; recover with `fetch_queue`); relaunch with the flag for live
 rendering. The official-marketplace plugin distribution flow doesn't need
 this flag; we do, until c3 is published through Anthropic's marketplace.
 
-## Step 4.5: Install the Claude wrapper
+## Step 4.5 (optional, default off): Install the Claude wrapper
 
-`/c3:setup` runs this automatically when invoked from a Claude Code
-session — it is COMPULSORY under HostClaude per the locked 2026-05-18
-design. The standalone command is for **manual** install, re-install
-(after a `claude` binary upgrade clobbered the symlink), or
-`--force` scenarios:
+Both `/c3:setup` and interactive `c3-broker setup` ask before installing
+this wrapper, with **no** as the default. Declining leaves the existing
+`claude` command untouched. For phased setup, opt in explicitly:
 
+```bash
+c3-broker setup finish --claude-shim
 ```
+
+Without `--claude-shim`, `c3-broker setup finish` skips the wrapper and
+prints how to add it later. Manual installation remains available:
+
+```bash
 c3-broker install-claude-shim
 ```
 
-The shim is a tiny launcher symlinked at `~/.local/bin/claude` that
-transparently adds `--dangerously-load-development-channels=plugin:c3@c3`
-to interactive `claude` launches. The `=` form keeps a positional prompt
-from being consumed as another plugin tag. Known subcommands such as
-`daemon`, `agents`, `auth`, `mcp`, `plugin`, and `update` pass through
-untouched so Claude can dispatch them normally. An existing flag is kept
-without duplication; C3 is added to its values only if missing. Without
-the shim you type the long flag form by hand on every session start — easy
-to forget, which is why v0.1 holds flagless inbound in the durable queue instead of dropping it (the shim
-still saves you the missed-live-rendering papercut).
+The shim is a tiny launcher symlinked at `~/.local/bin/claude` that adds
+`--dangerously-load-development-channels=plugin:c3@c3` to interactive
+launches. The `=` form keeps prompts positional. Known subcommands such
+as `daemon`, `agents`, `auth`, `mcp`, `plugin`, and `update` pass through
+untouched. Existing channel flags are preserved, adding C3 only if missing.
+You can also type the launch flag yourself (Step 4); the wrapper is optional.
 
-The most common manual-install hiccup is an existing non-shim
-`~/.local/bin/claude` (often from NVM, npm, or a hand-edited symlink to
-the real claude binary). The installer refuses to overwrite it without
-`--force`. Verify a successful one-time install **without** `--force`
-first — that path persists the resolved real-claude target to
-`~/.config/c3/claude-shim.json` so the shim's fallback lookup chain
-still finds your binary. Use `--force` only if the standard install
-already wrote that config or you know the real-claude target by hand.
+Each install runs the installed wrapper with `daemon --help` (daemon usage
+or an agent-view-disabled notice) and `--version` (exit zero), with a
+five-second timeout per command. If validation fails, installation reports
+an error, removes the new link, and restores any replaced symlink or file.
+An already-installed wrapper is checked without replacing its link.
+
+An existing symlink is replaced without `--force`; its resolved executable
+target is recorded in `~/.config/c3/claude-shim.json` so the wrapper can
+still find Claude. An existing non-shim **regular file** is refused unless
+you use `c3-broker install-claude-shim --force`. Before using `--force`,
+ensure the real Claude remains available elsewhere on PATH or via
+`C3_CLAUDE_REAL`; the overwritten regular file is not retained after a
+successful install. `--force` does not bypass the self-test.
+
+To remove the wrapper:
+
+```bash
+c3-broker uninstall-claude-shim
+```
+
+Uninstall removes the link; it does not recreate a previous Claude symlink.
+If the wrapper replaced your only Claude link, recreate it using the
+`real_claude` target recorded in `~/.config/c3/claude-shim.json` before
+removing that config. For a custom location, use matching `--path PATH`
+arguments for install and uninstall.
 
 ## Step 5 (optional): Enable Codex integration
 
@@ -473,6 +503,7 @@ For the Codex side, re-run `c3-broker install-codex-shim` after updating the bin
 
 ```
 /plugin uninstall c3@c3                          # removes the plugin from Claude Code
+c3-broker uninstall-claude-shim                 # only if you installed the optional wrapper; see Step 4.5
 pkill c3-broker                                  # stop the daemon
 rm ~/.local/bin/codex 2>/dev/null                # restore your real codex (if you'd installed the shim)
 rm ~/.local/libexec/c3/codex 2>/dev/null         # remove the off-PATH staged launcher

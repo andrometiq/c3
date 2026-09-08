@@ -94,8 +94,9 @@ An adapter is a small MCP server that connects one host CLI to the broker. Seven
 | `c3-dcode-adapter` | dcode (deepagents-code) | live push via the external-event socket; pull only without it | 11 | `{"kind":"prompt"}` events land as literal user turns. Needs `DEEPAGENTS_CODE_EXTERNAL_EVENT_SOCKET=1` at TUI launch, else `fetch_queue`. Slash commands `/skill:c3-{attach,fetch,topics}`. Install: `c3-broker install-dcode`. |
 
 Claude Code is the adapter the others are measured against — everything else trades something
-away, and the Inbound column is where you'll feel it. Install with `c3-broker
-install-claude-shim`, `install-codex-shim`, `install-desktop`, `install-grok`,
+away, and the Inbound column is where you'll feel it. Claude Code uses the C3
+plugin; its launcher wrapper is optional. Other integrations use `c3-broker
+install-codex-shim`, `install-desktop`, `install-grok`,
 `install-agy`, `install-cursor`, or `install-dcode`. Details in [`docs/ADAPTERS.md`](docs/ADAPTERS.md),
 [`docs/DESKTOP.md`](docs/DESKTOP.md), and [`docs/GROK-INJECT.md`](docs/GROK-INJECT.md).
 
@@ -212,8 +213,13 @@ claude --dangerously-load-development-channels=plugin:c3@c3
 Claude Code applies that preview guardrail to every locally-installed channel plugin — it
 isn't a C3 hack. Without the flag, C3 detects that the host can't render live channel turns
 and keeps inbound in the queue for `fetch_queue` rather than dropping it; the installer can
-also drop in a small `claude` shim so the flag is automatic for interactive
-launches. Known Claude subcommands pass through untouched. See Anthropic's
+also offer a small `claude` shim so the flag is automatic for interactive
+launches. **The wrapper is opt-in, default no:** setup changes `~/.local/bin/claude`
+only after an explicit yes, or with `c3-broker setup finish --claude-shim`.
+Add it later with `c3-broker install-claude-shim`; remove it with
+`c3-broker uninstall-claude-shim`. Installation checks daemon dispatch and
+version, rolling back a new link if either check fails. Known Claude subcommands
+pass through untouched. See Anthropic's
 [Channels documentation](https://code.claude.com/docs/en/channels).
 
 ## Stability
