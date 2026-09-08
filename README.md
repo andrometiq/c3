@@ -17,8 +17,6 @@ topic answers there. Claude Code on one project, Codex on the next, no app switc
 - **Voice in.** Send a voice note; the session receives the transcript as a native turn.
 - **Nothing gets lost.** Messages are held durably until delivered or fetched, within
   the queue's documented limits (1,000 messages / 14 days).
-- **A web chat for when Telegram isn't where you are.** Same broker, same topics, phone-friendly,
-  reachable only over your own network.
 
 Go, MIT, Linux and macOS (Windows in beta).
 
@@ -115,12 +113,12 @@ install-codex-shim`, `install-desktop`, `install-grok`,
 
 ## Channels
 
-Telegram and a private web chat (rich text, optional spoken replies) ship in the broker.
+Telegram is the channel. A private web chat also lives in the broker as an opt-in preview: setup never enables it, and it needs a manual `channels.web` entry plus a trusted private CA on your devices.
 
 | Channel | Status | Carries |
 |---|---|---|
 | Telegram | shipping | Markdown, quote-replies, six media kinds, edits, reactions, polls, inline buttons |
-| Web | shipping | Private-CA HTTPS on the tailnet; rich text, typing, edits, held/system notices, and optional spoken replies in on-the-go mode; magic-link login through the Telegram operator DM |
+| Web | preview, opt-in | Private-CA HTTPS on the tailnet; rich text, typing, edits, held/system notices, and optional spoken replies in on-the-go mode; magic-link login through the Telegram operator DM |
 
 Each CLI session drives one claimed route at a time: use `attach web` on the go and attach
 back to a Telegram topic at the desk. The web surface is private-first and intentionally
