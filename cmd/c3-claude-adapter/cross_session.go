@@ -5,15 +5,18 @@ import (
 	"encoding/json"
 	"encoding/xml"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/Andrometiq/c3/internal/broker"
+	"github.com/Andrometiq/c3/internal/ipc"
 )
 
 const crossSessionWindow = 2 * time.Second
@@ -24,6 +27,7 @@ type crossSessionTransport struct {
 	runtimeDir string
 	socketPath string
 	token      string
+	hostPID    int
 }
 
 func (*crossSessionTransport) String() string {
@@ -43,16 +47,61 @@ func startupCrossSessionTransport() (*crossSessionTransport, string) {
 	if err != nil {
 		return nil, "cross-session runtime directory unavailable"
 	}
-	tx := &crossSessionTransport{runtimeDir: filepath.Dir(socket), socketPath: path, token: token}
+	tx := &crossSessionTransport{runtimeDir: filepath.Dir(socket), socketPath: path, token: token, hostPID: owningClaudePID(os.Getppid(), platformProcReaders())}
 	if _, err := tx.validatedSocket(); err != nil {
 		return tx, err.Error() // keep captured config for attach/reconnect revalidation
 	}
 	return tx, ""
 }
 
+// The direct parent is eligible, or the nearest positively identified Claude
+// ancestor when a wrapper sits between host and adapter. Never skip a Claude
+// host to reach another session farther up the tree. Read argv only, never env.
+func owningClaudePID(parent int, r procReaders) int {
+	if parent <= 1 || r.cmdline == nil || r.ppid == nil {
+		return 0
+	}
+	pid := parent
+	seen := map[int]bool{}
+	for depth := 0; depth < 40 && pid > 1; depth++ {
+		if seen[pid] {
+			return 0
+		}
+		seen[pid] = true
+		args, ok := r.cmdline(pid)
+		if !ok {
+			return 0
+		}
+		if isNode(args) {
+			args, ok = nodeScript(args)
+			if !ok {
+				return 0
+			}
+		}
+		if isClaudeHost(args) {
+			return pid
+		}
+		pid, ok = r.ppid(pid)
+		if !ok {
+			return 0
+		}
+	}
+	// No identified host: only the immediate parent can own the inherited inbox.
+	if pid <= 1 {
+		return parent
+	}
+	return 0
+}
+
 func (t *crossSessionTransport) validatedSocket() (string, error) {
+	if !crossSessionPeerPIDAvailable {
+		return "", errors.New("cross-session peer PID verification unavailable on this platform")
+	}
 	if t == nil || t.token == "" || !filepath.IsAbs(t.socketPath) || !filepath.IsAbs(t.runtimeDir) {
 		return "", errors.New("cross-session socket configuration invalid")
+	}
+	if t.hostPID <= 1 || filepath.Base(t.socketPath) != strconv.Itoa(t.hostPID)+".sock" {
+		return "", errors.New("cross-session socket does not name the owning host")
 	}
 	root, err := filepath.EvalSymlinks(t.runtimeDir)
 	if err != nil {
@@ -74,6 +123,9 @@ func (t *crossSessionTransport) validatedSocket() (string, error) {
 	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
 		return "", errors.New("cross-session socket outside user runtime directory")
 	}
+	if rel != filepath.Join("cc-socks", strconv.Itoa(t.hostPID)+".sock") {
+		return "", errors.New("cross-session socket is not the owning inbox")
+	}
 	info, err = os.Lstat(path)
 	if err != nil || info.Mode()&os.ModeSocket == 0 || !crossSessionOwned(info) {
 		return "", errors.New("cross-session path is not a user-owned socket")
@@ -83,10 +135,30 @@ func (t *crossSessionTransport) validatedSocket() (string, error) {
 
 // Send proves transport completion only. A clean close can also mean host
 // refusal, so the caller MUST still require the exact transcript receipt.
-func (t *crossSessionTransport) Send(ctx context.Context, content string) error {
+func (t *crossSessionTransport) Send(ctx context.Context, content string, sessionID string) error {
 	path, err := t.validatedSocket() // revalidate before every credential write
 	if err != nil {
 		return err
+	}
+	if len(content) > ipc.MaxFrameSize || len(t.token) > ipc.MaxFrameSize {
+		return fmt.Errorf("cross-session outbound frame exceeds IPC cap (%d bytes)", ipc.MaxFrameSize)
+	}
+	user := map[string]any{"type": "user", "from": "c3", "priority": "next",
+		"message": map[string]any{"role": "user", "content": content}}
+	if sessionID != "" {
+		user["session_id"] = sessionID
+	}
+	// Marshal and bound BOTH complete frames before connecting or disclosing auth.
+	frames := make([][]byte, 0, 2)
+	for _, frame := range []any{map[string]any{"type": "auth", "token": t.token}, user} {
+		data, err := json.Marshal(frame)
+		if err != nil {
+			return errors.New("cross-session frame encoding failed")
+		}
+		if len(data)+1 > ipc.MaxFrameSize {
+			return fmt.Errorf("cross-session outbound frame exceeds IPC cap (%d bytes)", ipc.MaxFrameSize)
+		}
+		frames = append(frames, append(data, '\n'))
 	}
 	ctx, cancel := context.WithTimeout(ctx, crossSessionWindow)
 	defer cancel()
@@ -101,11 +173,13 @@ func (t *crossSessionTransport) Send(ctx context.Context, content string) error 
 	if conn.SetDeadline(deadline) != nil {
 		return errors.New("cross-session deadline failed")
 	}
-	enc := json.NewEncoder(conn)
-	if enc.Encode(map[string]any{"type": "auth", "token": t.token}) != nil ||
-		enc.Encode(map[string]any{"type": "user", "from": "c3", "priority": "next",
-			"message": map[string]any{"role": "user", "content": content}}) != nil {
-		return errors.New("cross-session write failed")
+	if err := validateCrossSessionPeer(conn, t.hostPID); err != nil {
+		return err
+	}
+	for _, data := range frames {
+		if n, err := conn.Write(data); err != nil || n != len(data) {
+			return errors.New("cross-session write failed")
+		}
 	}
 	unix, ok := conn.(*net.UnixConn)
 	if !ok || unix.CloseWrite() != nil {

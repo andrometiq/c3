@@ -10,12 +10,33 @@ rulings and rationale, never private operational details.
 **Decision:** Prefer the native channel route, then transcript-confirmed delivery
 through the owning session's inherited messaging inbox, then durable queue-only
 delivery. Never use the inbox while the channel is capable. Every inbox push
-carries the same channel block and delivery token and requires both a clean
-socket exchange and an exact transcript receipt before acknowledgement. Failed
+carries the same channel block and broker delivery token, plus its own
+`c3_attempt="<route>:<n>"` marker (`channel` or `cross-session`, with an increasing
+adapter-lifetime counter). Both a clean socket exchange and a receipt for that
+exact attempt are required before acknowledgement; receipts cannot cross routes. Failed
 confirmation retains the row, disables further fallback pushes until explicit
 attach/reconnect, and reports a coalesced held notice. Re-probe starts with channel
 eligibility. Credentials are captured once from this adapter's environment; the
-endpoint must remain a user-owned socket inside the user's private runtime dir.
+endpoint must resolve to `<runtime>/cc-socks/<hostpid>.sock` inside the user's
+0700 runtime directory. Existing argv/parent readers select the nearest Claude
+ancestor, or only the immediate parent if no Claude ancestor is identified;
+unreadable or uncertain ancestry fails closed. Before any auth bytes, `fstat`
+validates the connected socket's type/owner and kernel peer credentials must
+match that PID and our UID (`SO_PEERCRED` on Linux; `LOCAL_PEERPID` plus
+`LOCAL_PEERCRED` on macOS). Path substitution cannot redirect the authenticated
+connection; platforms without a peer PID facility have no fallback. A known
+stable SessionStart/registered session UUID is included as `session_id` so the
+host can reject a mismatch. Each complete outbound JSON frame is capped at the
+existing 4 MiB inbound IPC limit before auth; oversize leaves the row queued.
+
+Cross-session receipts must be the injected peer user turn: `type:user`,
+`message.role:user`, `isMeta:true`, and `origin.kind:peer` when origin is present.
+Content must start with our complete channel block, optionally after exactly one
+allowlisted host prefix (`Peer input: `, `Peer input:\n`, or
+`<cross-session-message from="c3">`). Both delivery and attempt markers must
+match. Quoted text, comments, attributes, and later content blocks cannot retire
+rows or recovery. `C3_DEBUG=1` enables a debug preview of rejected candidates'
+first 120 characters with words/values/tokens masked, exposing only framing.
 
 **Why:** A flagless host can accept peer user turns even when it drops channel
 notifications. This recovers an inbound route without confusing transport success

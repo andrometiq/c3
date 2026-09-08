@@ -149,7 +149,7 @@ func TestLiveReadbackUnresolvableTranscript(t *testing.T) {
 }
 
 func TestChannelReceiptShapeAndPartialTail(t *testing.T) {
-	channel := `<channel source="c3" c3_delivery_id="marker">hello</channel>`
+	channel := `<channel source="c3" c3_attempt="channel:1" c3_delivery_id="marker">hello</channel>`
 	for _, tc := range []struct {
 		name  string
 		entry any
@@ -220,4 +220,12 @@ func TestLiveRouteResetAndPreamble(t *testing.T) {
 			}
 		})
 	}
+}
+
+func scanChannelReceipt(path string, offset int64, marker string, discarding *bool) (int64, bool) {
+	return scanReceipt(path, offset, marker, discarding, false, "channel:1")
+}
+
+func channelReceipt(line []byte, marker string) bool {
+	return deliveryReceipt(line, marker, false, "channel:1")
 }

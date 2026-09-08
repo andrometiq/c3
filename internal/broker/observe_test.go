@@ -258,7 +258,9 @@ func TestHandleObserve_ReservesItsLargerEnvelope(t *testing.T) {
 	case resp = <-readCh:
 	case err := <-errCh:
 		t.Fatalf("read frame-budgeted observe response: %v", err)
-	case <-time.After(2 * time.Second):
+	// Encoding/decoding several MiB is slower under race instrumentation;
+	// this test checks the frame budget, not response latency.
+	case <-time.After(10 * time.Second):
 		t.Fatal("observe sized only the fetch envelope, so its larger response was refused and the panel received no frame")
 	}
 

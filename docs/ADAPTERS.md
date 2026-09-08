@@ -559,32 +559,49 @@ durable delivery once through the inbox, retaining its broker token. Other
 unconfirmed channel attempts stay queued. No queued backlog is automatically
 drained. Attach/reconnect starts again from channel eligibility, then fallback.
 
-The adapter captures only its own `CLAUDE_CODE_MESSAGING_SOCKET` and
-`CLAUDE_CODE_MESSAGING_TOKEN` at startup. It never discovers other sessions or
-reads their environments. The socket must resolve inside the per-user runtime
-directory selected by C3's normal socket resolver. That directory must be owned
-by the current user and mode 0700; the endpoint must be a user-owned Unix socket.
-Symlink resolution cannot escape the runtime directory. These checks run at
-startup, re-probe, and before credential writes. Windows remains queue-only.
-Missing credentials or unsafe paths yield a generic reason; credentials and
-raw socket errors are never logged. Re-probe revalidates the captured path;
-changed environment credentials require restarting the adapter.
+The adapter delivers only to its owning session's inbox. It captures its own
+`CLAUDE_CODE_MESSAGING_SOCKET` and `CLAUDE_CODE_MESSAGING_TOKEN` at startup,
+never discovers other sessions, and never reads their environments. The endpoint
+must resolve to `<runtime>/cc-socks/<hostpid>.sock`: `hostpid` is the nearest
+Claude host in the adapter's direct ancestor chain, using the existing argv and
+parent readers. With no identified Claude ancestor, only the immediate parent
+is eligible. Unreadable, cyclic, or truncated ancestry fails closed.
+
+The runtime directory must be user-owned and mode 0700; the endpoint must be a
+user-owned Unix socket, with no symlink escape. Path checks run at startup,
+re-probe, and each send. Before writing **any authentication bytes**, C3 checks
+the connected descriptor with `fstat` and verifies the kernel-reported peer PID
+and UID: Linux uses `SO_PEERCRED`; macOS uses `LOCAL_PEERPID` plus
+`LOCAL_PEERCRED`. The peer PID must equal `hostpid`, and its UID must equal C3's
+own UID. `fstat` checks the connected endpoint's type/owner; on Linux its inode
+is not the listener's pathname inode. Peer credentials bind the connection even
+if the pathname was substituted. Platforms without peer PID verification fail
+closed; Windows remains queue-only. The user frame includes `session_id` when
+C3 knows this session's stable UUID from the SessionStart handoff or registered
+identity, allowing the host to reject a session mismatch.
+
+Missing credentials, uncertain ownership, and unsafe paths yield generic errors;
+credentials and raw socket errors are never logged. Re-probe revalidates the
+captured path; changed environment credentials require restarting the adapter.
 
 The inbox receives exactly two newline-delimited JSON frames, followed by a
 write half-close:
 
 ```json
 {"type":"auth","token":"<inherited token>"}
-{"type":"user","from":"c3","priority":"next","message":{"role":"user","content":"<channel source=\"plugin:c3:c3\" c3_delivery_id=\"<delivery token>\" …>\n<same channel body>\n</channel>"}}
+{"type":"user","from":"c3","priority":"next","session_id":"<known session UUID>","message":{"role":"user","content":"<channel source=\"plugin:c3:c3\" c3_delivery_id=\"<delivery token>\" c3_attempt=\"cross-session:2\" …>\n<same channel body>\n</channel>"}}
 ```
 
 The content mirrors the native channel block: the same source, all string
-metadata attributes (including `c3_delivery_id`), and the unchanged body with
+metadata attributes (including `c3_delivery_id` and `c3_attempt`), and the unchanged body with
 its normal attachment/provenance/backlog decoration. Connect, write, and peer
 close share a two-second maximum deadline within the 15-second receipt window.
 Transport completion requires no response bytes and clean peer EOF. This is
 **not acceptance**: host hold/refuse settings can also close silently. A new
-complete user transcript record bearing the exact token is still required.
+complete peer user transcript record bearing the exact token **and attempt** is
+still required. Both outbound JSON frames, including their newline, are bounded
+by the existing inbound IPC cap (4 MiB). Oversized content or encoded frames are
+refused before authentication, with a clear error; the durable row stays queued.
 Failure sends no ack, publishes `queue_only` with reason
 `cross-session push not confirmed`, and stops fallback pushes until attach or
 reconnect. The normal one-time route/held notice reports the failure.
@@ -601,8 +618,8 @@ contract and are only pushed on the confirmed channel route.
 
 The inbox protocol and flagless user-turn delivery were live-verified on Claude
 Code 2.1.263. **The peer transcript record shape remains UNVERIFIED.** Tests use
-fixture-shaped `type:user`, `message.role:user` records with optional
-`origin.kind:peer`, `isMeta:true`, wrappers and host guidance. Format drift or
+fixture-shaped `type:user`, `message.role:user`, `isMeta:true` records; an
+`origin` object, when present, must have `kind:peer`. Format drift or
 host refusal retains the durable row; it never licenses a blind ack.
 
 ### Channel detection and shared receipts
@@ -642,13 +659,25 @@ may be a string or an array of `{"type":"text","text":...}` blocks. A
 `{"type":"queue-operation","operation":"enqueue",...}` record alone is
 insufficient: enqueue is not proof of injection into the conversation.
 
+Each attempt adds `c3_attempt="<route>:<n>"`, where route is `channel` or
+`cross-session` and n is a monotonically increasing counter for this adapter's
+lifetime (not reset on attach/reconnect). `c3_delivery_id` retains the broker
+acknowledgement token. Both attributes must match the outstanding attempt;
+a late channel receipt cannot confirm fallback, and vice versa.
+
 Channel-route receipts must start with the channel opener after whitespace.
-Cross-session receipts may have host text or a wrapper before it: inspect the
-**first** literal `<channel ` occurrence and require its closing `</channel>`.
-Never skip a malformed or unmatched first opener to find a nested token. The
-same strict attribute parser applies to both routes; peer origin/isMeta fields
-alone prove nothing. This narrower, route-specific relaxation preserves the
-native channel matcher while allowing host peer framing.
+Cross-session receipts require `type:user`, `message.role:user`, `isMeta:true`,
+and `origin.kind:peer` if `origin` is present. The first content block must be text
+(or content must be a string), starting with the complete C3 channel block with
+`source="plugin:c3:c3"`. The only accepted prefixes are **one** literal
+`Peer input: `, `Peer input:\n`, or `<cross-session-message from="c3">`, immediately
+followed by that block. This small allowlist is explicitly provisional until a
+live peer transcript verifies the host shape. Combinations of wrappers, quoted
+prose, XML comments, embedded attributes, and later text blocks cannot confirm.
+The strict attribute parser and closing `</channel>` requirement still apply.
+With `C3_DEBUG=1`, rejected marker candidates log only a redacted punctuation and
+spacing preview of their first 120 characters at debug level; words, values,
+and tokens are masked. This exposes framing without logging transcript secrets.
 
 Confirmation waits **15 seconds** (`liveReadbackWindow`), off the MCP request
 loop. Each scan uses a file-size snapshot capped at 32 MiB; incomplete final lines are retried,

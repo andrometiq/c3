@@ -7,8 +7,10 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"encoding/xml"
+	"fmt"
 	"io"
 	"log"
+	"log/slog"
 	"maps"
 	"os"
 	"strings"
@@ -237,6 +239,13 @@ func (a *adapter) pushWithReadbackGeneration(ctx context.Context, in ipc.Inbound
 	meta = maps.Clone(meta)
 	frame["meta"] = meta
 	meta["c3_delivery_id"] = marker
+	a.liveAttempt++
+	routeName := "channel"
+	if a.liveCrossSession {
+		routeName = "cross-session"
+	}
+	attempt := fmt.Sprintf("%s:%d", routeName, a.liveAttempt)
+	meta["c3_attempt"] = attempt
 	if a.livePending == nil {
 		a.livePending = map[string]bool{}
 	}
@@ -249,15 +258,22 @@ func (a *adapter) pushWithReadbackGeneration(ctx context.Context, in ipc.Inbound
 	generation := a.liveGeneration
 	cross := a.liveCrossSession
 	var sent chan bool
+	// Bind the session UUID to this attempt before an identity switch can run.
+	sessionID := ""
 	if cross {
 		sent = make(chan bool, 1)
+		if entry, ok := a.currentStableIdentity(); ok {
+			sessionID = entry.StableSessionID
+		} else if entry, ok := resolveTerminalHandoff(instanceIDFromEnv()); ok {
+			sessionID = entry.StableSessionID
+		}
 	}
 	a.liveActive++
 	if a.runCtx != nil {
 		ctx = a.runCtx
 	}
 	// Register and capture offset before output; the timer is independent of stdout.
-	go a.awaitLiveReadback(ctx, conn, generation, path, offset, marker, in, frame, cross, sent, deadline)
+	go a.awaitLiveReadback(ctx, conn, generation, path, offset, marker, in, frame, cross, sent, deadline, attempt)
 	a.liveMu.Unlock()
 	locked = false
 	if cross {
@@ -267,7 +283,7 @@ func (a *adapter) pushWithReadbackGeneration(ctx context.Context, in ipc.Inbound
 			defer cancel()
 			block, err := crossSessionChannelBlock(frame)
 			if err == nil {
-				err = a.crossSession.Send(writeCtx, block)
+				err = a.crossSession.Send(writeCtx, block, sessionID)
 			}
 			if err != nil {
 				log.Printf("cross-session transport failed: %v", err)
@@ -287,7 +303,7 @@ func (a *adapter) pushWithReadbackGeneration(ctx context.Context, in ipc.Inbound
 	}
 }
 
-func (a *adapter) awaitLiveReadback(ctx context.Context, conn *ipc.Conn, generation uint64, path string, offset int64, marker string, in ipc.InboundMsg, frame map[string]any, cross bool, sent <-chan bool, deadline time.Time) {
+func (a *adapter) awaitLiveReadback(ctx context.Context, conn *ipc.Conn, generation uint64, path string, offset int64, marker string, in ipc.InboundMsg, frame map[string]any, cross bool, sent <-chan bool, deadline time.Time, attempt string) {
 	defer func() {
 		a.liveMu.Lock()
 		a.liveActive--
@@ -311,7 +327,7 @@ func (a *adapter) awaitLiveReadback(ctx context.Context, conn *ipc.Conn, generat
 			return
 		}
 		a.liveScanMu.Lock()
-		next, found := scanReceipt(path, offset, marker, &discarding, cross)
+		next, found := scanReceipt(path, offset, marker, &discarding, cross, attempt)
 		a.liveScanMu.Unlock()
 		offset = next
 		received = received || found
@@ -383,11 +399,7 @@ func (a *adapter) awaitLiveReadback(ctx context.Context, conn *ipc.Conn, generat
 	}
 }
 
-func scanChannelReceipt(path string, offset int64, marker string, discarding *bool) (int64, bool) {
-	return scanReceipt(path, offset, marker, discarding, false)
-}
-
-func scanReceipt(path string, offset int64, marker string, discarding *bool, cross bool) (int64, bool) {
+func scanReceipt(path string, offset int64, marker string, discarding *bool, cross bool, attempt string) (int64, bool) {
 	info, err := os.Stat(path)
 	if err != nil || !info.Mode().IsRegular() {
 		return offset, false
@@ -425,7 +437,7 @@ func scanReceipt(path string, offset int64, marker string, discarding *bool, cro
 			}
 		}
 		if err == nil {
-			if !*discarding && deliveryReceipt(line, marker, cross) {
+			if !*discarding && deliveryReceipt(line, marker, cross, attempt) {
 				return offset, true
 			}
 			*discarding = false
@@ -443,13 +455,15 @@ func scanReceipt(path string, offset int64, marker string, discarding *bool, cro
 	}
 }
 
-func channelReceipt(line []byte, marker string) bool {
-	return deliveryReceipt(line, marker, false)
-}
+func deliveryReceipt(line []byte, marker string, cross bool, attempt string) bool {
+	if marker == "" || attempt == "" {
+		return false
+	}
 
-func deliveryReceipt(line []byte, marker string, cross bool) bool {
 	var entry struct {
-		Type    string `json:"type"`
+		Type    string          `json:"type"`
+		IsMeta  bool            `json:"isMeta"`
+		Origin  json.RawMessage `json:"origin"`
 		Message struct {
 			Role    string          `json:"role"`
 			Content json.RawMessage `json:"content"`
@@ -458,19 +472,38 @@ func deliveryReceipt(line []byte, marker string, cross bool) bool {
 	if json.Unmarshal(line, &entry) != nil || entry.Type != "user" || entry.Message.Role != "user" {
 		return false
 	}
-	matches := func(text string) bool {
-		// A channel receipt starts with its opening tag. Never search body text
-		// or another attribute's value for a second, embedded marker.
-		text = strings.TrimSpace(text)
+	provenance := true
+	if cross {
+		provenance = entry.IsMeta
+		if len(entry.Origin) != 0 {
+			var origin struct {
+				Kind string `json:"kind"`
+			}
+			provenance = provenance && json.Unmarshal(entry.Origin, &origin) == nil && origin.Kind == "peer"
+		}
+	}
+	matches := func(text string) (accepted bool) {
 		if cross {
-			// Peer framing is host-owned and its transcript shape is not yet
-			// live-verified. Inspect ONLY the first channel opener, never skip
-			// an unmatched/malformed opener in search of a nested marker.
-			start := strings.Index(text, "<channel ")
-			if start < 0 {
+			candidate := text
+			defer func() {
+				if !accepted && strings.Contains(text, marker) {
+					debugRejectedPeerPrefix(candidate, marker)
+				}
+			}()
+			if !provenance {
 				return false
 			}
-			text = text[start:]
+			// Host peer shape is UNVERIFIED. This deliberately small literal allowlist
+			// accepts bare content OR ONE wrapper/line immediately before our block.
+			// Never search arbitrary text, comments, attributes, or later text blocks.
+			for _, prefix := range []string{"Peer input: ", "Peer input:\n", `<cross-session-message from="c3">`} {
+				if strings.HasPrefix(text, prefix) {
+					text = strings.TrimPrefix(text, prefix)
+					break
+				}
+			}
+		} else {
+			text = strings.TrimSpace(text)
 		}
 		if !strings.HasPrefix(text, "<channel") {
 			return false
@@ -485,16 +518,23 @@ func deliveryReceipt(line []byte, marker string, cross bool) bool {
 			return false
 		}
 		seen := map[xml.Name]bool{}
-		matched := false
+		matched, matchedAttempt, matchedSource := false, false, !cross
 		for _, attr := range tag.Attr {
 			if seen[attr.Name] {
 				return false
 			}
 			seen[attr.Name] = true
+			if attr.Name.Space == "" && attr.Name.Local == "c3_attempt" {
+				matchedAttempt = attr.Value == attempt
+			}
+			if cross && attr.Name.Space == "" && attr.Name.Local == "source" {
+				matchedSource = attr.Value == "plugin:c3:c3"
+			}
 			if attr.Name.Space == "" && attr.Name.Local == "c3_delivery_id" {
 				matched = attr.Value == marker
 			}
 		}
+		matched = matched && matchedAttempt && matchedSource
 		// Token parses the complete opening tag (quotes, escapes and self-close).
 		// Channel bodies are plain text, not necessarily valid XML.
 		opener := text[:decoder.InputOffset()]
@@ -530,13 +570,33 @@ func deliveryReceipt(line []byte, marker string, cross bool) bool {
 	if json.Unmarshal(entry.Message.Content, &blocks) != nil {
 		return false
 	}
+	if cross {
+		return len(blocks) > 0 && blocks[0].Type == "text" && matches(blocks[0].Text)
+	}
 	for _, block := range blocks {
-		if cross && block.Type == "text" && strings.Contains(block.Text, "<channel ") {
-			return matches(block.Text) // first opener across the entire content array
-		}
 		if block.Type == "text" && matches(block.Text) {
 			return true
 		}
 	}
 	return false
+}
+
+// Debug only: retain punctuation/spacing from the first 120 characters to show
+// framing, but mask all words and attribute/body values. Never log a delivery
+// token or transcript prose (which may itself contain credentials).
+func debugRejectedPeerPrefix(text, marker string) {
+	if !slog.Default().Enabled(context.Background(), slog.LevelDebug) {
+		return
+	}
+	prefix := []rune(text)
+	if len(prefix) > 120 {
+		prefix = prefix[:120]
+	}
+	prefix = []rune(strings.ReplaceAll(string(prefix), marker, "[redacted]"))
+	for i, r := range prefix {
+		if !strings.ContainsRune("<>/= \t\r\n\"'!?-", r) {
+			prefix[i] = '*'
+		}
+	}
+	slog.Debug("cross-session receipt candidate rejected", "prefix_redacted", string(prefix))
 }

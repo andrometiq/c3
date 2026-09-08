@@ -1,4 +1,4 @@
-//go:build !windows
+//go:build linux || darwin
 
 package main
 
@@ -24,20 +24,29 @@ type inboxPush struct {
 	Auth struct{ Type, Token string }
 	User struct {
 		Type, From, Priority string
+		SessionID            string `json:"session_id"`
 		Message              struct{ Role, Content string }
 	}
-	Err error
+	Err   error
+	Bytes int
 }
 
 // An independent receiver checks framing and waits for the client's write EOF
 // before closing. No Claude process, broker daemon, or personal files involved.
 func fakeInbox(t *testing.T, hold <-chan struct{}, response string) (*crossSessionTransport, <-chan inboxPush) {
 	t.Helper()
-	root := t.TempDir()
+	root, err := os.MkdirTemp("/tmp", "c3-inbox-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
 	if err := os.Chmod(root, 0700); err != nil {
 		t.Fatal(err)
 	}
-	path := filepath.Join(root, "s")
+	if err := os.Mkdir(filepath.Join(root, "cc-socks"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(root, "cc-socks", fmt.Sprintf("%d.sock", os.Getpid()))
 	listener, err := net.Listen("unix", path)
 	if err != nil {
 		t.Fatal(err)
@@ -55,6 +64,7 @@ func fakeInbox(t *testing.T, hold <-chan struct{}, response string) (*crossSessi
 			var push inboxPush
 			for i := 0; i < 2; i++ {
 				line, err := reader.ReadBytes('\n')
+				push.Bytes += len(line)
 				if err != nil {
 					push.Err = err
 					break
@@ -83,7 +93,7 @@ func fakeInbox(t *testing.T, hold <-chan struct{}, response string) (*crossSessi
 			_ = conn.Close()
 		}
 	}()
-	return &crossSessionTransport{runtimeDir: root, socketPath: path, token: "TEST-SECRET-INBOX-TOKEN"}, pushes
+	return &crossSessionTransport{runtimeDir: root, socketPath: path, token: "TEST-SECRET-INBOX-TOKEN", hostPID: os.Getpid()}, pushes
 }
 
 func nextInbox(t *testing.T, pushes <-chan inboxPush) inboxPush {
@@ -105,7 +115,7 @@ func appendPeerReceipt(t *testing.T, path, content string) {
 	// Fixture-shaped assumption, NOT a captured Claude transcript. Host-added
 	// prefix/wrapper and suffix must preserve the first channel marker.
 	line, err := json.Marshal(map[string]any{"type": "user", "isMeta": true, "origin": map[string]any{"kind": "peer"},
-		"message": map[string]any{"role": "user", "content": "Peer input:\n<cross-session-message from=\"c3\">" + content + "</cross-session-message>\nHost peer guidance."}})
+		"message": map[string]any{"role": "user", "content": "<cross-session-message from=\"c3\">" + content + "</cross-session-message>\nHost peer guidance."}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -122,14 +132,14 @@ func appendPeerReceipt(t *testing.T, path, content string) {
 func TestCrossSessionTransportFrames(t *testing.T) {
 	tx, pushes := fakeInbox(t, nil, "")
 	content := "<channel c3_delivery_id=\"one\">\n/text & body\n</channel>"
-	if err := tx.Send(context.Background(), content); err != nil {
+	if err := tx.Send(context.Background(), content, "11111111-2222-4333-8444-555555555555"); err != nil {
 		t.Fatal(err)
 	}
 	push := nextInbox(t, pushes)
 	if push.Auth.Type != "auth" || push.Auth.Token != tx.token {
 		t.Fatal("incorrect authentication frame")
 	}
-	if push.User.Type != "user" || push.User.From != "c3" || push.User.Priority != "next" || push.User.Message.Role != "user" || push.User.Message.Content != content {
+	if push.User.SessionID != "11111111-2222-4333-8444-555555555555" || push.User.Type != "user" || push.User.From != "c3" || push.User.Priority != "next" || push.User.Message.Role != "user" || push.User.Message.Content != content {
 		t.Fatalf("incorrect user frame: %+v", push.User)
 	}
 }
@@ -144,12 +154,15 @@ func TestCrossSessionStartupCapturesOwnEnvironmentOnce(t *testing.T) {
 	}
 	t.Setenv("CLAUDE_CODE_MESSAGING_TOKEN", tx.token)
 	got, reason := startupCrossSessionTransport()
-	if got == nil || reason != "" {
-		t.Fatalf("startup rejected own inbox: %s", reason)
+	if got == nil || !strings.Contains(reason, "owning host") {
+		t.Fatalf("startup accepted this process instead of its parent: %s", reason)
 	}
+	// The fixture listener runs in this test process; the real startup must refuse
+	// it. Explicitly supply the fixture owner only after asserting that refusal.
+	got.hostPID = os.Getpid()
 	t.Setenv("CLAUDE_CODE_MESSAGING_TOKEN", "changed-token")
 	t.Setenv("CLAUDE_CODE_MESSAGING_SOCKET", "changed-socket")
-	if err := got.Send(context.Background(), "captured"); err != nil {
+	if err := got.Send(context.Background(), "captured", ""); err != nil {
 		t.Fatal(err)
 	}
 	if nextInbox(t, pushes).Auth.Token != tx.token {
@@ -205,14 +218,14 @@ func TestCrossSessionTransportRejectsUnsafePaths(t *testing.T) {
 	for _, path := range []string{outside.socketPath, regular, socketLink, filepath.Join(link, "s"), "relative.sock", filepath.Join(tx.runtimeDir, "missing")} {
 		copy := *tx
 		copy.socketPath = path
-		if err := copy.Send(context.Background(), "test"); err == nil {
+		if err := copy.Send(context.Background(), "test", ""); err == nil {
 			t.Fatalf("unsafe path accepted: %s", path)
 		}
 	}
 	if err := os.Chmod(tx.runtimeDir, 0755); err != nil {
 		t.Fatal(err)
 	}
-	if err := tx.Send(context.Background(), "test"); err == nil {
+	if err := tx.Send(context.Background(), "test", ""); err == nil {
 		t.Fatal("non-private runtime accepted")
 	}
 }
@@ -232,7 +245,7 @@ func TestCrossSessionTransportBoundedClose(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 80*time.Millisecond)
 			defer cancel()
 			start := time.Now()
-			if err := tx.Send(ctx, "test"); err == nil {
+			if err := tx.Send(ctx, "test", ""); err == nil {
 				t.Fatal("non-clean peer close accepted")
 			}
 			if time.Since(start) > time.Second {
@@ -264,8 +277,10 @@ func TestCrossSessionBlockMatchesHostFixture(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	line, _ := json.Marshal(map[string]any{"type": "user", "message": map[string]any{"role": "user", "content": block}})
-	if !deliveryReceipt(line, `marker&"`, true) {
+	frame["meta"].(map[string]any)["c3_attempt"] = "cross-session:1"
+	block, _ = crossSessionChannelBlock(frame)
+	line, _ := json.Marshal(map[string]any{"type": "user", "isMeta": true, "message": map[string]any{"role": "user", "content": block}})
+	if !deliveryReceipt(line, `marker&"`, true, "cross-session:1") {
 		t.Fatal("escaped metadata did not round trip")
 	}
 }

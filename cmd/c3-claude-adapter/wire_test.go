@@ -243,6 +243,7 @@ func captureClaudeGoldenFrame(t *testing.T, in c3types.Inbound) []byte {
 		t.Fatalf("notifyTx.Connect: %v", err)
 	}
 	frame := buildClaudeChannelFrame(&in)
+	frame["meta"].(map[string]any)["c3_attempt"] = "channel:1"
 	frame["meta"].(map[string]any)["c3_delivery_id"] = fmt.Sprintf("test-delivery-%d", in.MessageID)
 	if err := tx.Notify(context.Background(), "notifications/claude/channel", frame); err != nil {
 		t.Fatalf("Notify: %v", err)

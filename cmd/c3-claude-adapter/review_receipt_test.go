@@ -41,7 +41,7 @@ func realHostReceipt(t *testing.T, marker string) []byte {
 		t.Fatal(err)
 	}
 	message := record["message"].(map[string]any)
-	message["content"] = strings.Replace(message["content"].(string), "<channel ", `<channel c3_delivery_id="`+marker+`" `, 1)
+	message["content"] = strings.Replace(message["content"].(string), "<channel ", `<channel c3_attempt="channel:1" c3_delivery_id="`+marker+`" `, 1)
 	raw, err = json.Marshal(record)
 	if err != nil {
 		t.Fatal(err)
@@ -90,7 +90,7 @@ func TestChannelReceiptAttributeBoundaries(t *testing.T) {
 		{"nested in body", `<channel source='c3'><channel c3_delivery_id='T'>body</channel></channel>`, "T", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			raw, _ := json.Marshal(map[string]any{"type": "user", "message": map[string]any{"role": "user", "content": tc.text}})
+			raw, _ := json.Marshal(map[string]any{"type": "user", "message": map[string]any{"role": "user", "content": strings.Replace(tc.text, "<channel", `<channel c3_attempt="channel:1"`, 1)}})
 			if got := channelReceipt(raw, tc.marker); got != tc.want {
 				t.Fatalf("match = %v, want %v", got, tc.want)
 			}

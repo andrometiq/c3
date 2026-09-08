@@ -192,7 +192,7 @@ func seedLiveTranscript(t *testing.T, a *adapter) string {
 func appendChannelReceipt(t *testing.T, path, marker string) {
 	t.Helper()
 	line, _ := json.Marshal(map[string]any{"type": "user", "message": map[string]any{
-		"role": "user", "content": `<channel source="c3" c3_delivery_id="` + marker + `">hello</channel>`,
+		"role": "user", "content": `<channel source="c3" c3_attempt="channel:1" c3_delivery_id="` + marker + `">hello</channel>`,
 	}})
 	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0600)
 	if err != nil {

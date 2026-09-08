@@ -158,7 +158,9 @@ reports `no dev-channels flag on host`.
 `live push not confirmed` means no matching complete user channel record was
 observed within 15 seconds. No acknowledgement is sent; the durable copy stays
 available. If the inherited inbox is eligible, C3 first attempts one cross-session
-fallback with the same delivery token. `cross-session push not confirmed` means
+fallback with the same delivery token and a new `c3_attempt="cross-session:<n>"`
+marker. Native attempts carry `c3_attempt="channel:<n>"`; receipts cannot cross
+those attempt boundaries. `cross-session push not confirmed` means
 that attempt failed its socket exchange or transcript confirmation; a coalesced
 held notice reports it, and subsequent messages are held without further pushes.
 Explicit attach or reconnect retries channel eligibility first, then fallback.
@@ -174,19 +176,39 @@ log records its socket write, not host confirmation; durable consumption is
 controlled by the later receipt.
 
 The cross-session endpoint and token are captured from the adapter's own
-environment at startup. Do not dump the token, process environments, or socket
-frames into logs. Generic reasons distinguish missing credentials, an unavailable
-endpoint, a non-socket path, or a path outside the user's private runtime directory.
-An attach revalidates the captured endpoint; changed credentials need an adapter
-restart. C3 does not alter host accept/hold/refuse policy.
+environment at startup. Do not dump tokens, process environments, or socket
+frames into logs. Owning-session delivery requires the exact resolved path
+`<runtime>/cc-socks/<hostpid>.sock`, a user-owned 0700 runtime directory, and a
+user-owned socket. The existing argv/parent readers identify the nearest Claude
+ancestor; if none is identified, only the immediate parent is eligible.
+Unreadable or uncertain ancestry disables fallback.
 
-Peer transcript shape is still **UNVERIFIED live**. The matcher expects a complete
-`type:user`, `message.role:user` record, a string or text-block content containing
-the first `<channel ` opener with the exact `c3_delivery_id`, and `</channel>`.
-Host text/wrappers before it and guidance after it are allowed only for the peer
-route. Socket EOF alone is never enough. Verify an authorized live turn before
-concluding that a clean socket exchange means delivery; late records may leave a
-recoverable duplicate in `fetch_queue`.
+Before auth is written, the **connected fd** is checked with `fstat`, and kernel
+peer credentials must report that same host PID and C3's own UID. Linux uses
+`SO_PEERCRED`; macOS uses `LOCAL_PEERPID` and `LOCAL_PEERCRED`. This prevents a
+substituted pathname from redirecting credentials. No peer-PID facility means
+no fallback. The user frame also supplies `session_id` when the owning stable
+UUID is known from the SessionStart handoff/registered identity. Generic errors
+distinguish path/ownership/peer failures without exposing credentials. Attach
+revalidates the captured endpoint; changed credentials need an adapter restart.
+Outbound JSON frames (newline included) over the 4 MiB IPC cap are refused
+before auth, logged as `cross-session outbound frame exceeds IPC cap`, and held
+in the durable queue. C3 does not alter host accept/hold/refuse policy.
+
+Peer transcript shape is still **UNVERIFIED live**. A receipt requires a complete
+`type:user`, `message.role:user`, `isMeta:true` record; any `origin` must be an
+object with `kind:peer`. String content or its first text block must start with
+our complete `<channel source="plugin:c3:c3" …>` block and carry both the exact
+`c3_delivery_id` and `c3_attempt`. The only allowed single prefixes, immediately
+before the block, are `Peer input: `, `Peer input:\n`, and
+`<cross-session-message from="c3">`. Quoted text, XML comments, attributes,
+multiple wrappers, and later content blocks are rejected. Set `C3_DEBUG=1` when
+starting the adapter to see a debug preview of the first 120 characters of a
+rejected marker candidate, with words and values masked and only framing
+punctuation/spacing retained. Tokens and raw transcript prose are never logged.
+Use that framing preview to diagnose allowlist drift during an authorized live
+test. Socket EOF alone never confirms delivery; failed receipts leave rows
+available in `fetch_queue`, with possible duplicates after a late injection.
 
 Messages are held durably until delivered or fetched, within the queue's documented per-route limits (1,000 messages / 14 days); retention cleanup may permanently remove evicted records.
 

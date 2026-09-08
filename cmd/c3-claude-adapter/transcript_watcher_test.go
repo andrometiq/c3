@@ -78,7 +78,9 @@ func pollAndReadSettles(t *testing.T, a *adapter, peer *ipc.Conn, count int) []i
 		select {
 		case msg := <-result:
 			settles = append(settles, msg)
-		case <-time.After(2 * time.Second):
+		// The oversized fixture scans 16 MiB under race instrumentation. This
+		// bounds a missing result, not production receipt latency.
+		case <-time.After(10 * time.Second):
 			t.Fatal("timed out waiting for permission_settled")
 		}
 	}

@@ -42,6 +42,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"log/slog"
 	"net"
 	"os"
 	"os/exec"
@@ -99,6 +100,9 @@ func main() {
 }
 
 func run() error {
+	if os.Getenv("C3_DEBUG") == "1" {
+		slog.SetLogLoggerLevel(slog.LevelDebug)
+	}
 	// Persistent adapter log at $XDG_STATE_HOME/c3/adapter.log. Adapter stderr
 	// is socket-paired to Claude Code's plugin host and inaccessible from
 	// outside; the file is the durable signal for "did the adapter send the
@@ -357,6 +361,7 @@ type adapter struct {
 	initialRenderRoute ipc.RenderRoute
 	renderRoute        ipc.RenderRoute
 	liveGeneration     uint64
+	liveAttempt        uint64
 	liveConn           *ipc.Conn
 	livePublishMu      sync.Mutex
 	livePending        map[string]bool

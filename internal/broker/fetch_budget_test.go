@@ -108,7 +108,9 @@ func fetchOverIPC(t *testing.T, b *Broker, stub *Stub, req ipc.FetchQueueReq) (i
 			t.Fatalf("reading the fetch_queue response failed: %v", got.err)
 		}
 		return got.resp, true
-	case <-time.After(5 * time.Second):
+	// Multi-MiB queue IO plus race instrumentation can exceed five seconds.
+	// Keep loss/size assertions exact while bounding a missing response.
+	case <-time.After(30 * time.Second):
 		return ipc.FetchQueueResp{}, false
 	}
 }
