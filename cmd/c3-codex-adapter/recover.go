@@ -337,6 +337,9 @@ func (a *adapter) stableSessionID(ctx context.Context, cfg codexForwardConfig) (
 	}
 	id = a.threadID
 	a.tidmu.Unlock()
+	if codexForwardingAllowed() {
+		go a.publishCodexRenderRoute()
+	}
 	return id, nil
 }
 

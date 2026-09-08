@@ -790,8 +790,13 @@ launcher enables forwarding. Busy-session input is queued; C3 never automaticall
 steers or interrupts. An unsupported queue method yields pull-only delivery and a
 `fetch_queue` notice, with no legacy `turn/start` resubmission. Native CLI queue
 delivery is an explicit opt-in alternative. Queue acceptance permits an exact
-broker-token ack; it is not a conversation receipt. In pull-only mode, MCP log
-notifications provide a best-effort prompt to fetch held messages.
+broker-token ack; it is not a conversation receipt. A one-time MCP log notification announces the switch to pull-only; the broker
+then holds new messages and notifies per message; held messages are recovered
+with `fetch_queue`. Codex reports `render_state: "queue_only"` with a generic
+`render_reason` in hello and through the existing `render_state` update op when
+the queue is unsupported, a destructive fetch outcome is uncertain, or the
+conversation identity is unpinned. A successful pin or queue acceptance after
+restart reports `capable` again.
 
 **Grok Build** has no channel-notification dialect. Live inject **requires leader mode** (`[cli] use_leader = true`). The Grok adapter registers as a client on the leader socket and issues ACP `session/prompt` against the TUI session id (see [`GROK-INJECT.md`](GROK-INJECT.md)). Without a leader socket, inbound stays in the durable queue for `fetch_queue`.
 

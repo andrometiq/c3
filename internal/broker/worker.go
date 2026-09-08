@@ -1818,12 +1818,7 @@ func (w *RouteWorker) handleFetch(_ context.Context, job *FetchJob) {
 					}
 					msgs, err = w.broker.Queue.Consume(qrk, take)
 					if err == nil {
-						var ids []string
-						for i, row := range records {
-							msgs[i].ConsumedRecordID = row.RecordID
-							ids = append(ids, row.RecordID)
-						}
-						w.retirePendingRecords(ids)
+						w.retireConsumedRecords(msgs, records)
 					}
 				}
 				if job.Owner == nil {
@@ -2811,4 +2806,16 @@ func (w *RouteWorker) retirePendingRecords(ids []string) {
 		}
 	}
 	w.pendingAck = kept
+}
+
+// PeekTracked and Consume are separate reads; only retire rows returned by both.
+func (w *RouteWorker) retireConsumedRecords(msgs []c3types.Inbound, records []queue.TrackedInbound) {
+	var ids []string
+	for i, row := range records {
+		if i < len(msgs) {
+			msgs[i].ConsumedRecordID = row.RecordID
+			ids = append(ids, row.RecordID)
+		}
+	}
+	w.retirePendingRecords(ids)
 }

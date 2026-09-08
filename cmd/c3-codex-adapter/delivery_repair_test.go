@@ -69,7 +69,9 @@ func ackFrames(t *testing.T, peer *ipc.Conn) <-chan ipc.InboundDeliveredMsg {
 			}
 			var ack ipc.InboundDeliveredMsg
 			_ = json.Unmarshal(raw, &ack)
-			out <- ack
+			if ack.Op == ipc.OpInboundDelivered {
+				out <- ack
+			}
 		}
 	}()
 	return out

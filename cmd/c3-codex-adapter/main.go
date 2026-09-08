@@ -271,6 +271,9 @@ type adapter struct {
 	tidmu    sync.Mutex
 	threadID string
 
+	renderPublishMu sync.Mutex
+	publishedRoute  ipc.RenderRoute // guarded by renderPublishMu; empty means legacy capable
+
 	// deliveryMu serializes transport completion with destructive fetch requests.
 	// deliveryStateMu also protects invalidation on the broker reader: fetched
 	// record identities can obsolete a buffered batch without relying on frames.
@@ -293,6 +296,7 @@ type codexForwardReq struct {
 	inbound   c3types.Inbound
 	originTag string
 	covered   int
+	pending   int
 	token     string
 	conn      *ipc.Conn
 	state     *codexForwardState
@@ -355,6 +359,8 @@ func spawnBroker() error {
 }
 
 func (a *adapter) hello() error {
+	a.renderPublishMu.Lock()
+	defer a.renderPublishMu.Unlock()
 	conn := a.rawConn()
 	if conn == nil {
 		return errors.New("broker not connected")
@@ -363,10 +369,12 @@ func (a *adapter) hello() error {
 	if cwd == "" {
 		cwd, _ = os.Getwd()
 	}
+	route := a.codexRenderRoute()
 	if err := conn.WriteJSON(ipc.HelloMsg{
 		Op: ipc.OpHello, CLI: "codex", PID: os.Getpid(), CWD: cwd,
 		Capabilities:    []string{"log-notification", "fetch_queue", "ws-forwarder"},
 		ProtocolVersion: ipc.ProtocolVersion,
+		RenderState:     route.State, RenderReason: route.Reason,
 	}); err != nil {
 		return err
 	}
@@ -396,6 +404,8 @@ func (a *adapter) hello() error {
 	a.brokerVersion.Store(int64(ipc.PeerProtocolVersion(ack.ProtocolVersion)))
 	a.connHelloPending = false
 	a.bmu.Unlock()
+	a.publishedRoute = route
+	go a.publishCodexRenderRoute() // catch transitions that occurred during hello
 	return nil
 }
 
@@ -835,10 +845,35 @@ func (a *adapter) handleInbound(raw []byte) {
 		return
 	}
 
-	// Codex cannot render unsolicited content reliably, so it polls. Replace the
-	// retired in-memory ring with a lightweight "N pending" nudge — the durable
-	// queue in the broker is the source of truth; the agent calls fetch_queue.
-	//
+	if !codexForwardingAllowed() {
+		a.nudgeFetchQueue(msg)
+	}
+
+	if codexForwardingAllowed() {
+		req := codexForwardReq{
+			inbound: msg.Inbound, covered: msg.Covered, pending: msg.Pending,
+			originTag: a.originTag(&msg.Inbound), token: msg.DeliveryToken, conn: a.currentConn(),
+			state: &codexForwardState{ids: msg.RecordIDs},
+		}
+		a.deliveryStateMu.Lock()
+		if a.forwards == nil {
+			a.forwards = make(map[*codexForwardState]struct{})
+		}
+		a.forwards[req.state] = struct{}{}
+		a.deliveryStateMu.Unlock()
+		select {
+		case a.forwardCh <- req:
+		default:
+			a.deliveryStateMu.Lock()
+			delete(a.forwards, req.state)
+			a.latchForwardBlocked("forward queue full; message held")
+			a.deliveryStateMu.Unlock()
+		}
+	}
+}
+
+// nudgeFetchQueue also covers arrivals already in flight when delivery becomes pull-only.
+func (a *adapter) nudgeFetchQueue(msg ipc.InboundMsg) {
 	// I6: the true pending count is msg.Pending + msg.Covered. The broker stamps
 	// Pending = lines queued AFTER the covered ones, and Covered = the lines THIS
 	// push added (still queued until confirmed acceptance). Hardcoding 1 undercounted a debounced
@@ -847,9 +882,7 @@ func (a *adapter) handleInbound(raw []byte) {
 	if pendingCount < 1 {
 		pendingCount = 1
 	}
-	// Ordinary arrivals need a pull nudge only when forwarding is disabled.
-	// Transport failures send their own recovery notice.
-	if a.transport != nil && !codexForwardingAllowed() {
+	if a.transport != nil {
 		// Name the topic (§5) so a stale/wrong nudge is human-distinguishable.
 		route := a.currentTopicName()
 		notice := "c3: new Telegram message"
@@ -873,28 +906,6 @@ func (a *adapter) handleInbound(raw []byte) {
 			log.Printf("notify FAIL chan=%s chat=%d thread=%s msg=%d: %v — content durably queued; call fetch_queue. %s",
 				msg.Inbound.Channel, msg.Inbound.ChatID, thread, msg.Inbound.MessageID, err,
 				inboundContentSummary(&msg.Inbound))
-		}
-	}
-
-	if codexForwardingAllowed() {
-		req := codexForwardReq{
-			inbound: msg.Inbound, covered: msg.Covered,
-			originTag: a.originTag(&msg.Inbound), token: msg.DeliveryToken, conn: a.currentConn(),
-			state: &codexForwardState{ids: msg.RecordIDs},
-		}
-		a.deliveryStateMu.Lock()
-		if a.forwards == nil {
-			a.forwards = make(map[*codexForwardState]struct{})
-		}
-		a.forwards[req.state] = struct{}{}
-		a.deliveryStateMu.Unlock()
-		select {
-		case a.forwardCh <- req:
-		default:
-			a.deliveryStateMu.Lock()
-			delete(a.forwards, req.state)
-			a.latchForwardBlocked("forward queue full; message held")
-			a.deliveryStateMu.Unlock()
 		}
 	}
 }
@@ -966,6 +977,9 @@ func (a *adapter) deliverCodex(req codexForwardReq) {
 		a.deliveryStateMu.Lock()
 		delete(a.forwards, req.state)
 		a.deliveryStateMu.Unlock()
+		if uncertain && !obsolete && !req.inbound.IsEvent() {
+			a.nudgeFetchQueue(ipc.InboundMsg{Inbound: req.inbound, Covered: req.covered, Pending: req.pending})
+		}
 		return
 	}
 	cfg := a.codexForwardConfig()
@@ -985,7 +999,11 @@ func (a *adapter) deliverCodex(req codexForwardReq) {
 	}
 	if errors.Is(err, errCodexQueueUnsupported) {
 		a.queueUnsupported = true
+		go a.publishCodexRenderRoute()
 		a.latchForwardBlocked(err.Error())
+	}
+	if errors.Is(err, errCodexIdentityUnpinned) || err == nil {
+		go a.publishCodexRenderRoute()
 	}
 	if req.inbound.IsEvent() {
 		if err != nil {
@@ -1030,8 +1048,8 @@ func (a *adapter) clearForwardBlocked() {
 	}
 }
 
-// An operational notice must wake Codex through its delivery transport, not
-// only an MCP log notification that the TUI does not render as agent input.
+// Queue a best-effort operational notice. The delivery loop skips it while
+// pull-only is latched; the separate MCP log notification remains the fallback.
 func (a *adapter) forwardStatusNotice(text string) {
 	if text == "" || !codexForwardingAllowed() {
 		return
@@ -1191,7 +1209,7 @@ func (a *adapter) buildInstructions() string {
 		head = "C3 connected. Use `attach` to claim a Telegram topic, `fetch_queue` to recover held inbound, and `reply` to send."
 	}
 	if codexForwardingAllowed() {
-		head += " Live delivery is enabled. Codex queues inbound during active work for a subsequent turn. Do not fetch_queue concurrently with healthy live delivery; use it when a recovery notice requests it."
+		head += " Live delivery is enabled. Codex queues inbound during active work for a subsequent turn. Do not fetch_queue concurrently with healthy live delivery; use it when a recovery notice requests it, or when delivery has been reported pull-only, fetch_queue periodically."
 	} else {
 		head += " Live delivery is NOT configured: topic attachment alone does not wake Codex. Start with the C3 launcher, or configure native queue delivery for this exact session."
 	}
@@ -1781,6 +1799,7 @@ func (a *adapter) stopUncertainFetch(ack bool) {
 	a.deliveryStateMu.Lock()
 	defer a.deliveryStateMu.Unlock()
 	a.deliveryUncertain = true
+	go a.publishCodexRenderRoute()
 	a.latchForwardBlocked("destructive fetch outcome unknown; live delivery paused until restart")
 }
 
