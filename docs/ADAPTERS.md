@@ -550,9 +550,10 @@ Only the **nearest** host's argv counts. An outer session's flag cannot qualify
 an inner flagless session. Both development-flag forms (`--flag value` and
 `--flag=value`) are accepted.
 
-The Claude adapter reuses D020's bounded complete-record JSONL reader and
-session transcript resolver. Existing `message_id` metadata is not unique to
-an occurrence (edits and different routes may reuse it), so it adds string
+The Claude adapter reuses D020's session transcript resolver.
+Live receipts use `scanChannelReceipt`; `scanTranscriptRecords` serves permission readback.
+Both readers process bounded, complete JSONL records. Existing `message_id`
+metadata is not unique to an occurrence (edits and different routes may reuse it), so it adds string
 metadata `c3_delivery_id`, carrying the broker's `delivery_token`. With an old
 broker lacking tokens, it generates a fresh random marker for readback while
 keeping the legacy ack token empty. Claude's channel renderer is expected to

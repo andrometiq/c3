@@ -13,6 +13,21 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
+func TestAdapterDocsNameReceiptAndPermissionReaders(t *testing.T) {
+	body, err := os.ReadFile("../../docs/ADAPTERS.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, claim := range []string{
+		"Live receipts use `scanChannelReceipt`",
+		"`scanTranscriptRecords` serves permission readback",
+	} {
+		if !strings.Contains(string(body), claim) {
+			t.Fatalf("adapter docs missing reader distinction: %s", claim)
+		}
+	}
+}
+
 // This sanitized record was emitted by Claude Code 2.1.263, independently of
 // our frame builder. Insert metadata using the host's observed key="value" form.
 func realHostReceipt(t *testing.T, marker string) []byte {

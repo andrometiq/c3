@@ -2760,7 +2760,7 @@ func (w *RouteWorker) debounceMaxMessages() int {
 	return cc.DebounceMaxMessages
 }
 
-// retirePendingRecords removes explicitly fetched or receipt-confirmed sources,
+// retirePendingRecords removes explicitly fetched, drained or receipt-confirmed sources,
 // preserving the other rows of a merged delivery for holder-death recovery.
 func (w *RouteWorker) retirePendingRecords(ids []string) {
 	retired := make(map[string]bool, len(ids))

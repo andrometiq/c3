@@ -596,9 +596,6 @@ func (s *Stub) SetRenderRoute(state, reason string, cannot bool) {
 	}
 	s.renderRoute = ipc.RenderRoute{State: state, Reason: reason}
 	s.renderProbeSent = false
-	if state == ipc.RenderCapable {
-		s.renderNoticeRoutes = nil
-	}
 }
 
 func (s *Stub) RenderRoute() ipc.RenderRoute {
@@ -610,8 +607,7 @@ func (s *Stub) RenderRoute() ipc.RenderRoute {
 	return s.renderRoute
 }
 
-// scheduleRenderNotice reserves one retry loop per route; it reads the latest
-// state at send time, and marks it sent only after the Held cooldown allows it.
+// scheduleRenderNotice reserves one sending loop per route through completion.
 func (s *Stub) scheduleRenderNotice(key RouteKey) bool {
 	s.stubMu.Lock()
 	defer s.stubMu.Unlock()
@@ -626,17 +622,33 @@ func (s *Stub) scheduleRenderNotice(key RouteKey) bool {
 	return true
 }
 
-func (s *Stub) finishRenderNotice(key RouteKey, sent bool) ipc.RenderRoute {
+// nextRenderNotice rechecks after the cooldown: an intervening transition back
+// to the last sent state needs no notice. Clearing pending under the same lock
+// lets a later state change reserve a new loop without losing an update.
+func (s *Stub) nextRenderNotice(key RouteKey) (ipc.RenderRoute, bool) {
 	s.stubMu.Lock()
 	defer s.stubMu.Unlock()
-	delete(s.renderNoticePending, key)
+	if s.renderNoticeRoutes[key] == s.renderRoute.State+":"+s.renderRoute.Reason {
+		delete(s.renderNoticePending, key)
+		return ipc.RenderRoute{}, false
+	}
+	return s.renderRoute, true
+}
+
+func (s *Stub) finishRenderNotice(key RouteKey, route ipc.RenderRoute, sent bool) bool {
+	s.stubMu.Lock()
+	defer s.stubMu.Unlock()
 	if sent {
 		if s.renderNoticeRoutes == nil {
 			s.renderNoticeRoutes = map[RouteKey]string{}
 		}
-		s.renderNoticeRoutes[key] = s.renderRoute.State + ":" + s.renderRoute.Reason
+		s.renderNoticeRoutes[key] = route.State + ":" + route.Reason
+		if s.renderRoute != route {
+			return true // keep the reservation while sending the latest state
+		}
 	}
-	return s.renderRoute
+	delete(s.renderNoticePending, key)
+	return false
 }
 
 // Reserve the first probe across all routes held by this session. Later human

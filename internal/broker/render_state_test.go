@@ -5,12 +5,116 @@ import (
 	"encoding/json"
 	"net"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/Andrometiq/c3/internal/c3types"
 	"github.com/Andrometiq/c3/internal/ipc"
 )
+
+type firstNoticeBlockedChannel struct {
+	*fakeChannel
+	entered chan c3types.ReplyArgs
+	release chan struct{}
+	calls   atomic.Int32
+}
+
+func (c *firstNoticeBlockedChannel) SendReply(args c3types.ReplyArgs) (int64, error) {
+	first := c.calls.Add(1) == 1
+	c.entered <- args
+	if first {
+		<-c.release
+	}
+	return c.fakeChannel.SendReply(args)
+}
+
+func TestRenderNoticeSerializesCompletionAndCoalescesLatest(t *testing.T) {
+	for _, scenario := range []string{"new state during send", "return during send", "return during cooldown"} {
+		t.Run(scenario, func(t *testing.T) {
+			t.Setenv("C3_QUEUE_DIR", t.TempDir())
+			fc := &firstNoticeBlockedChannel{fakeChannel: &fakeChannel{}, entered: make(chan c3types.ReplyArgs, 8), release: make(chan struct{})}
+			b := brokerWithChannel(t, mfWithTelegram(), fc.fakeChannel)
+			b.chMu.Lock()
+			b.channels["telegram"] = &channelRegistration{Channel: fc}
+			b.chMu.Unlock()
+			defer b.Shutdown()
+			released := false
+			defer func() {
+				if !released {
+					close(fc.release)
+				}
+			}()
+			b.HeldNotices.cooldown = 30 * time.Millisecond
+			key := drainSrc()
+			stub, _ := liveHolder(t, b, key)
+			stub.AddRoute(key)
+			update := func(state string) {
+				stub.SetRenderRoute(state, "", true)
+				b.notifyRenderRoute(stub)
+			}
+			waitIdle := func() {
+				t.Helper()
+				deadline := time.Now().Add(time.Second)
+				for time.Now().Before(deadline) {
+					stub.stubMu.Lock()
+					pending := stub.renderNoticePending[key]
+					stub.stubMu.Unlock()
+					if !pending {
+						return
+					}
+					time.Sleep(time.Millisecond)
+				}
+				t.Fatal("notice loop did not finish")
+			}
+			update(ipc.RenderCapable)
+			select {
+			case <-fc.entered:
+			case <-time.After(time.Second):
+				t.Fatal("first notice never started")
+			}
+			if scenario == "return during cooldown" {
+				close(fc.release)
+				released = true
+				waitIdle()
+				// Occupy the cooldown while B changes back to the already-sent A.
+				b.HeldNotices.mu.Lock()
+				b.HeldNotices.lastByKey[key] = time.Now()
+				b.HeldNotices.mu.Unlock()
+			} else {
+				// The first send has outlasted the cooldown; B could now overtake it.
+				b.HeldNotices.mu.Lock()
+				b.HeldNotices.lastByKey[key] = time.Now().Add(-time.Second)
+				b.HeldNotices.mu.Unlock()
+			}
+			update(ipc.RenderQueueOnly)
+			if scenario != "new state during send" {
+				update(ipc.RenderCapable)
+			}
+			select {
+			case args := <-fc.entered:
+				t.Fatalf("overlapping or unchanged notice: %s", args.Text)
+			case <-time.After(100 * time.Millisecond):
+			}
+			if !released {
+				close(fc.release)
+				released = true
+			}
+			waitIdle()
+			replies := fc.sendRepliesSnapshot()
+			want := 1
+			if scenario == "new state during send" {
+				want = 2
+			}
+			if len(replies) != want || !strings.Contains(replies[0].Text, "Live route: channel.") {
+				t.Fatalf("completed notices: %+v, want %d", replies, want)
+			}
+			if want == 2 && !strings.Contains(replies[1].Text, "Live route: queue-only") {
+				t.Fatalf("latest notice was overtaken: %+v", replies)
+			}
+		})
+	}
+}
 
 func TestHelloRenderStateCompatibility(t *testing.T) {
 	for _, tc := range []struct {

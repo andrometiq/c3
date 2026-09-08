@@ -752,6 +752,9 @@ func (w *RouteWorker) handleDrainRemove(job *DrainRemoveJob) {
 		job.ResultCh <- DrainRemoveResult{Err: err}
 		return
 	}
+	// Every selected identity landed on the target before this job. Retire
+	// source recovery only after removal succeeds, including rows already gone.
+	w.retirePendingRecords(job.RecordIDs)
 	log.Printf("drain remove chan=%s chat=%d topic=%s requested=%d removed=%d",
 		w.key.Channel, w.key.ChatID, TopicKeyStr(w.key), len(job.RecordIDs), len(removed))
 	job.ResultCh <- DrainRemoveResult{Removed: removed}

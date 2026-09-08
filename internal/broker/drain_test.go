@@ -14,6 +14,7 @@ import (
 	"errors"
 	"net"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -68,6 +69,87 @@ func TestDrainSrcMsg_UsesFreshTimestamp(t *testing.T) {
 	age := time.Since(m.Timestamp)
 	if age < 0 || age > time.Minute {
 		t.Fatalf("drainSrcMsg timestamp is not fresh (age=%v); queue.MaxAge will eventually make drain tests silently evict their fixtures", age)
+	}
+}
+
+func TestDrainFetchHolderDeathRetiresRecoveryOnlyOnSuccess(t *testing.T) {
+	for _, failure := range []string{"", "copy", "remove"} {
+		name := failure
+		if name == "" {
+			name = "success"
+		}
+		t.Run(name, func(t *testing.T) {
+			b, _ := drainTestBroker(t)
+			_, pushed := liveHolder(t, b, drainSrc())
+			if !b.Workers.Submit(drainSrc(), Job{Kind: JobInbound, Inbound: drainSrcMsg(1, "one")}) {
+				t.Fatal("submit inbound")
+			}
+			select {
+			case <-pushed:
+			case <-time.After(3 * time.Second):
+				t.Fatal("source push missing")
+			}
+			// Make a queue file unreadable without relying on permission bits.
+			if failure == "copy" {
+				path := filepath.Join(os.Getenv("C3_QUEUE_DIR"), queueRouteKey(drainDst()).File()+".jsonl")
+				if err := os.Mkdir(path, 0700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			sourcePath := filepath.Join(os.Getenv("C3_QUEUE_DIR"), queueRouteKey(drainSrc()).File()+".jsonl")
+			if failure == "remove" {
+				drainTestHookAfterCopy = func() {
+					if err := os.Rename(sourcePath, sourcePath+".saved"); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.Mkdir(sourcePath, 0700); err != nil {
+						t.Fatal(err)
+					}
+				}
+				defer func() { drainTestHookAfterCopy = nil }()
+			}
+			res, err := b.Drain(drainSpec())
+			if (err != nil) != (failure != "") {
+				t.Fatalf("drain: %+v, %v", res, err)
+			}
+			if failure == "remove" {
+				if err := os.Remove(sourcePath); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Rename(sourcePath+".saved", sourcePath); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if failure == "" {
+				result := make(chan FetchResult, 1)
+				if !b.Workers.Submit(drainDst(), Job{Kind: JobFetch, Fetch: &FetchJob{All: true, Ack: true, ResultCh: result}}) {
+					t.Fatal("submit destination fetch")
+				}
+				if got := <-result; got.Err != nil || len(got.Messages) != 1 || got.Remaining != 0 {
+					t.Fatalf("destination fetch: %+v", got)
+				}
+			}
+			b.Workers.mu.Lock()
+			w := b.Workers.workers[drainSrc()]
+			b.Workers.mu.Unlock()
+			// Stop the job loop before inspecting and sweeping its recovery state.
+			w.Stop()
+			if failure != "" && (len(w.pendingAck) != 1 || len(w.pendingAck[0].ids) != 1) {
+				t.Fatalf("failed drain retired source recovery: %+v", w.pendingAck)
+			}
+			w.flushPendingAck("holder died")
+			w.flushPendingAck("repeated holder death")
+			want := 0
+			if failure != "" {
+				want = 1
+			}
+			if left := drainPeekAll(t, b, drainSrc()); len(left) != want {
+				t.Fatalf("source after holder death: %+v, want %d rows", left, want)
+			}
+			if failure == "" && len(drainPeekAll(t, b, drainDst())) != 0 {
+				t.Fatal("fetched destination message returned")
+			}
+		})
 	}
 }
 
