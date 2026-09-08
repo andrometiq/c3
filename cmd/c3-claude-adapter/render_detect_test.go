@@ -183,6 +183,8 @@ func TestIsClaudeHost(t *testing.T) {
 	hosts := [][]string{
 		{"claude"},
 		{"/usr/bin/claude", "--resume"},
+		{"/opt/claude/versions/2.1.263", "--session-id", "test-session"},
+		{"claude/versions/2.1.263"},
 		{"node", "/x/@anthropic-ai/claude-code/cli.js"},
 	}
 	for _, a := range hosts {
@@ -193,6 +195,12 @@ func TestIsClaudeHost(t *testing.T) {
 	notHosts := [][]string{
 		{"c3-claude-adapter"}, // the adapter itself must never be taken for a host
 		{"zsh"},
+		{"2.1.263", devChannelsFlag, "plugin:c3@c3"},
+		{"/opt/versions/2.1.263"},
+		{"/opt/not-claude/versions/2.1.263"},
+		{"/opt/claude/not-versions/2.1.263"},
+		{"/opt/claude/versions/2.1.263/other"},
+		{"sh", "/opt/claude/versions/2.1.263"},
 		{"/usr/lib/systemd/systemd", "--user"},
 		{},
 	}

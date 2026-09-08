@@ -550,6 +550,15 @@ Only the **nearest** host's argv counts. An outer session's flag cannot qualify
 an inner flagless session. Both development-flag forms (`--flag value` and
 `--flag=value`) are accepted.
 
+Host identification accepts `claude`, the npm `@anthropic-ai/claude-code/cli.js`
+script, and an argv[0] directly under a `claude/versions/` directory. The last
+shape covers native binaries executed by their resolved path (including the C3
+shim and background supervisors); a bare version number is insufficient. The
+same native layout is assumed on macOS; offline installer documentation was
+unavailable to verify it. A completed ancestry walk reports
+`no Claude Code host identified in the process tree`; incomplete walks report
+`process tree truncated` or `process tree unreadable`.
+
 The Claude adapter reuses D020's session transcript resolver.
 Live receipts use `scanChannelReceipt`; `scanTranscriptRecords` serves permission readback.
 Both readers process bounded, complete JSONL records. Existing `message_id`

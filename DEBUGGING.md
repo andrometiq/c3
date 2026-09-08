@@ -139,6 +139,16 @@ unregistered channel notifications, consuming the only durable copy. Detection
 now fails closed and macOS reads native process ancestry. Only the nearest
 Claude host's flags count; an outer flagged session cannot qualify a nested one.
 
+Host identification accepts `claude`, the npm `@anthropic-ai/claude-code/cli.js`
+script, and native argv[0] paths directly under `claude/versions/`. This includes
+resolved versioned binaries launched by the C3 shim or a background supervisor.
+A bare version number is not a host. The native layout is assumed to be the same
+on macOS (offline installer documentation was unavailable).
+`no Claude Code host identified in the process tree` means the walk completed
+without a match; `process tree truncated` and `process tree unreadable` mean it
+could not complete. An identified versioned binary without a qualifying flag
+reports `no dev-channels flag on host`.
+
 `live push not confirmed` means no matching complete user channel record was
 observed within 15 seconds. No acknowledgement is sent; the durable copy stays
 available, a coalesced held notice reports it, and subsequent messages are held.

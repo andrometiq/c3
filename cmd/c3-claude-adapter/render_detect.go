@@ -97,7 +97,10 @@ func detectRenderRoute(goos string, startPID int, r procReaders) ipc.RenderRoute
 		}
 		pid = parent
 	}
-	return queue("no host identified or process tree truncated")
+	if pid > 1 {
+		return queue("process tree truncated")
+	}
+	return queue("no Claude Code host identified in the process tree")
 }
 
 // cmdlineHasDevChannelForC3 reports whether argv carries the dev-channels flag
@@ -150,14 +153,20 @@ func pluginTokenMatchesC3(tok string) bool {
 }
 
 // isClaudeHost reports whether argv looks like the Claude Code CLI host process:
-// an arg0 basename of "claude" (native binary) or any arg naming the CLI package
-// (npm/node install: node .../@anthropic-ai/claude-code/cli.js). The adapter's
+// an arg0 basename of "claude", a native binary directly under claude/versions/,
+// or the CLI package script (npm/node install: node .../@anthropic-ai/claude-code/cli.js).
+// Native installs may execute the resolved versioned path instead of the symlink.
+// A bare version-number basename alone is insufficient. The adapter's
 // own "c3-claude-adapter" arg0 does NOT match, so self is never taken for a host.
 func isClaudeHost(args []string) bool {
 	if len(args) == 0 {
 		return false
 	}
 	if filepath.Base(args[0]) == "claude" {
+		return true
+	}
+	dir := filepath.Dir(args[0])
+	if filepath.Base(dir) == "versions" && filepath.Base(filepath.Dir(dir)) == "claude" {
 		return true
 	}
 	if isNode(args) {
