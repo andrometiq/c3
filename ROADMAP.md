@@ -57,6 +57,12 @@ The first is cleaner; the second is far easier to reason about when it misbehave
 - Consider migrating the Grok adapter's inject path from the leader socket (an
   undocumented internal surface) to the documented ACP `grok agent stdio` protocol.
 
+## Web surface
+
+- Mobile UI redesign of the web chat: taste-discovery first (reference links and a react loop
+  with the operator before any build), then a phone-first pass over the whole page — driving
+  view, composer, history, notices — as one designed surface rather than a stack of features.
+
 ## More channels
 
 - **Web-chat phase 1 shipped:** a real `web` channel, private text page, SSE,
