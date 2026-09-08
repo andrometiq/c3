@@ -92,18 +92,26 @@ func TestProbeHoldsLaterInboundAndTimeoutNotifiesOnce(t *testing.T) {
 	if n, _ := b.Queue.Pending(queueRouteKey(key)); n != 1 {
 		t.Fatalf("second inbound not held: %d", n)
 	}
-	// Isolate the transition notice from the organic second-message hold above.
-	b.HeldNotices = newFallbackTracker(0)
+	// The production cooldown must delay, then deliver, the latest route state.
+	if b.HeldNotices.cooldown != defaultHeldNoticeCooldown {
+		t.Fatal("non-production cooldown")
+	}
+	b.HeldNotices.ShouldSend(key) // occupy the real ten-second Held window
 	before := len(fc.sendRepliesSnapshot())
 	raw, _ := json.Marshal(ipc.RenderStateMsg{Op: ipc.OpRenderState, RenderRoute: ipc.RenderRoute{State: ipc.RenderQueueOnly, Reason: "live push not confirmed"}})
+	intermediate, _ := json.Marshal(ipc.RenderStateMsg{Op: ipc.OpRenderState, RenderRoute: ipc.RenderRoute{State: ipc.RenderQueueOnly, Reason: "session transcript unavailable"}})
+	b.handleRenderState(stub, intermediate)
 	b.handleRenderState(stub, raw)
 	b.handleRenderState(stub, raw)
-	deadline := time.Now().Add(time.Second)
+	if got := len(fc.sendRepliesSnapshot()); got != before {
+		t.Fatal("route notice bypassed production cooldown")
+	}
+	deadline := time.Now().Add(defaultHeldNoticeCooldown + 2*time.Second)
 	for len(fc.sendRepliesSnapshot()) == before && time.Now().Before(deadline) {
 		time.Sleep(time.Millisecond)
 	}
 	replies := fc.sendRepliesSnapshot()
-	if len(replies) != before+1 || !strings.Contains(replies[len(replies)-1].Text, "Held — nothing lost") {
+	if len(replies) != before+1 || (!strings.Contains(replies[len(replies)-1].Text, "Held — nothing lost") || !strings.Contains(replies[len(replies)-1].Text, "live push not confirmed")) {
 		t.Fatalf("timeout notices: %+v", replies)
 	}
 	if stub.CanRenderPush() {
@@ -133,8 +141,8 @@ func TestPendingAckSurvivesOutboundAndClearsOnlyConfirmedToken(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	w.trackPendingAck([]*c3types.Inbound{one}, "token-one")
-	w.trackPendingAck([]*c3types.Inbound{two}, "token-two")
+	w.trackPendingAck([]*c3types.Inbound{one}, rows[0].RecordID)
+	w.trackPendingAck([]*c3types.Inbound{two}, rows[1].RecordID)
 	w.recordCoveredByPush(1, "token-one", []string{rows[0].RecordID})
 	w.recordCoveredByPush(2, "token-two", []string{rows[1].RecordID})
 	result := make(chan OutboundResult, 1)
@@ -145,8 +153,12 @@ func TestPendingAckSurvivesOutboundAndClearsOnlyConfirmedToken(t *testing.T) {
 	if len(w.pendingAck) != 2 {
 		t.Fatal("unrelated outbound cleared unconfirmed messages")
 	}
-	w.handleConsume(context.Background(), &ConsumeJob{MessageID: 2, Token: "token-two", Count: 1})
-	if len(w.pendingAck) != 1 || w.pendingAck[0].token != "token-one" {
+	owner := &Stub{ReceiptConfirming: true, ConnID: 100}
+	b.Routes.Claim(key, owner)
+	owner.AddRoute(key)
+	owner.MarkRouteConfirmed(key)
+	w.handleConsume(context.Background(), &ConsumeJob{MessageID: 2, Token: "token-two", Count: 1, Owner: owner})
+	if len(w.pendingAck) != 1 || w.pendingAck[0].ids[0] != rows[0].RecordID {
 		t.Fatalf("wrong pending delivery removed: %+v", w.pendingAck)
 	}
 	left, err := b.Queue.Peek(queueRouteKey(key), 10)
@@ -175,5 +187,27 @@ func TestAttachRouteNoticeCoalesces(t *testing.T) {
 	replies := fc.sendRepliesSnapshot()
 	if len(replies) != 1 || !strings.Contains(replies[0].Text, "Live route: queue-only (no dev-channels flag on host)") {
 		t.Fatalf("attach notices: %+v", replies)
+	}
+}
+
+func TestRenderPromotionSchedulesLatestNotice(t *testing.T) {
+	t.Setenv("C3_QUEUE_DIR", t.TempDir())
+	fc := &fakeChannel{}
+	b := brokerWithChannel(t, mfWithTelegram(), fc)
+	defer b.Shutdown()
+	tid := int64(914)
+	key := MakeRouteKey("telegram", -1001234567890, &tid)
+	stub, _ := liveHolder(t, b, key)
+	stub.AddRoute(key)
+	stub.SetRenderRoute(ipc.RenderProbing, "awaiting confirmation", true)
+	raw, _ := json.Marshal(ipc.RenderStateMsg{Op: ipc.OpRenderState, RenderRoute: ipc.RenderRoute{State: ipc.RenderCapable}})
+	b.handleRenderState(stub, raw)
+	deadline := time.Now().Add(time.Second)
+	for len(fc.sendRepliesSnapshot()) == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	replies := fc.sendRepliesSnapshot()
+	if len(replies) != 1 || !strings.Contains(replies[0].Text, "Live route: channel.") {
+		t.Fatalf("promotion notice: %+v", replies)
 	}
 }

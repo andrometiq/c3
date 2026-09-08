@@ -15,9 +15,8 @@ topic answers there. Claude Code on one project, Codex on the next, no app switc
   and an Allow/Deny keyboard. A tap from an allowlisted operator authorizes it; anyone else's
   tap is ignored.
 - **Voice in.** Send a voice note; the session receives the transcript as a native turn.
-- **Nothing gets lost.** No session attached, laptop asleep, agent mid-task: the message waits
-  on disk until delivery is confirmed. If the live route is unavailable, retrieve it with
-  `fetch_queue`.
+- **Nothing gets lost.** Messages are held durably until delivered or fetched, within
+  the queue's documented limits (1,000 messages / 14 days).
 - **A web chat for when Telegram isn't where you are.** Same broker, same topics, phone-friendly,
   reachable only over your own network.
 

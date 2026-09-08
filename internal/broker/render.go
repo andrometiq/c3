@@ -3,6 +3,7 @@ package broker
 import (
 	"encoding/json"
 	"log"
+	"time"
 
 	"github.com/Andrometiq/c3/internal/c3types"
 	"github.com/Andrometiq/c3/internal/ipc"
@@ -20,43 +21,52 @@ func (b *Broker) handleRenderState(stub *Stub, raw []byte) {
 	}
 }
 
-// Route notices reuse the held coalescer and fire once per session/route. Queue
-// status uses the in-memory index, never a concurrent queue-file read.
+// Route notices share the Held cooldown, with one cancellable retry per route.
+// State changes coalesce while waiting, so a recent ordinary Held notice cannot
+// permanently suppress the route's latest state.
 func (b *Broker) notifyRenderRoute(stub *Stub) {
-	route := stub.RenderRoute()
-	if route.State == ipc.RenderCapable {
+	for _, key := range stub.Routes() {
+		if stub.scheduleRenderNotice(key) {
+			go b.sendRenderNotice(stub, key)
+		}
+	}
+}
+
+func (b *Broker) sendRenderNotice(stub *Stub, key RouteKey) {
+	for b.HeldNotices != nil && !b.HeldNotices.ShouldSend(key) {
+		timer := time.NewTimer(b.HeldNotices.remaining(key))
+		select {
+		case <-b.ctx.Done():
+			timer.Stop()
+			stub.finishRenderNotice(key, false)
+			return
+		case <-timer.C:
+		}
+	}
+	// Do not emit stale notices after release or holder replacement.
+	if holder, _ := b.Routes.Holder(key); holder != stub {
+		stub.finishRenderNotice(key, false)
 		return
 	}
-	for _, key := range stub.Routes() {
-		if !stub.takeRenderNotice(key) {
-			continue
+	route := stub.finishRenderNotice(key, true)
+	text := route.Text() + " Messages remain available through fetch_queue."
+	if b.Queue != nil {
+		if count := b.Queue.StatusFor(queueRouteKey(key)).Pending; count > 0 {
+			text = heldReplyText(key.Channel, count) + "\n\n" + route.Text()
 		}
-		if b.HeldNotices != nil && !b.HeldNotices.ShouldSend(key) {
-			continue
-		}
-		text := route.Text() + " Messages remain available through fetch_queue."
-		if b.Queue != nil {
-			count := b.Queue.StatusFor(queueRouteKey(key)).Pending
-			if count > 0 {
-				text = heldReplyText(key.Channel, count) + "\n\n" + route.Text()
-			}
-		} else {
-			text += "\n" + queueDisabledWarning
-		}
-		// Channel calls must not delay the attach result or IPC reader.
-		go func(key RouteKey, text string) {
-			ch, err := b.Channel(key.Channel)
-			if err != nil {
-				return
-			}
-			var topic *int64
-			if key.HasTopic {
-				id := key.TopicID
-				topic = &id
-			}
-			if _, err := ch.SendReply(c3types.ReplyArgs{Channel: key.Channel, ChatID: key.ChatID, TopicID: topic, Text: text}); err != nil {
-				log.Printf("live route notice failed: %v", err)
-			}
-		}(key, text)
+	} else {
+		text += "\n" + queueDisabledWarning
+	}
+	ch, err := b.Channel(key.Channel)
+	if err != nil {
+		return
+	}
+	var topic *int64
+	if key.HasTopic {
+		id := key.TopicID
+		topic = &id
+	}
+	if _, err := ch.SendReply(c3types.ReplyArgs{Channel: key.Channel, ChatID: key.ChatID, TopicID: topic, Text: text}); err != nil {
+		log.Printf("live route notice failed: %v", err)
 	}
 }

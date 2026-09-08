@@ -279,6 +279,7 @@ live inbound. Match a per-push `c3_delivery_id` in a user message's channel tag,
 not merely a `queue-operation` enqueue record. A 15-second unconfirmed push
 keeps its durable copy and changes the route to queue-only until attach or
 reconnect. Additive render-state hello fields and updates keep protocol v1.
+Messages are held durably until delivered or fetched, within the queue's documented limits (1,000 messages / 14 days).
 Transcript format drift may cause duplicate recovery; it must never authorize
 consumption on a successful stdout write alone.
 

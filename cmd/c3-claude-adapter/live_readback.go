@@ -1,10 +1,12 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"encoding/xml"
 	"io"
 	"log"
 	"os"
@@ -59,26 +61,61 @@ func (a *adapter) resetLiveRoute(publish bool) {
 	if a.initialRenderRoute.State == "" {
 		return
 	} // uninitialised test adapter
+	a.syncLiveConnectionLocked(a.rawConn())
 	route := a.initialRenderRoute
 	if route.State != ipc.RenderQueueOnly {
 		if _, ok := transcriptOffset(a.livePath()); !ok {
 			route = ipc.RenderRoute{State: ipc.RenderQueueOnly, Reason: "session transcript unavailable"}
 		}
 	}
-	a.liveGeneration++
-	a.livePending = nil
 	a.renderRoute = route
 	if publish {
 		a.publishLiveRouteLocked(a.currentConn())
 	}
 }
 
+// Callers own liveMu; capture state there, but never write IPC while holding it.
 func (a *adapter) publishLiveRouteLocked(conn *ipc.Conn) {
-	if conn != nil {
-		if err := conn.WriteJSON(ipc.RenderStateMsg{Op: ipc.OpRenderState, RenderRoute: a.renderRoute}); err != nil {
-			log.Printf("live route update failed: %v", err)
-		}
+	if conn == nil {
+		return
 	}
+	route := a.renderRoute
+	go a.publishLiveRoute(conn, route)
+}
+
+// Serialize state publications, dropping superseded snapshots before writing.
+func (a *adapter) publishLiveRoute(conn *ipc.Conn, route ipc.RenderRoute) {
+	a.livePublishMu.Lock()
+	defer a.livePublishMu.Unlock()
+	a.liveMu.Lock()
+	current := route == a.renderRoute && conn == a.currentConn()
+	a.liveMu.Unlock()
+	if current {
+		writeLiveFrame(conn, ipc.RenderStateMsg{Op: ipc.OpRenderState, RenderRoute: route})
+	}
+}
+
+func writeLiveFrame(conn *ipc.Conn, frame any) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := conn.WriteJSONContext(ctx, frame); err != nil {
+		log.Printf("live receipt IPC failed: %v", err)
+	}
+}
+
+func (a *adapter) syncLiveConnectionLocked(conn *ipc.Conn) {
+	if a.liveConn != conn {
+		a.liveConn = conn
+		a.liveGeneration++
+		a.livePending = nil
+	}
+}
+
+func (a *adapter) cancelLiveReadbacks() {
+	a.liveMu.Lock()
+	a.liveGeneration++
+	a.livePending = nil
+	a.liveMu.Unlock()
 }
 
 func (a *adapter) downgradeLiveLocked(conn *ipc.Conn, reason string) {
@@ -114,11 +151,17 @@ func (a *adapter) pushWithReadback(ctx context.Context, in ipc.InboundMsg, frame
 		return
 	}
 	a.liveMu.Lock()
-	defer a.liveMu.Unlock()
+	locked := true
+	defer func() {
+		if locked {
+			a.liveMu.Unlock()
+		}
+	}()
 	conn := a.currentConn()
 	if a.renderRoute.State == ipc.RenderQueueOnly || conn == nil {
 		return
 	}
+	a.syncLiveConnectionLocked(conn)
 	if a.liveActive >= maxLiveReadbacks {
 		a.downgradeLiveLocked(conn, "live confirmation limit reached")
 		return
@@ -162,17 +205,24 @@ func (a *adapter) pushWithReadback(ctx context.Context, in ipc.InboundMsg, frame
 		window = liveReadbackWindow
 	}
 	deadline := time.Now().Add(window)
-	if a.notifyTx == nil || a.notifyTx.Notify(ctx, "notifications/claude/channel", frame) != nil {
-		delete(a.livePending, marker)
-		a.downgradeLiveLocked(conn, "live push not confirmed")
-		return
-	}
 	generation := a.liveGeneration
 	a.liveActive++
 	if a.runCtx != nil {
 		ctx = a.runCtx
 	}
+	// Register and capture offset before output; the timer is independent of stdout.
 	go a.awaitLiveReadback(ctx, conn, generation, path, offset, marker, in, deadline)
+	a.liveMu.Unlock()
+	locked = false
+	writeCtx, cancel := context.WithDeadline(ctx, deadline)
+	defer cancel()
+	if a.notifyTx == nil || a.notifyTx.Notify(writeCtx, "notifications/claude/channel", frame) != nil {
+		a.liveMu.Lock()
+		if generation == a.liveGeneration && conn == a.currentConn() {
+			a.downgradeLiveLocked(conn, "live push not confirmed")
+		}
+		a.liveMu.Unlock()
+	}
 }
 
 func (a *adapter) awaitLiveReadback(ctx context.Context, conn *ipc.Conn, generation uint64, path string, offset int64, marker string, in ipc.InboundMsg, deadline time.Time) {
@@ -184,9 +234,13 @@ func (a *adapter) awaitLiveReadback(ctx context.Context, conn *ipc.Conn, generat
 		}
 		a.liveMu.Unlock()
 	}()
+	discarding := false
 	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
 	for {
+		if ctx.Err() != nil {
+			return
+		}
 		a.liveMu.Lock()
 		current := generation == a.liveGeneration && conn == a.currentConn()
 		a.liveMu.Unlock()
@@ -194,7 +248,7 @@ func (a *adapter) awaitLiveReadback(ctx context.Context, conn *ipc.Conn, generat
 			return
 		}
 		a.liveScanMu.Lock()
-		next, found := scanChannelReceipt(path, offset, marker)
+		next, found := scanChannelReceipt(path, offset, marker, &discarding)
 		a.liveScanMu.Unlock()
 		offset = next
 		a.liveMu.Lock()
@@ -202,18 +256,21 @@ func (a *adapter) awaitLiveReadback(ctx context.Context, conn *ipc.Conn, generat
 			a.liveMu.Unlock()
 			return
 		}
-		if found {
+		if found && time.Now().Before(deadline) {
 			delete(a.livePending, marker)
 			// A late receipt for another push may consume that exact row, but cannot
 			// undo a timeout downgrade. Only attach/reconnect may re-enable pushes.
-			if a.renderRoute.State == ipc.RenderProbing {
+			promote := a.renderRoute.State == ipc.RenderProbing
+			if promote {
 				a.renderRoute = ipc.RenderRoute{State: ipc.RenderCapable}
-				a.publishLiveRouteLocked(conn)
+			}
+			a.liveMu.Unlock()
+			if promote {
+				a.publishLiveRoute(conn, ipc.RenderRoute{State: ipc.RenderCapable})
 			}
 			log.Printf("live readback confirmed msg=%d", in.Inbound.MessageID)
-			_ = conn.WriteJSON(ipc.InboundDeliveredMsg{Op: ipc.OpInboundDelivered,
+			writeLiveFrame(conn, ipc.InboundDeliveredMsg{Op: ipc.OpInboundDelivered,
 				UpdateID: in.Inbound.MessageID, OK: true, Count: in.Covered, DeliveryToken: in.DeliveryToken})
-			a.liveMu.Unlock()
 			return
 		}
 		if !time.Now().Before(deadline) {
@@ -231,7 +288,7 @@ func (a *adapter) awaitLiveReadback(ctx context.Context, conn *ipc.Conn, generat
 	}
 }
 
-func scanChannelReceipt(path string, offset int64, marker string) (int64, bool) {
+func scanChannelReceipt(path string, offset int64, marker string, discarding *bool) (int64, bool) {
 	info, err := os.Stat(path)
 	if err != nil || !info.Mode().IsRegular() {
 		return offset, false
@@ -247,20 +304,44 @@ func scanChannelReceipt(path string, offset int64, marker string) (int64, bool) 
 	}
 	if info.Size() < offset {
 		offset = 0
+		*discarding = false
 	}
 	if _, err := f.Seek(offset, io.SeekStart); err != nil {
 		return offset, false
 	}
-	found := false
-	// Read only this size snapshot, even if the host keeps appending. The next
-	// poll retries a partial final record from its start. Oversized lines never ack.
-	_, _ = scanTranscriptRecords(io.LimitReader(f, min(info.Size()-offset, 32<<20)), offset,
-		func(start, end int64, line []byte, oversized bool) bool {
-			offset = end
-			found = !oversized && channelReceipt(line, marker)
-			return !found
-		}, nil)
-	return offset, found
+	// Bound each poll's work and memory. Once oversized, advance through the
+	// record across polls, retaining only a discard bit until its newline.
+	r := bufio.NewReader(io.LimitReader(f, min(info.Size()-offset, 32<<20)))
+	start := offset
+	var line []byte
+	for {
+		chunk, err := r.ReadSlice('\n')
+		offset += int64(len(chunk))
+		if !*discarding {
+			if len(line)+len(chunk) > maxTranscriptLineBytes {
+				*discarding = true
+				line = nil
+			} else {
+				line = append(line, chunk...)
+			}
+		}
+		if err == nil {
+			if !*discarding && channelReceipt(line, marker) {
+				return offset, true
+			}
+			*discarding = false
+			line = line[:0]
+			start = offset
+			continue
+		}
+		if err == bufio.ErrBufferFull {
+			continue
+		}
+		if !*discarding {
+			offset = start
+		} // retry incomplete, bounded record
+		return offset, false
+	}
 }
 
 func channelReceipt(line []byte, marker string) bool {
@@ -275,22 +356,52 @@ func channelReceipt(line []byte, marker string) bool {
 		return false
 	}
 	matches := func(text string) bool {
-		// Match the marker only in a channel opening tag, not quoted tool output or
-		// a queue-operation's content. Meta values are rendered as tag attributes.
-		for {
-			_, rest, ok := strings.Cut(text, "<channel ")
-			if !ok {
-				return false
-			}
-			tag, after, ok := strings.Cut(rest, ">")
-			if !ok {
-				return false
-			}
-			if strings.Contains(" "+tag, ` c3_delivery_id="`+marker+`"`) && strings.Contains(after, "</channel>") {
-				return true
-			}
-			text = after
+		// A channel receipt starts with its opening tag. Never search body text
+		// or another attribute's value for a second, embedded marker.
+		text = strings.TrimSpace(text)
+		if !strings.HasPrefix(text, "<channel") {
+			return false
 		}
+		decoder := xml.NewDecoder(strings.NewReader(text))
+		token, err := decoder.Token()
+		if err != nil {
+			return false
+		}
+		tag, ok := token.(xml.StartElement)
+		if !ok || tag.Name.Local != "channel" || tag.Name.Space != "" {
+			return false
+		}
+		seen := map[xml.Name]bool{}
+		matched := false
+		for _, attr := range tag.Attr {
+			if seen[attr.Name] {
+				return false
+			}
+			seen[attr.Name] = true
+			if attr.Name.Space == "" && attr.Name.Local == "c3_delivery_id" {
+				matched = attr.Value == marker
+			}
+		}
+		// Token parses the complete opening tag (quotes, escapes and self-close).
+		// Channel bodies are plain text, not necessarily valid XML.
+		opener := text[:decoder.InputOffset()]
+		// encoding/xml accepts adjacent attributes without whitespace. Require
+		// the host's quoted-value boundary too, so malformed tags fail closed.
+		var quote byte
+		for i := 0; i < len(opener); i++ {
+			c := opener[i]
+			if quote == 0 {
+				if c == '\'' || c == '"' {
+					quote = c
+				}
+			} else if c == quote {
+				quote = 0
+				if i+1 < len(opener) && !strings.ContainsRune(" \t\r\n/>", rune(opener[i+1])) {
+					return false
+				}
+			}
+		}
+		return matched && (strings.HasSuffix(opener, "/>") || strings.Contains(text[decoder.InputOffset():], "</channel>"))
 	}
 	var text string
 	if json.Unmarshal(entry.Message.Content, &text) == nil {

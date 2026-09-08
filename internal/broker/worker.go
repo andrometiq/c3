@@ -233,8 +233,8 @@ type RouteWorker struct {
 	// the worker's single run goroutine (flushInbounds), so it needs no lock.
 	dedup *deliveredDedup
 
-	// pendingAck retains discrete sources until their delivery token is
-	// confirmed, or holder death restores them. Outbound activity proves nothing
+	// pendingAck retains discrete sources until fetched or receipt-confirmed;
+	// legacy acks keep this net until holder death. Outbound activity proves nothing
 	// about any particular inbound. Worker goroutine owns this bounded tracker.
 	pendingAck []pendingDelivery
 
@@ -626,6 +626,7 @@ func (w *RouteWorker) flushInbounds(ctx context.Context, batch []*c3types.Inboun
 	// below covers. Channel MessageIDs are not sufficient because an edit reuses
 	// one while creating a distinct durable line.
 	var deliveryIDs []string
+	var deliverySources []*c3types.Inbound
 	if w.broker != nil && w.broker.Queue != nil {
 		qrk := queueRouteKey(w.key)
 		for _, in := range batch {
@@ -706,6 +707,7 @@ func (w *RouteWorker) flushInbounds(ctx context.Context, batch []*c3types.Inboun
 			}
 			deliveryAppended++
 			deliveryIDs = append(deliveryIDs, recordID)
+			deliverySources = append(deliverySources, in)
 		}
 	} else if w.broker != nil {
 		// Item 3: durable queue disabled (init failed → "durable inbound hold
@@ -762,7 +764,10 @@ func (w *RouteWorker) flushInbounds(ctx context.Context, batch []*c3types.Inboun
 	// queue is wired (unit tests) deliveryAppended stays 0 and covEffective
 	// normalizes to 1. deliveryIDs names those same lines so the ack removes them
 	// by identity; pending voice rows are excluded from both.
-	w.forwardOrFallbackCovering(ctx, merged, deliveryBatch, deliveryAppended, deliveryIDs, true)
+	if w.broker.Queue == nil {
+		deliverySources = deliveryBatch
+	}
+	w.forwardOrFallbackCovering(ctx, merged, deliverySources, deliveryAppended, deliveryIDs, true)
 }
 
 // enqueueVoiceReadback preserves the existing off-critical-path FIFO chain, but
@@ -1224,8 +1229,7 @@ func (w *RouteWorker) forwardOrFallbackCovering(_ context.Context, in *c3types.I
 		// Record the exact lines this push covered so the delivered-ack removes
 		// THOSE lines, not the queue head (see RouteWorker.coveredByPush). Only
 		// meaningful for a non-event push that actually covered stored lines and
-		// whose caller knew their ids; otherwise the ack keeps the legacy
-		// head-consume path.
+		// whose caller knew their ids; otherwise the ack leaves the queue intact.
 		if tracked {
 			w.recordCoveredByPush(in.MessageID, deliveryToken, coveredIDs)
 		}
@@ -1243,8 +1247,8 @@ func (w *RouteWorker) forwardOrFallbackCovering(_ context.Context, in *c3types.I
 		w.armTyping(holder)
 		// Track discrete sources until this delivery token is confirmed, so holder
 		// death can restore them. Events are never queued or recovery-tracked.
-		if !in.IsEvent() {
-			w.trackPendingAck(sources, deliveryToken)
+		if !in.IsEvent() && len(sources) > 0 {
+			w.trackPendingAck(sources, coveredIDs...)
 		}
 		return
 	}
@@ -1758,9 +1762,17 @@ func (w *RouteWorker) handleFetch(_ context.Context, job *FetchJob) {
 						if err != nil || emptyFit > 0 {
 							break // deliverable in a fresh response: leave it queued
 						}
+						rows, readErr := w.broker.Queue.PeekTracked(qrk, 1)
+						if readErr != nil {
+							err = readErr
+							return
+						}
 						var notice c3types.Inbound
 						if notice, err = w.setAsideOversize(qrk, cand[0], encodedSize(cand[0])); err != nil {
 							return
+						}
+						if len(rows) > 0 {
+							w.retirePendingRecords([]string{rows[0].RecordID})
 						}
 						notices = append(notices, notice)
 						total--
@@ -1781,7 +1793,19 @@ func (w *RouteWorker) handleFetch(_ context.Context, job *FetchJob) {
 					if take < 0 {
 						take = 0
 					}
+					var records []queue.TrackedInbound
+					records, err = w.broker.Queue.PeekTracked(qrk, take)
+					if err != nil {
+						return
+					}
 					msgs, err = w.broker.Queue.Consume(qrk, take)
+					if err == nil {
+						var ids []string
+						for _, row := range records {
+							ids = append(ids, row.RecordID)
+						}
+						w.retirePendingRecords(ids)
+					}
 				}
 				if job.Owner == nil {
 					consume()
@@ -1885,17 +1909,8 @@ func (w *RouteWorker) handleBacklog(_ context.Context, job *BacklogJob) {
 	job.ResultCh <- BacklogResult{Total: total, Preview: preview}
 }
 
-// handleConsume drops the oldest Count queued messages (Claude live-ack: a
-// pushed notification the adapter accepted, which may have MERGED a debounced
-// batch of Count stored lines). Consuming Count off the head matches exactly the
-// lines the push covered — otherwise a merged push of N would orphan N-1 stored
-// lines as phantom backlog. MessageID is logged for audit; consumption is
-// strictly oldest-first (live delivery is in arrival order).
-//
-// C1: Count<=0 means the push covered ZERO stored lines (an EVENT push, which is
-// never queued). We SKIP the consume entirely — bumping 0→1 here would Consume a
-// real queued backlog message that the event never delivered, silently dropping
-// it. Only a push that actually added lines (Count>=1) consumes.
+// handleConsume removes only the durable identities covered by an accepted push.
+// Events and unknown identities cannot consume queued human messages.
 func (w *RouteWorker) handleConsume(_ context.Context, job *ConsumeJob) {
 	if job == nil || w.broker == nil || w.broker.Queue == nil {
 		return
@@ -1921,6 +1936,9 @@ func (w *RouteWorker) handleConsume(_ context.Context, job *ConsumeJob) {
 				log.Printf("queue consume(live-ack, by-record) FAIL chan=%s chat=%d topic=%s msg=%d ids=%d: %v",
 					w.key.Channel, w.key.ChatID, TopicKeyStr(w.key), job.MessageID, len(ids), err)
 				return
+			}
+			if job.Owner != nil && job.Owner.ReceiptConfirming {
+				w.retirePendingRecords(ids)
 			}
 			if len(removed) != len(ids) {
 				// Not an error: a covered line can legitimately have been evicted by the
@@ -2001,7 +2019,6 @@ func (w *RouteWorker) takeCoveredByPush(pushID int64, token string) []string {
 	}
 	ids := records[idx].ids
 	recordToken := records[idx].token
-	w.confirmPendingAck(recordToken)
 	records = append(records[:idx], records[idx+1:]...)
 	if len(records) == 0 {
 		delete(w.coveredByPush, pushID)
@@ -2371,25 +2388,27 @@ func (w *RouteWorker) disarmTyping() {
 // pushes (oldest dropped + logged past the cap). See the pendingAck field and
 // flushPendingAck.
 type pendingDelivery struct {
-	token   string
+	ids     []string // durable identities parallel to sources
 	sources []*c3types.Inbound
 }
 
-func (w *RouteWorker) trackPendingAck(sources []*c3types.Inbound, tokens ...string) {
+func (w *RouteWorker) trackPendingAck(sources []*c3types.Inbound, ids ...string) {
 	discrete := make([]*c3types.Inbound, 0, len(sources))
-	for _, source := range sources {
+	var recordIDs []string
+	for i, source := range sources {
 		if source != nil && !source.IsEvent() {
 			discrete = append(discrete, source)
+			id := ""
+			if i < len(ids) {
+				id = ids[i]
+			}
+			recordIDs = append(recordIDs, id)
 		}
 	}
 	if len(discrete) == 0 {
 		return
 	}
-	token := ""
-	if len(tokens) > 0 {
-		token = tokens[0]
-	}
-	w.pendingAck = append(w.pendingAck, pendingDelivery{token: token, sources: discrete})
+	w.pendingAck = append(w.pendingAck, pendingDelivery{ids: recordIDs, sources: discrete})
 	if over := len(w.pendingAck) - maxPendingAck; over > 0 {
 		log.Printf("pendingAck chan=%s chat=%d topic=%s: over cap, dropping %d oldest tracked delivery(ies)",
 			w.key.Channel, w.key.ChatID, TopicKeyStr(w.key), over)
@@ -2399,8 +2418,8 @@ func (w *RouteWorker) trackPendingAck(sources []*c3types.Inbound, tokens ...stri
 
 // flushPendingAck re-queues every inbound that was delivered to a now-dead holder
 // but never handled, then posts one notice to the topic so the operator is told.
-// This preserves the existing holder-death recovery semantics for deliveries
-// whose tokens were never confirmed. Called ONLY on confirmed holder death, so it never
+// Receipt-confirmed and explicitly fetched rows have already retired their
+// entries; legacy blind acks retain entries so only missing rows are restored. Called ONLY on confirmed holder death, so it never
 // fires for a merely-slow live session. No-op when nothing is tracked.
 func (w *RouteWorker) flushPendingAck(reason string) {
 	// The holder is confirmed dead, so none of its outstanding push records may
@@ -2419,12 +2438,32 @@ func (w *RouteWorker) flushPendingAck(reason string) {
 	}
 	requeued := 0
 	if w.broker != nil && w.broker.Queue != nil {
+		rows, err := w.broker.Queue.PeekTracked(queueRouteKey(w.key), -1)
+		if err != nil {
+			w.pendingAck = lost
+			log.Printf("pendingAck recovery read failed: %v", err)
+			return
+		}
+		exists := make(map[string]bool, len(rows))
+		for _, row := range rows {
+			exists[row.RecordID] = true
+		}
 		for _, sources := range lost {
-			for _, in := range sources.sources {
+			for i, in := range sources.sources {
+				id := ""
+				if i < len(sources.ids) {
+					id = sources.ids[i]
+				}
+				if id != "" && exists[id] {
+					continue
+				}
 				if err := w.broker.Queue.Append(queueRouteKey(w.key), in); err != nil {
 					log.Printf("pendingAck flush FAIL chan=%s chat=%d topic=%s msg=%d: re-queue: %v",
 						w.key.Channel, w.key.ChatID, TopicKeyStr(w.key), in.MessageID, err)
 					continue
+				}
+				if id != "" {
+					exists[id] = true
 				}
 				requeued++
 			}
@@ -2721,14 +2760,33 @@ func (w *RouteWorker) debounceMaxMessages() int {
 	return cc.DebounceMaxMessages
 }
 
-func (w *RouteWorker) confirmPendingAck(token string) {
-	if token == "" {
-		return
-	} // cannot identify an un-tokened recovery entry
-	for i, pending := range w.pendingAck {
-		if pending.token == token {
-			w.pendingAck = append(w.pendingAck[:i], w.pendingAck[i+1:]...)
-			return
+// retirePendingRecords removes explicitly fetched or receipt-confirmed sources,
+// preserving the other rows of a merged delivery for holder-death recovery.
+func (w *RouteWorker) retirePendingRecords(ids []string) {
+	retired := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		if id != "" {
+			retired[id] = true
 		}
 	}
+	kept := w.pendingAck[:0]
+	for _, pending := range w.pendingAck {
+		sources, recordIDs := pending.sources[:0], pending.ids[:0]
+		for i, source := range pending.sources {
+			id := ""
+			if i < len(pending.ids) {
+				id = pending.ids[i]
+			}
+			if retired[id] {
+				continue
+			}
+			sources = append(sources, source)
+			recordIDs = append(recordIDs, id)
+		}
+		pending.sources, pending.ids = sources, recordIDs
+		if len(sources) > 0 {
+			kept = append(kept, pending)
+		}
+	}
+	w.pendingAck = kept
 }

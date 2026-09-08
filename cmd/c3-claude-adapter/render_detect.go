@@ -45,8 +45,6 @@ type procReaders struct {
 
 // Detection fails closed: a false queue-only costs a fetch; a false capable
 // can lose a message. Only the NEAREST positively identified host counts.
-func hostCanRenderChannels() bool { return hostRenderRoute().State == ipc.RenderCapable }
-
 func hostRenderRoute() ipc.RenderRoute {
 	return detectRenderRoute(runtime.GOOS, os.Getpid(), platformProcReaders())
 }
@@ -73,6 +71,13 @@ func detectRenderRoute(goos string, startPID int, r procReaders) ipc.RenderRoute
 		args, readable := r.cmdline(pid)
 		if !readable {
 			return queue("process tree unreadable")
+		}
+		if isNode(args) {
+			script, certain := nodeScript(args)
+			if !certain {
+				return queue("node script uncertain")
+			}
+			args = script
 		}
 		if isClaudeHost(args) {
 			if cmdlineHasDevChannelForC3(args) {
@@ -155,10 +160,51 @@ func isClaudeHost(args []string) bool {
 	if filepath.Base(args[0]) == "claude" {
 		return true
 	}
-	if (filepath.Base(args[0]) == "node" || filepath.Base(args[0]) == "nodejs") && len(args) > 1 {
-		return strings.HasSuffix(args[1], "/@anthropic-ai/claude-code/cli.js")
+	if isNode(args) {
+		script, certain := nodeScript(args)
+		return certain && len(script) > 0 && strings.HasSuffix(script[0], "/@anthropic-ai/claude-code/cli.js")
+	}
+	if strings.HasSuffix(args[0], "/@anthropic-ai/claude-code/cli.js") {
+		return true
 	}
 	return false
+}
+
+func isNode(args []string) bool {
+	return len(args) > 0 && (filepath.Base(args[0]) == "node" || filepath.Base(args[0]) == "nodejs")
+}
+
+// Stop at the script operand: flags in script arguments belong to the host.
+// Unknown bare options may take a value, so cannot justify walking past Node.
+func nodeScript(args []string) ([]string, bool) {
+	for i := 1; i < len(args); i++ {
+		arg := args[i]
+		if arg == "--" {
+			return args[i+1:], i+1 < len(args)
+		}
+		if !strings.HasPrefix(arg, "-") {
+			return args[i:], true
+		}
+		option, _, _ := strings.Cut(arg, "=")
+		switch option {
+		case "--eval", "--print", "--check", "--run", "-e", "-p", "-c":
+			return nil, false // these modes do not execute a script operand
+		}
+		if strings.HasPrefix(arg, "--") && strings.Contains(arg, "=") {
+			continue
+		}
+		switch arg {
+		case "--require", "-r", "--import", "--loader", "--experimental-loader", "--max-old-space-size":
+			i++
+			if i >= len(args) || strings.HasPrefix(args[i], "-") {
+				return nil, false
+			}
+		case "--no-warnings", "--trace-warnings", "--enable-source-maps", "--experimental-strip-types":
+		default:
+			return nil, false
+		}
+	}
+	return nil, false
 }
 
 // isCursorHost reports whether argv looks like Cursor Agent CLI. Cursor loads

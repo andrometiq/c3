@@ -65,9 +65,11 @@ type Stub struct {
 	confirmed map[RouteKey]bool
 	// Delivery eligibility, probe reservation, and notice history are owned by
 	// stubMu. Empty state preserves the legacy adapter default (capable).
-	renderRoute        ipc.RenderRoute
-	renderProbeSent    bool
-	renderNoticeRoutes map[RouteKey]string
+	ReceiptConfirming   bool // immutable hello capability; legacy ack keeps recovery
+	renderRoute         ipc.RenderRoute
+	renderProbeSent     bool
+	renderNoticeRoutes  map[RouteKey]string
+	renderNoticePending map[RouteKey]bool
 	// peerProtocolVersion is the normalized IPC dialect observed on hello.
 	// Sensitive dispatch reads this stored connection identity rather than
 	// re-decoding or assuming the current build's dialect.
@@ -608,18 +610,33 @@ func (s *Stub) RenderRoute() ipc.RenderRoute {
 	return s.renderRoute
 }
 
-func (s *Stub) takeRenderNotice(key RouteKey) bool {
+// scheduleRenderNotice reserves one retry loop per route; it reads the latest
+// state at send time, and marks it sent only after the Held cooldown allows it.
+func (s *Stub) scheduleRenderNotice(key RouteKey) bool {
 	s.stubMu.Lock()
 	defer s.stubMu.Unlock()
 	state := s.renderRoute.State + ":" + s.renderRoute.Reason
-	if s.renderNoticeRoutes[key] == state {
+	if s.renderNoticePending[key] || s.renderNoticeRoutes[key] == state {
 		return false
 	}
-	if s.renderNoticeRoutes == nil {
-		s.renderNoticeRoutes = map[RouteKey]string{}
+	if s.renderNoticePending == nil {
+		s.renderNoticePending = map[RouteKey]bool{}
 	}
-	s.renderNoticeRoutes[key] = state
+	s.renderNoticePending[key] = true
 	return true
+}
+
+func (s *Stub) finishRenderNotice(key RouteKey, sent bool) ipc.RenderRoute {
+	s.stubMu.Lock()
+	defer s.stubMu.Unlock()
+	delete(s.renderNoticePending, key)
+	if sent {
+		if s.renderNoticeRoutes == nil {
+			s.renderNoticeRoutes = map[RouteKey]string{}
+		}
+		s.renderNoticeRoutes[key] = s.renderRoute.State + ":" + s.renderRoute.Reason
+	}
+	return s.renderRoute
 }
 
 // Reserve the first probe across all routes held by this session. Later human

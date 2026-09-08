@@ -340,7 +340,7 @@ func TestFlushPendingAck_ClearsCoveredRecordsWithoutPendingTurn(t *testing.T) {
 	w := &RouteWorker{}
 	w.recordCoveredByPush(7, "", []string{"record-7"})
 
-	// An outbound can clear pendingAck before the holder dies, while its
+	// A fetch can clear pendingAck before the holder dies, while its
 	// delivered-ack identity record is still outstanding. Death must still clear
 	// holder-local identity state so it cannot bleed into a replacement holder.
 	w.flushPendingAck("holder exited")

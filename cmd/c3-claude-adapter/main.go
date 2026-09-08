@@ -356,6 +356,8 @@ type adapter struct {
 	initialRenderRoute ipc.RenderRoute
 	renderRoute        ipc.RenderRoute
 	liveGeneration     uint64
+	liveConn           *ipc.Conn
+	livePublishMu      sync.Mutex
 	livePending        map[string]bool
 	liveActive         int
 	liveTimeout        time.Duration // zero selects liveReadbackWindow; tests inject
@@ -773,6 +775,15 @@ func cloneRouteRefs(routes []ipc.RouteRef) []ipc.RouteRef {
 func (a *adapter) setRouteState(routes []ipc.RouteRef, output *ipc.RouteRef) {
 	a.amu.Lock()
 	defer a.amu.Unlock()
+	changed := len(a.routes) != len(routes)
+	for _, route := range routes {
+		if _, ok := a.routeNames[routeKeyFor(route.Channel, route.ChatID, route.TopicID)]; !ok {
+			changed = true
+		}
+	}
+	if changed {
+		a.cancelLiveReadbacks()
+	}
 	a.routes = cloneRouteRefs(routes)
 	a.routeNames = make(map[routeKey]string, len(routes))
 	for _, route := range routes {
@@ -795,6 +806,9 @@ func (a *adapter) setOutputRouteState(output *ipc.RouteRef) {
 }
 
 func (a *adapter) clearRouteStateLocked() {
+	if len(a.routes) > 0 {
+		a.cancelLiveReadbacks()
+	}
 	a.attachedTopic = ""
 	a.routes = nil
 	a.outputRoute = nil
@@ -1117,37 +1131,6 @@ func (a *adapter) handleInbound(ctx context.Context, raw []byte) {
 	}
 
 	a.pushWithReadback(ctx, in, frame)
-}
-
-// inboundContentSummary renders a one-line, content-bearing summary of an
-// inbound for the notify-FAIL log path (D4). UNLIKE the success path (which
-// logs metadata only, per DEBUGGING.md), this is a failure path where the
-// message is otherwise lost with no record — so we DO include content
-// (sender, text, attachment summary) so it's recoverable from adapter.log.
-func inboundContentSummary(in *c3types.Inbound) string {
-	var parts []string
-	switch {
-	case in.Sender.Username != "":
-		parts = append(parts, "from=@"+in.Sender.Username)
-	case in.Sender.UserID != 0:
-		parts = append(parts, fmt.Sprintf("from=uid=%d", in.Sender.UserID))
-	}
-	if in.Text != "" {
-		parts = append(parts, fmt.Sprintf("text=%q", capRunes(in.Text, 200)))
-	}
-	if in.ReplyTo != nil {
-		parts = append(parts, fmt.Sprintf("reply_to=%d", in.ReplyTo.MessageID))
-	}
-	for _, att := range in.Attachments {
-		parts = append(parts, fmt.Sprintf("attach=%s/%d", att.Kind, att.Size))
-	}
-	if in.IsEvent() {
-		parts = append(parts, fmt.Sprintf("event=%s", in.Kind))
-	}
-	if len(parts) == 0 {
-		return "(no content)"
-	}
-	return strings.Join(parts, " ")
 }
 
 // renderBacklogSummary renders the on-attach backlog notification text. Empty
@@ -1546,6 +1529,7 @@ func (a *adapter) dispatchAttached(raw []byte) {
 			routes, output = []ipc.RouteRef{legacy}, &legacy
 		}
 		a.setRouteState(routes, output)
+		a.resetLiveRoute(true)
 	}
 	a.pmu.Lock()
 	ch, ok := a.pending["attached"]
@@ -2021,7 +2005,6 @@ func (a *adapter) toolAttach(ctx context.Context, req *mcp.CallToolRequest) (*mc
 		a.pmu.Unlock()
 		return toolErrorResult("broker reconnecting — retry attach in a moment"), nil
 	}
-	a.resetLiveRoute(true)
 	if err := identityConn.WriteJSON(attachReq); err != nil {
 		a.pmu.Lock()
 		delete(a.pending, "attached")
@@ -2562,9 +2545,13 @@ func (a *adapter) currentStableIdentity() (sessionhandoff.Entry, bool) {
 // RecoverSessionResp, whether or not a route was recovered.
 func (a *adapter) setCurrentStableIdentity(entry sessionhandoff.Entry) {
 	a.idmu.Lock()
+	changed := a.currentStableID != entry.StableSessionID
 	a.currentStableID = entry.StableSessionID
 	a.currentHandoffEntry = entry
 	a.idmu.Unlock()
+	if changed {
+		a.cancelLiveReadbacks()
+	}
 	a.observePermissionTranscriptPath(entry.TranscriptPath)
 }
 

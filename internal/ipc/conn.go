@@ -2,12 +2,13 @@ package ipc
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net"
-	"sync"
+	"time"
 )
 
 // Conn wraps a net.Conn with newline-JSON framing and a write mutex. Multiple
@@ -21,7 +22,7 @@ import (
 type Conn struct {
 	c   net.Conn
 	w   *bufio.Writer
-	wmu sync.Mutex
+	wmu chan struct{}
 	r   *bufio.Reader
 }
 
@@ -65,9 +66,10 @@ var ErrFrameTooLarge = errors.New("ipc: frame exceeds maximum size")
 // NewConn wraps a net.Conn. Owner is responsible for calling Close.
 func NewConn(c net.Conn) *Conn {
 	return &Conn{
-		c: c,
-		w: bufio.NewWriter(c),
-		r: bufio.NewReaderSize(c, readBufSize),
+		c:   c,
+		w:   bufio.NewWriter(c),
+		wmu: make(chan struct{}, 1),
+		r:   bufio.NewReaderSize(c, readBufSize),
 	}
 }
 
@@ -81,7 +83,11 @@ func NewConn(c net.Conn) *Conn {
 // put on the wire and then rejected by the peer's ReadFrame, which desyncs and
 // tears down a connection that was doing nothing wrong. Failing here keeps the
 // blast radius at one request instead of one connection.
-func (c *Conn) WriteJSON(v any) error {
+func (c *Conn) WriteJSON(v any) error { return c.WriteJSONContext(context.Background(), v) }
+
+// WriteJSONContext bounds both writer admission and the socket write. A timed
+// out partial frame makes this connection unusable, so close it on cancellation.
+func (c *Conn) WriteJSONContext(ctx context.Context, v any) (writeErr error) {
 	data, err := json.Marshal(v)
 	if err != nil {
 		return fmt.Errorf("ipc: marshal: %w", err)
@@ -92,8 +98,29 @@ func (c *Conn) WriteJSON(v any) error {
 		return fmt.Errorf("%w: refusing to write a %d-byte frame (cap %d) — the peer's ReadFrame would reject it and drop the connection",
 			ErrFrameTooLarge, len(data)+1, MaxFrameSize)
 	}
-	c.wmu.Lock()
-	defer c.wmu.Unlock()
+	select {
+	case c.wmu <- struct{}{}:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	defer func() { <-c.wmu }()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if deadline, ok := ctx.Deadline(); ok {
+		_ = c.c.SetWriteDeadline(deadline)
+	}
+	finished := make(chan struct{})
+	stop := context.AfterFunc(ctx, func() { _ = c.c.Close(); close(finished) })
+	defer func() {
+		if !stop() {
+			<-finished
+		}
+		if writeErr != nil {
+			_ = c.c.Close()
+		}
+		_ = c.c.SetWriteDeadline(time.Time{})
+	}()
 	if _, err := c.w.Write(data); err != nil {
 		return err
 	}

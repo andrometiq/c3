@@ -342,3 +342,28 @@ func TestHello_ReportsCannotRenderChannels(t *testing.T) {
 		})
 	}
 }
+
+func TestNodeOptionsCannotHideNearestClaude(t *testing.T) {
+	for _, options := range [][]string{
+		{"--max-old-space-size=4096"}, {"--no-warnings", "--max-old-space-size=4096"},
+		{"--require", "/work/preload.js"}, {"--unknown-value-taking", "value"}, {"--eval", "something"}, {"--eval=something"}, {"--print=1"},
+	} {
+		args := append([]string{"node"}, options...)
+		args = append(args, "/work/node_modules/@anthropic-ai/claude-code/cli.js")
+		readers := fakeTree(map[int][]string{
+			3: args,
+			2: {"claude", devChannelsFlag + "=plugin:c3@c3"},
+		}, map[int]int{4: 3, 3: 2, 2: 1})
+		if route := detectRenderRoute("linux", 4, readers); route.State != ipc.RenderQueueOnly {
+			t.Fatalf("%v: %v", options, route)
+		}
+	}
+}
+
+func TestNodeOptionsIdentifyFlaggedScript(t *testing.T) {
+	args := []string{"node", "--no-warnings", "--max-old-space-size=4096", "/work/node_modules/@anthropic-ai/claude-code/cli.js", devChannelsFlag + "=plugin:c3@c3"}
+	readers := fakeTree(map[int][]string{3: args, 2: {"claude"}}, map[int]int{4: 3, 3: 2, 2: 1})
+	if route := detectRenderRoute("linux", 4, readers); route.State != ipc.RenderCapable {
+		t.Fatalf("flagged Node script was not identified: %+v", route)
+	}
+}

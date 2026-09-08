@@ -98,3 +98,9 @@ const degradedDropLogPhrase = "DROPPED — durable queue disabled"
 func heldDegradedText() string {
 	return "⚠️ NOT held — that message was dropped.\n" + queueDisabledWarning + "\n\n\nSend /status to check."
 }
+
+func (f *fallbackTracker) remaining(key RouteKey) time.Duration {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return max(time.Millisecond, time.Until(f.lastByKey[key].Add(f.cooldown)))
+}

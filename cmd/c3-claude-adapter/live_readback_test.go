@@ -178,13 +178,13 @@ func TestChannelReceiptShapeAndPartialTail(t *testing.T) {
 	if err := os.WriteFile(path, raw, 0600); err != nil {
 		t.Fatal(err)
 	}
-	if offset, found := scanChannelReceipt(path, 0, "marker"); offset != 0 || found {
+	if offset, found := scanChannelReceipt(path, 0, "marker", new(bool)); offset != 0 || found {
 		t.Fatalf("partial line consumed: %d %v", offset, found)
 	}
 	if err := os.WriteFile(path, append(raw, '\n'), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if _, found := scanChannelReceipt(path, 0, "marker"); !found {
+	if _, found := scanChannelReceipt(path, 0, "marker", new(bool)); !found {
 		t.Fatal("completed line not confirmed")
 	}
 	// Oversized records are skipped without swallowing the next valid receipt.
@@ -192,7 +192,7 @@ func TestChannelReceiptShapeAndPartialTail(t *testing.T) {
 	if err := os.WriteFile(path, large, 0600); err != nil {
 		t.Fatal(err)
 	}
-	if _, found := scanChannelReceipt(path, 0, "marker"); !found {
+	if _, found := scanChannelReceipt(path, 0, "marker", new(bool)); !found {
 		t.Fatal("oversized line hid following receipt")
 	}
 }

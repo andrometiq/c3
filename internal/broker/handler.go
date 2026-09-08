@@ -84,6 +84,7 @@ func (b *Broker) HandleConn(nc net.Conn) {
 		// setting the flag only in the shared block below would leave a window
 		// where one inbound could still take the push path into a host that
 		// can't render. Idempotent with the shared block below.
+		stub.ReceiptConfirming = hello.RenderState != ""
 		stub.SetRenderRoute(hello.RenderState, hello.RenderReason, hello.CannotRenderChannels)
 		// Unregister the OLD stub (now superseded) and transfer its claims.
 		b.Stubs.Unregister(oldConnID)
@@ -150,6 +151,7 @@ func (b *Broker) HandleConn(nc net.Conn) {
 			hello.CLI, hello.PID, hello.CWD, oldConnID, stub.ConnID)
 	} else {
 		stub = b.Stubs.Register(hello.CLI, hello.PID, hello.CWD, conn)
+		stub.ReceiptConfirming = hello.RenderState != ""
 		stub.SetRenderRoute(hello.RenderState, hello.RenderReason, hello.CannotRenderChannels)
 		log.Printf("hello: NEW cli=%s pid=%d cwd=%q conn=%d",
 			hello.CLI, hello.PID, hello.CWD, stub.ConnID)

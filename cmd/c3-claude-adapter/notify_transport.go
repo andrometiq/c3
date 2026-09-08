@@ -52,7 +52,8 @@ type permRequestHandler func(requestID, toolName, preview string, snapshot permi
 // hands back from Connect intercepts permission_request frames (see interceptConn)
 // so the adapter can relay them, while passing every other frame through untouched.
 type notifyTransport struct {
-	inner mcp.Transport
+	inner     mcp.Transport
+	writeSlot chan struct{}
 
 	mu       sync.Mutex
 	conn     mcp.Connection
@@ -61,7 +62,7 @@ type notifyTransport struct {
 }
 
 func newNotifyTransport(inner mcp.Transport) *notifyTransport {
-	return &notifyTransport{inner: inner}
+	return &notifyTransport{inner: inner, writeSlot: make(chan struct{}, 1)}
 }
 
 // SetPermissionHandler installs the callback invoked for diverted
@@ -209,6 +210,8 @@ func (t *notifyTransport) Disconnect() {
 // settings the SDK uses internally (no HTML escaping is handled by the
 // jsonrpc encoder downstream from us).
 func (t *notifyTransport) Notify(ctx context.Context, method string, params any) error {
+	ctx, cancel := context.WithTimeout(ctx, liveReadbackWindow)
+	defer cancel()
 	t.mu.Lock()
 	c := t.conn
 	t.mu.Unlock()
@@ -226,5 +229,27 @@ func (t *notifyTransport) Notify(ctx context.Context, method string, params any)
 	// A jsonrpc.Request with no ID serializes as a notification
 	// (id field omitted via omitempty on the wire struct).
 	msg := &jsonrpc.Request{Method: method, Params: raw}
-	return c.Write(ctx, msg)
+	// The SDK checks context only before Write, so a stalled stdout cannot be
+	// interrupted there. Bound admission to one active write and let cancellation
+	// release the caller; no later notifications accumulate behind a stuck writer.
+	select {
+	case t.writeSlot <- struct{}{}:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	if err := ctx.Err(); err != nil {
+		<-t.writeSlot
+		return err
+	}
+	done := make(chan error, 1)
+	go func() {
+		defer func() { <-t.writeSlot }()
+		done <- c.Write(ctx, msg)
+	}()
+	select {
+	case err := <-done:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }

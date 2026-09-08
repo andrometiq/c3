@@ -417,8 +417,8 @@ func TestFlushInbounds_MergedPresentationNeverPersists(t *testing.T) {
 
 	// Do not process an OpInboundDelivered ack: the holder dies after the live
 	// write but before proving it handled the turn. The next delivery's confirmed-
-	// death sweep must flush pendingAck as the two original discrete rows, never
-	// as the one merged presentation object that went over IPC.
+	// death sweep must preserve the two original discrete rows exactly once,
+	// never append a duplicate or the merged presentation sent over IPC.
 	holder.MarkDisconnected()
 	holder.PID = deadPID(t)
 	deathProbe := &c3types.Inbound{
@@ -434,13 +434,13 @@ func TestFlushInbounds_MergedPresentationNeverPersists(t *testing.T) {
 	if err != nil {
 		t.Fatalf("peek rows after holder death: %v", err)
 	}
-	if len(recovered) != 4 {
-		t.Fatalf("rows after pending-ack recovery = %d, want 4 (2 original durable rows + 2 discrete re-queues): %+v", len(recovered), recovered)
+	if len(recovered) != 2 {
+		t.Fatalf("rows after pending-ack recovery = %d, want 2 unchanged durable rows: %+v", len(recovered), recovered)
 	}
-	if !reflect.DeepEqual(recovered[2:], recovered[:2]) {
-		t.Fatalf("pending-ack recovery did not restore the discrete originals:\n original: %+v\nrequeued: %+v", recovered[:2], recovered[2:])
+	if !reflect.DeepEqual(recovered, rows) {
+		t.Fatalf("recovery changed the discrete originals: %+v", recovered)
 	}
-	for i, row := range recovered[2:] {
+	for i, row := range recovered {
 		if len(row.Merged) != 0 {
 			t.Errorf("re-queued row %d leaked Merged: %+v", i, row.Merged)
 		}

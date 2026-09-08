@@ -528,7 +528,7 @@ On the broker dropping the connection:
 
 This is the part a doc-conformant adapter previously got wrong in a way that works perfectly in a demo and then quietly corrupts the user's queue.
 
-**While the durable queue is healthy, a delivered message stays there until you acknowledge it.** The broker writes the push to your socket and then waits. It does not consider the message done. If the broker reports that durability is degraded, live delivery still works but there is no queued copy to protect.
+**While the durable queue is healthy, a delivered message stays there until acknowledged, within the per-route limit of 1,000 messages / 14 days.** The broker writes the push to your socket and then waits. It does not consider the message done. If the broker reports that durability is degraded, live delivery still works but there is no queued copy to protect.
 
 Claude Code has three route states, shown by `attach`, the MCP instructions,
 `c3-broker status` / `/c3:status`, and Telegram `/status`:
@@ -561,19 +561,24 @@ copy metadata into `<channel ...>` attributes.
 **A successful notification write is not a receipt.** The adapter observes new
 complete records after the pre-push file offset. It requires `"type":"user"`,
 `"message":{"role":"user","content":...}`, with the matching
-`c3_delivery_id` in a channel opening tag and a closing `</channel>`. `content`
+`c3_delivery_id` as a unique quoted attribute in the opening channel tag,
+with a closing `</channel>` or a self-closing tag; the decoded value must match
+exactly, and duplicate attributes or malformed tags cannot confirm delivery. `content`
 may be a string or an array of `{"type":"text","text":...}` blocks. A
 `{"type":"queue-operation","operation":"enqueue",...}` record alone is
 insufficient: enqueue is not proof of injection into the conversation.
 
 Confirmation waits **15 seconds** (`liveReadbackWindow`), off the MCP request
 loop. Each scan uses a file-size snapshot capped at 32 MiB; incomplete final lines are retried,
-lines beyond 16 MiB cannot confirm delivery, and at most 64 receipts are pending.
+lines beyond 16 MiB are discarded across polls without confirming delivery,
+and at most 64 receipts are pending. Notification callers have cancellable
+deadlines; receipt timers and bounded IPC writes run outside the state lock.
 On timeout the adapter sends no ack, changes to `queue_only` with reason
 `live push not confirmed`, and stops human pushes until explicit attach or
 reconnect retries detection. The broker uses the existing coalesced
 **📨 Held — nothing lost** notice when durable messages are pending. Attach also
-posts a one-time route notice for an unproven route. Readback proves transcript
+posts a one-time route notice for an unproven route. State changes coalesce
+to the latest notice and retry after the Held notice cooldown. Readback proves transcript
 injection, not completion of the requested work; host transcript format drift
 fails toward retaining a duplicate, never blind consumption.
 
@@ -590,6 +595,14 @@ queue. `claims_list` and `list_sessions_reply` also carry optional
 `render_state` and `render_reason` per session. An unrelated successful outbound
 tool call never clears unconfirmed delivery tokens.
 
+The hello's presence of `render_state` declares a receipt-confirming adapter:
+its accepted ack retires both the exact durable rows and their holder-death
+recovery entries. Legacy adapters omit `render_state`; their accepted ack still
+consumes those durable rows, but recovery entries remain until holder death,
+when only missing rows are restored. An explicit `fetch_queue(ack=true)` retires
+recovery entries for the fetched rows in either case. Unchanged successful
+re-attach preserves outstanding receipts; failed attach cancels none.
+
 The full loop:
 
 1. Receive `inbound` with `inbound`, `pending`, `covered`.
@@ -599,7 +612,7 @@ The full loop:
    {"op":"inbound_delivered","update_id":<inbound.MessageID>,"ok":true,
     "count":<covered>,"delivery_token":"<inbound.delivery_token>"}
    ```
-4. **On render failure, do not ack.** Return without writing anything (or send `ok: false`, which the broker logs as a NACK). The message stays queued as backlog and surfaces in the next push's `pending` count and in `fetch_queue`. Also log the full content locally — the message is otherwise invisible.
+4. **On render failure, do not ack.** Return without writing anything (or send `ok: false`, which the broker logs as a NACK). The message stays queued as backlog and surfaces in the next push's `pending` count and in `fetch_queue`. Log the failure; the queued content remains available through `fetch_queue`.
 
 Six rules, each with a concrete failure behind it:
 
@@ -611,7 +624,7 @@ Six rules, each with a concrete failure behind it:
 - **An ack consumes only the route recorded when that push was sent**, not the route the adapter happens to hold later. The record is one-shot and bounded to 64 outstanding pushes per session (the oldest is evicted). An ack with no matching push record is dropped and its queue line remains available through `fetch_queue`.
 - **You must be genuinely attached.** The broker drops a consume from a connection whose route was never confirmed by an explicit claim. The same rule refuses `fetch_queue(ack=true)` on an unconfirmed route. This is a deliberate fail-closed tripwire, not a bug — a legitimate holder always has a confirmed route.
 
-**If you never ack at all**, everything appears to work: messages render, the user reads them. Meanwhile every delivered message stays queued forever, `pending` climbs monotonically on every push, and `fetch_queue` re-delivers messages the user has already seen — permanently, because nothing ever consumes the head.
+**If you never ack at all**, everything appears to work: messages render, the user reads them. Meanwhile every delivered message stays queued within the documented limits, `pending` climbs monotonically on every push, and `fetch_queue` re-delivers messages the user has already seen.
 
 ---
 

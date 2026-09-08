@@ -153,6 +153,8 @@ check the existing conversation before repeating work. The broker's `delivered`
 log records its socket write, not host confirmation; durable consumption is
 controlled by the later receipt.
 
+Messages are held durably until delivered or fetched, within the queue's documented per-route limits (1,000 messages / 14 days); retention cleanup may permanently remove evicted records.
+
 ### "Broker won't start"
 
 ```bash
