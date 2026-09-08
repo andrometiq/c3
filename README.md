@@ -222,8 +222,12 @@ claude --dangerously-load-development-channels=plugin:c3@c3
 ```
 
 Claude Code applies that preview guardrail to every locally-installed channel plugin — it
-isn't a C3 hack. Without the flag, C3 detects that the host can't render live channel turns
-and keeps inbound in the queue for `fetch_queue` rather than dropping it; the installer can
+isn't a C3 hack. Without the flag, C3 can probe the session's inherited cross-session
+inbox as a fallback; only transcript-confirmed delivery consumes the queued message.
+That route has no Telegram permission relay or native question answering, and its
+peer transcript shape still needs live verification. If neither route confirms,
+inbound stays available through `fetch_queue`. Status shows which route is live.
+The installer can
 also offer a small `claude` shim so the flag is automatic for interactive
 launches. **The wrapper is opt-in, default no:** setup changes `~/.local/bin/claude`
 only after an explicit yes, or with `c3-broker setup finish --claude-shim`.

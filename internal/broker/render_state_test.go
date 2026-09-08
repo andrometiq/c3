@@ -127,6 +127,8 @@ func TestHelloRenderStateCompatibility(t *testing.T) {
 		{"new probing", ipc.RenderProbing, true, ipc.RenderProbing},
 		{"new capable", ipc.RenderCapable, false, ipc.RenderCapable},
 		{"new queue", ipc.RenderQueueOnly, true, ipc.RenderQueueOnly},
+		{"cross session", ipc.RenderCrossSession, true, ipc.RenderCrossSession},
+		{"unknown fails closed", "future_route", false, ipc.RenderQueueOnly},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("C3_QUEUE_DIR", t.TempDir())
@@ -151,6 +153,9 @@ func TestHelloRenderStateCompatibility(t *testing.T) {
 			stubs := b.Stubs.Snapshot()
 			if len(stubs) != 1 || stubs[0].RenderRoute().State != tc.want {
 				t.Fatalf("hello state: %+v", stubs)
+			}
+			if stubs[0].ReceiptConfirming != (tc.state != "") {
+				t.Fatal("hello lost receipt-confirming capability")
 			}
 			if err := peer.WriteJSON(ipc.ListSessionsReq{Op: ipc.OpListSessions}); err != nil {
 				t.Fatal(err)

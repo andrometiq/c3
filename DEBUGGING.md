@@ -125,6 +125,12 @@ or Telegram `/status`:
   transcript receipt before it is consumed.
 - `probing (channels flag present, awaiting confirmation)`: the host has
   `--channels plugin:c3@c3`; C3 is waiting for its first channel receipt.
+- `probing (cross-session awaiting confirmation; …)`: the channel is unavailable;
+  C3 is testing the session's inherited messaging inbox with its first human push.
+- `cross-session (reason; permission relay unavailable)`: a peer user turn was
+  receipt-confirmed through that inbox. Telegram Allow/Deny and native
+  `AskUserQuestion` answers are unavailable; slash commands arrive as text.
+  C3's own `ask` and `reply` tools still work.
 - `queue-only (reason)`: inbound remains on disk for `fetch_queue`. Outbound
   tools still work. This is a route status, not a request to resend messages.
 
@@ -151,8 +157,12 @@ reports `no dev-channels flag on host`.
 
 `live push not confirmed` means no matching complete user channel record was
 observed within 15 seconds. No acknowledgement is sent; the durable copy stays
-available, a coalesced held notice reports it, and subsequent messages are held.
-Explicit attach or reconnect retries the route. `session transcript unavailable`
+available. If the inherited inbox is eligible, C3 first attempts one cross-session
+fallback with the same delivery token. `cross-session push not confirmed` means
+that attempt failed its socket exchange or transcript confirmation; a coalesced
+held notice reports it, and subsequent messages are held without further pushes.
+Explicit attach or reconnect retries channel eligibility first, then fallback.
+`session transcript unavailable`
 means the SessionStart handoff did not resolve a readable regular transcript.
 
 Readback requires `type=user`, `message.role=user`, and channel content bearing
@@ -162,6 +172,21 @@ queue-only. A record arriving after the window may produce a duplicate on fetch;
 check the existing conversation before repeating work. The broker's `delivered`
 log records its socket write, not host confirmation; durable consumption is
 controlled by the later receipt.
+
+The cross-session endpoint and token are captured from the adapter's own
+environment at startup. Do not dump the token, process environments, or socket
+frames into logs. Generic reasons distinguish missing credentials, an unavailable
+endpoint, a non-socket path, or a path outside the user's private runtime directory.
+An attach revalidates the captured endpoint; changed credentials need an adapter
+restart. C3 does not alter host accept/hold/refuse policy.
+
+Peer transcript shape is still **UNVERIFIED live**. The matcher expects a complete
+`type:user`, `message.role:user` record, a string or text-block content containing
+the first `<channel ` opener with the exact `c3_delivery_id`, and `</channel>`.
+Host text/wrappers before it and guidance after it are allowed only for the peer
+route. Socket EOF alone is never enough. Verify an authorized live turn before
+concluding that a clean socket exchange means delivery; late records may leave a
+recoverable duplicate in `fetch_queue`.
 
 Messages are held durably until delivered or fetched, within the queue's documented per-route limits (1,000 messages / 14 days); retention cleanup may permanently remove evicted records.
 

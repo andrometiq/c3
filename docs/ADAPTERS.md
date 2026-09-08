@@ -160,8 +160,8 @@ An adapter that implements only these is correct and complete for a CLI with no 
 | `pid` | int | your adapter's pid. The broker keeps a claim alive as long as this pid lives, so it must be a real, live process id. A future version may additionally bind this pid to its process start time, so that a *recycled* pid is not treated as the same session; an honest pid is unaffected. |
 | `cwd` | string | resolved-absolute path. Seeds the attach picker's "current project" suggestion and the cwd→mapping lookup. |
 | `capabilities`? | []string | free-form tags. **Currently recorded on the wire but not read by the broker** — informational only. |
-| `cannot_render_channels`? | bool | True for both `queue_only` and `probing`; absent preserves the legacy adapter default. |
-| `render_state`? | string | `capable`, `probing`, or `queue_only`. Additive; protocol remains 1. |
+| `cannot_render_channels`? | bool | True for `queue_only`, `probing`, and `cross_session`; absent preserves the legacy adapter default. |
+| `render_state`? | string | `capable`, `probing`, `cross_session`, or `queue_only`. Additive; protocol remains 1. |
 | `render_reason`? | string | Short generic explanation, without personal paths or identifiers. |
 | `protocol_version`? | int | absent ⇒ 1. |
 
@@ -170,7 +170,7 @@ An adapter that implements only these is correct and complete for a CLI with no 
 The broker rejects only *malformed JSON*. It does not reject an incomplete identity; it declines to treat one as an identity. The reason is a rule this project holds without exception: **two unknown identities must never compare equal.** Two adapters that both omit these fields are not the same session, and the broker will not hand one's topic to the other on the strength of them matching in their emptiness.
 
 **Fail closed when host delivery is uncertain.** New Claude adapters set
-`cannot_render_channels: true` for both `queue_only` and `probing`. Old brokers
+`cannot_render_channels: true` for `queue_only`, `probing`, and `cross_session`. Old brokers
 ignore the new fields and hold these messages for `fetch_queue`. New brokers
 use `render_state` to allow one probe; old adapters that omit the new fields
 retain their boolean behavior. The session keeps its claims for outbound.
@@ -530,19 +530,82 @@ This is the part a doc-conformant adapter previously got wrong in a way that wor
 
 **While the durable queue is healthy, a delivered message stays there until acknowledged, within the per-route limit of 1,000 messages / 14 days.** The broker writes the push to your socket and then waits. It does not consider the message done. If the broker reports that durability is degraded, live delivery still works but there is no queued copy to protect.
 
-Claude Code has three route states, shown by `attach`, the MCP instructions,
+Claude Code has four route states, shown by `attach`, the MCP instructions,
 `c3-broker status` / `/c3:status`, and Telegram `/status`:
 
 - **`capable`** (displayed as **channel**): the nearest Claude host has the
   development-channels flag naming C3, or a probe was confirmed. Every push
   still needs its own transcript receipt before acknowledgement.
-- **`probing`**: the nearest host has `--channels plugin:c3@c3` (also accepts
+- **`probing`**: for a channel probe, the nearest host has `--channels plugin:c3@c3` (also accepts
   `--channels=plugin:c3@c3`). This establishes eligibility, not registration.
   Only the first human push is sent; subsequent messages stay queued until
-  confirmation changes the state to `capable`.
+  confirmation changes the state to `capable`. A cross-session fallback probe
+  uses the same state, with reason `cross-session awaiting confirmation; …`;
+  its receipt promotes to `cross_session`.
+- **`cross_session`** (displayed as **cross-session**): the channel route was
+  unavailable and a push through this session's inherited messaging inbox was
+  confirmed by transcript receipt. Every later push still needs its own receipt.
 - **`queue_only`** (displayed as **queue-only**): no identified host, unreadable
   or truncated ancestry, no qualifying flag, Windows, unavailable transcript,
-  or a failed live confirmation. Retrieve inbound with `fetch_queue`.
+  or exhausted live confirmation attempts. Retrieve inbound with `fetch_queue`.
+
+### Cross-session fallback contract
+
+Preference is **channel → confirmed cross-session → queue-only**. Cross-session
+never replaces a `capable` channel. If the channel starts queue-only, a valid
+inherited inbox enables one fallback probe on the first human inbound. If a
+channel probe or live channel push times out, the adapter retries that same
+durable delivery once through the inbox, retaining its broker token. Other
+unconfirmed channel attempts stay queued. No queued backlog is automatically
+drained. Attach/reconnect starts again from channel eligibility, then fallback.
+
+The adapter captures only its own `CLAUDE_CODE_MESSAGING_SOCKET` and
+`CLAUDE_CODE_MESSAGING_TOKEN` at startup. It never discovers other sessions or
+reads their environments. The socket must resolve inside the per-user runtime
+directory selected by C3's normal socket resolver. That directory must be owned
+by the current user and mode 0700; the endpoint must be a user-owned Unix socket.
+Symlink resolution cannot escape the runtime directory. These checks run at
+startup, re-probe, and before credential writes. Windows remains queue-only.
+Missing credentials or unsafe paths yield a generic reason; credentials and
+raw socket errors are never logged. Re-probe revalidates the captured path;
+changed environment credentials require restarting the adapter.
+
+The inbox receives exactly two newline-delimited JSON frames, followed by a
+write half-close:
+
+```json
+{"type":"auth","token":"<inherited token>"}
+{"type":"user","from":"c3","priority":"next","message":{"role":"user","content":"<channel source=\"plugin:c3:c3\" c3_delivery_id=\"<delivery token>\" …>\n<same channel body>\n</channel>"}}
+```
+
+The content mirrors the native channel block: the same source, all string
+metadata attributes (including `c3_delivery_id`), and the unchanged body with
+its normal attachment/provenance/backlog decoration. Connect, write, and peer
+close share a two-second maximum deadline within the 15-second receipt window.
+Transport completion requires no response bytes and clean peer EOF. This is
+**not acceptance**: host hold/refuse settings can also close silently. A new
+complete user transcript record bearing the exact token is still required.
+Failure sends no ack, publishes `queue_only` with reason
+`cross-session push not confirmed`, and stops fallback pushes until attach or
+reconnect. The normal one-time route/held notice reports the failure.
+
+**Limitations are part of the route:** inbound is peer user input. Telegram
+Allow/Deny permission relay and native `AskUserQuestion` answering are
+unavailable because they require channel registration. Peer text never grants
+permission approval. Slash commands inside messages arrive as plain text.
+C3's own blocking `ask` tool continues working through its broker result path;
+reply with C3's `reply` tool as usual. The MCP preamble and attach result explain
+this, and status/Telegram route notices include the channel failure reason and
+`permission relay unavailable`. Synthesized events have no durable receipt
+contract and are only pushed on the confirmed channel route.
+
+The inbox protocol and flagless user-turn delivery were live-verified on Claude
+Code 2.1.263. **The peer transcript record shape remains UNVERIFIED.** Tests use
+fixture-shaped `type:user`, `message.role:user` records with optional
+`origin.kind:peer`, `isMeta:true`, wrappers and host guidance. Format drift or
+host refusal retains the durable row; it never licenses a blind ack.
+
+### Channel detection and shared receipts
 
 Linux reads `/proc`; macOS uses the existing `golang.org/x/sys/unix` dependency
 for `kern.procargs2` and `kern.proc.pid`, preserving actual argv boundaries.
@@ -560,7 +623,8 @@ unavailable to verify it. A completed ancestry walk reports
 `process tree truncated` or `process tree unreadable`.
 
 The Claude adapter reuses D020's session transcript resolver.
-Live receipts use `scanChannelReceipt`; `scanTranscriptRecords` serves permission readback.
+Live receipts use `scanReceipt` (with `scanChannelReceipt` retaining the strict channel helper);
+`scanTranscriptRecords` serves permission readback.
 Both readers process bounded, complete JSONL records. Existing `message_id`
 metadata is not unique to an occurrence (edits and different routes may reuse it), so it adds string
 metadata `c3_delivery_id`, carrying the broker's `delivery_token`. With an old
@@ -572,20 +636,30 @@ copy metadata into `<channel ...>` attributes.
 complete records after the pre-push file offset. It requires `"type":"user"`,
 `"message":{"role":"user","content":...}`, with the matching
 `c3_delivery_id` as a unique quoted attribute in the opening channel tag,
-with a closing `</channel>` or a self-closing tag; the decoded value must match
+with a closing `</channel>` (channel-route receipts also accept a self-closing tag); the decoded value must match
 exactly, and duplicate attributes or malformed tags cannot confirm delivery. `content`
 may be a string or an array of `{"type":"text","text":...}` blocks. A
 `{"type":"queue-operation","operation":"enqueue",...}` record alone is
 insufficient: enqueue is not proof of injection into the conversation.
+
+Channel-route receipts must start with the channel opener after whitespace.
+Cross-session receipts may have host text or a wrapper before it: inspect the
+**first** literal `<channel ` occurrence and require its closing `</channel>`.
+Never skip a malformed or unmatched first opener to find a nested token. The
+same strict attribute parser applies to both routes; peer origin/isMeta fields
+alone prove nothing. This narrower, route-specific relaxation preserves the
+native channel matcher while allowing host peer framing.
 
 Confirmation waits **15 seconds** (`liveReadbackWindow`), off the MCP request
 loop. Each scan uses a file-size snapshot capped at 32 MiB; incomplete final lines are retried,
 lines beyond 16 MiB are discarded across polls without confirming delivery,
 and at most 64 receipts are pending. Notification callers have cancellable
 deadlines; receipt timers and bounded IPC writes run outside the state lock.
-On timeout the adapter sends no ack, changes to `queue_only` with reason
-`live push not confirmed`, and stops human pushes until explicit attach or
-reconnect retries detection. The broker uses the existing coalesced
+On channel timeout the adapter sends no ack and tries the eligible fallback
+described above. Without it, the state becomes `queue_only` with reason
+`live push not confirmed`; exhausted fallback uses `cross-session push not confirmed`.
+Human pushes then stop until explicit attach or reconnect retries detection.
+The broker uses the existing coalesced
 **📨 Held — nothing lost** notice when durable messages are pending. Attach also
 posts a one-time route notice for an unproven route. State changes coalesce
 to the latest notice and retry after the Held notice cooldown. Readback proves transcript
@@ -600,7 +674,8 @@ The additive adapter → broker `render_state` op publishes transitions:
 ```
 
 There is no reply and no protocol-version bump. Old brokers log/ignore this
-unknown op; local adapter gating and withholding the ack still protect the
+unknown op; brokers that understand render states but predate `cross_session`
+normalize that non-empty unknown state to queue-only. Local gating and withholding the ack still protect the
 queue. `claims_list` and `list_sessions_reply` also carry optional
 `render_state` and `render_reason` per session. An unrelated successful outbound
 tool call never clears unconfirmed delivery tokens.
@@ -611,7 +686,9 @@ recovery entries. Legacy adapters omit `render_state`; their accepted ack still
 consumes those durable rows, but recovery entries remain until holder death,
 when only missing rows are restored. An explicit `fetch_queue(ack=true)` retires
 recovery entries for the fetched rows in either case. Unchanged successful
-re-attach preserves outstanding receipts; failed attach cancels none.
+channel re-attach preserves outstanding receipts; failed attach cancels none.
+Re-probing a cross-session route cancels its old watchers, retaining their
+unconfirmed durable rows so old peer receipts cannot promote the new probe.
 
 The full loop:
 

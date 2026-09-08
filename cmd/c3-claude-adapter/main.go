@@ -123,6 +123,7 @@ func run() error {
 		return fmt.Errorf("c3-claude-adapter must not run under Cursor Agent CLI; use c3-cursor-adapter (c3-broker install-cursor). Disable the Claude-plugin MCP: agent mcp disable plugin-c3-c3")
 	}
 	a.initialRenderRoute = hostRenderRoute()
+	a.crossSession, a.crossSessionReason = startupCrossSessionTransport()
 	a.renderRoute = a.initialRenderRoute
 	if err := a.connectBroker(); err != nil {
 		log.Printf("adapter: exit pid=%d reason=connect-broker err=%v", os.Getpid(), err)
@@ -360,8 +361,11 @@ type adapter struct {
 	livePublishMu      sync.Mutex
 	livePending        map[string]bool
 	liveActive         int
-	liveTimeout        time.Duration // zero selects liveReadbackWindow; tests inject
-	liveTranscriptPath func() string // tests inject without personal files
+	liveTimeout        time.Duration          // zero selects liveReadbackWindow; tests inject
+	liveTranscriptPath func() string          // tests inject without personal files
+	crossSession       *crossSessionTransport // immutable startup credentials
+	crossSessionReason string                 // generic startup validation failure
+	liveCrossSession   bool                   // liveMu: selected for probing/live, sticky on failure
 
 	// Hello-ack response state, captured on connect.
 	helloAck      ipc.HelloAckMsg
@@ -1716,7 +1720,7 @@ func (a *adapter) buildInstructions() string {
 // plugin). Declaring the capability asserts C3 authenticates the replier — C3
 // only honors an Allow/Deny verdict from an allowlisted operator, and tapping
 // Allow over Telegram AUTHORIZES the pending tool use.
-const permissionContractNote = "\n\nPermission relay: C3 declares the claude/channel/permission capability, which asserts the channel authenticates the replier. C3 surfaces a tool-use permission prompt as an Allow/Deny keyboard, honors a verdict only from an allowlisted operator, and an Allow tap over Telegram authorizes the pending tool use."
+const permissionContractNote = "\n\nPermission relay: C3 declares the claude/channel/permission capability, which asserts the channel authenticates the replier. When the host has registered the channel, C3 surfaces a tool-use permission prompt as an Allow/Deny keyboard, honors a verdict only from an allowlisted operator, and an Allow tap over Telegram authorizes the pending tool use. This relay is unavailable on the cross-session route."
 
 // capsOrDefault returns the channel capability manifest the broker delivered
 // on hello_ack (or a fresh attach), falling back to a sensible default when

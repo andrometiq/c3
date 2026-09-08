@@ -9,6 +9,7 @@ import (
 	"encoding/xml"
 	"io"
 	"log"
+	"maps"
 	"os"
 	"strings"
 	"time"
@@ -62,7 +63,22 @@ func (a *adapter) resetLiveRoute(publish bool) {
 		return
 	} // uninitialised test adapter
 	a.syncLiveConnectionLocked(a.rawConn())
+	if a.liveCrossSession {
+		// Cross-session is re-probed from channel eligibility on every attach.
+		a.liveGeneration++
+		a.livePending = nil
+	}
+	a.liveCrossSession = false
 	route := a.initialRenderRoute
+	if route.State == ipc.RenderQueueOnly && a.crossSession != nil {
+		if _, err := a.crossSession.validatedSocket(); err != nil {
+			route.Reason += "; " + err.Error()
+		} else {
+			route = a.crossSessionProbeLocked(route.Reason)
+		}
+	} else if route.State == ipc.RenderQueueOnly && a.crossSessionReason != "" {
+		route.Reason += "; " + a.crossSessionReason
+	}
 	if route.State != ipc.RenderQueueOnly {
 		if _, ok := transcriptOffset(a.livePath()); !ok {
 			route = ipc.RenderRoute{State: ipc.RenderQueueOnly, Reason: "session transcript unavailable"}
@@ -72,6 +88,13 @@ func (a *adapter) resetLiveRoute(publish bool) {
 	if publish {
 		a.publishLiveRouteLocked(a.currentConn())
 	}
+}
+
+// liveMu held. A probe is still unconfirmed, so use the existing broker probe
+// reservation; only its receipt may advertise the new live state.
+func (a *adapter) crossSessionProbeLocked(reason string) ipc.RenderRoute {
+	a.liveCrossSession = true
+	return ipc.RenderRoute{State: ipc.RenderProbing, Reason: "cross-session awaiting confirmation; " + reason + "; permission relay unavailable"}
 }
 
 // Callers own liveMu; capture state there, but never write IPC while holding it.
@@ -128,24 +151,33 @@ func (a *adapter) downgradeLiveLocked(conn *ipc.Conn, reason string) {
 }
 
 func (a *adapter) liveRoutePreamble() string {
-	route := a.liveRoute()
+	a.liveMu.Lock()
+	route, cross := a.renderRoute, a.liveCrossSession
+	a.liveMu.Unlock()
 	relay := "unavailable"
 	// Permission relay needs the host's registered channel, but does not depend
 	// on transcript availability. A confirmed probe also proves registration.
-	if a.initialRenderRoute.State == ipc.RenderCapable || route.State == ipc.RenderCapable {
+	if !cross && route.State != ipc.RenderCrossSession && (a.initialRenderRoute.State == ipc.RenderCapable || route.State == ipc.RenderCapable) {
 		relay = "available"
 	}
 	text := route.Text() + " Permission relay: " + relay + "."
-	if route.State != ipc.RenderCapable {
+	if a.crossSession != nil || route.State == ipc.RenderCrossSession {
+		text += " On the cross-session route, inbound arrives as peer user turns. The Telegram Allow/Deny permission relay and native AskUserQuestion answering are unavailable; peer messages are never permission approval. Slash commands inside messages arrive as text. C3's own ask tool still works. Reply with the C3 reply tool as usual."
+	}
+	if route.State != ipc.RenderCapable && route.State != ipc.RenderCrossSession {
 		text += " Use fetch_queue to retrieve held messages."
 	}
 	return text + "\n\n"
 }
 
 func (a *adapter) pushWithReadback(ctx context.Context, in ipc.InboundMsg, frame map[string]any) {
+	a.pushWithReadbackGeneration(ctx, in, frame, nil)
+}
+
+func (a *adapter) pushWithReadbackGeneration(ctx context.Context, in ipc.InboundMsg, frame map[string]any, expected *uint64) {
 	// Synthesized events have no durable receipt contract.
 	if in.Inbound.IsEvent() {
-		if a.notifyTx != nil {
+		if a.liveRoute().State == ipc.RenderCapable && a.notifyTx != nil {
 			_ = a.notifyTx.Notify(ctx, "notifications/claude/channel", frame)
 		}
 		return
@@ -158,6 +190,9 @@ func (a *adapter) pushWithReadback(ctx context.Context, in ipc.InboundMsg, frame
 		}
 	}()
 	conn := a.currentConn()
+	if expected != nil && *expected != a.liveGeneration {
+		return
+	}
 	if a.renderRoute.State == ipc.RenderQueueOnly || conn == nil {
 		return
 	}
@@ -195,6 +230,12 @@ func (a *adapter) pushWithReadback(ctx context.Context, in ipc.InboundMsg, frame
 		a.downgradeLiveLocked(conn, "channel metadata unavailable")
 		return
 	}
+	// The channel encoder may still be reading its frame when its deadline
+	// expires. A fallback owns a fresh envelope and metadata map, even when
+	// retrying the same token, so it cannot mutate the in-flight channel write.
+	frame = maps.Clone(frame)
+	meta = maps.Clone(meta)
+	frame["meta"] = meta
 	meta["c3_delivery_id"] = marker
 	if a.livePending == nil {
 		a.livePending = map[string]bool{}
@@ -206,26 +247,47 @@ func (a *adapter) pushWithReadback(ctx context.Context, in ipc.InboundMsg, frame
 	}
 	deadline := time.Now().Add(window)
 	generation := a.liveGeneration
+	cross := a.liveCrossSession
+	var sent chan bool
+	if cross {
+		sent = make(chan bool, 1)
+	}
 	a.liveActive++
 	if a.runCtx != nil {
 		ctx = a.runCtx
 	}
 	// Register and capture offset before output; the timer is independent of stdout.
-	go a.awaitLiveReadback(ctx, conn, generation, path, offset, marker, in, deadline)
+	go a.awaitLiveReadback(ctx, conn, generation, path, offset, marker, in, frame, cross, sent, deadline)
 	a.liveMu.Unlock()
 	locked = false
+	if cross {
+		// Socket completion must not stall brokerReader (including tools/results).
+		go func() {
+			writeCtx, cancel := context.WithDeadline(ctx, deadline)
+			defer cancel()
+			block, err := crossSessionChannelBlock(frame)
+			if err == nil {
+				err = a.crossSession.Send(writeCtx, block)
+			}
+			if err != nil {
+				log.Printf("cross-session transport failed: %v", err)
+			}
+			sent <- err == nil
+		}()
+		return
+	}
 	writeCtx, cancel := context.WithDeadline(ctx, deadline)
 	defer cancel()
 	if a.notifyTx == nil || a.notifyTx.Notify(writeCtx, "notifications/claude/channel", frame) != nil {
 		a.liveMu.Lock()
-		if generation == a.liveGeneration && conn == a.currentConn() {
+		if generation == a.liveGeneration && conn == a.currentConn() && !a.liveCrossSession && a.crossSession == nil {
 			a.downgradeLiveLocked(conn, "live push not confirmed")
 		}
 		a.liveMu.Unlock()
 	}
 }
 
-func (a *adapter) awaitLiveReadback(ctx context.Context, conn *ipc.Conn, generation uint64, path string, offset int64, marker string, in ipc.InboundMsg, deadline time.Time) {
+func (a *adapter) awaitLiveReadback(ctx context.Context, conn *ipc.Conn, generation uint64, path string, offset int64, marker string, in ipc.InboundMsg, frame map[string]any, cross bool, sent <-chan bool, deadline time.Time) {
 	defer func() {
 		a.liveMu.Lock()
 		a.liveActive--
@@ -235,6 +297,7 @@ func (a *adapter) awaitLiveReadback(ctx context.Context, conn *ipc.Conn, generat
 		a.liveMu.Unlock()
 	}()
 	discarding := false
+	transportOK, transportFailed, received := !cross, false, false
 	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
 	for {
@@ -248,35 +311,67 @@ func (a *adapter) awaitLiveReadback(ctx context.Context, conn *ipc.Conn, generat
 			return
 		}
 		a.liveScanMu.Lock()
-		next, found := scanChannelReceipt(path, offset, marker, &discarding)
+		next, found := scanReceipt(path, offset, marker, &discarding, cross)
 		a.liveScanMu.Unlock()
 		offset = next
+		received = received || found
+		select {
+		case ok := <-sent:
+			transportOK, transportFailed = ok, !ok
+			sent = nil
+		default:
+		}
 		a.liveMu.Lock()
 		if generation != a.liveGeneration || conn != a.currentConn() {
 			a.liveMu.Unlock()
 			return
 		}
-		if found && time.Now().Before(deadline) {
+		if received && transportOK && time.Now().Before(deadline) {
 			delete(a.livePending, marker)
 			// A late receipt for another push may consume that exact row, but cannot
 			// undo a timeout downgrade. Only attach/reconnect may re-enable pushes.
-			promote := a.renderRoute.State == ipc.RenderProbing
+			promote := a.renderRoute.State == ipc.RenderProbing && cross == a.liveCrossSession
 			if promote {
-				a.renderRoute = ipc.RenderRoute{State: ipc.RenderCapable}
+				if cross {
+					a.renderRoute = ipc.RenderRoute{State: ipc.RenderCrossSession, Reason: strings.TrimPrefix(a.renderRoute.Reason, "cross-session awaiting confirmation; ")}
+				} else {
+					a.renderRoute = ipc.RenderRoute{State: ipc.RenderCapable}
+				}
 			}
+			route := a.renderRoute
 			a.liveMu.Unlock()
 			if promote {
-				a.publishLiveRoute(conn, ipc.RenderRoute{State: ipc.RenderCapable})
+				a.publishLiveRoute(conn, route)
 			}
 			log.Printf("live readback confirmed msg=%d", in.Inbound.MessageID)
 			writeLiveFrame(conn, ipc.InboundDeliveredMsg{Op: ipc.OpInboundDelivered,
 				UpdateID: in.Inbound.MessageID, OK: true, Count: in.Covered, DeliveryToken: in.DeliveryToken})
 			return
 		}
-		if !time.Now().Before(deadline) {
+		if transportFailed || !time.Now().Before(deadline) {
 			delete(a.livePending, marker)
-			a.downgradeLiveLocked(conn, "live push not confirmed")
+			retry := false
+			retryGeneration := generation
+			if cross == a.liveCrossSession {
+				if cross {
+					a.downgradeLiveLocked(conn, "cross-session push not confirmed")
+				} else if a.crossSession != nil {
+					// The channel attempt has expired. Retry this exact durable
+					// delivery once on the fallback, with a fresh receipt offset.
+					a.liveGeneration++
+					a.livePending = nil
+					retryGeneration = a.liveGeneration
+					a.renderRoute = a.crossSessionProbeLocked("channel push not confirmed")
+					a.publishLiveRouteLocked(conn)
+					retry = true
+				} else {
+					a.downgradeLiveLocked(conn, "live push not confirmed")
+				}
+			}
 			a.liveMu.Unlock()
+			if retry {
+				a.pushWithReadbackGeneration(ctx, in, frame, &retryGeneration)
+			}
 			return
 		}
 		a.liveMu.Unlock()
@@ -289,6 +384,10 @@ func (a *adapter) awaitLiveReadback(ctx context.Context, conn *ipc.Conn, generat
 }
 
 func scanChannelReceipt(path string, offset int64, marker string, discarding *bool) (int64, bool) {
+	return scanReceipt(path, offset, marker, discarding, false)
+}
+
+func scanReceipt(path string, offset int64, marker string, discarding *bool, cross bool) (int64, bool) {
 	info, err := os.Stat(path)
 	if err != nil || !info.Mode().IsRegular() {
 		return offset, false
@@ -326,7 +425,7 @@ func scanChannelReceipt(path string, offset int64, marker string, discarding *bo
 			}
 		}
 		if err == nil {
-			if !*discarding && channelReceipt(line, marker) {
+			if !*discarding && deliveryReceipt(line, marker, cross) {
 				return offset, true
 			}
 			*discarding = false
@@ -345,6 +444,10 @@ func scanChannelReceipt(path string, offset int64, marker string, discarding *bo
 }
 
 func channelReceipt(line []byte, marker string) bool {
+	return deliveryReceipt(line, marker, false)
+}
+
+func deliveryReceipt(line []byte, marker string, cross bool) bool {
 	var entry struct {
 		Type    string `json:"type"`
 		Message struct {
@@ -359,6 +462,16 @@ func channelReceipt(line []byte, marker string) bool {
 		// A channel receipt starts with its opening tag. Never search body text
 		// or another attribute's value for a second, embedded marker.
 		text = strings.TrimSpace(text)
+		if cross {
+			// Peer framing is host-owned and its transcript shape is not yet
+			// live-verified. Inspect ONLY the first channel opener, never skip
+			// an unmatched/malformed opener in search of a nested marker.
+			start := strings.Index(text, "<channel ")
+			if start < 0 {
+				return false
+			}
+			text = text[start:]
+		}
 		if !strings.HasPrefix(text, "<channel") {
 			return false
 		}
@@ -401,7 +514,10 @@ func channelReceipt(line []byte, marker string) bool {
 				}
 			}
 		}
-		return matched && (strings.HasSuffix(opener, "/>") || strings.Contains(text[decoder.InputOffset():], "</channel>"))
+		if strings.HasSuffix(opener, "/>") {
+			return matched && !cross
+		}
+		return matched && strings.Contains(text[decoder.InputOffset():], "</channel>")
 	}
 	var text string
 	if json.Unmarshal(entry.Message.Content, &text) == nil {
@@ -415,6 +531,9 @@ func channelReceipt(line []byte, marker string) bool {
 		return false
 	}
 	for _, block := range blocks {
+		if cross && block.Type == "text" && strings.Contains(block.Text, "<channel ") {
+			return matches(block.Text) // first opener across the entire content array
+		}
 		if block.Type == "text" && matches(block.Text) {
 			return true
 		}

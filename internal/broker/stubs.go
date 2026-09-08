@@ -591,7 +591,7 @@ func (s *Stub) SetRenderRoute(state, reason string, cannot bool) {
 			state = ipc.RenderCapable
 		}
 	}
-	if state != ipc.RenderCapable && state != ipc.RenderProbing {
+	if state != ipc.RenderCapable && state != ipc.RenderProbing && state != ipc.RenderCrossSession {
 		state = ipc.RenderQueueOnly
 	}
 	s.renderRoute = ipc.RenderRoute{State: state, Reason: reason}

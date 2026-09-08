@@ -89,3 +89,24 @@ func TestRunStatusShowsRenderRoute(t *testing.T) {
 		t.Fatalf("status: %s", out)
 	}
 }
+
+func TestRunStatusShowsCrossSession(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	oldHealth, oldClaims := statusFetchHealth, statusFetchClaims
+	statusFetchHealth = func() (*ipc.HealthListMsg, error) { return &ipc.HealthListMsg{}, nil }
+	statusFetchClaims = func() (*ipc.ClaimsListMsg, error) {
+		return &ipc.ClaimsListMsg{Claims: []ipc.ClaimEntry{{Channel: "telegram", HolderCLI: "claude", Connected: true,
+			RenderState: "cross_session", RenderReason: "channel not registered; permission relay unavailable"}}}, nil
+	}
+	t.Cleanup(func() { statusFetchHealth, statusFetchClaims = oldHealth, oldClaims })
+	out := captureStdout(t, func() {
+		if err := runStatus(); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if !strings.Contains(out, "Live route: cross-session (channel not registered; permission relay unavailable)") {
+		t.Fatalf("status: %s", out)
+	}
+}

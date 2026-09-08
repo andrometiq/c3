@@ -1,9 +1,10 @@
 package ipc
 
 const (
-	RenderCapable   = "capable"
-	RenderProbing   = "probing"
-	RenderQueueOnly = "queue_only"
+	RenderCapable      = "capable"
+	RenderProbing      = "probing"
+	RenderQueueOnly    = "queue_only"
+	RenderCrossSession = "cross_session"
 )
 
 // RenderRoute describes host delivery, independently of broker connectivity.
@@ -22,6 +23,8 @@ func (r RenderRoute) Text() string {
 	switch r.State {
 	case RenderCapable:
 		state = "channel"
+	case RenderCrossSession:
+		state = "cross-session"
 	case RenderProbing:
 		state = "probing"
 	}

@@ -19,7 +19,7 @@ func TestAdapterDocsNameReceiptAndPermissionReaders(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, claim := range []string{
-		"Live receipts use `scanChannelReceipt`",
+		"Live receipts use `scanReceipt`",
 		"`scanTranscriptRecords` serves permission readback",
 	} {
 		if !strings.Contains(string(body), claim) {

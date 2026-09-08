@@ -3,6 +3,30 @@
 Entries are newest first. This is the public architecture record: it records
 rulings and rationale, never private operational details.
 
+## D031: Cross-session messaging is a receipt-gated fallback only
+
+**Date:** 2026-09-08
+
+**Decision:** Prefer the native channel route, then transcript-confirmed delivery
+through the owning session's inherited messaging inbox, then durable queue-only
+delivery. Never use the inbox while the channel is capable. Every inbox push
+carries the same channel block and delivery token and requires both a clean
+socket exchange and an exact transcript receipt before acknowledgement. Failed
+confirmation retains the row, disables further fallback pushes until explicit
+attach/reconnect, and reports a coalesced held notice. Re-probe starts with channel
+eligibility. Credentials are captured once from this adapter's environment; the
+endpoint must remain a user-owned socket inside the user's private runtime dir.
+
+**Why:** A flagless host can accept peer user turns even when it drops channel
+notifications. This recovers an inbound route without confusing transport success
+with delivery or silently replacing the richer native channel. The active route
+and its reason must remain visible in attach, MCP instructions, status and Telegram.
+Peer input cannot grant permission approval: Telegram Allow/Deny relay and native
+`AskUserQuestion` answering are unavailable, and slash commands arrive as text.
+C3's own `ask` and `reply` tools remain usable. The socket protocol was live-verified;
+the peer transcript shape remains unverified, so format drift fails toward held
+messages and possible duplicates rather than loss.
+
 ## D030: Drive feedback is centralized and deliberate cancellation preserves long audio
 
 **Date:** 2026-08-30
