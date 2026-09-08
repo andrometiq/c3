@@ -240,6 +240,9 @@ func TestFetchQueue_OversizeHeadRecord_DoesNotDestroyTheQueueBehindIt(t *testing
 			"the queue was consumed before the response was known to be encodable; %d messages were destroyed and the caller was told nothing",
 			before, after, before-after)
 	}
+	if resp.Err != "" {
+		t.Fatalf("oversize-head fetch failed before consumption: %s", resp.Err)
+	}
 	_ = waitForFetchPending(t, b, qrk, resp.Remaining, "oversize-head fetch")
 	if got := frameSize(t, resp); got > ipc.MaxFrameSize {
 		t.Fatalf("response frame is %d bytes (cap %d) — it cannot be written, so everything it reports as delivered is lost", got, ipc.MaxFrameSize)
