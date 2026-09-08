@@ -1,69 +1,89 @@
-# Reliable Codex delivery
+# Codex queued delivery
 
 ## Normal interactive use
 
-Run `c3-broker install-codex-shim`, then start `c3-codex` (or the installed
-`codex` shim). The explicit `c3-codex` entrypoint survives a Codex self-update
-replacing the `codex` symlink. The launcher supports both standalone and NVM
-Codex installations and loads the adapter from the same release directory.
+Run `c3-broker install-codex-shim`, then start `c3-codex` or the installed
+`codex` launcher. The explicit alias targets a separate C3-owned executable at
+`~/.local/libexec/c3/codex-launcher`, so replacing `codex` does not replace it.
+Re-run the shim installer after updating C3 to refresh that copy. Standalone and
+NVM Codex installations are supported. Adapter discovery checks only siblings
+of the resolved running launcher, then PATH; a bare launcher name never selects
+an adapter from the project directory. `C3_CODEX_ADAPTER` is an explicit override.
 
-The launcher supplies C3's MCP tools and a session-specific app-server endpoint.
-Modern app-servers receive Telegram input through `thread/queue/add`, including
-messages sent while the agent is working. Older servers that explicitly return
-JSON-RPC method-not-found use the previous `thread/resume` + `turn/start` path.
-A failed or uncertain queue response never triggers a second delivery path.
+The launcher supplies MCP tools and a session-specific app-server endpoint.
+Inbound uses `thread/queue/add`, including while Codex is busy. C3 requests queued
+input; it never automatically steers or interrupts an active turn. Codex controls
+when queued input runs. This remains a bridge to the user's TUI, not a C3-owned
+session runtime.
 
-Recovery and delivery share the same conversation identity. Multiple loaded
-threads without an explicit pin are refused; cwd is not a recipient selector.
-Startup backlog generates an agent-visible recovery notice. A full acknowledged
-`fetch_queue` drain restores live acknowledgements and invalidates stale pending
-forwards, so one transport failure no longer requires restarting the adapter.
-Button, reaction, poll-result, and system-event payloads survive delivery and
-never consume ordinary queued messages.
+A definite unknown-method or unknown-variant rejection of `thread/queue/add`,
+including an id-less JSON-RPC error, disables live submissions for that adapter
+process and reports **pull-only: call `fetch_queue`**. There is no `turn/start`
+compatibility path. Generic invalid requests, timeouts, connection loss, and
+malformed acceptance never authorize a second submission or a broker ack.
+Restart the adapter after upgrading an unsupported app-server.
 
-`codex_forward` reports the actual transport, conversation, topic, and whether
-queue recovery is required. It does not claim to register an endpoint without
-changing anything, and it refuses attempts to redirect the current session.
+## Identity, acknowledgement, and recovery
 
-## Existing local conversation
+Startup recovery resolves and caches the conversation identity. Multiple loaded
+threads are refused; cwd is not a recipient selector. An explicit
+`C3_CODEX_THREAD_ID` supplies the pin. If startup resolution fails, explicit
+attachment remains possible, but live delivery stays pull-only until identity
+is pinned. Attach and failure notices explain this. Restart with an explicit pin,
+or let a later broker reconnect retry startup resolution. Delivery itself never
+rediscovers an unpinned conversation for each message.
 
-For a local Codex CLI that supports `codex queue --thread UUID --message TEXT`,
-the Codex adapter can deliver to the existing TUI without a separate WebSocket
-app-server. Set both variables on that session's adapter:
+WebSocket delivery requires a nonempty queued submission ID and a matching
+returned client message identity. Retry identity depends on recipient
+and message content, not mutable route labels. Native delivery requires successful
+process exit and textual acknowledgement naming the pinned thread. Only then
+does C3 acknowledge the exact broker delivery token. Events preserve their full
+serialized payload, including system Source, Level, Title, and Message, and never
+acknowledge durable message rows. Multi-route messages retain their origin tags.
+
+These are **queue acceptance acknowledgements, not transcript receipts**. They do
+not prove automatic idle wake, execution, crash durability, or exactly-once
+processing. If Codex accepts input but its response is lost, the C3 copy remains
+held; manually fetching it can duplicate input already in Codex. Native queue
+invocation has no stable client message ID.
+
+Destructive `fetch_queue` waits for in-flight delivery to finish. The broker
+returns the durable identities of records actually consumed, under its existing
+per-route confirmed-holder gate. Only matching pending submissions are excluded;
+a fresh arrival before the response or an untouched sibling route stays eligible.
+Debounce-held sources outside the fetch are not invalidated. If a partial fetch
+intersects a processed merged batch, that batch is excluded and its surviving
+sources remain held for a further pull, with a recovery notice. Obsolete success
+and failure cannot acknowledge or re-block recovery.
+
+An earlier failure does not suppress acknowledgements for later successful
+messages: broker tokens consume exact records. Backlog attach notices do not use
+up the one-shot transport-failure notice. Notices are best effort through MCP and,
+when usable, the delivery transport. They cannot guarantee waking an unavailable
+host. A canceled or timed-out destructive fetch has an unknown outcome, so live
+delivery pauses until restart; further pulls remain available.
+
+`codex_forward` reports transport, pin, topic, and whether a recovery notice was
+sent, including
+unsupported-queue and unresolved-identity pull-only states. It refuses rebinding.
+Use a matching broker/adapter release for record-identity coordination.
+
+## Opt-in existing local conversation
+
+For a CLI supporting `codex queue --thread UUID --message TEXT`, configure only
+that conversation's adapter:
 
 ```text
 C3_CODEX_QUEUE_BIN=/absolute/path/to/the/real/codex
 C3_CODEX_THREAD_ID=<the exact current conversation UUID>
 ```
 
-Use the real CLI executable, not an older C3 launcher that does not recognize the
-`queue` subcommand. Do not put a single thread UUID in shared MCP configuration:
-each adapter must be pinned to its own conversation. The adapter continues to
-use the normal explicit topic attachment/session recovery protocol.
+Native mode is opt-in and takes precedence over WebSocket mode. It can reach an
+existing local TUI without C3's separate app-server. The executable must be an
+absolute path and the pin a UUID; message content is a literal process argument.
+Do not put one conversation's UUID in shared MCP configuration. Without either
+transport the adapter remains pull-only. Existing backlog still needs a pull.
 
-Native queue mode takes precedence over WebSocket mode when configured. It
-passes message content as a literal process argument, checks the acknowledgement
-names the pinned thread, and only then allows the existing serialized broker
-acknowledgement path to consume the Telegram copy. Failed delivery leaves the
-message in C3's durable queue. While Codex is busy, its queue processes messages
-after the current turn; this transport does not interrupt an active turn.
-
-Messages already held before attachment still require `fetch_queue` recovery.
-Avoid consuming a queue simultaneously through manual fetch and live delivery.
-The existing fail-closed forwarding latch preserves messages after a delivery
-failure; fix the transport and completely drain the durable backlog to restore
-normal acknowledgement behavior.
-
-## Validation and limitations
-
-Verify the native CLI supports `queue --help` before opting into native mode.
-Codex MCP processes do not necessarily inherit `CODEX_THREAD_ID`; do not globally
-register a native adapter with a guessed or shared conversation UUID. Use the
-launcher for ordinary fresh/resumed sessions. A raw adapter without either
-transport remains pull-only and explicitly reports that attachment does not
-enable automatic delivery.
-
-Codex uses its own approval system. C3's Claude-specific permission relay and
-blocking `ask` integration are not supplied by this change. Voice messages arrive
-as broker transcripts with the original attachment reference; other media retain
-their attachment references for `download_attachment`.
+C3's Claude permission relay and blocking `ask` integration are unavailable.
+Voice arrives as broker transcripts; attachment references remain available for
+`download_attachment`. This change does not establish receipt parity with Claude.

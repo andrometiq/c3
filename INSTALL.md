@@ -460,7 +460,11 @@ c3-broker install-codex-shim
 The installer verifies the staged executable is C3's launcher. If no live C3
 launcher exists yet it copies the staged file next to `c3-broker`; an existing
 live C3 launcher is authoritative, so a stale staged file can never downgrade
-it. It then symlinks the live launcher into `~/.local/bin/codex` and every
+it. It creates an independent C3-owned executable at
+`~/.local/libexec/c3/codex-launcher` and links `~/.local/bin/c3-codex` to that
+copy. This explicit entrypoint survives replacement of `codex`; re-run the shim
+installer after a C3 update to refresh it. It also symlinks the live launcher
+into `~/.local/bin/codex` and every
 `~/.nvm/versions/node/*/bin/` so existing shells (which hash `codex` to the NVM
 path) bypass NVM in favor of the launcher. It refuses to replace an unrelated
 regular file without `--force`. It's idempotent; re-running is safe. Tell the
@@ -470,7 +474,8 @@ prebuilt `~/.local/bin` layout, that path is the launcher itself.
 
 On the **prebuilt** install the launcher already lives at
 `~/.local/bin/codex`, so that entry is skipped (there is nothing to shim) and
-only the NVM directories get symlinks. If a target is a regular file rather
+the explicit `c3-codex` alias plus the NVM directories get symlinks. On a source
+install the two local names plus each NVM directory get links. If a target is a regular file rather
 than a symlink — i.e. it may be a real `codex` binary — the command refuses
 rather than delete it; pass `--force` to replace it deliberately.
 

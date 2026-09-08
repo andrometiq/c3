@@ -4,7 +4,9 @@ package main
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -17,27 +19,65 @@ func TestModernManagementCommandsBypassLauncher(t *testing.T) {
 }
 
 func TestFindAdapterPrefersReleaseBesideResolvedLauncher(t *testing.T) {
+	testAdapterLookupProcess(t, true)
+}
+
+func TestFindAdapterBarePATHInvocationIgnoresHostileCWD(t *testing.T) {
+	testAdapterLookupProcess(t, false)
+}
+
+func TestAdapterLookupHelper(t *testing.T) {
+	if os.Getenv("C3_TEST_ADAPTER_LOOKUP") != "1" {
+		return
+	}
+	got, err := findAdapter(os.Args[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != os.Getenv("C3_TEST_EXPECT_ADAPTER") {
+		t.Fatalf("selected %q", got)
+	}
+}
+
+func testAdapterLookupProcess(t *testing.T, sibling bool) {
+	t.Helper()
 	root := t.TempDir()
-	release := filepath.Join(root, "release")
-	shimdir := filepath.Join(root, "bin")
-	if err := os.MkdirAll(release, 0755); err != nil {
+	release, pathdir, project := filepath.Join(root, "release"), filepath.Join(root, "bin"), filepath.Join(root, "project")
+	for _, dir := range []string{release, pathdir, project} {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	exe, err := os.Executable()
+	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.MkdirAll(shimdir, 0755); err != nil {
+	data, err := os.ReadFile(exe)
+	if err != nil {
 		t.Fatal(err)
 	}
-	launcher := executableScript(t, release, "codex")
-	want := executableScript(t, release, "c3-codex-adapter")
-	executableScript(t, shimdir, "c3-codex-adapter")
-	shim := filepath.Join(shimdir, "codex")
+	launcher := filepath.Join(release, "codex")
+	if err := os.WriteFile(launcher, data, 0755); err != nil {
+		t.Fatal(err)
+	}
+	shim := filepath.Join(pathdir, "codex")
 	if err := os.Symlink(launcher, shim); err != nil {
 		t.Fatal(err)
 	}
+	want := executableScript(t, pathdir, "c3-codex-adapter")
+	if sibling {
+		want = executableScript(t, release, "c3-codex-adapter")
+	}
+	executableScript(t, project, "c3-codex-adapter")
+	t.Setenv("PATH", pathdir)
 	t.Setenv("C3_CODEX_ADAPTER", "")
-	t.Setenv("PATH", shimdir)
-	got, err := findAdapter(shim)
-	if err != nil || got != want {
-		t.Fatalf("got %q, %v; want matching release %q", got, err, want)
+	t.Setenv("C3_TEST_ADAPTER_LOOKUP", "1")
+	t.Setenv("C3_TEST_EXPECT_ADAPTER", want)
+	cmd := exec.Command("codex", "-test.run=^TestAdapterLookupHelper$")
+	cmd.Args[0] = "codex"
+	cmd.Dir = project
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("bare PATH invocation: %v: %s", err, strings.TrimSpace(string(output)))
 	}
 }
 

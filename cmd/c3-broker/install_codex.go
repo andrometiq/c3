@@ -39,7 +39,8 @@ func runInstallCodexShim(args []string) error {
 		return nil
 	}
 	for _, path := range installed {
-		fmt.Printf("%s -> %s\n", path, launcher)
+		target, _ := os.Readlink(path)
+		fmt.Printf("%s -> %s\n", path, target)
 	}
 	return nil
 }
@@ -137,7 +138,13 @@ func isLauncherItself(target, launcher string) bool {
 }
 
 func installCodexShims(home, launcher string, force bool) ([]string, error) {
-	// Preserve an explicit C3 entrypoint if a Codex self-update replaces `codex`.
+	// The alias owns a separate executable, even when the prebuilt launcher
+	// occupies the very pathname a Codex installer replaces. Refresh atomically
+	// from the validated live launcher on each C3 shim installation.
+	aliasLauncher := filepath.Join(home, ".local", "libexec", "c3", "codex-launcher")
+	if err := replaceExecutable(launcher, aliasLauncher); err != nil {
+		return nil, err
+	}
 	targets := []string{filepath.Join(home, ".local", "bin", "codex"), filepath.Join(home, ".local", "bin", "c3-codex")}
 	nvmBins, err := filepath.Glob(filepath.Join(home, ".nvm", "versions", "node", "*", "bin"))
 	if err != nil {
@@ -173,7 +180,11 @@ func installCodexShims(home, launcher string, force bool) ([]string, error) {
 		if err := os.Remove(target); err != nil && !os.IsNotExist(err) {
 			return installed, err
 		}
-		if err := os.Symlink(launcher, target); err != nil {
+		destination := launcher
+		if filepath.Base(target) == "c3-codex" {
+			destination = aliasLauncher
+		}
+		if err := os.Symlink(destination, target); err != nil {
 			return installed, err
 		}
 		installed = append(installed, target)

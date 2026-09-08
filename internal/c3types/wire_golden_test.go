@@ -88,6 +88,8 @@ func wireGoldens() []wireGolden {
 		{
 			name: "Inbound",
 			value: Inbound{
+				ConsumedRecordID: "record-1",
+
 				Channel:       "telegram",
 				ChatID:        -1001,
 				TopicID:       ptrInt64(7),
@@ -110,9 +112,9 @@ func wireGoldens() []wireGolden {
 			keys: []string{
 				"Channel", "ChatID", "TopicID", "MessageID", "Sender", "Text",
 				"Attachments", "ReplyTo", "Timestamp", "MediaGroupID", "ForwardOrigin", "Merged", "Kind", "Event",
-				"DrainedFrom", "V", "ConvKind", "Edited",
+				"DrainedFrom", "V", "ConvKind", "Edited", "ConsumedRecordID",
 			},
-			omitEmpty: []string{"MediaGroupID", "ForwardOrigin", "Merged", "Kind", "Event", "DrainedFrom", "V", "ConvKind", "Edited"},
+			omitEmpty: []string{"MediaGroupID", "ForwardOrigin", "Merged", "Kind", "Event", "DrainedFrom", "V", "ConvKind", "Edited", "ConsumedRecordID"},
 		},
 		{
 			name: "InboundEvent",

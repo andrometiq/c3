@@ -1200,7 +1200,7 @@ func (w *RouteWorker) forwardOrFallbackCovering(_ context.Context, in *c3types.I
 		}
 		if err := conn.WriteJSON(ipc.InboundMsg{
 			Op: ipc.OpInbound, Inbound: *in, Covered: covered, Pending: pending,
-			DeliveryToken: deliveryToken,
+			DeliveryToken: deliveryToken, RecordIDs: coveredIDs,
 		}); err != nil {
 			if w.broker.Queue == nil {
 				log.Printf("deliver FAIL chan=%s chat=%d topic=%s msg=%d to cli=%s pid=%d: %v — %s, nothing stored — %s",
@@ -1734,7 +1734,22 @@ func (w *RouteWorker) handleFetch(_ context.Context, job *FetchJob) {
 	// for 2000 ordinary records is just as capable of assembling an unsendable
 	// frame as an unbounded drain is.
 	total, _ := w.broker.Queue.Pending(qrk)
-	cand, err := w.broker.Queue.Peek(qrk, n)
+	// Include consumed identities in the candidates BEFORE frame sizing. The
+	// worker owns the queue throughout peek/size/consume, under the existing
+	// confirmed-holder gate for every destructive mutation.
+	peek := func() ([]c3types.Inbound, error) {
+		rows, err := w.broker.Queue.PeekTracked(qrk, n)
+		out := make([]c3types.Inbound, 0, len(rows))
+		for _, row := range rows {
+			in := row.Inbound
+			if job.Ack {
+				in.ConsumedRecordID = row.RecordID
+			}
+			out = append(out, in)
+		}
+		return out, err
+	}
+	cand, err := peek()
 	if err != nil {
 		job.ResultCh <- FetchResult{Err: err}
 		return
@@ -1774,9 +1789,12 @@ func (w *RouteWorker) handleFetch(_ context.Context, job *FetchJob) {
 						if len(rows) > 0 {
 							w.retirePendingRecords([]string{rows[0].RecordID})
 						}
+						if len(rows) > 0 {
+							notice.ConsumedRecordID = rows[0].RecordID
+						}
 						notices = append(notices, notice)
 						total--
-						if cand, err = w.broker.Queue.Peek(qrk, n); err != nil {
+						if cand, err = peek(); err != nil {
 							return
 						}
 					}
@@ -1801,7 +1819,8 @@ func (w *RouteWorker) handleFetch(_ context.Context, job *FetchJob) {
 					msgs, err = w.broker.Queue.Consume(qrk, take)
 					if err == nil {
 						var ids []string
-						for _, row := range records {
+						for i, row := range records {
+							msgs[i].ConsumedRecordID = row.RecordID
 							ids = append(ids, row.RecordID)
 						}
 						w.retirePendingRecords(ids)
@@ -1843,6 +1862,9 @@ func (w *RouteWorker) handleFetch(_ context.Context, job *FetchJob) {
 			notices = []c3types.Inbound{oversizeNotice(cand[0], encodedSize(cand[0]), w.broker.Queue.RetentionDir(), false)}
 		}
 		msgs = cand[:fit]
+		for i := range msgs {
+			msgs[i].ConsumedRecordID = ""
+		}
 	}
 	remaining, _ := w.broker.Queue.Pending(qrk)
 	if !effectiveAck {

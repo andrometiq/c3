@@ -332,7 +332,10 @@ func (a *adapter) stableSessionID(ctx context.Context, cfg codexForwardConfig) (
 		return "", err
 	}
 	a.tidmu.Lock()
-	a.threadID = id
+	if a.threadID == "" {
+		a.threadID = id
+	}
+	id = a.threadID
 	a.tidmu.Unlock()
 	return id, nil
 }
@@ -433,9 +436,6 @@ func (a *adapter) dispatchRecoverSessionResult(conn *ipc.Conn, raw []byte) {
 	a.rsmu.Unlock()
 	if ch == nil {
 		return
-	}
-	if resp.Recovered && resp.QueuedCount > 0 && resp.Err == "" {
-		a.forwardBlocked.Store(true)
 	}
 	select {
 	case ch <- resp:

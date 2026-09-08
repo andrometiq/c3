@@ -90,3 +90,51 @@ func TestNativeQueueIsExplicitOptIn(t *testing.T) {
 		t.Fatal("queue delivery must not silently enable itself")
 	}
 }
+
+func TestNativeQueueAcceptanceControlsBrokerAck(t *testing.T) {
+	for _, lost := range []bool{false, true} {
+		t.Run(map[bool]string{false: "accepted", true: "lost"}[lost], func(t *testing.T) {
+			dir := t.TempDir()
+			argsPath, release := filepath.Join(dir, "args"), filepath.Join(dir, "release")
+			t.Setenv("C3_QUEUE_TEST_ARGS", argsPath)
+			t.Setenv("C3_QUEUE_TEST_RELEASE", release)
+			t.Cleanup(func() { _ = os.WriteFile(release, nil, 0600) })
+			ending := `printf 'Queued message test-id for thread %s.\n' "$3"`
+			if lost {
+				ending = "exit 1"
+			}
+			bin := nativeQueueExecutable(t, `printf '%s\n' "$5" > "$C3_QUEUE_TEST_ARGS"
+: > "$C3_QUEUE_TEST_ARGS.ready"
+while [ ! -f "$C3_QUEUE_TEST_RELEASE" ]; do sleep 0.01; done
+`+ending+"\n")
+			t.Setenv("C3_CODEX_QUEUE_BIN", bin)
+			t.Setenv("C3_CODEX_THREAD_ID", nativeQueueTestThread)
+			a, peer := adapterWithBrokerConn(t)
+			acks := ackFrames(t, peer)
+			enqueueRecord(a, "telegram", 9, "native literal $(do-not-run)", "native-row")
+			deadline := time.Now().Add(time.Second)
+			for {
+				if _, err := os.Stat(argsPath + ".ready"); err == nil {
+					break
+				}
+				if time.Now().After(deadline) {
+					t.Fatal("native transport never received payload")
+				}
+				time.Sleep(time.Millisecond)
+			}
+			got, err := os.ReadFile(argsPath)
+			if err != nil || !strings.Contains(string(got), "native literal $(do-not-run)") {
+				t.Fatalf("literal payload lost: %s %v", got, err)
+			}
+			expectNoAck(t, acks)
+			if err := os.WriteFile(release, nil, 0600); err != nil {
+				t.Fatal(err)
+			}
+			if lost {
+				expectNoAck(t, acks)
+			} else {
+				expectAck(t, acks, 9, "native literal $(do-not-run)")
+			}
+		})
+	}
+}

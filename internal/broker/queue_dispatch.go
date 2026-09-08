@@ -153,6 +153,9 @@ func (b *Broker) fetchSelectedRoutes(stub *Stub, req ipc.FetchQueueReq, routes [
 			}
 			break
 		}
+		// Keep each consumed record's identity on its route's response copy.
+		// Codex invalidates only matching pending pushes; neither the combined
+		// Remaining count nor this response's frame order is a drain boundary.
 		resp.Messages = append(resp.Messages, res.Messages...)
 		resp.Remaining += res.Remaining
 		if !req.All && remainingLimit > 0 {

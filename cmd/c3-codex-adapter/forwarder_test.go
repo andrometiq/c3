@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -14,7 +15,7 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-func TestForwardInboundToCodexAppServerStartsTurn(t *testing.T) {
+func TestForwardInboundToCodexAppServerQueuesInput(t *testing.T) {
 	var got []map[string]any
 	upgrader := websocket.Upgrader{}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -35,16 +36,12 @@ func TestForwardInboundToCodexAppServerStartsTurn(t *testing.T) {
 				continue
 			}
 			method, _ := msg["method"].(string)
-			if method == "thread/queue/add" {
-				_ = c.WriteJSON(map[string]any{"id": id, "error": map[string]any{"code": -32601, "message": "method not found"}})
-				continue
-			}
 			result := map[string]any{}
 			switch method {
 			case "thread/loaded/list":
 				result["data"] = []string{"thread-1"}
-			case "turn/start":
-				result["turn"] = map[string]any{"id": "turn-1"}
+			case "thread/queue/add":
+				result["queuedSubmission"] = map[string]any{"id": "q-1", "clientUserMessageId": msg["params"].(map[string]any)["clientUserMessageId"]}
 			default:
 				result["ok"] = true
 			}
@@ -79,7 +76,7 @@ func TestForwardInboundToCodexAppServerStartsTurn(t *testing.T) {
 			methods = append(methods, method)
 		}
 	}
-	wantMethods := []string{"initialize", "initialized", "thread/loaded/list", "thread/queue/add", "thread/resume", "turn/start"}
+	wantMethods := []string{"initialize", "initialized", "thread/loaded/list", "thread/queue/add"}
 	if len(methods) != len(wantMethods) {
 		t.Fatalf("methods = %#v, want %#v", methods, wantMethods)
 	}
@@ -134,7 +131,7 @@ func captureCodexForwardedText(t *testing.T, req codexForwardReq) string {
 					textCh <- text
 				}
 			}
-			if err := conn.WriteJSON(map[string]any{"id": id, "result": map[string]any{"queuedSubmission": map[string]any{"id": "q-1"}}}); err != nil {
+			if err := conn.WriteJSON(map[string]any{"id": id, "result": map[string]any{"queuedSubmission": map[string]any{"id": "q-1", "clientUserMessageId": msg["params"].(map[string]any)["clientUserMessageId"]}}}); err != nil {
 				return
 			}
 		}
@@ -216,11 +213,7 @@ func TestForwardInboundToCodexAppServerRefusesAmbiguousCWD(t *testing.T) {
 				continue
 			}
 			method, _ := msg["method"].(string)
-			if method == "thread/queue/add" {
-				_ = c.WriteJSON(map[string]any{"id": id, "error": map[string]any{"code": -32601, "message": "method not found"}})
-				continue
-			}
-			result := map[string]any{"queuedSubmission": map[string]any{"id": "q-1"}}
+			result := map[string]any{"queuedSubmission": map[string]any{"id": "q-1", "clientUserMessageId": msg["params"].(map[string]any)["clientUserMessageId"]}}
 			switch method {
 			case "thread/loaded/list":
 				result = map[string]any{"data": []string{"thread-old", "thread-new"}}

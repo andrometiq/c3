@@ -37,6 +37,8 @@ type InboundMsg struct {
 	// and durable records this ack covers even when two outstanding pushes share
 	// one MessageID. Empty is the legacy wire shape.
 	DeliveryToken string `json:"delivery_token,omitempty"`
+	// RecordIDs identifies the durable rows covered by this push.
+	RecordIDs []string `json:"record_ids,omitempty"`
 }
 
 // ToolCallReq is the adapter → broker forward of an MCP tool call. The broker

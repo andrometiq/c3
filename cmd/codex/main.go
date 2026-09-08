@@ -777,22 +777,24 @@ func standaloneCodexPath(codexHome string) string {
 	return ""
 }
 
-func findAdapter(self string) (string, error) {
+func findAdapter(_ string) (string, error) {
 	if explicit := os.Getenv("C3_CODEX_ADAPTER"); explicit != "" {
 		return explicit, nil
 	}
-	selfAbs, _ := filepath.Abs(self)
-	if resolved, err := filepath.EvalSymlinks(selfAbs); err == nil {
-		selfAbs = resolved
-	}
-	sibling := filepath.Join(filepath.Dir(selfAbs), "c3-codex-adapter")
-	if info, err := os.Stat(sibling); err == nil && !info.IsDir() && info.Mode()&0o111 != 0 {
-		return sibling, nil
+	// argv[0] can be a bare PATH name (or caller-controlled). Only the actual
+	// executable identifies the release directory; resolution failure skips it.
+	if executable, err := os.Executable(); err == nil {
+		if resolved, err := filepath.EvalSymlinks(executable); err == nil {
+			sibling := filepath.Join(filepath.Dir(resolved), "c3-codex-adapter")
+			if info, err := os.Stat(sibling); err == nil && !info.IsDir() && info.Mode()&0o111 != 0 {
+				return sibling, nil
+			}
+		}
 	}
 	if found, err := exec.LookPath("c3-codex-adapter"); err == nil {
 		return found, nil
 	}
-	return "", fmt.Errorf("could not find c3-codex-adapter in PATH")
+	return "", fmt.Errorf("could not find c3-codex-adapter beside the running launcher or in PATH")
 }
 
 func execReal(realCodex string, args []string, env []string) error {

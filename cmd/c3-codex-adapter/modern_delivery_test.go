@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -11,12 +10,11 @@ import (
 	"time"
 
 	"github.com/Andrometiq/c3/internal/c3types"
-	"github.com/Andrometiq/c3/internal/ipc"
 	"github.com/gorilla/websocket"
 )
 
 func TestModernCodexQueuesWithoutStartingCompetingTurn(t *testing.T) {
-	for _, mode := range []string{"accepted", "malformed", "rejected", "legacy"} {
+	for _, mode := range []string{"accepted", "missing-echo", "wrong-echo", "malformed", "rejected", "legacy"} {
 		t.Run(mode, func(t *testing.T) {
 			var starts atomic.Int32
 			var queueCalls atomic.Int32
@@ -45,8 +43,15 @@ func TestModernCodexQueuesWithoutStartingCompetingTurn(t *testing.T) {
 							t.Error("queue recipient or idempotency id missing")
 						}
 						switch mode {
-						case "accepted":
-							response["result"] = map[string]any{"queuedSubmission": map[string]any{"id": "queued-1"}}
+						case "accepted", "missing-echo", "wrong-echo":
+							submission := map[string]any{"id": "queued-1", "clientUserMessageId": params["clientUserMessageId"]}
+							if mode == "missing-echo" {
+								delete(submission, "clientUserMessageId")
+							}
+							if mode == "wrong-echo" {
+								submission["clientUserMessageId"] = "other"
+							}
+							response["result"] = map[string]any{"queuedSubmission": submission}
 						case "rejected":
 							response["error"] = map[string]any{"code": -32000, "message": "unavailable"}
 						case "legacy":
@@ -64,7 +69,7 @@ func TestModernCodexQueuesWithoutStartingCompetingTurn(t *testing.T) {
 			}))
 			defer s.Close()
 			err := forwardInboundToCodexAppServer(context.Background(), &c3types.Inbound{MessageID: 8, Text: "hello"}, codexForwardConfig{WSURL: "ws" + strings.TrimPrefix(s.URL, "http"), ThreadID: "pinned-thread", Timeout: time.Second})
-			wantSuccess := mode == "accepted" || mode == "legacy"
+			wantSuccess := mode == "accepted"
 			if (err == nil) != wantSuccess {
 				t.Fatalf("result %v for %s", err, mode)
 			}
@@ -72,9 +77,6 @@ func TestModernCodexQueuesWithoutStartingCompetingTurn(t *testing.T) {
 				t.Fatal("expected one durable queue attempt")
 			}
 			wantStarts := int32(0)
-			if mode == "legacy" {
-				wantStarts = 1
-			}
 			if starts.Load() != wantStarts {
 				t.Fatalf("turn/start count %d, want %d", starts.Load(), wantStarts)
 			}
@@ -94,8 +96,11 @@ func TestCodexDeliveryIdentityAndRetryKeyRemainStable(t *testing.T) {
 	if one != codexInboundMessageID("original-thread", in) {
 		t.Fatal("retry key changed")
 	}
+	if one == codexInboundMessageID("other-thread", in) {
+		t.Fatal("recipient reused retry key")
+	}
 	in.Text = "edited"
-	if one == codexInboundMessageID("original-thread", in) || one == codexInboundMessageID("other-thread", in) {
+	if one == codexInboundMessageID("original-thread", in) {
 		t.Fatal("different content/recipient reused retry key")
 	}
 }
@@ -105,60 +110,5 @@ func TestCodexEventPayloadSurvivesDelivery(t *testing.T) {
 	got := formatInboundTurnText(in)
 	if !strings.Contains(got, "continue") || !strings.Contains(got, "callback") {
 		t.Fatalf("lost callback: %s", got)
-	}
-}
-
-func TestCodexFullDrainRestoresAckAndDiscardsStaleForward(t *testing.T) {
-	t.Setenv("C3_CODEX_REMOTE_BRIDGE", "1")
-	t.Setenv("C3_CODEX_APP_SERVER_WS", startFakeCodexAppServer(t))
-	t.Setenv("C3_CODEX_THREAD_ID", "thread-1")
-	a, peer := adapterWithBrokerConn(t)
-	a.forwardBlocked.Store(true)
-	stale := codexForwardReq{inbound: c3types.Inbound{MessageID: 1, Text: "already drained"}, covered: 1, conn: a.currentConn(), epoch: a.forwardEpoch.Load()}
-	a.clearForwardBlocked()
-	a.forwardCh <- stale
-	fresh := ipc.InboundMsg{Op: ipc.OpInbound, Covered: 1, Inbound: c3types.Inbound{MessageID: 2, Text: "new message"}}
-	raw, _ := json.Marshal(fresh)
-	a.handleInbound(raw)
-	ack, ok := readDeliveredAck(t, peer, 3*time.Second)
-	if !ok || ack.UpdateID != 2 {
-		t.Fatalf("stale message was acked or recovery remained blocked: %+v, %t", ack, ok)
-	}
-}
-
-func TestDrainResetPrecedesNextInboundWithoutToolScheduling(t *testing.T) {
-	for _, tc := range []struct {
-		name      string
-		ack       bool
-		remaining int
-		err       string
-		wantReset bool
-	}{
-		{"drained", true, 0, "", true},
-		{"peek", false, 0, "", false},
-		{"partial", true, 1, "", false},
-		{"failed", true, 0, "unavailable", false},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			a := newAdapter()
-			a.forwardBlocked.Store(true)
-			ch := make(chan ipc.FetchQueueResp, 1)
-			a.fqPending["fetch"] = ch
-			a.fqAck["fetch"] = tc.ack
-			raw, _ := json.Marshal(ipc.FetchQueueResp{ID: "fetch", Remaining: tc.remaining, Err: tc.err})
-			a.dispatchFetchQueueResult(raw)
-			// The tool goroutine has deliberately not consumed its response.
-			// A following IPC inbound must already see the correct epoch.
-			if got := a.forwardEpoch.Load() != 0; got != tc.wantReset {
-				t.Fatalf("reset before next frame = %t, want %t", got, tc.wantReset)
-			}
-			if a.forwardBlocked.Load() == tc.wantReset {
-				t.Fatal("forwarding latch does not match drain result")
-			}
-			a.dispatchFetchQueueResult(raw)
-			if a.forwardEpoch.Load() > 1 {
-				t.Fatal("duplicate response invalidated fresh inbound")
-			}
-		})
 	}
 }

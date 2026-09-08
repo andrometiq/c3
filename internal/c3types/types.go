@@ -36,6 +36,10 @@ type Inbound struct {
 	Timestamp     time.Time      `json:"Timestamp"`
 	MediaGroupID  string         `json:"MediaGroupID,omitempty"`
 	ForwardOrigin *ForwardOrigin `json:"ForwardOrigin,omitempty"`
+
+	// ConsumedRecordID is set only on destructive fetch response copies. It is
+	// the broker's durable identity, never an arrival-order watermark.
+	ConsumedRecordID string `json:"ConsumedRecordID,omitempty"`
 	// Merged carries delivery-time source boundaries for a debounced push. Queue
 	// rows are persisted before merging, so this presentation-only field is never
 	// stored on an organic row.

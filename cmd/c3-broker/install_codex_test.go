@@ -2,7 +2,9 @@ package main
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -134,8 +136,12 @@ func TestInstallCodexShimsCreatesLocalAndNVMSymlinks(t *testing.T) {
 		if err != nil {
 			t.Fatalf("readlink %s: %v", path, err)
 		}
-		if target != launcher {
-			t.Fatalf("%s -> %s, want %s", path, target, launcher)
+		want := launcher
+		if filepath.Base(path) == "c3-codex" {
+			want = filepath.Join(home, ".local", "libexec", "c3", "codex-launcher")
+		}
+		if target != want {
+			t.Fatalf("%s -> %s, want %s", path, target, want)
 		}
 	}
 }
@@ -242,5 +248,42 @@ func TestInstallCodexShims_Idempotent(t *testing.T) {
 	}
 	if _, err := os.Stat(launcher); err != nil {
 		t.Errorf("launcher must survive repeated installs: %v", err)
+	}
+}
+
+func TestCodexAliasSurvivesReplacingCodex(t *testing.T) {
+	for _, layout := range []string{"prebuilt", "source"} {
+		t.Run(layout, func(t *testing.T) {
+			home := t.TempDir()
+			launcher := filepath.Join(home, ".local", "bin", "codex")
+			if layout == "source" {
+				launcher = filepath.Join(home, "go", "bin", "codex")
+			}
+			writeLauncher(t, launcher)
+			if err := os.WriteFile(launcher, []byte("#!/bin/sh\nprintf 'c3-alias-ok\\n'\n"), 0755); err != nil {
+				t.Fatal(err)
+			}
+			want, err := os.ReadFile(launcher)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := installCodexShims(home, launcher, false); err != nil {
+				t.Fatal(err)
+			}
+			// Model an updater writing through an existing codex symlink too.
+			if err := os.WriteFile(filepath.Join(home, ".local", "bin", "codex"), []byte("upstream replacement"), 0755); err != nil {
+				t.Fatal(err)
+			}
+			got, err := os.ReadFile(filepath.Join(home, ".local", "bin", "c3-codex"))
+			if err != nil || string(got) != string(want) {
+				t.Fatalf("alias changed after Codex update: %q, %v", got, err)
+			}
+			if runtime.GOOS != "windows" {
+				out, err := exec.Command(filepath.Join(home, ".local", "bin", "c3-codex")).Output()
+				if err != nil || strings.TrimSpace(string(out)) != "c3-alias-ok" {
+					t.Fatalf("alias no longer runs C3: %s, %v", out, err)
+				}
+			}
+		})
 	}
 }

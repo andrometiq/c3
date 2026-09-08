@@ -82,16 +82,12 @@ func startFakeCodexAppServer(t *testing.T) string {
 				continue
 			}
 			method, _ := msg["method"].(string)
-			if method == "thread/queue/add" {
-				_ = c.WriteJSON(map[string]any{"id": id, "error": map[string]any{"code": -32601, "message": "method not found"}})
-				continue
-			}
 			result := map[string]any{}
 			switch method {
 			case "thread/loaded/list":
 				result["data"] = []string{"thread-1"}
-			case "turn/start":
-				result["turn"] = map[string]any{"id": "turn-1"}
+			case "thread/queue/add":
+				result["queuedSubmission"] = map[string]any{"id": "q-1", "clientUserMessageId": msg["params"].(map[string]any)["clientUserMessageId"]}
 			default:
 				result["ok"] = true
 			}
@@ -137,23 +133,19 @@ func startFlakyCodexAppServer(t *testing.T, failFirstN int) (wsURL string, turns
 				continue
 			}
 			method, _ := msg["method"].(string)
-			if method == "thread/queue/add" {
-				_ = c.WriteJSON(map[string]any{"id": id, "error": map[string]any{"code": -32601, "message": "method not found"}})
-				continue
-			}
 			result := map[string]any{}
 			switch method {
 			case "thread/loaded/list":
 				result["data"] = []string{"thread-1"}
-			case "turn/start":
-				result["turn"] = map[string]any{"id": "turn-1"}
+			case "thread/queue/add":
+				result["queuedSubmission"] = map[string]any{"id": "q-1", "clientUserMessageId": msg["params"].(map[string]any)["clientUserMessageId"]}
 			default:
 				result["ok"] = true
 			}
 			if err := c.WriteJSON(map[string]any{"id": id, "result": result}); err != nil {
 				return
 			}
-			if method == "turn/start" {
+			if method == "thread/queue/add" {
 				select {
 				case turnCh <- struct{}{}:
 				default:
@@ -165,18 +157,13 @@ func startFlakyCodexAppServer(t *testing.T, failFirstN int) (wsURL string, turns
 	return "ws" + server.URL[len("http"):], turnCh
 }
 
-// M2 loss regression: an OLDER message whose forward FAILS (correctly no ack)
-// followed by a NEWER message whose forward SUCCEEDS must NOT produce an ack for
-// the newer one — the broker's consume is count-off-HEAD, so acking the newer
-// message would Consume the OLDER (undelivered) message off the head → silent
-// loss. The retired per-inbound-goroutine design acked the newer message here;
-// the serial loop + `blocked` latch must not.
-func TestCodexForward_OlderFailLaterSuccess_DoesNotAck(t *testing.T) {
+// A later success acknowledges its own exact records, leaving the failed row held.
+func TestCodexForward_OlderFailLaterSuccess_AcksOnlySuccess(t *testing.T) {
 	wsURL, turns := startFlakyCodexAppServer(t, 1) // first (oldest) forward fails; rest succeed
 	t.Setenv("C3_CODEX_ALLOW_MANUAL_FORWARD", "1")
 	t.Setenv("C3_CODEX_REMOTE_BRIDGE", "")
 	t.Setenv("C3_CODEX_APP_SERVER_WS", wsURL)
-	t.Setenv("C3_CODEX_THREAD_ID", "")
+	t.Setenv("C3_CODEX_THREAD_ID", "thread-1")
 
 	a, peer := adapterWithBrokerConn(t)
 
@@ -195,8 +182,8 @@ func TestCodexForward_OlderFailLaterSuccess_DoesNotAck(t *testing.T) {
 		t.Fatal("the newer message's forward never completed a turn/start")
 	}
 
-	if ack, got := readDeliveredAck(t, peer, 500*time.Millisecond); got {
-		t.Fatalf("no ack may be sent while the older (head) message is undelivered — got %+v; acking it would Consume the older message off the head (loss)", ack)
+	if ack, got := readDeliveredAck(t, peer, 3*time.Second); !got || ack.UpdateID != 2 || !ack.OK {
+		t.Fatalf("later success must ack its own token despite older failure: %+v, %v", ack, got)
 	}
 }
 
@@ -209,7 +196,7 @@ func TestCodexForward_AllSuccess_AcksInOrder(t *testing.T) {
 	t.Setenv("C3_CODEX_ALLOW_MANUAL_FORWARD", "1")
 	t.Setenv("C3_CODEX_REMOTE_BRIDGE", "")
 	t.Setenv("C3_CODEX_APP_SERVER_WS", wsURL)
-	t.Setenv("C3_CODEX_THREAD_ID", "")
+	t.Setenv("C3_CODEX_THREAD_ID", "thread-1")
 
 	a, peer := adapterWithBrokerConn(t)
 
@@ -245,7 +232,7 @@ func TestHandleInbound_Codex_ForwardSuccessSendsDeliveredAck(t *testing.T) {
 	t.Setenv("C3_CODEX_ALLOW_MANUAL_FORWARD", "1")
 	t.Setenv("C3_CODEX_REMOTE_BRIDGE", "")
 	t.Setenv("C3_CODEX_APP_SERVER_WS", wsURL)
-	t.Setenv("C3_CODEX_THREAD_ID", "")
+	t.Setenv("C3_CODEX_THREAD_ID", "thread-1")
 
 	a, peer := adapterWithBrokerConn(t)
 
@@ -275,7 +262,7 @@ func TestHandleInbound_Codex_ForwardFailureDoesNotAck(t *testing.T) {
 	t.Setenv("C3_CODEX_REMOTE_BRIDGE", "")
 	// Port 1 has no listener → dial refuses immediately → forward returns an error.
 	t.Setenv("C3_CODEX_APP_SERVER_WS", "ws://127.0.0.1:1")
-	t.Setenv("C3_CODEX_THREAD_ID", "")
+	t.Setenv("C3_CODEX_THREAD_ID", "thread-1")
 
 	a, peer := adapterWithBrokerConn(t)
 
@@ -325,7 +312,7 @@ func TestHandleInbound_Codex_ForwardingEnabledButNoWSURL_NoAck(t *testing.T) {
 	t.Setenv("C3_CODEX_ALLOW_MANUAL_FORWARD", "1") // forwarding ENABLED
 	t.Setenv("C3_CODEX_REMOTE_BRIDGE", "")
 	t.Setenv("C3_CODEX_APP_SERVER_WS", "") // but no WS URL → forward no-ops
-	t.Setenv("C3_CODEX_THREAD_ID", "")
+	t.Setenv("C3_CODEX_THREAD_ID", "thread-1")
 
 	a, peer := adapterWithBrokerConn(t)
 

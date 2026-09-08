@@ -11,13 +11,7 @@ import (
 	"github.com/Andrometiq/c3/internal/ipc"
 )
 
-// Loss regression (review finding 1): a forwardCh buffer-full DROP in handleInbound
-// leaves the dropped inbound undelivered at/near the queue head. Because the broker's
-// OpInboundDelivered consume is count-off-HEAD, a later successful forward's ack would
-// Consume that undelivered head line → silent loss. The drop path must therefore latch
-// forwardBlocked exactly as a forward FAILURE does, so codexForwardLoop stops acking.
-// Before the fix the latch was a loop-local var unreachable from handleInbound, so the
-// drop opened an un-guarded gap.
+// A full local buffer leaves the message held and emits a recovery notice.
 func TestHandleInbound_Codex_ForwardBufferFullDrop_LatchesBlocked(t *testing.T) {
 	t.Setenv("C3_CODEX_ALLOW_MANUAL_FORWARD", "1")
 	t.Setenv("C3_CODEX_REMOTE_BRIDGE", "")
@@ -43,37 +37,37 @@ func TestHandleInbound_Codex_ForwardBufferFullDrop_LatchesBlocked(t *testing.T) 
 	a.bmu.Unlock()
 	peer := ipc.NewConn(peerSide)
 
-	if a.forwardBlocked.Load() {
-		t.Fatal("precondition: forwardBlocked must start false")
+	if a.recoveryNoticeSent.Load() {
+		t.Fatal("precondition: recoveryNoticeSent must start false")
 	}
 
 	msg := ipc.InboundMsg{Op: ipc.OpInbound, Covered: 1, Inbound: c3types.Inbound{Channel: "telegram", ChatID: -100, MessageID: 42, Text: "dropped"}}
 	raw, _ := json.Marshal(msg)
 	a.handleInbound(raw) // forwardCh full → default: drop → latchForwardBlocked
 
-	if !a.forwardBlocked.Load() {
-		t.Fatal("a buffer-full forward drop must latch forwardBlocked, else a later successful forward's count-off-head ack Consumes the undelivered head message → silent loss")
+	if !a.recoveryNoticeSent.Load() {
+		t.Fatal("a buffer-full forward drop must surface held-message recovery")
 	}
 	if _, got := readDeliveredAck(t, peer, 300*time.Millisecond); got {
 		t.Fatal("the drop path itself must not send an ack")
 	}
 }
 
-// Recovery regression (review finding 2): latching forwardBlocked must fire EXACTLY ONE
+// Recovery regression (review finding 2): latching recoveryNoticeSent must fire EXACTLY ONE
 // fetch_queue recovery nudge on the false→true transition (so the stuck head message is
 // drainable even in bridge mode, where the steady-state nudge is suppressed), and be an
 // idempotent no-op thereafter — no per-inbound nudge spam.
 func TestLatchForwardBlocked_FiresExactlyOneRecoveryNudge(t *testing.T) {
 	a, buf := adapterWithCaptureTransport(t)
 
-	if a.forwardBlocked.Load() {
-		t.Fatal("precondition: forwardBlocked must start false")
+	if a.recoveryNoticeSent.Load() {
+		t.Fatal("precondition: recoveryNoticeSent must start false")
 	}
 	a.latchForwardBlocked("WS forward failed")
 	a.latchForwardBlocked("forward queue full") // already latched → must be a no-op
 
-	if !a.forwardBlocked.Load() {
-		t.Fatal("forwardBlocked must remain latched after the first transition")
+	if !a.recoveryNoticeSent.Load() {
+		t.Fatal("recoveryNoticeSent must remain latched after the first transition")
 	}
 	if n := strings.Count(buf.String(), "notifications/message"); n != 1 {
 		t.Fatalf("latch must fire EXACTLY ONE recovery nudge (got %d) — it is one-shot per session", n)

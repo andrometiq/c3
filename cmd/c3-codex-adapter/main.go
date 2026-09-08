@@ -271,26 +271,18 @@ type adapter struct {
 	tidmu    sync.Mutex
 	threadID string
 
-	// forwardCh feeds the SINGLE serial Codex-forward goroutine (codexForwardLoop,
-	// started in newAdapter). Enqueueing here instead of spawning a goroutine per
-	// inbound is the M2 loss fix: the broker's OpInboundDelivered consume is
-	// count-off-HEAD (worker.go handleConsume → Queue.Consume(n); MessageID only
-	// logged), so an ack is only safe when acks arrive in queue order, head-first,
-	// and never while an earlier message is undelivered. Serial processing gives
-	// in-order; the forwardBlocked latch gives never-ack-past-a-gap.
-	forwardCh chan codexForwardReq
-
-	// forwardBlocked latches true the instant an undelivered gap opens at/near the
-	// queue head — a forward FAILURE in codexForwardLoop OR a forwardCh buffer-full
-	// DROP in handleInbound (which runs on the IPC-read goroutine and cannot reach
-	// the loop's local scope). Once set, codexForwardLoop stops acking, so no later
-	// successful forward's count-off-head ack can Consume the undelivered head
-	// message off the queue → no silent loss. Shared across two goroutines, so it
-	// is atomic. A full fetch_queue drain resets it and invalidates older
-	// forward requests; the false→true transition emits a recovery notice.
-	forwardBlocked atomic.Bool
-	// A completed manual drain invalidates older buffered/in-flight forwards.
-	forwardEpoch atomic.Uint64
+	// deliveryMu serializes transport completion with destructive fetch requests.
+	// deliveryStateMu also protects invalidation on the broker reader: fetched
+	// record identities can obsolete a buffered batch without relying on frames.
+	deliveryMu        sync.Mutex
+	deliveryStateMu   sync.Mutex
+	forwards          map[*codexForwardState]struct{}
+	deliveryUncertain bool
+	queueUnsupported  bool
+	forwardCh         chan codexForwardReq
+	// Diagnostic/one-shot notice only. Broker tokens make acknowledgements exact;
+	// a failed earlier message never suppresses a later successful token's ack.
+	recoveryNoticeSent atomic.Bool
 }
 
 // codexForwardReq is one inbound queued for the serial Codex-forward goroutine.
@@ -303,7 +295,12 @@ type codexForwardReq struct {
 	covered   int
 	token     string
 	conn      *ipc.Conn
-	epoch     uint64
+	state     *codexForwardState
+}
+
+type codexForwardState struct {
+	ids      []string
+	obsolete bool
 }
 
 func newAdapter() *adapter {
@@ -315,11 +312,7 @@ func newAdapter() *adapter {
 		rsPending: map[*ipc.Conn]chan ipc.RecoverSessionResp{},
 		forwardCh: make(chan codexForwardReq, 256),
 	}
-	// Single serial Codex-forward consumer. Started here (not per-inbound) so all
-	// forwards + delivery acks go through one in-order path — the invariant the
-	// broker's count-off-head consume requires (M2). Parks on forwardCh until an
-	// inbound is enqueued; lives for the process lifetime like the old detached
-	// forward goroutines did (no separate shutdown).
+	// Preserve submission order without suppressing unrelated delivery acks.
 	go a.codexForwardLoop()
 	return a
 }
@@ -848,19 +841,14 @@ func (a *adapter) handleInbound(raw []byte) {
 	//
 	// I6: the true pending count is msg.Pending + msg.Covered. The broker stamps
 	// Pending = lines queued AFTER the covered ones, and Covered = the lines THIS
-	// push added (still queued — Codex never sends OpInboundDelivered, so the
-	// just-pushed line is NOT consumed). Hardcoding 1 undercounted a debounced
+	// push added (still queued until confirmed acceptance). Hardcoding 1 undercounted a debounced
 	// merge / existing backlog. Floor at 1 (this push delivered at least itself).
 	pendingCount := msg.Pending + msg.Covered
 	if pendingCount < 1 {
 		pendingCount = 1
 	}
-	// Nudge = the notify-only delivery signal (agent → fetch_queue → consume). It
-	// is SUPPRESSED in bridge mode (M2 hazard c): when forwarding is enabled the
-	// serial WS forward below is the SOLE delivery+consume path, and a nudge telling
-	// the agent to call fetch_queue(ack=true) would add a SECOND count-off-head
-	// consumer racing the forward's ack → over-consume → silent loss. In notify-only
-	// mode (forwarding disabled) the nudge is the only delivery signal, so it stays.
+	// Ordinary arrivals need a pull nudge only when forwarding is disabled.
+	// Transport failures send their own recovery notice.
 	if a.transport != nil && !codexForwardingAllowed() {
 		// Name the topic (§5) so a stale/wrong nudge is human-distinguishable.
 		route := a.currentTopicName()
@@ -888,34 +876,25 @@ func (a *adapter) handleInbound(raw []byte) {
 		}
 	}
 
-	// WS forwarder (gated by env, see split-brain guard). Enqueue onto the SINGLE
-	// serial forwarder (codexForwardLoop) instead of spawning a goroutine per
-	// inbound — that per-inbound design was the M2 loss bug (an older message's
-	// forward failing while a newer one acked Count=1 consumed the OLDER undelivered
-	// message off the head). conn is captured NOW (a.currentConn()) so a reconnect
-	// during the forward can't redirect the later ack (hazard b). On a SUCCESSFUL,
-	// not-blocked forward the loop acks so the broker Consumes the queued copy
-	// (D-RC2); on failure it never acks and the content stays queued for fetch_queue
-	// recovery. Inbound is copied by value so the loop owns it.
 	if codexForwardingAllowed() {
 		req := codexForwardReq{
 			inbound: msg.Inbound, covered: msg.Covered,
 			originTag: a.originTag(&msg.Inbound), token: msg.DeliveryToken, conn: a.currentConn(),
-			epoch: a.forwardEpoch.Load(),
+			state: &codexForwardState{ids: msg.RecordIDs},
 		}
+		a.deliveryStateMu.Lock()
+		if a.forwards == nil {
+			a.forwards = make(map[*codexForwardState]struct{})
+		}
+		a.forwards[req.state] = struct{}{}
+		a.deliveryStateMu.Unlock()
 		select {
 		case a.forwardCh <- req:
 		default:
-			// forwardCh full (256 buffered): skip this live forward and do NOT ack.
-			// The inbound is durably queued in the broker, but skipping the forward
-			// leaves it UNDELIVERED at/near the head. The broker's ack is
-			// count-off-HEAD, so a later successful forward acking Count>=1 would
-			// Consume THIS undelivered line off the head → silent loss. So latch
-			// forwardBlocked exactly as a forward FAILURE does: codexForwardLoop then
-			// stops acking and the content survives for fetch_queue recovery, which
-			// the one-shot nudge (latchForwardBlocked) prompts even in bridge mode.
-			log.Printf("codex forward queue full — skipping live forward for inbound id=%d; latching forwardBlocked so no later ack consumes it (fetch_queue recovery)", msg.Inbound.MessageID)
-			a.latchForwardBlocked("forward queue full")
+			a.deliveryStateMu.Lock()
+			delete(a.forwards, req.state)
+			a.latchForwardBlocked("forward queue full; message held")
+			a.deliveryStateMu.Unlock()
 		}
 	}
 }
@@ -967,112 +946,73 @@ func codexForwardingAllowed() bool {
 		os.Getenv("C3_CODEX_ALLOW_MANUAL_FORWARD") == "1"
 }
 
-// codexForwardLoop is the SINGLE consumer of forwardCh. It pushes each inbound as
-// a Codex turn via WebSocket, strictly in enqueue (= queue) order, and is the ONLY
-// path that sends an OpInboundDelivered ack.
-//
-// WS protocol per spec §4.4 Codex section:
-//
-//	initialize → notifications/initialized → thread/loaded/list →
-//	(thread/list filtered by cwd if multiple loaded) → thread/resume →
-//	thread/turn/start
-//
-// Each inbound opens a fresh short-lived WebSocket (Codex app-server expects new
-// turns this way; long-lived sessions would conflict with the visible TUI's
-// connection).
-//
-// M2 correctness: the broker's OpInboundDelivered consume is count-off-HEAD
-// (worker.go handleConsume → Queue.Consume(n); MessageID is only logged). That is
-// safe ONLY if (1) acks arrive in queue order, head-first, and (2) we never ack
-// while an earlier message is still undelivered. The retired per-inbound goroutine
-// design broke both: an older message's forward could FAIL (correctly no ack) while
-// a newer one SUCCEEDED and acked Count=1 → the broker dropped 1 off the head = the
-// OLDER undelivered message → silent loss. Serial processing here gives (1); the
-// shared forwardBlocked latch gives (2). forwardBlocked stays set for the session
-// once any forward fails OR handleInbound drops a buffer-full inbound (both open an
-// undelivered head gap) — Codex then falls back to fetch_queue-as-source-of-truth
-// (the safe pre-RC2 behavior); a session restart resets it. It is atomic because
-// handleInbound (the IPC-read goroutine) latches it too.
+// codexForwardLoop submits serially. Destructive fetch waits for the in-flight
+// attempt, then invalidates exactly the broker records it consumed. An uncertain
+// acceptance remains held; later successful tokens can still be acknowledged.
 func (a *adapter) codexForwardLoop() {
 	for req := range a.forwardCh {
-		if !req.inbound.IsEvent() && req.epoch != a.forwardEpoch.Load() {
-			continue
-		}
-		err := forwardInboundToCodexAppServerWithPrefix(context.Background(), &req.inbound, req.originTag, a.codexForwardConfig())
-		if req.inbound.IsEvent() {
-			if err != nil {
-				log.Printf("codex event delivery failed kind=%s: %v", req.inbound.Kind, err)
-			}
-			continue
-		}
-		if err != nil {
-			// errCodexForwardNoWS = forwarding enabled but unconfigured (no WS URL):
-			// the forward delivered nothing. It's a benign config state, not a real
-			// failure, so don't spam stderr per inbound. Any OTHER error is a real
-			// forward failure: log it. Either way the forward delivered nothing, so
-			// the head is now an undelivered message and any later ack would consume
-			// IT off the head → set blocked and never ack.
-			if !errors.Is(err, errCodexForwardNoWS) {
-				fmt.Fprintf(os.Stderr, "c3-codex-adapter: forward failed for inbound id=%d: %v\n", req.inbound.MessageID, err)
-			}
-			a.latchForwardBlocked("Codex delivery failed")
-			continue // DO NOT ack — content stays queued (recovery via fetch_queue).
-		}
-		if a.forwardBlocked.Load() || req.epoch != a.forwardEpoch.Load() {
-			// Delivered live, but an earlier message is still the undelivered head.
-			// Acking now would Consume that earlier message off the head → loss. So
-			// skip the ack: this (delivered) message stays queued and fetch_queue
-			// re-delivers it later — a benign duplicate, never loss.
-			continue
-		}
-		// Success AND not blocked: this message IS the current head and was delivered
-		// live → safe to ack so the broker Consumes exactly it. Gated exactly like the
-		// Claude adapter (cmd/c3-claude-adapter/main.go ~:655):
-		//   - codexForwardingAllowed() already held at the enqueue site, so the
-		//     notify-only (forwarding-disabled) path never enqueues — we never ack
-		//     content the agent did not receive live (Watch-out #6).
-		//   - !IsEvent(): a synthesized event (poll_result/reaction/callback) is never
-		//     queued, so it covers zero stored lines — acking one would over-consume
-		//     real backlog the event never delivered (Watch-out #5).
-		//   - covered >= 1: nothing to consume otherwise. The broker double-guards
-		//     (handleInboundDelivered drops Count<1, handleConsume skips Count<1) —
-		//     this adapter guard is the first line.
-		// req.conn was captured at ENQUEUE time (hazard b), so a reconnect during the
-		// forward can't make this land on a route the stub no longer holds.
-		// ipc.Conn.WriteJSON is wmu-guarded, so this write is safe from the goroutine.
-		if req.conn != nil && !req.inbound.IsEvent() && req.covered >= 1 {
-			_ = req.conn.WriteJSON(ipc.InboundDeliveredMsg{
-				Op: ipc.OpInboundDelivered, UpdateID: req.inbound.MessageID, OK: true,
-				Count: req.covered, DeliveryToken: req.token,
-			})
-		}
+		a.deliveryMu.Lock()
+		a.deliverCodex(req)
+		a.deliveryMu.Unlock()
 	}
 }
 
-// latchForwardBlocked marks the Codex forward path blocked the first time an
-// undelivered gap opens at the queue head — either a forward FAILURE
-// (codexForwardLoop) or a forwardCh buffer-full DROP (handleInbound). It is
-// idempotent and concurrency-safe: both callers race through CompareAndSwap, and
-// only the goroutine that wins the false→true transition proceeds. Once latched,
-// codexForwardLoop stops acking so no later count-off-head ack consumes the
-// undelivered head message (the loss vector this closes).
-//
-// On the transition it fires exactly ONE fetch_queue recovery nudge so the agent
-// drains the durable backlog even in bridge mode — where the steady-state nudge in
-// handleInbound is intentionally suppressed (it would race the forward's ack). This
-// restores the "fetch_queue as source of truth" fallback the design assumes without
-// waiting for a session restart. The nudge is best-effort; the content is durably
-// queued regardless, so a Notify failure is logged, not fatal.
+func (a *adapter) deliverCodex(req codexForwardReq) {
+	a.deliveryStateMu.Lock()
+	obsolete := req.state != nil && req.state.obsolete
+	uncertain := a.deliveryUncertain || a.queueUnsupported
+	a.deliveryStateMu.Unlock()
+	if obsolete || uncertain {
+		a.deliveryStateMu.Lock()
+		delete(a.forwards, req.state)
+		a.deliveryStateMu.Unlock()
+		return
+	}
+	cfg := a.codexForwardConfig()
+	var err error
+	if cfg.ThreadID == "" {
+		err = errCodexIdentityUnpinned
+	} else {
+		err = forwardInboundToCodexAppServerWithPrefix(context.Background(), &req.inbound, req.originTag, cfg)
+	}
+	a.deliveryStateMu.Lock()
+	defer a.deliveryStateMu.Unlock()
+	delete(a.forwards, req.state)
+	// Completion and invalidation share one lock: obsolete failures cannot
+	// reinstate a recovered latch, and obsolete successes cannot acknowledge.
+	if req.state != nil && req.state.obsolete {
+		return
+	}
+	if errors.Is(err, errCodexQueueUnsupported) {
+		a.queueUnsupported = true
+		a.latchForwardBlocked(err.Error())
+	}
+	if req.inbound.IsEvent() {
+		if err != nil {
+			log.Printf("codex event delivery failed kind=%s: %v", req.inbound.Kind, err)
+		}
+		return
+	}
+	if err != nil {
+		log.Printf("codex delivery held id=%d: %v", req.inbound.MessageID, err)
+		a.latchForwardBlocked(err.Error())
+		return
+	}
+	if req.conn != nil && req.covered >= 1 {
+		_ = req.conn.WriteJSON(ipc.InboundDeliveredMsg{
+			Op: ipc.OpInboundDelivered, UpdateID: req.inbound.MessageID, OK: true,
+			Count: req.covered, DeliveryToken: req.token,
+		})
+	}
+}
+
+// latchForwardBlocked emits one best-effort recovery notice per failure period.
+// Backlog announcements do not consume this notice, and it never gates an ack.
 func (a *adapter) latchForwardBlocked(reason string) {
-	if !a.forwardBlocked.CompareAndSwap(false, true) {
+	if !a.recoveryNoticeSent.CompareAndSwap(false, true) {
 		return // already latched this session — the one-shot nudge already fired
 	}
-	// Name the topic (§5) so a stale/wrong nudge is human-distinguishable.
-	target := "pending Telegram messages"
-	if route := a.currentTopicName(); route != "" {
-		target = fmt.Sprintf("pending Telegram messages for topic %q", route)
-	}
-	notice := "c3: live message forwarding interrupted (" + reason + ") — call `fetch_queue` to read " + target + "."
+	notice := "c3: live message forwarding interrupted (" + reason + ") — call `fetch_queue` to read held messages on the attached routes."
 	a.forwardStatusNotice(notice)
 	if a.transport == nil {
 		return
@@ -1080,14 +1020,13 @@ func (a *adapter) latchForwardBlocked(reason string) {
 	if err := a.transport.Notify(context.Background(), "notifications/message", map[string]any{
 		"data": notice,
 	}); err != nil {
-		log.Printf("codex forwardBlocked recovery nudge FAIL (%s): %v — content durably queued; call fetch_queue to drain", reason, err)
+		log.Printf("codex recoveryNoticeSent recovery nudge FAIL (%s): %v — content durably queued; call fetch_queue to drain", reason, err)
 	}
 }
 
 func (a *adapter) clearForwardBlocked() {
-	a.forwardEpoch.Add(1)
-	if a.forwardBlocked.CompareAndSwap(true, false) {
-		log.Printf("codex forwarding recovered after full fetch_queue drain")
+	if a.recoveryNoticeSent.CompareAndSwap(true, false) {
+		log.Printf("codex recovery notice rearmed after selected fetch_queue drain")
 	}
 }
 
@@ -1143,9 +1082,6 @@ func (a *adapter) dispatchAttached(raw []byte) {
 	}
 	a.pmu.Unlock()
 	if ok {
-		if attached.OK && attached.QueuedCount > 0 {
-			a.forwardBlocked.Store(true)
-		}
 		// A successful attach may carry the just-claimed channel's manifest.
 		// Store it as the latest caps so any subsequent instructions rebuild
 		// reflects the attached channel (multi-channel turn-time-refresh seam,
@@ -1573,6 +1509,9 @@ func (a *adapter) toolAttach(ctx context.Context, req *mcp.CallToolRequest) (*mc
 			termtitle.EmitAttach(&attached)
 		}
 		text := ipc.FormatAttached(&attached)
+		if attached.OK && codexForwardingAllowed() && a.codexForwardConfig().ThreadID == "" {
+			text += "\n\n" + errCodexIdentityUnpinned.Error()
+		}
 		// A successful attach can switch channels after initialize. Surface the
 		// just-attached manifest immediately only when it differs from the channel
 		// whose guidance the agent already received (or that channel was unknown).
@@ -1784,6 +1723,14 @@ func (a *adapter) toolFetchQueue(ctx context.Context, req *mcp.CallToolRequest) 
 	}
 	fq.Limit, fq.All = parseFetchLimit(args["limit"])
 
+	if fq.Ack {
+		a.deliveryMu.Lock()
+		defer a.deliveryMu.Unlock()
+		if ctx.Err() != nil {
+			return toolErrorResult("canceled"), nil
+		}
+	}
+
 	ch := make(chan ipc.FetchQueueResp, 1)
 	a.fqmu.Lock()
 	a.fqPending[fq.ID] = ch
@@ -1808,15 +1755,33 @@ func (a *adapter) toolFetchQueue(ctx context.Context, req *mcp.CallToolRequest) 
 	}
 	select {
 	case <-ctx.Done():
-		return toolErrorResult("canceled"), nil
+		if !fq.Ack {
+			return toolErrorResult("canceled"), nil
+		}
+		a.stopUncertainFetch(fq.Ack)
+		return toolErrorResult("canceled; live delivery paused until restart because fetch outcome is unknown"), nil
 	case <-time.After(120 * time.Second):
-		return toolErrorResult("fetch_queue timeout"), nil
+		if !fq.Ack {
+			return toolErrorResult("fetch_queue timeout"), nil
+		}
+		a.stopUncertainFetch(fq.Ack)
+		return toolErrorResult("fetch_queue timeout; live delivery paused until restart because fetch outcome is unknown"), nil
 	case resp := <-ch:
 		if resp.Err != "" {
 			return toolErrorResult(resp.Err), nil
 		}
 		return toolTextResult(a.renderFetchedMessages(resp.Messages, resp.Remaining, a.currentTopicName())), nil
 	}
+}
+
+func (a *adapter) stopUncertainFetch(ack bool) {
+	if !ack {
+		return
+	}
+	a.deliveryStateMu.Lock()
+	defer a.deliveryStateMu.Unlock()
+	a.deliveryUncertain = true
+	a.latchForwardBlocked("destructive fetch outcome unknown; live delivery paused until restart")
 }
 
 // toolRetranscribe forwards a retranscribe request and returns the transcript.
@@ -1875,11 +1840,39 @@ func (a *adapter) dispatchFetchQueueResult(raw []byte) {
 	}
 	a.fqmu.Unlock()
 	if ok {
-		// Advance before reading the next broker frame, not when the waiting
-		// tool goroutine happens to resume. Otherwise a fresh inbound arriving
-		// after this drain can be stamped with the old epoch and discarded.
-		if ack && resp.Err == "" && resp.Remaining == 0 {
-			a.clearForwardBlocked()
+		if ack {
+			a.deliveryStateMu.Lock()
+			consumed := make(map[string]bool)
+			for _, in := range resp.Messages {
+				if in.ConsumedRecordID != "" {
+					consumed[in.ConsumedRecordID] = true
+				}
+			}
+			mixed := false
+			for state := range a.forwards {
+				n := 0
+				for _, id := range state.ids {
+					if consumed[id] {
+						n++
+					}
+				}
+				if n > 0 {
+					state.obsolete = true
+				}
+				if n > 0 && n < len(state.ids) {
+					mixed = true
+				}
+			}
+			// A plugin-processed merged payload cannot safely be split here.
+			// Keep its surviving durable sources for pull instead of resubmitting
+			// the already fetched portion.
+			if mixed {
+				a.latchForwardBlocked("part of a merged batch was fetched; fetch_queue to read the remaining sources")
+			}
+			if resp.Err == "" && resp.Remaining == 0 {
+				a.clearForwardBlocked()
+			}
+			a.deliveryStateMu.Unlock()
 		}
 		ch <- resp
 	}
@@ -2022,7 +2015,18 @@ func (a *adapter) toolCodexForward(_ context.Context, req *mcp.CallToolRequest) 
 	} else if cfg.WSURL == "" {
 		return toolErrorResult("no delivery endpoint configured"), nil
 	}
-	return toolTextResult(fmt.Sprintf("C3 delivery: %s; thread=%s; topic=%s; recovery_required=%t", transport, cfg.ThreadID, a.currentTopicName(), a.forwardBlocked.Load())), nil
+	a.deliveryStateMu.Lock()
+	if a.queueUnsupported {
+		transport = "pull-only (thread/queue/add unsupported)"
+	}
+	if a.deliveryUncertain {
+		transport = "pull-only (fetch outcome unknown; restart required)"
+	}
+	a.deliveryStateMu.Unlock()
+	if cfg.ThreadID == "" {
+		transport = "pull-only (conversation identity unresolved)"
+	}
+	return toolTextResult(fmt.Sprintf("C3 delivery: %s; thread=%s; topic=%s; recovery_notice_sent=%t", transport, cfg.ThreadID, a.currentTopicName(), a.recoveryNoticeSent.Load())), nil
 }
 
 func (a *adapter) toolForward(name string) mcp.ToolHandler {

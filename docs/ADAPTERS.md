@@ -785,10 +785,13 @@ The broker emits a normalised message; converting it to what the host can ingest
 
 **Claude Code** uses `notifications/claude/channel` with string-valued `meta` attributes that render as `<channel source="…" chat_id="…" message_id="…" user="…" reply_to_message_id="…" reply_to_text="…">`. Attachments use the unsuffixed `attachment_kind`, `attachment_file_id`, `attachment_size`, `attachment_mime`, and `attachment_name` keys for the first item; multiple attachments add `attachment_count` and repeat those keys with `_2`, `_3`, and so on. A merged delivery additionally carries `merged_count`, comma-joined `merged_message_ids`, and `attachment_message_id` / `attachment_message_id_N` pairing keys. A discrete forwarded message carries `forwarded_from`.
 
-**Codex** doesn't render unsolicited MCP notifications in the TUI today (upstream issues #18056, #17543, #15299). The Codex adapter therefore does two things in parallel:
-
-1. Emit a `notifications/message` log notification (cheap; future-proofs for when Codex surfaces unsolicited notifications).
-2. **If `C3_CODEX_REMOTE_BRIDGE=1`** is set (the C3 launcher sets it), forward the inbound as a real `turn/start` to the running Codex app-server over WebSocket. This is the path that makes a Telegram message appear as a normal turn in the user's TUI.
+**Codex** uses `thread/queue/add` through the session's app-server when the
+launcher enables forwarding. Busy-session input is queued; C3 never automatically
+steers or interrupts. An unsupported queue method yields pull-only delivery and a
+`fetch_queue` notice, with no legacy `turn/start` resubmission. Native CLI queue
+delivery is an explicit opt-in alternative. Queue acceptance permits an exact
+broker-token ack; it is not a conversation receipt. In pull-only mode, MCP log
+notifications provide a best-effort prompt to fetch held messages.
 
 **Grok Build** has no channel-notification dialect. Live inject **requires leader mode** (`[cli] use_leader = true`). The Grok adapter registers as a client on the leader socket and issues ACP `session/prompt` against the TUI session id (see [`GROK-INJECT.md`](GROK-INJECT.md)). Without a leader socket, inbound stays in the durable queue for `fetch_queue`.
 
@@ -818,6 +821,26 @@ codex (launcher binary)
 The visible TUI talks to the app-server over WebSocket; the app-server runs MCP servers; one of those is the C3 adapter; the adapter talks to the broker. **The app-server, not the TUI, owns MCP server startup.** This is why the launcher injects MCP config args into the **app-server's** invocation — the same flags get duplicated into the TUI invocation, but the app-server-side copy is the load-bearing one.
 
 If you write a new adapter, check how your CLI handles MCP servers under any equivalent "remote/embedded" mode before assuming the TUI is where MCP lives. Get this wrong and you'll have an adapter that runs in the foreground but has none of the environment it needs.
+
+Recovery pins the thread once. If startup resolution fails, explicit attach is
+allowed with a pull-only notice; live delivery refuses to rediscover a recipient.
+A restart with `C3_CODEX_THREAD_ID`, or successful resolution on broker reconnect,
+can establish the pin. Per-route origin tags are captured when input is enqueued.
+
+Destructive fetch and in-flight submission are serialized. Inbound IPC includes
+`record_ids`, the broker's durable source identities; destructive fetch response
+messages carry `ConsumedRecordID`. The worker includes this field before frame
+sizing and supplies it only for consumed records. Multi-route dispatch preserves
+each route's identities under its confirmed-holder gate. Matching buffered
+submissions are excluded regardless of frame order; a partially consumed merged
+batch leaves its surviving sources held for pull. Events retain their complete
+payload and carry no durable acknowledgement. A later successful token can be
+acked even after an earlier delivery failed.
+
+The explicit `c3-codex` alias targets a separate C3-owned executable. Re-run
+`install-codex-shim` after a C3 update to refresh it. See
+[`CODEX-NATIVE-QUEUE.md`](CODEX-NATIVE-QUEUE.md) for setup, unsupported-server
+behavior, uncertain-response duplicates, and recovery limits.
 
 ## Distribution
 

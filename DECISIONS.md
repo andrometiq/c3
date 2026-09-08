@@ -3,6 +3,23 @@
 Entries are newest first. This is the public architecture record: it records
 rulings and rationale, never private operational details.
 
+## D032: Codex queues busy-session input and keeps the user's TUI
+
+**Date:** 2026-09-08
+
+**Decision:** Use `thread/queue/add` by default, including while Codex is busy.
+Never automatically steer or interrupt. App-servers without the queue method
+are pull-only with an explicit recovery notice; do not resubmit via `turn/start`.
+Keep bridging the user's own TUI. C3-owned session runtime work is separate.
+
+**Why:** Queued delivery preserves deliberate scheduling without an uncertain
+response licensing a second submission. A clear compatibility floor is easier
+to verify than several automatic transport contracts. This increment acknowledges
+queue acceptance, not transcript receipt, and makes no exactly-once guarantee.
+Broker record identities and confirmed per-route fetch boundaries coordinate
+manual recovery with live submission; later exact-token acknowledgements do not
+consume earlier failed messages.
+
 ## D031: Cross-session messaging is a receipt-gated fallback only
 
 **Date:** 2026-09-08
