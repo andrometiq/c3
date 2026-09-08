@@ -39,7 +39,7 @@ func TestReviewUnrelatedUserSocketMustNotReceiveCredentials(t *testing.T) {
 func TestReviewQuotedTextMustNotBeReceipt(t *testing.T) {
 	block := `<channel source="plugin:c3:c3" c3_attempt="cross-session:1" c3_delivery_id="T">body</channel>`
 	for _, text := range []string{"Please explain this quote: " + block, "<!--" + block + "-->", `<wrapper note='` + block + `'>quoted</wrapper>`} {
-		line, _ := json.Marshal(map[string]any{"type": "user", "isMeta": true, "origin": map[string]any{"kind": "peer"}, "message": map[string]any{"role": "user", "content": text}})
+		line, _ := json.Marshal(map[string]any{"type": "user", "isMeta": true, "origin": map[string]any{"kind": "peer", "from": "c3"}, "message": map[string]any{"role": "user", "content": "Another Claude session sent a message:\n" + text}})
 		if deliveryReceipt(line, "T", true, "cross-session:1") {
 			t.Errorf("quoted text accepted: %s", text)
 		}
@@ -170,7 +170,7 @@ func TestCrossSessionReceiptCannotConfirmChannelAttempt(t *testing.T) {
 
 func appendTranscriptContent(t *testing.T, path, content string, meta bool) {
 	t.Helper()
-	line, err := json.Marshal(map[string]any{"type": "user", "isMeta": meta, "origin": map[string]any{"kind": "peer"}, "message": map[string]any{"role": "user", "content": content}})
+	line, err := json.Marshal(map[string]any{"type": "user", "isMeta": meta, "origin": map[string]any{"kind": "peer", "from": "c3"}, "message": map[string]any{"role": "user", "content": content}})
 	if err != nil {
 		t.Fatal(err)
 	}

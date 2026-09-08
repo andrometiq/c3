@@ -616,11 +616,15 @@ this, and status/Telegram route notices include the channel failure reason and
 `permission relay unavailable`. Synthesized events have no durable receipt
 contract and are only pushed on the confirmed channel route.
 
-The inbox protocol and flagless user-turn delivery were live-verified on Claude
-Code 2.1.263. **The peer transcript record shape remains UNVERIFIED.** Tests use
-fixture-shaped `type:user`, `message.role:user`, `isMeta:true` records; an
-`origin` object, when present, must have `kind:peer`. Format drift or
-host refusal retains the durable row; it never licenses a blind ack.
+The inbox protocol, flagless user-turn delivery, and peer transcript record shape
+are **VERIFIED on Claude Code 2.1.263**. The sanitized captured record is
+`cmd/c3-claude-adapter/testdata/claude-2.1.263-peer.jsonl`. Its provenance is
+`type:user`, `message.role:user`, `isMeta:true`, and an `origin` object with
+`kind:peer`, `from:c3`, `verifiedPeerPid` (integer), and `verifiedPeerProcStart`
+(string). It also has `promptSource:system` and `userType:external`. The PID,
+process-start, prompt-source, and user-type fields are observed metadata, not
+receipt requirements. Format drift or host refusal retains the durable row;
+it never licenses a blind ack.
 
 ### Channel detection and shared receipts
 
@@ -667,17 +671,18 @@ a late channel receipt cannot confirm fallback, and vice versa.
 
 Channel-route receipts must start with the channel opener after whitespace.
 Cross-session receipts require `type:user`, `message.role:user`, `isMeta:true`,
-and `origin.kind:peer` if `origin` is present. The first content block must be text
-(or content must be a string), starting with the complete C3 channel block with
-`source="plugin:c3:c3"`. The only accepted prefixes are **one** literal
-`Peer input: `, `Peer input:\n`, or `<cross-session-message from="c3">`, immediately
-followed by that block. This small allowlist is explicitly provisional until a
-live peer transcript verifies the host shape. Combinations of wrappers, quoted
-prose, XML comments, embedded attributes, and later text blocks cannot confirm.
+`origin.kind:peer`, and `origin.from:c3`. String content (or the first text block)
+must start with the exact verified host line
+`Another Claude session sent a message:\n`, immediately followed by the complete
+C3 channel block with `source="plugin:c3:c3"`. After `</channel>`, the verified
+record has two newlines and a fixed host paragraph beginning
+`This came from another Claude session —`; trailing host text is allowed.
+Bare blocks, guessed prefixes, combinations of wrappers, quoted prose, XML
+comments, embedded attributes, and later text blocks cannot confirm.
 The strict attribute parser and closing `</channel>` requirement still apply.
 With `C3_DEBUG=1`, rejected marker candidates log only a redacted punctuation and
 spacing preview of their first 120 characters at debug level; words, values,
-and tokens are masked. This exposes framing without logging transcript secrets.
+tokens, and attempts are masked. See `DEBUGGING.md` for the adapter log location.
 
 Confirmation waits **15 seconds** (`liveReadbackWindow`), off the MCP request
 loop. Each scan uses a file-size snapshot capped at 32 MiB; incomplete final lines are retried,

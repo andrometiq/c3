@@ -195,20 +195,30 @@ Outbound JSON frames (newline included) over the 4 MiB IPC cap are refused
 before auth, logged as `cross-session outbound frame exceeds IPC cap`, and held
 in the durable queue. C3 does not alter host accept/hold/refuse policy.
 
-Peer transcript shape is still **UNVERIFIED live**. A receipt requires a complete
-`type:user`, `message.role:user`, `isMeta:true` record; any `origin` must be an
-object with `kind:peer`. String content or its first text block must start with
-our complete `<channel source="plugin:c3:c3" …>` block and carry both the exact
-`c3_delivery_id` and `c3_attempt`. The only allowed single prefixes, immediately
-before the block, are `Peer input: `, `Peer input:\n`, and
-`<cross-session-message from="c3">`. Quoted text, XML comments, attributes,
-multiple wrappers, and later content blocks are rejected. Set `C3_DEBUG=1` when
-starting the adapter to see a debug preview of the first 120 characters of a
-rejected marker candidate, with words and values masked and only framing
-punctuation/spacing retained. Tokens and raw transcript prose are never logged.
-Use that framing preview to diagnose allowlist drift during an authorized live
-test. Socket EOF alone never confirms delivery; failed receipts leave rows
-available in `fetch_queue`, with possible duplicates after a late injection.
+Peer transcript shape is **VERIFIED on Claude Code 2.1.263**; the sanitized
+capture is `cmd/c3-claude-adapter/testdata/claude-2.1.263-peer.jsonl`. A receipt
+requires a complete `type:user`, `message.role:user`, `isMeta:true` record and an
+`origin` object with both `kind:peer` and `from:c3`. String content or its first
+text block must start with the exact host line
+`Another Claude session sent a message:\n`, immediately followed by our complete
+`<channel source="plugin:c3:c3" …>` block carrying the exact `c3_delivery_id` and
+`c3_attempt`. Trailing host guidance after `</channel>` is allowed. The captured
+record includes `origin.verifiedPeerPid`, `origin.verifiedPeerProcStart`,
+`promptSource:system`, and `userType:external`; these are not required for a
+receipt. Bare blocks, guessed prefixes, quoted text, XML comments, attributes,
+multiple wrappers, and later content blocks are rejected.
+
+Set `C3_DEBUG=1` in the environment inherited by the adapter at startup (restart
+the adapter to apply it). This enables the existing Go `slog` debug bridge into
+the adapter's normal logger. Look for `cross-session receipt candidate rejected`
+and `prefix_redacted` in `$XDG_STATE_HOME/c3/adapter.log` (default
+`~/.local/state/c3/adapter.log`); the same output goes to adapter stderr.
+The preview is capped at 120 characters, with words, values, delivery tokens,
+and attempts masked and only framing punctuation/spacing retained. Tokens and
+raw transcript prose are never logged. Use that framing preview to diagnose
+allowlist drift during an authorized live test. Socket EOF alone never confirms
+delivery; failed receipts leave rows available in `fetch_queue`, with possible
+duplicates after a late injection.
 
 Messages are held durably until delivered or fetched, within the queue's documented per-route limits (1,000 messages / 14 days); retention cleanup may permanently remove evicted records.
 

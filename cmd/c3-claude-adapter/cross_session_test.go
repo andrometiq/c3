@@ -112,10 +112,9 @@ func nextInbox(t *testing.T, pushes <-chan inboxPush) inboxPush {
 
 func appendPeerReceipt(t *testing.T, path, content string) {
 	t.Helper()
-	// Fixture-shaped assumption, NOT a captured Claude transcript. Host-added
-	// prefix/wrapper and suffix must preserve the first channel marker.
-	line, err := json.Marshal(map[string]any{"type": "user", "isMeta": true, "origin": map[string]any{"kind": "peer"},
-		"message": map[string]any{"role": "user", "content": "<cross-session-message from=\"c3\">" + content + "</cross-session-message>\nHost peer guidance."}})
+	// Match the peer framing verified in Claude Code 2.1.263.
+	line, err := json.Marshal(map[string]any{"type": "user", "isMeta": true, "origin": map[string]any{"kind": "peer", "from": "c3"},
+		"message": map[string]any{"role": "user", "content": "Another Claude session sent a message:\n" + content + "\n\nHost peer guidance."}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -279,7 +278,7 @@ func TestCrossSessionBlockMatchesHostFixture(t *testing.T) {
 	}
 	frame["meta"].(map[string]any)["c3_attempt"] = "cross-session:1"
 	block, _ = crossSessionChannelBlock(frame)
-	line, _ := json.Marshal(map[string]any{"type": "user", "isMeta": true, "message": map[string]any{"role": "user", "content": block}})
+	line, _ := json.Marshal(map[string]any{"type": "user", "isMeta": true, "origin": map[string]any{"kind": "peer", "from": "c3"}, "message": map[string]any{"role": "user", "content": "Another Claude session sent a message:\n" + block}})
 	if !deliveryReceipt(line, `marker&"`, true, "cross-session:1") {
 		t.Fatal("escaped metadata did not round trip")
 	}

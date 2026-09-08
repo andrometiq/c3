@@ -225,7 +225,7 @@ Claude Code applies that preview guardrail to every locally-installed channel pl
 isn't a C3 hack. Without the flag, C3 can probe the session's inherited cross-session
 inbox as a fallback; only transcript-confirmed delivery consumes the queued message.
 That route has no Telegram permission relay or native question answering, and its
-peer transcript shape still needs live verification. If neither route confirms,
+peer transcript shape is verified on Claude Code 2.1.263. If neither route confirms,
 inbound stays available through `fetch_queue`. Status shows which route is live.
 The installer can
 also offer a small `claude` shim so the flag is automatic for interactive

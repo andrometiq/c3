@@ -474,33 +474,30 @@ func deliveryReceipt(line []byte, marker string, cross bool, attempt string) boo
 	}
 	provenance := true
 	if cross {
-		provenance = entry.IsMeta
-		if len(entry.Origin) != 0 {
-			var origin struct {
-				Kind string `json:"kind"`
-			}
-			provenance = provenance && json.Unmarshal(entry.Origin, &origin) == nil && origin.Kind == "peer"
+		var origin struct {
+			Kind string `json:"kind"`
+			From string `json:"from"`
 		}
+		provenance = entry.IsMeta && json.Unmarshal(entry.Origin, &origin) == nil && origin.Kind == "peer" && origin.From == "c3"
 	}
 	matches := func(text string) (accepted bool) {
 		if cross {
 			candidate := text
 			defer func() {
 				if !accepted && strings.Contains(text, marker) {
-					debugRejectedPeerPrefix(candidate, marker)
+					debugRejectedPeerPrefix(candidate, marker, attempt)
 				}
 			}()
 			if !provenance {
 				return false
 			}
-			// Host peer shape is UNVERIFIED. This deliberately small literal allowlist
-			// accepts bare content OR ONE wrapper/line immediately before our block.
+			// Verified in Claude Code 2.1.263: exactly this host line precedes
+			// our block; host guidance may follow its closing </channel>.
 			// Never search arbitrary text, comments, attributes, or later text blocks.
-			for _, prefix := range []string{"Peer input: ", "Peer input:\n", `<cross-session-message from="c3">`} {
-				if strings.HasPrefix(text, prefix) {
-					text = strings.TrimPrefix(text, prefix)
-					break
-				}
+			var ok bool
+			text, ok = strings.CutPrefix(text, "Another Claude session sent a message:\n")
+			if !ok {
+				return false
 			}
 		} else {
 			text = strings.TrimSpace(text)
@@ -584,15 +581,15 @@ func deliveryReceipt(line []byte, marker string, cross bool, attempt string) boo
 // Debug only: retain punctuation/spacing from the first 120 characters to show
 // framing, but mask all words and attribute/body values. Never log a delivery
 // token or transcript prose (which may itself contain credentials).
-func debugRejectedPeerPrefix(text, marker string) {
+func debugRejectedPeerPrefix(text, marker, attempt string) {
 	if !slog.Default().Enabled(context.Background(), slog.LevelDebug) {
 		return
 	}
+	text = strings.NewReplacer(marker, "[redacted]", attempt, "[redacted]").Replace(text)
 	prefix := []rune(text)
 	if len(prefix) > 120 {
 		prefix = prefix[:120]
 	}
-	prefix = []rune(strings.ReplaceAll(string(prefix), marker, "[redacted]"))
 	for i, r := range prefix {
 		if !strings.ContainsRune("<>/= \t\r\n\"'!?-", r) {
 			prefix[i] = '*'

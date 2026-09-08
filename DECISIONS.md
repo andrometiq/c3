@@ -29,14 +29,20 @@ stable SessionStart/registered session UUID is included as `session_id` so the
 host can reject a mismatch. Each complete outbound JSON frame is capped at the
 existing 4 MiB inbound IPC limit before auth; oversize leaves the row queued.
 
-Cross-session receipts must be the injected peer user turn: `type:user`,
-`message.role:user`, `isMeta:true`, and `origin.kind:peer` when origin is present.
-Content must start with our complete channel block, optionally after exactly one
-allowlisted host prefix (`Peer input: `, `Peer input:\n`, or
-`<cross-session-message from="c3">`). Both delivery and attempt markers must
-match. Quoted text, comments, attributes, and later content blocks cannot retire
-rows or recovery. `C3_DEBUG=1` enables a debug preview of rejected candidates'
-first 120 characters with words/values/tokens masked, exposing only framing.
+The peer record shape is **VERIFIED on Claude Code 2.1.263**, captured in
+`cmd/c3-claude-adapter/testdata/claude-2.1.263-peer.jsonl`. Cross-session receipts
+require `type:user`, `message.role:user`, `isMeta:true`, `origin.kind:peer`, and
+`origin.from:c3`. The verified record also carries `verifiedPeerPid` and
+`verifiedPeerProcStart` inside `origin`, plus `promptSource:system` and
+`userType:external`; these fields are not receipt requirements.
+Content starts with the exact host line `Another Claude session sent a message:\n`,
+immediately followed by our complete `<channel source="plugin:c3:c3" …>` block.
+Both delivery and attempt markers must match. The host appends two newlines and
+a fixed paragraph beginning `This came from another Claude session —` after
+`</channel>`; trailing host text is allowed. Bare blocks and guessed prefixes
+are rejected, as are quoted text, comments, attributes, and later content blocks.
+`C3_DEBUG=1` enables a debug preview of rejected candidates' first 120 characters
+with words/values/tokens/attempts masked, exposing only framing.
 
 **Why:** A flagless host can accept peer user turns even when it drops channel
 notifications. This recovers an inbound route without confusing transport success
@@ -44,9 +50,11 @@ with delivery or silently replacing the richer native channel. The active route
 and its reason must remain visible in attach, MCP instructions, status and Telegram.
 Peer input cannot grant permission approval: Telegram Allow/Deny relay and native
 `AskUserQuestion` answering are unavailable, and slash commands arrive as text.
-C3's own `ask` and `reply` tools remain usable. The socket protocol was live-verified;
-the peer transcript shape remains unverified, so format drift fails toward held
-messages and possible duplicates rather than loss.
+C3's own `ask` and `reply` tools remain usable. The socket protocol and peer
+transcript shape were live-verified. A delivered peer turn initially went
+unrecognised because the receipt prefix was wrong;
+format drift still fails toward held messages and possible duplicates rather
+than loss.
 
 ## D030: Drive feedback is centralized and deliberate cancellation preserves long audio
 

@@ -113,7 +113,7 @@ func crossSessionBrokerLifecycle(t *testing.T, variant string) {
 		if variant == "quoted" {
 			content = "Please explain this quote: " + content
 		}
-		appendTranscriptContent(t, a.livePath(), content, true)
+		appendPeerReceipt(t, a.livePath(), content)
 	}
 	deadline := time.Now().Add(2 * time.Second)
 	for a.liveRoute().State == ipc.RenderProbing && time.Now().Before(deadline) {
