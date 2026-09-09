@@ -8,6 +8,7 @@ import (
 )
 
 func TestInjectedMarkerSingleRouteFetchAndPreview(t *testing.T) {
+	isolateAdapterTest(t)
 	a := newAdapter()
 	topic := int64(42)
 	route := ipc.RouteRef{Channel: "test-inject", ChatID: -1, TopicID: &topic}

@@ -6,6 +6,7 @@ import (
 )
 
 func TestInjectedChannelMetadata(t *testing.T) {
+	isolateAdapterTest(t)
 	for _, synthetic := range []bool{false, true} {
 		frame := buildClaudeChannelFrame(&c3types.Inbound{TestInjected: synthetic, Text: "example"})
 		meta := frame["meta"].(map[string]any)

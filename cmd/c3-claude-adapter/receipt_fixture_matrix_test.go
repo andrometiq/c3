@@ -21,6 +21,7 @@ type receiptExpectation struct {
 // file in a version directory must have one explicit expectation per record.
 // The live collector writes null only for genuinely unverified envelopes.
 func TestVersionedDeliveryReceiptCorpus(t *testing.T) {
+	isolateAdapterTest(t)
 	files, err := filepath.Glob("testdata/claude-*/*.jsonl")
 	if err != nil || len(files) == 0 {
 		t.Fatalf("missing corpus: %v", err)

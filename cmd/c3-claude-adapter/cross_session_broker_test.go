@@ -31,6 +31,7 @@ func TestReviewQuotedReceiptConsumesDurableRow(t *testing.T) {
 // This runs the real legacy adapter fallback and broker ack handler together.
 // The 16s channel window deliberately outlives the broker's 15s observation.
 func TestLegacyChannelTimeoutInboxSameTokenRetires(t *testing.T) {
+	isolateAdapterTest(t)
 	crossSessionBrokerLifecycle(t, "channel-timeout")
 }
 
