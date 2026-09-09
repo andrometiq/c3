@@ -530,7 +530,7 @@ On the broker dropping the connection:
 
 This is the part a doc-conformant adapter previously got wrong in a way that works perfectly in a demo and then quietly corrupts the user's queue.
 
-**While the durable queue is healthy, a delivered message stays there until acknowledged, within the per-route limit of 1,000 messages / 14 days.** The broker writes the push to your socket and then waits. It does not consider the message done. If the queue is disabled, live delivery continues best-effort and Telegram offsets hold for replay when the broker restarts with a working queue; anything delivered live will arrive again.
+**While the durable queue is healthy, a delivered message stays there until acknowledged, within the per-route limit of 1,000 messages / 90 days.** The broker writes the push to your socket and then waits. It does not consider the message done. If the queue is disabled, live delivery continues best-effort and Telegram offsets hold for replay when the broker restarts with a working queue; anything delivered live will arrive again.
 
 Claude Code has four route states, shown by `attach`, the MCP instructions,
 `c3-broker status` / `/c3:status`, and Telegram `/status`:

@@ -220,7 +220,7 @@ allowlist drift during an authorized live test. Socket EOF alone never confirms
 delivery; failed receipts leave rows available in `fetch_queue`, with possible
 duplicates after a late injection.
 
-Messages are held durably until delivered or fetched, within the queue's documented per-route limits (1,000 messages / 14 days); retention cleanup may permanently remove evicted records.
+Messages are held durably until delivered or fetched, within the queue's documented per-route limits (1,000 messages / 90 days); retention cleanup may permanently remove evicted records.
 
 ### "Broker won't start"
 

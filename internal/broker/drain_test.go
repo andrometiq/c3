@@ -53,7 +53,7 @@ func drainSpec(sel ...DrainSelector) DrainSpec {
 }
 
 // drainSrcMsg builds a source-routed organic message with a fresh timestamp.
-// These fixtures pass through the real 14-day retention cap, so an absolute date
+// These fixtures pass through the real 90-day retention cap, so an absolute date
 // turns the suite into a time bomb once the wall clock advances past it.
 func drainSrcMsg(id int64, text string) *c3types.Inbound {
 	return &c3types.Inbound{

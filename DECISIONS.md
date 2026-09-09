@@ -15,7 +15,10 @@ never inferred: `transcript` means the host transcript records the attempt token
 `none` means pull-only. Nothing weaker than the session's declared milestone
 retires a durable row.
 
-Rows survive until confirmed or the documented limits (1,000 messages / 14 days).
+Rows survive until confirmed or the documented limits (1,000 messages / 90 days).
+
+**2026-09-09 operator ruling:** Queue age limit raised to 90 days so held messages survive a long absence; age is a safety valve, not a feature.
+
 A queue-disabled broker never advances Telegram offsets: inbound stays at
 Telegram for replay after restart with a working queue. Holding the earliest
 unpersisted update holds the global frontier across topics. Live delivery remains
@@ -393,7 +396,7 @@ live inbound. Match a per-push `c3_delivery_id` in a user message's channel tag,
 not merely a `queue-operation` enqueue record. A 15-second unconfirmed push
 keeps its durable copy and changes the route to queue-only until attach or
 reconnect. Additive render-state hello fields and updates keep protocol v1.
-Messages are held durably until delivered or fetched, within the queue's documented limits (1,000 messages / 14 days).
+Messages are held durably until delivered or fetched, within the queue's documented limits (1,000 messages / 90 days).
 Transcript format drift may cause duplicate recovery; it must never authorize
 consumption on a successful stdout write alone.
 

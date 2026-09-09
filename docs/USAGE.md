@@ -133,7 +133,7 @@ between topics. Full grammar and the authorization matrix:
 
 ### Limits
 
-- Per-route cap: **1000 messages OR 14 days**, whichever comes first. On overflow the oldest held messages are dropped, logged to `broker.log`, **and** announced in the topic (*"⚠️ queue full — dropped N oldest held message(s); attach a session soon."*) — never a silent truncation.
+- Per-route cap: **1000 messages OR 90 days**, whichever comes first. On overflow the oldest held messages are dropped, logged to `broker.log`, **and** announced in the topic (*"⚠️ queue full — dropped N oldest held message(s); attach a session soon."*) — never a silent truncation.
 - Per-record cap: **1 MiB encoded JSON**. The queue retains the full original in `.trash/` first, then stores a truncated record with an in-band marker so the route can continue rather than redelivering the same unwriteable record forever. If retention is disabled, the marker says that the removed text was not kept.
 - **24-hour Telegram bound (outside C3's control).** Telegram itself keeps undelivered updates for at most 24 hours. C3 can only queue what it has actually received, so a gap longer than 24 hours with **no broker polling anywhere** loses messages at Telegram's level before C3 ever sees them. Keeping a broker polling (the opt-in `systemd --user` unit helps) is the only guard against that window.
 
@@ -146,7 +146,7 @@ Two belts keep a drain from ever taking the *wrong* topic's messages:
 
 ### Queue trash & recovery
 
-Nothing ever leaves the queue by hard delete. When a route drains — the right topic, a wrong topic, a rogue skill, an orphaned consume — the queue files are **moved into a `.trash/` subdirectory**, not removed. Any drain is therefore recoverable for the retention window (≥14 days). This is a manual, broker-side recovery — there is no Telegram surface for it.
+Nothing ever leaves the queue by hard delete. When a route drains — the right topic, a wrong topic, a rogue skill, an orphaned consume — the queue files are **moved into a `.trash/` subdirectory**, not removed. Any drain is therefore recoverable for the retention window (≥90 days). This is a manual, broker-side recovery — there is no Telegram surface for it.
 
 > **Caveat — retention can be disabled.** The `.trash/` window is defense-in-depth on top of the primary durable queue, and it is **skipped** if the broker could not create the `.trash/` directory at startup (e.g. a stray file occupies the path). In that degraded mode drains **hard-delete** and are **NOT recoverable**. The broker logs exactly one line to `broker.log` when this happens:
 >
@@ -178,7 +178,7 @@ The trash lives beside the queue, at `$XDG_STATE_HOME/c3/queue/.trash/` (fallbac
    Dropping the cursor replays the whole merged file (the old cursor no longer aligns once you prepend history — over-delivery of the recovered lines, never loss).
 4. **A partial wrong-drain that's still live** (no trash pair yet — the file is still in the queue dir): there's nothing to move. Lower or delete the live `<base>.cur` (delete = replay from the first line).
 
-**GC.** Trash is swept automatically (piggybacked on drains, plus one sweep at broker startup — no extra process): every retired file is kept at least the retention window (14 days, the same window an undelivered message gets), and hard caps of 256 MiB / 8192 files evict oldest-first if trash grows past them (the newest snapshots — the likeliest recovery targets — survive). A cap-eviction that shortens the promised window logs one line to `broker.log`.
+**GC.** Trash is swept automatically (piggybacked on drains, plus one sweep at broker startup — no extra process): every retired file is kept at least the retention window (90 days, the same window an undelivered message gets), and hard caps of 256 MiB / 8192 files evict oldest-first if trash grows past them (the newest snapshots — the likeliest recovery targets — survive). A cap-eviction that shortens the promised window logs one line to `broker.log`.
 
 ## Multi-group setups
 

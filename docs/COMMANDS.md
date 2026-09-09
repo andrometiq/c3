@@ -68,7 +68,7 @@ menu (menu hint only). Commands inside media captions are **not** intercepted
 | `/status` | any allowlisted sender | In a topic: that topic's queue depth + attach state. In DM/General: broker-wide summary. |
 | `/queue` | any allowlisted sender | Index of non-empty pooled queues: `[serial] name · pending · oldest · newest`. **Metadata only — no message content, no kind counts.** In a group it lists only that group's queues; in the DM it lists everything. |
 | `/queue <q> [start]` | **operators only** (DM-allowlisted user id); everyone else gets a silent drop | One queue's messages: oldest-first ordinals, kind icon + preview + sender + age, 25 per page (`/queue <q> 26` pages on). |
-| `/drain <src> <sel> [to <t>]` | **operators only**; silent drop otherwise | Move the selected pending messages from `<src>` into `<t>` (default: the topic the command was typed in). Loss-free: fsync'd copy into the target **before** the atomic remove from the source; removed lines are also snapshotted to `.trash/` (14-day retention). The reply echoes the resolved names, the ordinal window, a first-message preview, and the target's new total. |
+| `/drain <src> <sel> [to <t>]` | **operators only**; silent drop otherwise | Move the selected pending messages from `<src>` into `<t>` (default: the topic the command was typed in). Loss-free: fsync'd copy into the target **before** the atomic remove from the source; removed lines are also snapshotted to `.trash/` (90-day retention). The reply echoes the resolved names, the ordinal window, a first-message preview, and the target's new total. |
 
 Grammar (shared by `<q>`, `<src>`, `<t>`):
 

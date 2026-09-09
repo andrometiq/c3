@@ -16,7 +16,7 @@ topic answers there. Claude Code on one project, Codex on the next, no app switc
   tap is ignored.
 - **Voice in.** Send a voice note; the session receives the transcript as a native turn.
 - **Nothing gets lost.** Messages are held durably until delivered or fetched, within
-  the queue's documented limits (1,000 messages / 14 days).
+  the queue's documented limits (1,000 messages / 90 days).
   Duplicates after expiry, restart, or degraded mode are allowed; silent loss is not.
 
 Go, MIT, Linux and macOS (Windows in beta).

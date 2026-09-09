@@ -18,7 +18,7 @@ const (
 	// MaxMessages is the per-route line cap; EvictOverCap drops oldest beyond it.
 	MaxMessages = 1000
 	// MaxAge is the per-route age cap; EvictOverCap drops lines older than this.
-	MaxAge = 14 * 24 * time.Hour
+	MaxAge = 90 * 24 * time.Hour
 	// MaxRecordBytes bounds ONE record's marshaled size. Append enforces it; it is
 	// the only byte bound in the package (the others are count and age), and
 	// Append is the single gate every producer passes through — the debounce-merge
@@ -49,7 +49,7 @@ const (
 const (
 	// TrashTTL is how long a retired pair is kept before GC removes it. Held to
 	// MaxAge so a wrongly-drained message survives exactly as long as an
-	// undelivered one would have — one retention story (≥14 days, held or drained).
+	// undelivered one would have — one retention story (≥90 days, held or drained).
 	TrashTTL = MaxAge
 	// TrashMaxBytes caps total .trash/ bytes; GC evicts oldest-first beyond it.
 	TrashMaxBytes = 256 << 20 // 256 MiB

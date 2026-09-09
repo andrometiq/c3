@@ -190,10 +190,15 @@ func TestEvictOverCap_RewriteFailureCannotHidePendingBehindOldCursor(t *testing.
 func TestEvictOverCap_DropsByAge(t *testing.T) {
 	s := newStore(t)
 	rk := RouteKey{Channel: "telegram", ChatID: -100}
-	old := &c3types.Inbound{Channel: "telegram", ChatID: -100, MessageID: 1, Text: "old", Timestamp: time.Now().Add(-MaxAge - time.Hour)}
-	fresh := &c3types.Inbound{Channel: "telegram", ChatID: -100, MessageID: 2, Text: "new", Timestamp: time.Now()}
-	_ = s.Append(rk, old)
-	_ = s.Append(rk, fresh)
+	now := time.Now()
+	old := &c3types.Inbound{Channel: "telegram", ChatID: -100, MessageID: 1, Text: "91 days old", Timestamp: now.Add(-91 * 24 * time.Hour)}
+	held := &c3types.Inbound{Channel: "telegram", ChatID: -100, MessageID: 2, Text: "30 days old", Timestamp: now.Add(-30 * 24 * time.Hour)}
+	if err := s.Append(rk, old); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Append(rk, held); err != nil {
+		t.Fatal(err)
+	}
 	dropped, err := s.EvictOverCap(rk)
 	if err != nil {
 		t.Fatal(err)
@@ -201,9 +206,12 @@ func TestEvictOverCap_DropsByAge(t *testing.T) {
 	if dropped != 1 {
 		t.Fatalf("age-evict dropped = %d, want 1", dropped)
 	}
-	got, _ := s.Peek(rk, 5)
+	got, err := s.Peek(rk, 5)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(got) != 1 || got[0].MessageID != 2 {
-		t.Fatalf("after age-evict = %+v, want only msg 2", got)
+		t.Fatalf("after age-evict = %+v, want only 30-day-old msg 2; 91-day-old msg 1 must be evicted", got)
 	}
 }
 
