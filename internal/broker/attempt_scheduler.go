@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"log"
 	"slices"
 	"time"
 
@@ -139,17 +140,27 @@ func (w *RouteWorker) scheduleAttempt(ctx context.Context, inbound bool) {
 	if inbound && !state.Exhausted.IsZero() && time.Since(state.Exhausted) >= 60*time.Second {
 		state.Exhausted = time.Time{}
 	}
-	ready := s.deliveryReady.Load() && d.live.Channel.Eligible && state.Exhausted.IsZero() && len(eligible) > 0 && s.IsConnected()
+	// P6: fallback covers only the surviving revisions of the selected batch.
+	if state.CycleToken != "" {
+		eligible = slices.DeleteFunc(eligible, func(r queue.TrackedInbound) bool {
+			return !slices.Contains(state.CycleMembers, attemptMember{ID: r.RecordID, Revision: rowRevision(r)})
+		})
+	}
+	transport := state.nextTransport(d.live)
+	ready := s.deliveryReady.Load() && transport != "" && state.Exhausted.IsZero() && len(eligible) > 0 && s.IsConnected()
 	if !ready {
 		d.waiting = slices.DeleteFunc(d.waiting, func(k RouteKey) bool { return k == w.key })
+		oldToken := state.CycleToken
+		state.clearCycle()
 		d.mu.Unlock()
+		w.releaseAttemptSlot(s, oldToken)
 		w.evaluateAttemptHeld(s)
 		return
 	}
 	if !slices.Contains(d.waiting, w.key) {
 		d.waiting = append(d.waiting, w.key)
 	}
-	if !d.proven && (d.slot != "" || d.waiting[0] != w.key) {
+	if !d.proven && !(state.CycleToken != "" && d.slot == state.CycleToken) && (d.slot != "" || d.waiting[0] != w.key) {
 		d.mu.Unlock()
 		w.evaluateAttemptHeld(s)
 		return
@@ -160,7 +171,7 @@ func (w *RouteWorker) scheduleAttempt(ctx context.Context, inbound bool) {
 	d.mu.Unlock()
 	var batch []*c3types.Inbound
 	var members []attemptMember
-	frame := ipc.DeliverMsg{Op: ipc.OpDeliver, Token: token, Transport: "channel", DeadlineMS: 15000}
+	frame := ipc.DeliverMsg{Op: ipc.OpDeliver, Token: token, Transport: transport, DeadlineMS: 15000}
 	for _, row := range eligible {
 		in := row.Inbound
 		candidate := append(slices.Clone(batch), &in)
@@ -189,10 +200,19 @@ func (w *RouteWorker) scheduleAttempt(ctx context.Context, inbound bool) {
 		w.exhaustAttempt(s)
 		return
 	}
+	d.mu.Lock()
+	state.CycleToken = token
+	state.CycleMembers = slices.Clone(members)
+	if transport == "channel" {
+		state.TriedChannel = true
+	} else {
+		state.TriedInbox = true
+	}
+	d.mu.Unlock()
 	now := time.Now()
 	holder := shadowHolder(s)
 	holder.ClaimGeneration = s.claimGeneration(w.key)
-	a := attemptRecord{Negotiated: true, Token: token, Route: w.key, Transport: "channel", Holder: holder, Members: members}
+	a := attemptRecord{Negotiated: true, Token: token, Route: w.key, Transport: transport, Holder: holder, Members: members}
 	w.broker.drains.mu.Lock()
 	_, draining := w.broker.drains.inFlight[queueRouteKey(w.key).File()]
 	if !draining {
@@ -204,6 +224,9 @@ func (w *RouteWorker) scheduleAttempt(ctx context.Context, inbound bool) {
 	}
 	w.broker.drains.mu.Unlock()
 	if got := w.liveAttempt(); got == nil {
+		d.mu.Lock()
+		state.clearCycle()
+		d.mu.Unlock()
 		w.releaseAttemptSlot(s, token)
 		return
 	}
@@ -212,6 +235,7 @@ func (w *RouteWorker) scheduleAttempt(ctx context.Context, inbound bool) {
 		w.finishAttempt(token, "released", "disconnected")
 		return
 	}
+	log.Printf("attempt reserved transport=%s members=%d budget_ms=15000", transport, len(members))
 	w.startAttemptWriter(ctx)
 	select {
 	case w.attemptWrites <- attemptWrite{Conn: conn, Frame: attemptFrame{frame, now.Add(15 * time.Second)}, Deadline: now.Add(15 * time.Second), Token: token}:

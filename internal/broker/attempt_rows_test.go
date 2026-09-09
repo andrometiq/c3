@@ -111,8 +111,16 @@ func TestNegotiatedOversizeNoticeRetiresAfterReceipt(t *testing.T) {
 	}
 }
 func TestNegotiatedMixedLegacyPaths(t *testing.T) {
+	for _, transport := range []string{"channel", "inbox"} {
+		t.Run(transport, func(t *testing.T) { testNegotiatedMixedLegacyPaths(t, transport) })
+	}
+}
+func testNegotiatedMixedLegacyPaths(t *testing.T, transport string) {
 	// R7: "Non-negotiated sessions keep the old path untouched. Never two delivery owners for one session."
 	b, w, s, frames, ctx := negotiatedFixture(t)
+	if transport == "inbox" {
+		enableInbox(s, false)
+	}
 	key := MakeRouteKey("telegram", -200, nil)
 	legacy, pushes := liveHolderFrames(t, b, key)
 	legacy.AddRoute(key)

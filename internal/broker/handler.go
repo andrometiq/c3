@@ -193,7 +193,7 @@ func (b *Broker) HandleConn(nc net.Conn) {
 
 	ack := b.buildHelloAck(hello, stub)
 	if stub.negotiated() {
-		ack.Delivery = &ipc.DeliveryAcceptance{Version: 1, Modes: []string{"channel"}}
+		ack.Delivery = &ipc.DeliveryAcceptance{Version: 1, Modes: []string{"channel", "inbox"}}
 	}
 	if err := conn.WriteJSON(ack); err != nil {
 		return
@@ -979,6 +979,7 @@ func (b *Broker) handleListClaims(conn *ipc.Conn) {
 		}
 		render := e.Stub.RenderRouteFor(e.Key)
 		entry.ConfirmedAt = render.Confirmed
+		entry.ConfirmedTransport = render.Transport
 		entry.RenderState, entry.RenderReason = render.State, render.Reason
 		if output := e.Stub.OutputRoute(); output != nil && *output == e.Key {
 			entry.IsOutput = true
@@ -1344,6 +1345,7 @@ func (b *Broker) handleListSessions(conn *ipc.Conn, raw []byte) {
 		render := s.RenderRoute()
 		e.RenderState, e.RenderReason = render.State, render.Reason
 		e.ConfirmedAt = render.Confirmed
+		e.ConfirmedTransport = render.Transport
 		routes := orderedHeldRoutes(s)
 		if len(routes) > 0 {
 			labels := make([]string, 0, len(routes))

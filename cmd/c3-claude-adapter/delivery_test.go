@@ -10,10 +10,11 @@ import (
 
 	"github.com/Andrometiq/c3/internal/c3types"
 	"github.com/Andrometiq/c3/internal/ipc"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 func TestNegotiatedHelloEligibility(t *testing.T) {
-	// P1: "OFFERS ONLY WHEN channel is eligible (host detected, channel flag present, transcript readable)".
+	// P1/P2: "channel OR inbox is eligible"; no inbox in this fixture.
 	for _, state := range []string{ipc.RenderCapable, ipc.RenderProbing, ipc.RenderQueueOnly, ""} {
 		t.Run(state, func(t *testing.T) {
 			a, _, _ := liveFixture(t, state)
@@ -53,6 +54,7 @@ func TestNegotiatedDeliverReceiptShapes(t *testing.T) {
 			msg := ipc.DeliverMsg{Op: ipc.OpDeliver, Token: "DELIVERYTOKEN-1", Transport: "channel", DeadlineMS: 1000, Inbound: c3types.Inbound{Text: "hello"}}
 			raw, _ := json.Marshal(msg)
 			a.handleDeliver(ctx, raw)
+			waitDeliveryWritten(t, a, msg.Token)
 			if !strings.Contains(string(output.Bytes()), `"c3_delivery_id":"DELIVERYTOKEN-1"`) || !strings.Contains(string(output.Bytes()), `"c3_attempt":"channel:1"`) {
 				t.Fatal("missing receipt metadata")
 			}
@@ -81,6 +83,7 @@ func TestNegotiatedNoFallbackRetry(t *testing.T) {
 	a, output, frames, ctx := negotiatedAdapter(t)
 	raw, _ := json.Marshal(ipc.DeliverMsg{Op: ipc.OpDeliver, Token: "expires", Transport: "channel", DeadlineMS: 50, Inbound: c3types.Inbound{Text: "hello"}})
 	a.handleDeliver(ctx, raw)
+	waitDeliveryWritten(t, a, "expires")
 	before := len(output.Bytes())
 	a.resetLiveRoute(true)
 	time.Sleep(250 * time.Millisecond)
@@ -112,9 +115,9 @@ func TestNegotiatedAcceptanceAbsentKeepsLegacy(t *testing.T) {
 func TestNegotiatedDocsContract(t *testing.T) {
 	// P9: "phase 2 ... P8 per-route display for negotiated sessions; legacy sessions untouched".
 	for path, claims := range map[string][]string{
-		"../../docs/ADAPTERS.md":  {"Provisional-negotiated", "no `fetch_receipt` mode is accepted", "lease` is refused on presence only for negotiated", "Legacy sessions retain"},
-		"../../docs/DEBUGGING.md": {"attempt retirement released: storage retry limit reached", "attempt shadow suite divergences=0", "no phase-5 flap timer"},
-		"../../DECISIONS.md":      {"D034: Negotiated channel delivery (phase 2)", "no goroutine per attempt"},
+		"../../docs/ADAPTERS.md":  {"Provisional-negotiated", "no `fetch_receipt` mode is accepted", "lease` is refused on presence only for negotiated", "Legacy sessions retain", "c3_attempt=\"inbox:N\"", "validateCrossSessionPeer", "peer variants fail", "channel OR inbox is eligible", "Phase-2 binary compatibility limitation"},
+		"../../docs/DEBUGGING.md": {"attempt retirement released: storage retry limit reached", "attempt shadow suite divergences=0", "no phase-5 flap timer", "attempt reserved transport=inbox", "attempt finished transport=inbox outcome=confirmed"},
+		"../../DECISIONS.md":      {"D034: Negotiated channel delivery (phase 2)", "no goroutine per attempt", "D035: Inbox as a broker-owned transport (phase 3)", "supersedes the delivery parts of D031"},
 	} {
 		body, err := os.ReadFile(path)
 		if err != nil {
@@ -181,5 +184,75 @@ func TestNegotiatedHostDetectionFactChanges(t *testing.T) {
 	case raw := <-frames:
 		t.Fatalf("repeated report: %s", raw)
 	default:
+	}
+}
+
+func waitDeliveryWritten(t *testing.T, a *adapter, token string) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		a.liveMu.Lock()
+		o := a.deliveryObservers[token]
+		written := o != nil && o.written
+		a.liveMu.Unlock()
+		if written {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatal("delivery writer did not complete")
+}
+
+func TestNegotiatedAcceptedModeSubset(t *testing.T) {
+	// P1/P2: "accepted mode set is frozen for the life of the connection".
+	for _, modes := range [][]string{{"channel"}, {"inbox"}, {"channel", "inbox"}, {"channel", "future"}} {
+		a, _, _ := liveFixture(t, ipc.RenderCapable)
+		a.initialRenderRoute = ipc.RenderRoute{State: ipc.RenderCapable}
+		a.acceptDelivery(a.deliveryOffer(), &ipc.DeliveryAcceptance{Version: 1, Modes: modes})
+		if !a.deliveryAccepted.Load() {
+			t.Fatal(modes)
+		}
+		a.liveMu.Lock()
+		inbox := a.deliveryInboxAccepted
+		channel := a.deliveryChannelAccepted
+		a.liveMu.Unlock()
+		has := func(mode string) bool {
+			for _, m := range modes {
+				if m == mode {
+					return true
+				}
+			}
+			return false
+		}
+		if inbox != has("inbox") || channel != has("channel") {
+			t.Fatal("accepted set changed", modes)
+		}
+	}
+}
+
+func TestNegotiatedInboxAttachAndPreamble(t *testing.T) {
+	// P8: broker-derived inbox state is used in both attach text and preamble.
+	a, _, frames, ctx := negotiatedAdapter(t)
+	results := make(chan *mcp.CallToolResult, 1)
+	go func() {
+		r, _ := a.toolAttach(ctx, &mcp.CallToolRequest{Params: &mcp.CallToolParamsRaw{Arguments: json.RawMessage(`{"name":"example"}`)}})
+		results <- r
+	}()
+	raw := nextLiveFrame(t, frames)
+	if op, _ := ipc.PeekOp(raw); op != ipc.OpAttach {
+		t.Fatal(string(raw))
+	}
+	raw, _ = json.Marshal(ipc.AttachedMsg{Op: ipc.OpAttached, OK: true, Channel: "telegram", ChatID: -100, Name: "example", DeliveryRoute: &ipc.RenderRoute{State: "live_inbox", Confirmed: time.Now(), Transport: "inbox"}})
+	a.dispatchAttached(raw)
+	select {
+	case r := <-results:
+		if r == nil || len(r.Content) == 0 || !strings.Contains(r.Content[0].(*mcp.TextContent).Text, "live: inbox, confirmed") {
+			t.Fatal(r)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("attach did not complete")
+	}
+	if !strings.Contains(a.buildInstructions(), "live: inbox, confirmed") {
+		t.Fatal("preamble omitted inbox")
 	}
 }

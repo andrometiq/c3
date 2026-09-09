@@ -246,12 +246,16 @@ type routeKey struct {
 }
 
 type adapter struct {
-	deliveryHostRoute func() ipc.RenderRoute
-	deliveryRoutes    map[routeKey]ipc.RenderRoute
-	deliveryAccepted  atomic.Bool
-	deliveryObservers map[string]*deliveryObserver
-	deliveryLoopOnce  sync.Once
-	deliveryLastFacts ipc.DeliveryLive
+	deliveryWrites          chan deliveryWrite
+	deliveryWriterOnce      sync.Once
+	deliveryChannelAccepted bool // liveMu
+	deliveryInboxAccepted   bool // liveMu
+	deliveryHostRoute       func() ipc.RenderRoute
+	deliveryRoutes          map[routeKey]ipc.RenderRoute
+	deliveryAccepted        atomic.Bool
+	deliveryObservers       map[string]*deliveryObserver
+	deliveryLoopOnce        sync.Once
+	deliveryLastFacts       ipc.DeliveryLive
 
 	// notifyTx wraps the stdio transport to permit emitting custom
 	// `notifications/claude/channel` frames. Set in run() before Server.Run.
@@ -546,7 +550,7 @@ func (a *adapter) hello() error {
 	wasNegotiated := a.deliveryAccepted.Load()
 	a.acceptDelivery(offer, ack.Delivery)
 	if a.deliveryAccepted.Load() && a.runCtx != nil {
-		a.deliveryLoopOnce.Do(func() { go a.observeDeliveries(a.runCtx) })
+		a.startDeliveryLoops(a.runCtx)
 	}
 	if wasNegotiated && !a.deliveryAccepted.Load() {
 		a.resetLiveRoute(true)

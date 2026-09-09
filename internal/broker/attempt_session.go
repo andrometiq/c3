@@ -10,9 +10,13 @@ import (
 )
 
 type negotiatedRoute struct {
-	Exhausted time.Time
-	Confirmed time.Time
-	Held      int
+	Exhausted                time.Time
+	Confirmed                time.Time
+	Held                     int
+	Transport                string
+	CycleToken               string
+	CycleMembers             []attemptMember
+	TriedChannel, TriedInbox bool
 }
 type negotiatedSession struct {
 	mu      sync.Mutex
@@ -32,7 +36,7 @@ func (s *Stub) claimGeneration(key RouteKey) uint64 {
 }
 func (b *Broker) configureDelivery(s *Stub, raw json.RawMessage) {
 	offer := ipc.ParseDeliveryOffer(raw)
-	if b.Queue == nil || offer == nil || !offer.Live.Channel.Eligible {
+	if b.Queue == nil || offer == nil || (!offer.Live.Channel.Eligible && !offer.Live.Inbox.Eligible) {
 		return
 	}
 	s.delivery = &negotiatedSession{offer: *offer, live: offer.Live, routes: map[RouteKey]*negotiatedRoute{}}
@@ -108,7 +112,7 @@ func (b *Broker) handleAttemptResult(s *Stub, raw []byte) {
 // P1: "Reconnect that changes mode or declared milestones: release every attempt
 // of the old connection first". The worker validates adoption under the claim gate.
 func (b *Broker) reconnectDelivery(old, next *Stub) {
-	same := old.negotiated() && next.negotiated() && old.delivery.offer == next.delivery.offer && isPIDAlive(old.PID)
+	same := old.negotiated() && next.negotiated() && sameDeliveryContract(old.delivery.offer, next.delivery.offer) && isPIDAlive(old.PID)
 
 	for _, a := range b.attempts.snapshot(time.Now()) {
 		if a.Negotiated && a.Holder.Stub == old && a.Outcome == "open" && b.Workers != nil {
@@ -145,8 +149,12 @@ func (b *Broker) registerDeliveryHello(hello ipc.HelloMsg, conn *ipc.Conn, old *
 		b.configureDelivery(s, hello.Delivery)
 		s.ReceiptConfirming = hello.RenderState != ""
 		s.SetRenderRoute(hello.RenderState, hello.RenderReason, hello.CannotRenderChannels)
-		if old.negotiated() && s.negotiated() && old.delivery.offer == s.delivery.offer && isPIDAlive(old.PID) {
+		if old.negotiated() && s.negotiated() && sameDeliveryContract(old.delivery.offer, s.delivery.offer) && isPIDAlive(old.PID) {
+			live := s.delivery.live
 			s.delivery = old.delivery
+			s.delivery.mu.Lock()
+			s.delivery.live = live
+			s.delivery.mu.Unlock()
 		}
 	})
 }
@@ -164,4 +172,12 @@ func (s *Stub) invalidateDeliveryClaim(key RouteKey) {
 		s.claimGenerations = map[RouteKey]uint64{}
 	}
 	s.claimGenerations[key] = s.claimSequence
+}
+
+// P1/P6: capability changes rearm; only a changed accepted mode set or declared
+// milestone releases live attempts on reconnect. Both configured peers accept
+// the same channel/inbox modes. Hello eligibility may differ from initial facts
+// after delivery_report without changing the connection's delivery contract.
+func sameDeliveryContract(a, b ipc.DeliveryOffer) bool {
+	return a.Version == b.Version && a.Receipts == b.Receipts && a.Fetch == b.Fetch
 }

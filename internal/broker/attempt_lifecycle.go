@@ -33,21 +33,40 @@ func (w *RouteWorker) exhaustAttempt(s *Stub) {
 	d := s.delivery
 	d.mu.Lock()
 	d.route(w.key).Exhausted = time.Now()
+	d.route(w.key).clearCycle()
 	d.mu.Unlock()
-	log.Print("attempt exhausted: no receipt on channel; route paused")
+	log.Print("attempt exhausted: no receipt on channel or inbox; route paused")
 }
 func (w *RouteWorker) finishAttempt(token, outcome, reason string) {
 	var owner *Stub
+	var transport string
+	var members []attemptMember
 	w.updateAttempt(token, func(a *attemptRecord) {
 		if a.Outcome == "open" {
 			a.Outcome = outcome
 			a.Reason = reason
 			owner = a.Holder.Stub
+			transport = a.Transport
+			members = slices.Clone(a.Members)
 		}
 	})
 	if owner == nil {
 		return
 	}
+	log.Printf("attempt finished transport=%s outcome=%s", transport, outcome)
+	d := owner.delivery
+	d.mu.Lock()
+	state := d.route(w.key)
+	fallback := (outcome == "failed" || outcome == "expired") && state.Exhausted.IsZero() && len(members) > 0 && state.nextTransport(d.live) != ""
+	if fallback {
+		state.CycleMembers = members
+	} else {
+		state.clearCycle()
+	}
+	d.mu.Unlock()
+	if fallback {
+		return
+	} // P6: "A cycle holds the slot until it terminates".
 	if outcome == "failed" || outcome == "expired" {
 		w.exhaustAttempt(owner)
 	}
@@ -137,6 +156,7 @@ func (w *RouteWorker) retireAttempt() {
 		d.mu.Lock()
 		d.proven = true
 		d.route(w.key).Confirmed = time.Now()
+		d.route(w.key).Transport = a.Transport
 		d.mu.Unlock()
 		w.finishAttempt(a.Token, "confirmed", "transcript")
 		w.broker.rearmDelivery(s)

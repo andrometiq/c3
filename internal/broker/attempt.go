@@ -151,7 +151,11 @@ func (t *attemptTable) open(a attemptRecord, now time.Time) {
 		a.Deadline = now.Add(15 * time.Second)
 	case "fetch":
 		a.Deadline = now.Add(60 * time.Second)
-	case "inbox", "unknown": // no observable deadline for these in phase 1
+	case "inbox":
+		if a.Negotiated {
+			a.Deadline = now.Add(15 * time.Second)
+		}
+	case "unknown": // no observable deadline for these in phase 1
 	default:
 		a.Transport = "unknown"
 	}

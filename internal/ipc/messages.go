@@ -447,20 +447,21 @@ type ClaimsListMsg struct {
 // when the route corresponds to a known topic in mappings.json (lookup is
 // best-effort; empty when the route is a DM or a yet-unregistered topic).
 type ClaimEntry struct {
-	ConfirmedAt  time.Time `json:"confirmed_at,omitzero"`
-	RenderState  string    `json:"render_state,omitempty"`
-	RenderReason string    `json:"render_reason,omitempty"`
-	Channel      string    `json:"channel"`
-	ChatID       int64     `json:"chat_id"`
-	HasTopic     bool      `json:"has_topic"`
-	TopicID      int64     `json:"topic_id,omitempty"`
-	TopicName    string    `json:"topic_name,omitempty"`
-	GroupName    string    `json:"group_name,omitempty"`
-	HolderCLI    string    `json:"holder_cli"`
-	HolderPID    int       `json:"holder_pid"`
-	HolderCWD    string    `json:"holder_cwd,omitempty"`
-	ConnID       uint64    `json:"conn_id"`
-	Connected    bool      `json:"connected"`
+	ConfirmedTransport string    `json:"confirmed_transport,omitempty"`
+	ConfirmedAt        time.Time `json:"confirmed_at,omitzero"`
+	RenderState        string    `json:"render_state,omitempty"`
+	RenderReason       string    `json:"render_reason,omitempty"`
+	Channel            string    `json:"channel"`
+	ChatID             int64     `json:"chat_id"`
+	HasTopic           bool      `json:"has_topic"`
+	TopicID            int64     `json:"topic_id,omitempty"`
+	TopicName          string    `json:"topic_name,omitempty"`
+	GroupName          string    `json:"group_name,omitempty"`
+	HolderCLI          string    `json:"holder_cli"`
+	HolderPID          int       `json:"holder_pid"`
+	HolderCWD          string    `json:"holder_cwd,omitempty"`
+	ConnID             uint64    `json:"conn_id"`
+	Connected          bool      `json:"connected"`
 	// IsOutput marks the holder's outbound-default route. It is additive and
 	// omitted for input-only routes and older brokers.
 	IsOutput bool `json:"is_output,omitempty"`
@@ -897,13 +898,14 @@ type ListSessionsReplyMsg struct {
 // SessionEntry is one row of ListSessionsReplyMsg.Sessions. Mirrors
 // what the user would see in the rendered table.
 type SessionEntry struct {
-	ConfirmedAt  time.Time `json:"confirmed_at,omitzero"`
-	RenderState  string    `json:"render_state,omitempty"`
-	RenderReason string    `json:"render_reason,omitempty"`
-	CLI          string    `json:"cli"`
-	PID          int       `json:"pid"`
-	CWD          string    `json:"cwd"`
-	ConnID       uint64    `json:"conn_id"`
+	ConfirmedTransport string    `json:"confirmed_transport,omitempty"`
+	ConfirmedAt        time.Time `json:"confirmed_at,omitzero"`
+	RenderState        string    `json:"render_state,omitempty"`
+	RenderReason       string    `json:"render_reason,omitempty"`
+	CLI                string    `json:"cli"`
+	PID                int       `json:"pid"`
+	CWD                string    `json:"cwd"`
+	ConnID             uint64    `json:"conn_id"`
 	// AttachedTo is the human-formatted topic label — "<name> (<group>)"
 	// for a regular topic, "dm" for a DM route, "topic-<id>" when the
 	// route refers to an unknown topic id, or "" when the stub holds no routes.

@@ -89,3 +89,20 @@ func StrictJSON(raw []byte, dst any) error {
 func (d *DeliveryAcceptance) ChannelOnly() bool {
 	return d != nil && d.Version == 1 && len(d.Modes) == 1 && d.Modes[0] == "channel"
 }
+
+// P1/P2: accepted modes are frozen per connection. Ignore modes this adapter
+// does not implement; execute only supported modes present in the acceptance.
+func (d *DeliveryAcceptance) HasMode(mode string) bool {
+	if d == nil || d.Version != 1 {
+		return false
+	}
+	for _, m := range d.Modes {
+		if m == mode {
+			return true
+		}
+	}
+	return false
+}
+func (d *DeliveryAcceptance) SupportsLive() bool {
+	return d.HasMode("channel") || d.HasMode("inbox")
+}

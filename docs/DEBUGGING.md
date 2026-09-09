@@ -15,22 +15,24 @@ opens and immediately confirms a `fetch` attempt labelled `legacy_consume`; fetc
 receipts join the table in phase 4. The legacy shadow itself adds no wire or display behavior.
 
 
-## Negotiated channel delivery (phase 2)
+## Negotiated channel and inbox delivery (phase 3)
 
-A valid `delivery` offer and `hello_ack.delivery` acceptance select the channel
+A valid `delivery` offer and `hello_ack.delivery` acceptance select the broker-owned channel/inbox
 attempt path. A missing acceptance means legacy, including degraded brokers
-and channel-ineligible Claude sessions. Use `attach`, `/status`, or
+and Claude sessions with neither eligible transport. Use `attach`, `/status`, or
 `c3-broker status` to inspect broker-derived route state; the adapter preamble
 shows the same state.
 
-- `waiting`: channel is eligible, with no confirmation on this route yet.
-- `live: channel, confirmed <age>`: the host transcript confirmed delivery.
-- `pull-only (<reason>)`: channel is ineligible or a cycle exhausted. Exhaustion
-  says `no receipt on channel; retries on reconnect, attach or new messages after 60 s`.
-  Previous channel confirmation remains visible as history.
+- `waiting`: channel or inbox is eligible, with no confirmation on this route yet.
+- `live: channel, confirmed <age>` or `live: inbox, confirmed <age>`: the host
+  transcript confirmed the named transport.
+- `pull-only (<reason>)`: the confirmed transport is ineligible or a cycle exhausted. Exhaustion
+  says `no receipt on channel or inbox; retries on reconnect, attach or new messages after 60 s`.
+  Previous transport confirmation remains visible as history.
 
 A fetch never proves live transport. Held and attach backlog counts omit rows
-inside open attempts. After a timeout, the rows become visible again. Inbound
+inside open attempts. After channel expires, a new inbox attempt covers only the surviving batch
+with a new token and fresh 15-second budget. After exhaustion, rows become visible again. Inbound
 at +30 seconds does not retry; inbound at or after +60 seconds rearms a cycle.
 Reconnect, explicit attach, changed capability facts, and a confirmation on a
 sibling route also rearm. There is no phase-5 flap timer yet.
@@ -39,8 +41,11 @@ Diagnostic lines are deliberately generic:
 
 - `attempt result ignored: authority, deadline or open membership mismatch`:
   one no-op for stale, forged, late or already-closed evidence; no row is consumed.
-- `attempt exhausted: no receipt on channel; route paused`: channel failed or
-  its authoritative reservation deadline expired; rows remain available for fetch.
+- `attempt reserved transport=inbox members=N budget_ms=15000`: a fresh inbox attempt.
+- `attempt finished transport=inbox outcome=confirmed` (or `failed` / `expired`):
+  serialized terminal outcome; the inbox write is bounded to 2 seconds.
+- `attempt exhausted: no receipt on channel or inbox; route paused`: all eligible transports failed or
+  their authoritative reservation deadlines expired; rows remain available for fetch.
 - `attempt retirement retry: storage write failed; evidence retained`: receipt
   arrived in time, but removal failed. Three bounded removal tries preserve evidence.
 - `attempt retirement released: storage retry limit reached`: no retirement was
@@ -52,3 +57,7 @@ resending; process death releases them. Removing the final member through drain,
 eviction or revision reconciliation releases the slot without proving transport.
 Drain imports retain durable `origin:"drain"` provenance and are never live pushed.
 The legacy suite continues to assert `attempt shadow suite divergences=0`.
+
+The phase-2 Claude binary requires an exact channel-only acknowledgement and
+rejects the phase-3 mode set. Restart it with the phase-3 adapter; this is a
+known compatibility limitation, not a reason to retry or weaken receipt checks.

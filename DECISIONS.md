@@ -3,6 +3,44 @@
 Entries are newest first. This is the public architecture record: it records
 rulings and rationale, never private operational details.
 
+## D035: Inbox as a broker-owned transport (phase 3)
+
+**Date:** 2026-09-09
+
+**Decision:** This supersedes the delivery parts of D031 for negotiated
+connections. D031's owning-session endpoint validation, peer credentials,
+framing and transcript provenance remain unchanged. Legacy connections retain
+their adapter-owned fallback and retry behavior.
+
+Claude offers delivery when channel or inbox is eligible. Inbox requires a
+readable transcript and the validated owning-session socket, including peer
+PID/UID verification without disclosing credentials. The broker accepts
+`["channel","inbox"]`. It schedules channel then inbox over one selected batch;
+fallback keeps the unproven admission slot and reserves a new token and a fresh
+15-second deadline. Each transport is tried once per batch. New arrivals and
+changed revisions wait for a later batch. Late evidence never retires another
+attempt's members or rearms a route. Exhaustion retains confirmation history
+and uses the existing rearm events.
+
+The adapter executes exactly the requested transport through a bounded writer
+and shared observation loop, with no goroutine per attempt. Inbox writes keep
+the 2-second bound and validate the connected peer before authentication.
+Receipts carry `c3_attempt="inbox:N"` and the new token; the strict peer prefix
+and provenance rules apply to the versioned host fixtures. Capability reports
+include socket availability changes. Per-route display names channel or inbox;
+fetch cannot change that history.
+
+**Compatibility limitation:** The phase-2 adapter's exact `ChannelOnly()` check
+rejects a broadened ack. Its hello cannot distinguish it from a phase-3
+channel-only offer. The requirement that an unchanged phase-2 binary remain
+negotiated conflicts with the required mode set. We pin this conflict in tests
+and require upgrading that adapter, rather than inventing a handshake. New
+adapters honor supported modes within an accepted subset.
+
+**Why:** The broker owns durable row delivery, including fallback identity,
+admission and deadlines. Keeping transport execution and receipt parsing in the
+adapter preserves host-specific validation without creating a second scheduler.
+
 ## D034: Negotiated channel delivery (phase 2)
 
 **Date:** 2026-09-09

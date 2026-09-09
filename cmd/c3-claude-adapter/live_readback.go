@@ -199,6 +199,9 @@ func (a *adapter) pushWithReadback(ctx context.Context, in ipc.InboundMsg, frame
 }
 
 func (a *adapter) pushWithReadbackGeneration(ctx context.Context, in ipc.InboundMsg, frame map[string]any, expected *uint64) {
+	if a.deliveryAccepted.Load() {
+		return
+	}
 	// Synthesized events have no durable receipt contract.
 	if in.Inbound.IsEvent() {
 		if a.liveRoute().State == ipc.RenderCapable && a.notifyTx != nil {
@@ -343,7 +346,7 @@ func (a *adapter) awaitLiveReadback(ctx context.Context, conn *ipc.Conn, generat
 			return
 		}
 		a.liveMu.Lock()
-		current := generation == a.liveGeneration && conn == a.currentConn()
+		current := !a.deliveryAccepted.Load() && generation == a.liveGeneration && conn == a.currentConn()
 		a.liveMu.Unlock()
 		if !current {
 			return

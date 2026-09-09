@@ -17,10 +17,11 @@ type deliveryObserver struct {
 	discarding bool
 	result     string
 	reason     string
+	cross      bool
+	written    bool
 }
 
-// P1/P9: "the adapter OFFERS ONLY WHEN channel is eligible". Detection remains
-// fail-closed; a flagless host retains its legacy adapter-owned inbox fallback.
+// P1/P2: offer when "channel OR inbox is eligible"; both need a readable transcript.
 func (a *adapter) deliveryFacts() ipc.DeliveryLive {
 	route := a.initialRenderRoute
 	if a.deliveryHostRoute != nil {
@@ -36,30 +37,46 @@ func (a *adapter) deliveryFacts() ipc.DeliveryLive {
 	}
 	inbox := ipc.DeliveryEligibility{Reason: "no owning session socket"}
 	if a.crossSession != nil {
-		if _, err := a.crossSession.validatedSocket(); err == nil {
+		if _, ok := transcriptOffset(a.livePath()); !ok {
+			inbox.Reason = "session transcript unavailable"
+		} else if channel.Eligible && !a.deliveryAccepted.Load() {
+			// A channel offer can negotiate before probing the optional inbox.
+			// Old brokers therefore retain the channel path's exact socket behavior.
+			inbox.Reason = "owning session socket not yet verified"
+		} else if err := a.validateDeliveryInbox(); err == nil {
 			inbox = ipc.DeliveryEligibility{Eligible: true}
+		} else {
+			inbox.Reason = "owning session socket unavailable or invalid"
 		}
 	}
 	return ipc.DeliveryLive{Channel: channel, Inbox: inbox}
 }
 func (a *adapter) deliveryOffer() json.RawMessage {
 	live := a.deliveryFacts()
-	if !live.Channel.Eligible {
+	if !live.Channel.Eligible && !live.Inbox.Eligible {
 		return nil
 	}
 	data, _ := json.Marshal(ipc.DeliveryOffer{Version: 1, Live: live, Receipts: "transcript", Fetch: "receipt"})
 	return data
 }
 func (a *adapter) acceptDelivery(offer json.RawMessage, accepted *ipc.DeliveryAcceptance) {
-	enabled := len(offer) > 0 && accepted.ChannelOnly()
+	offered := ipc.ParseDeliveryOffer(offer)
+	enabled := offered != nil && accepted.SupportsLive()
+	inbox := enabled && accepted.HasMode("inbox")
 	a.deliveryAccepted.Store(enabled)
 	a.liveMu.Lock()
+	a.deliveryInboxAccepted = inbox
+	a.deliveryChannelAccepted = enabled && accepted.HasMode("channel")
 	if !enabled {
 		a.deliveryObservers = nil
 		a.deliveryRoutes = nil
 	} else {
-		a.deliveryLastFacts = a.deliveryFacts()
-		if a.renderRoute.State != "live_channel" && a.renderRoute.State != "pull_only" {
+		// Stop every legacy observer and invalidate its retry/probe latches.
+		a.liveGeneration++
+		a.livePending = nil
+		a.liveCrossSession = false
+		a.deliveryLastFacts = offered.Live
+		if a.renderRoute.State != "live_channel" && a.renderRoute.State != "live_inbox" && a.renderRoute.State != "pull_only" {
 			a.renderRoute = ipc.RenderRoute{State: "waiting"}
 		}
 	}
@@ -70,7 +87,7 @@ func (a *adapter) handleDeliver(ctx context.Context, raw []byte) {
 		return
 	}
 	var msg ipc.DeliverMsg
-	if ipc.StrictJSON(raw, &msg) != nil || msg.Token == "" || msg.Transport != "channel" || msg.DeadlineMS <= 0 || msg.DeadlineMS > 15000 {
+	if ipc.StrictJSON(raw, &msg) != nil || msg.Token == "" || (msg.Transport != "channel" && msg.Transport != "inbox") || msg.DeadlineMS <= 0 || msg.DeadlineMS > 15000 {
 		return
 	}
 	deadline := time.Now().Add(time.Duration(msg.DeadlineMS) * time.Millisecond)
@@ -81,6 +98,10 @@ func (a *adapter) handleDeliver(ctx context.Context, raw []byte) {
 	path := a.livePath()
 	offset, available := transcriptOffset(path)
 	a.liveMu.Lock()
+	if (msg.Transport == "inbox" && !a.deliveryInboxAccepted) || (msg.Transport == "channel" && !a.deliveryChannelAccepted) {
+		a.liveMu.Unlock()
+		return
+	}
 	if a.deliveryObservers[msg.Token] != nil {
 		a.liveMu.Unlock()
 		return
@@ -93,8 +114,8 @@ func (a *adapter) handleDeliver(ctx context.Context, raw []byte) {
 		return
 	}
 	a.liveAttempt++
-	attempt := fmt.Sprintf("channel:%d", a.liveAttempt)
-	observer := &deliveryObserver{path: path, offset: offset, deadline: deadline, attempt: attempt}
+	attempt := fmt.Sprintf("%s:%d", msg.Transport, a.liveAttempt)
+	observer := &deliveryObserver{path: path, offset: offset, deadline: deadline, attempt: attempt, cross: msg.Transport == "inbox"}
 	if !available {
 		observer.result = "failed"
 		observer.reason = "session transcript unavailable"
@@ -104,28 +125,25 @@ func (a *adapter) handleDeliver(ctx context.Context, raw []byte) {
 	}
 	a.deliveryObservers[msg.Token] = observer
 	a.liveMu.Unlock()
-	a.deliveryLoopOnce.Do(func() {
-		loopCtx := ctx
-		if a.runCtx != nil {
-			loopCtx = a.runCtx
-		}
-		go a.observeDeliveries(loopCtx)
-	})
+	a.startDeliveryLoops(ctx)
 	if !available {
 		return
 	}
 	meta := frame["meta"].(map[string]any)
 	meta["c3_delivery_id"] = msg.Token
 	meta["c3_attempt"] = attempt
-	writeCtx, cancel := context.WithDeadline(ctx, deadline)
-	defer cancel()
-	if a.notifyTx == nil || a.notifyTx.Notify(writeCtx, "notifications/claude/channel", frame) != nil {
-		a.liveMu.Lock()
-		if current := a.deliveryObservers[msg.Token]; current == observer {
-			observer.result = "failed"
-			observer.reason = "channel notify write failed"
+	sessionID := ""
+	if observer.cross {
+		if entry, ok := a.currentStableIdentity(); ok {
+			sessionID = entry.StableSessionID
+		} else if entry, ok := resolveTerminalHandoff(instanceIDFromEnv()); ok {
+			sessionID = entry.StableSessionID
 		}
-		a.liveMu.Unlock()
+	}
+	select {
+	case a.deliveryWrites <- deliveryWrite{token: msg.Token, observer: observer, frame: frame, sessionID: sessionID}:
+	default:
+		a.finishDeliveryWrite(msg.Token, observer, "write admission full")
 	}
 }
 
@@ -165,13 +183,13 @@ func (a *adapter) pollDeliveries() {
 			delete(a.deliveryObservers, token)
 			continue
 		}
-		if o.result == "" {
+		if o.result == "" && o.written {
 			if _, ok := transcriptOffset(o.path); !ok {
 				o.result = "failed"
 				o.reason = "session transcript unavailable"
 			} else {
 				a.liveScanMu.Lock()
-				offset, found := scanReceipt(o.path, o.offset, token, &o.discarding, false, o.attempt)
+				offset, found := scanReceipt(o.path, o.offset, token, &o.discarding, o.cross, o.attempt)
 				a.liveScanMu.Unlock()
 				o.offset = offset
 				if found {

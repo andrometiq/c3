@@ -14,6 +14,7 @@ const (
 
 // RenderRoute describes host delivery, independently of broker connectivity.
 type RenderRoute struct {
+	Transport string    `json:"confirmed_transport,omitempty"`
 	Confirmed time.Time `json:"confirmed_at,omitzero"`
 	Held      int       `json:"-"`
 	State     string    `json:"render_state"`
@@ -30,10 +31,13 @@ type RenderStateMsg struct {
 
 func (r RenderRoute) Semantic() string { return r.State + ":" + r.Reason + ":" + strconv.Itoa(r.Held) }
 func (r RenderRoute) Text() string {
-	if r.State == "waiting" || r.State == "live_channel" || r.State == "pull_only" {
+	if r.State == "waiting" || r.State == "live_channel" || r.State == "live_inbox" || r.State == "pull_only" {
 		text := r.State
 		if r.State == "live_channel" {
 			text = "live: channel"
+		}
+		if r.State == "live_inbox" {
+			text = "live: inbox"
 		}
 		if r.State == "pull_only" {
 			text = "pull-only"
@@ -47,7 +51,11 @@ func (r RenderRoute) Text() string {
 				age = 0
 			}
 			if r.State == "pull_only" {
-				text += ", was channel"
+				transport := r.Transport
+				if transport == "" {
+					transport = "channel"
+				}
+				text += ", was " + transport
 			}
 			text += ", confirmed " + age.String() + " ago"
 		}

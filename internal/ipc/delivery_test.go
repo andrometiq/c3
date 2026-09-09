@@ -18,6 +18,8 @@ func TestNegotiatedWireGolden(t *testing.T) {
 		golden string
 	}{
 		{"offer", DeliveryOffer{Version: 1, Live: DeliveryLive{Channel: DeliveryEligibility{Eligible: true}, Inbox: DeliveryEligibility{Reason: "unavailable"}}, Receipts: "transcript", Fetch: "receipt"}, `{"version":1,"live":{"channel":{"eligible":true},"inbox":{"eligible":false,"reason":"unavailable"}},"receipts":"transcript","fetch":"receipt"}`},
+		{"inbox-offer", DeliveryOffer{Version: 1, Live: DeliveryLive{Channel: DeliveryEligibility{Reason: "no channel"}, Inbox: DeliveryEligibility{Eligible: true}}, Receipts: "transcript", Fetch: "receipt"}, `{"version":1,"live":{"channel":{"eligible":false,"reason":"no channel"},"inbox":{"eligible":true}},"receipts":"transcript","fetch":"receipt"}`},
+		{"inbox-accept", DeliveryAcceptance{Version: 1, Modes: []string{"channel", "inbox"}}, `{"version":1,"modes":["channel","inbox"]}`},
 		{"accept", DeliveryAcceptance{Version: 1, Modes: []string{"channel"}}, `{"version":1,"modes":["channel"]}`},
 		{"result", AttemptResultMsg{Op: OpAttemptResult, Token: "t", Outcome: "confirmed"}, `{"op":"attempt_result","token":"t","outcome":"confirmed","reason":""}`},
 		{"report", DeliveryReportMsg{Op: OpDeliveryReport, Live: DeliveryLive{Channel: DeliveryEligibility{Eligible: true}}}, `{"op":"delivery_report","live":{"channel":{"eligible":true},"inbox":{"eligible":false}}}`},
@@ -80,5 +82,32 @@ func TestDeliverDeadlineMeasuredAfterAdmission(t *testing.T) {
 	}
 	if err := <-done; err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestDeliverInboxWireGolden(t *testing.T) {
+	// P2: "deliver ... transport: channel|inbox"; the new token is broker-authored.
+	raw, _ := json.Marshal(DeliverMsg{Op: OpDeliver, Token: "inbox-new", Transport: "inbox", DeadlineMS: 15000, Inbound: c3types.Inbound{Text: "hello"}})
+	want := `{"op":"deliver","token":"inbox-new","transport":"inbox","deadline_ms":15000,"inbound":{"Channel":"","ChatID":0,"TopicID":null,"MessageID":0,"Sender":{"UserID":0,"Username":""},"Text":"hello","Attachments":null,"ReplyTo":null,"Timestamp":"0001-01-01T00:00:00Z"}}`
+	if string(raw) != want {
+		t.Fatal(string(raw))
+	}
+}
+func TestNegotiatedInboxRenderHistory(t *testing.T) {
+	// P8: "live: <transport>, confirmed <age>"; exhaustion keeps transport history.
+	for _, state := range []string{"live_inbox", "pull_only"} {
+		r := RenderRoute{State: state, Confirmed: time.Now(), Transport: "inbox"}
+		raw, _ := json.Marshal(r)
+		var decoded RenderRoute
+		if json.Unmarshal(raw, &decoded) != nil {
+			t.Fatal(string(raw))
+		}
+		want := "live: inbox, confirmed"
+		if state == "pull_only" {
+			want = "was inbox, confirmed"
+		}
+		if !strings.Contains(decoded.Text(), want) {
+			t.Fatal(decoded.Text())
+		}
 	}
 }

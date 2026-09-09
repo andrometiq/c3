@@ -63,16 +63,22 @@ func (s *Stub) deliveryRoute(key RouteKey) ipc.RenderRoute {
 	state := d.route(key)
 	r := ipc.RenderRoute{State: "waiting", Held: state.Held}
 	if !state.Confirmed.IsZero() {
-		r.State = "live_channel"
+		r.State = "live_" + state.Transport
+		r.Transport = state.Transport
 		r.Confirmed = state.Confirmed
 	}
-	if !d.live.Channel.Eligible {
+	if (!d.live.Channel.Eligible && !d.live.Inbox.Eligible) ||
+		(state.Transport == "channel" && !d.live.Channel.Eligible) ||
+		(state.Transport == "inbox" && !d.live.Inbox.Eligible) {
 		r.State = "pull_only"
 		r.Reason = d.live.Channel.Reason
+		if state.Transport == "inbox" {
+			r.Reason = d.live.Inbox.Reason
+		}
 	}
 	if !state.Exhausted.IsZero() {
 		r.State = "pull_only"
-		r.Reason = "no receipt on channel; retries on reconnect, attach or new messages after 60 s"
+		r.Reason = "no receipt on channel or inbox; retries on reconnect, attach or new messages after 60 s"
 	}
 	return r
 }

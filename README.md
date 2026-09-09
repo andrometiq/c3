@@ -98,7 +98,7 @@ An adapter is a small MCP server that connects one host CLI to the broker. Seven
 
 | Adapter | Host | Inbound delivery | Tools | Notes |
 |---|---|---|---|---|
-| `c3-claude-adapter` | Claude Code | live push (native `<channel>` turns) | 12 | The reference adapter. Only one with `ask` and the permission relay. |
+| `c3-claude-adapter` | Claude Code | live push (channel or owning-session inbox) | 12 | The reference adapter. Only one with `ask` and the permission relay. |
 | `c3-codex-adapter` | Codex | queued input on supported Codex; pull-only if unsupported | 12 | Queue-acceptance ack, not transcript receipt. Adds `codex_forward`; no `ask` or permission relay. Launcher → app-server → adapter → TUI; opt-in [native queue](docs/CODEX-NATIVE-QUEUE.md) also supported. |
 | `c3-desktop-adapter` | Claude Desktop | pull only | 13 | Adds `observe` and `open_inbox`, plus an inbox panel. You ask Claude to check; it calls `fetch_queue`. |
 | `c3-grok-adapter` | Grok Build | live push, needs leader mode | 11 | Requires `[cli] use_leader = true` in Grok's config. Without it, pull only. |
@@ -224,15 +224,18 @@ claude --dangerously-load-development-channels=plugin:c3@c3
 ```
 
 Claude Code applies that preview guardrail to every locally-installed channel plugin — it
-isn't a C3 hack. Without the flag, C3 can probe the session's inherited cross-session
-inbox as a fallback; only transcript-confirmed delivery consumes the queued message.
+isn't a C3 hack. Without the flag, C3 can use the session's inherited owning-session
+inbox; only transcript-confirmed delivery consumes the queued message.
 That route has no Telegram permission relay or native question answering, and its
 peer transcript shape is verified on Claude Code 2.1.263. If neither route confirms,
-inbound stays available through `fetch_queue`. Status shows which route is live. Eligible Claude channel sessions now negotiate
+inbound stays available through `fetch_queue`. Status shows which route is live. Eligible Claude sessions negotiate
 broker-owned delivery: status shows `waiting`, `live: channel, confirmed <age>`,
-or `pull-only (<reason>)`. After a channel timeout, retries wait for reconnect,
-attach, changed eligibility, another confirmed route, or a new message arriving
-at least 60 seconds after exhaustion. Flagless sessions keep the inbox fallback.
+`live: inbox, confirmed <age>`, or `pull-only (<reason>)`. After a channel timeout,
+the broker tries an eligible inbox with a new attempt. Flagless and background
+sessions can use inbox first. After both transports are exhausted, retries wait
+for reconnect, attach, changed eligibility, another confirmed route, or a new
+message arriving at least 60 seconds after exhaustion. Sessions still running
+the phase-2 adapter need a CLI restart to accept the broadened delivery modes.
 The installer can
 also offer a small `claude` shim so the flag is automatic for interactive
 launches. **The wrapper is opt-in, default no:** setup changes `~/.local/bin/claude`

@@ -124,6 +124,11 @@ func nextWireOp(t *testing.T, peer *ipc.Conn, want ipc.Op) []byte {
 	}
 }
 func TestNegotiatedSocketReconnectAdoptsWithoutResend(t *testing.T) {
+	for _, transport := range []string{"channel", "inbox"} {
+		t.Run(transport, func(t *testing.T) { testNegotiatedSocketReconnect(t, transport) })
+	}
+}
+func testNegotiatedSocketReconnect(t *testing.T, transport string) {
 	// P1/P6: "same living process ... uninterrupted claim ... transferring the claim generation".
 	for _, changed := range []bool{false, true} {
 		t.Run(map[bool]string{false: "adoption", true: "changed_offer_releases"}[changed], func(t *testing.T) {
@@ -132,7 +137,11 @@ func TestNegotiatedSocketReconnectAdoptsWithoutResend(t *testing.T) {
 			t.Cleanup(b.Shutdown)
 			first, closeFirst := peerPair(t, b)
 			t.Cleanup(closeFirst)
-			hello := ipc.HelloMsg{Op: ipc.OpHello, CLI: "claude", PID: os.Getpid(), CWD: "/work", Delivery: json.RawMessage(channelOffer)}
+			offer := channelOffer
+			if transport == "inbox" {
+				offer = strings.ReplaceAll(strings.ReplaceAll(channelOffer, `"channel":{"eligible":true}`, `"channel":{"eligible":false}`), `"inbox":{"eligible":false}`, `"inbox":{"eligible":true}`)
+			}
+			hello := ipc.HelloMsg{Op: ipc.OpHello, CLI: "claude", PID: os.Getpid(), CWD: "/work", Delivery: json.RawMessage(offer)}
 			first.WriteJSON(hello)
 			raw := nextWireOp(t, first, ipc.OpHelloAck)
 			var ack ipc.HelloAckMsg
@@ -147,8 +156,12 @@ func TestNegotiatedSocketReconnectAdoptsWithoutResend(t *testing.T) {
 			var f ipc.DeliverMsg
 			json.Unmarshal(raw, &f)
 			closeFirst()
+			if !changed {
+				// P1/P6: a refreshed inbox fact is not a mode/milestone change.
+				hello.Delivery = json.RawMessage(strings.Replace(offer, `"eligible":false`, `"eligible":false,"reason":"refreshed fact"`, 1))
+			}
 			if changed {
-				hello.Delivery = json.RawMessage(strings.Replace(channelOffer, `"fetch":"receipt"`, `"fetch":"consume"`, 1))
+				hello.Delivery = json.RawMessage(strings.Replace(offer, `"fetch":"receipt"`, `"fetch":"consume"`, 1))
 			}
 			second, closeSecond := peerPair(t, b)
 			t.Cleanup(closeSecond)
