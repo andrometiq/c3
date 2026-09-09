@@ -17,7 +17,9 @@ Rows survive until confirmed or the documented limits (1,000 messages / 14 days)
 A queue-disabled broker never advances Telegram offsets: inbound stays at
 Telegram for replay after restart with a working queue. Holding the earliest
 unpersisted update holds the global frontier across topics. Live delivery remains
-best-effort; anything delivered live in the meantime will arrive again.
+best-effort; anything delivered live in the meantime will arrive again. The hold
+is bounded by the provider: Telegram retains an update for about 24 hours, and
+about 100 waiting updates block newer ones until restart.
 Duplicates after expiry, restart, or degraded mode are allowed and documented;
 silent loss is not.
 

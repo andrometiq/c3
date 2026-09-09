@@ -86,7 +86,8 @@ Send /status to check.
 
 It warns your DM at startup too, and `/status` keeps saying so until you fix it. Live delivery
 continues best-effort. The held Telegram offset applies across all topics, so later inbound
-can wait until the broker restarts with a working queue.
+can wait until the broker restarts with a working queue. Restart within Telegram's 24-hour update
+retention; after roughly 100 waiting updates, newer messages stop arriving until then.
 See *Degraded mode* in [`docs/USAGE.md`](docs/USAGE.md).
 
 *(Those are the strings C3 actually renders, copied out of the code — not a mock-up.)*
