@@ -4,12 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"time"
 
 	"github.com/Andrometiq/c3/internal/ipc"
 )
 
 type deliveryObserver struct {
+	injected   bool
 	path       string
 	offset     int64
 	deadline   time.Time
@@ -126,7 +128,7 @@ func (a *adapter) handleDeliver(ctx context.Context, raw []byte) {
 	}
 	a.liveAttempt++
 	attempt := fmt.Sprintf("%s:%d", msg.Transport, a.liveAttempt)
-	observer := &deliveryObserver{path: path, offset: offset, deadline: deadline, attempt: attempt, cross: msg.Transport == "inbox"}
+	observer := &deliveryObserver{injected: msg.Inbound.TestInjected, path: path, offset: offset, deadline: deadline, attempt: attempt, cross: msg.Transport == "inbox"}
 	if failure != "" {
 		observer.result = "failed"
 		observer.reason = failure
@@ -135,6 +137,9 @@ func (a *adapter) handleDeliver(ctx context.Context, raw []byte) {
 		a.deliveryObservers = map[string]*deliveryObserver{}
 	}
 	a.deliveryObservers[msg.Token] = observer
+	if observer.injected {
+		log.Printf("TEST DELIVERY token=%s attempt=%s transport=%s budget_ms=%d", msg.Token, attempt, msg.Transport, msg.DeadlineMS)
+	}
 	a.liveMu.Unlock()
 	a.startDeliveryLoops(ctx)
 	if failure != "" {

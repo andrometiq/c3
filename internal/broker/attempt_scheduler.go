@@ -235,6 +235,7 @@ func (w *RouteWorker) scheduleAttempt(ctx context.Context, inbound bool) {
 		w.finishAttempt(token, "released", "disconnected")
 		return
 	}
+	w.logTestAttempt(token, "reserved")
 	log.Printf("attempt reserved transport=%s members=%d budget_ms=15000", transport, len(members))
 	w.startAttemptWriter(ctx)
 	select {

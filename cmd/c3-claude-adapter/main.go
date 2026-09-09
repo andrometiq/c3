@@ -1355,6 +1355,9 @@ func buildClaudeChannelFrame(in *c3types.Inbound) map[string]any {
 		"chat_id": strconv.FormatInt(in.ChatID, 10),
 		"ts":      in.Timestamp.Format("2006-01-02T15:04:05.000Z"),
 	}
+	if in.TestInjected {
+		meta["c3_test_injected"] = "true"
+	}
 	if in.MessageID != 0 {
 		meta["message_id"] = strconv.FormatInt(in.MessageID, 10)
 	}

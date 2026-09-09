@@ -53,6 +53,7 @@ func (w *RouteWorker) finishAttempt(token, outcome, reason string) {
 	if owner == nil {
 		return
 	}
+	w.logTestAttempt(token, outcome)
 	log.Printf("attempt finished transport=%s outcome=%s", transport, outcome)
 	d := owner.delivery
 	d.mu.Lock()

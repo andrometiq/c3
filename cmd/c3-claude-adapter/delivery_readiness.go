@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"log"
 	"time"
 
 	"github.com/Andrometiq/c3/internal/ipc"
@@ -40,6 +41,9 @@ func (a *adapter) reportDeliveryResult(token string, observer *deliveryObserver)
 	observer.reporting = false
 	if err == nil && a.deliveryObservers[token] == observer {
 		delete(a.deliveryObservers, token)
+		if observer.injected {
+			log.Printf("TEST RECEIPT token=%s attempt=%s outcome=%s", token, observer.attempt, observer.result)
+		}
 	}
 	a.liveMu.Unlock()
 }

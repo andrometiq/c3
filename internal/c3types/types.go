@@ -25,6 +25,8 @@ import "time"
 // "tidy" a tag to snake_case or camelCase: that is the exact data-loss event
 // this freeze exists to prevent.
 type Inbound struct {
+	// TestInjected persists synthetic provenance and is rendered in host metadata.
+	TestInjected  bool           `json:"TestInjected,omitempty"`
 	Channel       string         `json:"Channel"`
 	ChatID        int64          `json:"ChatID"`
 	TopicID       *int64         `json:"TopicID"` // nil = no topic, &1 = General, >1 = custom

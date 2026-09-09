@@ -225,6 +225,8 @@ func (b *Broker) HandleConn(nc net.Conn) {
 			continue
 		}
 		switch op {
+		case ipc.OpTestInject:
+			b.handleTestInject(conn, raw)
 		case ipc.OpAttach:
 			before := stub.Routes()
 			stableAtAttach := stub.StableSessionIDValue()

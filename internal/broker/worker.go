@@ -1045,12 +1045,13 @@ func mergeBatch(batch []*c3types.Inbound) *c3types.Inbound {
 	}
 	last := batch[len(batch)-1]
 	out := &c3types.Inbound{
-		Channel:   last.Channel,
-		ChatID:    last.ChatID,
-		TopicID:   last.TopicID,
-		MessageID: last.MessageID,
-		Sender:    last.Sender,
-		Timestamp: batch[0].Timestamp,
+		TestInjected: last.TestInjected,
+		Channel:      last.Channel,
+		ChatID:       last.ChatID,
+		TopicID:      last.TopicID,
+		MessageID:    last.MessageID,
+		Sender:       last.Sender,
+		Timestamp:    batch[0].Timestamp,
 		// Carry the latest event metadata through so a stray event in a batch is
 		// not silently dropped. In normal operation the run loop guarantees no
 		// event reaches mergeBatch (events flush alone via flushEvent).

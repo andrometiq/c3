@@ -70,3 +70,37 @@ the bounded eligibility re-hello makes the offer after the MCP handshake.
 Definite notify failures immediately send `attempt_result` with `outcome:"failed"`
 and a generic reason (`notify transport unavailable` or `channel notify write failed`),
 without waiting for receipt polling or the 15-second deadline.
+
+## Live matrix
+
+The test injection hook is available only in a deliberately opted-in scratch
+broker. Normal daemon startup never enables it, even if the test environment
+variable is present. The `test_inject` socket operation refuses otherwise.
+
+```sh
+# Choose a NEW directory beneath an existing private scratch parent.
+bin/c3-broker test-serve --allow-test-inject --state "$PWD/scratch-broker"
+# In another terminal; socket selection is mandatory and never auto-spawns:
+bin/c3-broker inject --socket "$PWD/scratch-broker/c3.sock" --topic 42 --text 'matrix sample'
+bin/c3-broker inject --socket "$PWD/scratch-broker/c3.sock" --topic 42 --text 'matrix voice sample' --voice --voice-delay-ms 1000 --count 2
+```
+
+`C3_ALLOW_TEST_INJECT=1` is equivalent to the flag on `test-serve` only. The
+scratch command refuses an existing state directory and creates private config,
+queue, log, and socket paths. It loads no production mappings, Telegram channel,
+credential, update checker, or STT provider. Attach with `channel=test-inject`,
+`topic_id=42` (the synthetic group's chat id is -1).
+
+Injection runs the shared channel gate and `BrokerHost.Emit` path. Its JSON
+response says **accepted**, meaning worker admission; durability follows through
+the ordinary append and can fail independently. `--count 2` submits the whole
+burst within debounce; `--photo` supplies attachment metadata, and `--voice`
+uses a deterministic local transcription hook through the real voice scheduler.
+There is no media download. All synthetic rows have `TestInjected=true`, channel
+frames have `c3_test_injected="true"`, and the channel namespace is `test-inject`.
+Replies, Held/route notices, edits, and voice echoes go to `TEST SINK` log lines.
+No injected route resolves to Telegram. Treat log contents as local test data.
+
+The full specification is [TESTING-LIVE-MATRIX.md](TESTING-LIVE-MATRIX.md).
+The maintainer runs `scripts/live-matrix/run.sh` outside the coding sandbox;
+see `scripts/live-matrix/README.md` for collection, fixtures, isolation and timing.

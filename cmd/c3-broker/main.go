@@ -96,6 +96,18 @@ const (
 func main() {
 	if len(os.Args) >= 2 {
 		switch os.Args[1] {
+		case "inject":
+			if err := runInject(os.Args[2:]); err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(1)
+			}
+			return
+		case "test-serve":
+			if err := runTestServe(os.Args[2:]); err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(1)
+			}
+			return
 		case "setup":
 			if err := runSetup(); err != nil {
 				fmt.Fprintf(os.Stderr, "c3-broker setup: %v\n", err)
