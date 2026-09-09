@@ -177,3 +177,62 @@ func TestNegotiatedSocketReconnectAdoptsWithoutResend(t *testing.T) {
 		})
 	}
 }
+
+func TestNegotiatedHeldRecountsAfterScheduling(t *testing.T) {
+	// P8: "the count is recomputed at the moment a delayed notice actually sends".
+	t.Setenv("C3_QUEUE_DIR", t.TempDir())
+	fc := &fakeChannel{}
+	b := brokerWithChannel(t, mfWithTelegram(), fc)
+	t.Cleanup(b.Shutdown)
+	b.HeldNotices = newFallbackTracker(100 * time.Millisecond)
+	key := MakeRouteKey("telegram", -100, nil)
+	s, frames := negotiatedHolder(t, b, key, 1)
+	b.HeldNotices.ShouldSend(key) // keep the notice pending until scheduling runs
+	in := inboundOn(-100, nil, 1, "visible only while queued")
+	if _, err := b.Queue.AppendTracked(queueRouteKey(key), in); err != nil {
+		t.Fatal(err)
+	}
+	s.delivery.mu.Lock()
+	s.delivery.route(key).Held = 1
+	s.delivery.mu.Unlock()
+	b.notifyRenderRoute(s)
+	b.wakeDelivery(key)
+	f := nextDeliver(t, frames)
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		fc.mu.Lock()
+		n := len(fc.replyCalls)
+		fc.mu.Unlock()
+		if n > 0 {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	fc.mu.Lock()
+	if len(fc.replyCalls) == 0 {
+		fc.mu.Unlock()
+		t.Fatal("delayed route notice never sent")
+	}
+	for _, reply := range fc.replyCalls {
+		if strings.Contains(reply.Text, "Held —") {
+			t.Errorf("notice counted attempting row: %s", reply.Text)
+		}
+	}
+	fc.mu.Unlock()
+	raw, _ := json.Marshal(ipc.AttemptResultMsg{Op: ipc.OpAttemptResult, Token: f.Token, Outcome: "failed"})
+	b.handleAttemptResult(s, raw)
+	deadline = time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		fc.mu.Lock()
+		held := false
+		for _, reply := range fc.replyCalls {
+			held = held || strings.Contains(reply.Text, "Held —")
+		}
+		fc.mu.Unlock()
+		if held {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatal("failed attempt never produced a recounted Held notice")
+}

@@ -80,7 +80,10 @@ func (b *Broker) statusForTopic(channelName string, chatID int64, topicID *int64
 	pending, oldest := 0, time.Time{}
 	if b.Queue != nil {
 		st := b.Queue.StatusFor(queueRouteKey(key))
-		pending = max(0, st.Pending-b.attemptingCount(key))
+		pending = st.Pending
+		if holder, _ := b.Routes.Holder(key); holder.negotiated() {
+			pending, _ = b.backlogSummary(key)
+		}
 		if st.OldestUnix > 0 {
 			oldest = time.Unix(st.OldestUnix, 0)
 		}

@@ -1,6 +1,6 @@
 // Tests for the grokForwardLoop consume/ack state machine — the safety-critical
 // path behind the 2026-07-10 double-delivery incident (task #43). Hermetic: the
-// fake Grok leader is a unix socket in t.TempDir() speaking the register/ACP
+// fake Grok leader is a temporary unix socket speaking the register/ACP
 // protocol, and the "broker" is the far side of a net.Pipe — no network, no
 // real broker, no Telegram. Patterns mirror cmd/c3-codex-adapter's
 // inbound_ack_test.go / forward_blocked_test.go and this package's
@@ -11,6 +11,7 @@ import (
 	"context"
 	"encoding/json"
 	"net"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -51,7 +52,13 @@ func (l *fakeGrokLeader) promptAttempts() int {
 
 func startFakeGrokLeader(t *testing.T, failFirst int, failMsg string) *fakeGrokLeader {
 	t.Helper()
-	dir := t.TempDir()
+	// Unix socket paths have a small OS limit. Omit the long test name while
+	// honoring TMPDIR, which may itself be a long path on a disk-backed volume.
+	dir, err := os.MkdirTemp("", "c3-grok-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
 	l := &fakeGrokLeader{
 		sock:      filepath.Join(dir, "leader.sock"),
 		failFirst: failFirst,

@@ -3,6 +3,7 @@ package ipc
 import (
 	"errors"
 	"net"
+	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -17,7 +18,13 @@ import (
 // net.Pipe and fails on a kernel socket, which coalesces and splits at will.
 func realSocketPair(t *testing.T) (client, server net.Conn) {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "s.sock")
+	// Keep the socket name short even when TMPDIR is a long disk-backed path.
+	dir, err := os.MkdirTemp("", "c3-ipc-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	path := filepath.Join(dir, "s.sock")
 	ln, err := net.Listen("unix", path)
 	if err != nil {
 		t.Fatalf("listen: %v", err)
