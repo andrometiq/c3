@@ -1,0 +1,203 @@
+"""Isolated Claude configuration, private tmux server, and evidenced host states."""
+import json
+import os
+from pathlib import Path
+import re
+import shlex
+import shutil
+import subprocess
+import time
+
+
+def read_jsonl(path):
+    if not path.exists():
+        return []
+    records = []
+    for line in path.read_text(errors="replace").splitlines(keepends=True):
+        if not line.endswith("\n"):
+            continue
+        try:
+            records.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    return records
+
+
+def wait_for(check, timeout, description):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        result = check()
+        if result:
+            return result
+        time.sleep(0.1)
+    raise TimeoutError(description)
+
+
+class Host:
+    def __init__(self, root, claude, broker, adapter, scripts, cell, timeout=90):
+        self.root, self.claude, self.cell, self.timeout = root, claude, cell, timeout
+        self.cwd, self.control = root / "cwd", root / "control"
+        self.cwd.mkdir()
+        self.control.mkdir()
+        self.env = os.environ.copy()
+        self.env.pop("CLAUDECODE", None)
+        for name in ("CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_MESSAGING_SOCKET", "CLAUDE_CODE_MESSAGING_TOKEN", "CLAUDE_PLUGIN_ROOT"):
+            self.env.pop(name, None)
+        state = root / "broker"
+        self.env.update({"XDG_RUNTIME_DIR": str(state), "XDG_CONFIG_HOME": str(state / "config"),
+                         "XDG_STATE_HOME": str(state / "state"), "XDG_CACHE_HOME": str(state / "cache"),
+                         "C3_QUEUE_DIR": str(state / "queue"), "CLAUDE_CONFIG_DIR": str(root / "claude"),
+                         "C3_DEBUG": "1", "C3_NO_TERMINAL_TITLE": "1"})
+        config = root / "claude"
+        config.mkdir(mode=0o700)
+        # Read only the authentication material and provider environment. Never
+        # inherit production hooks, MCP servers, plugins or permission settings.
+        original = Path(os.environ.get("CLAUDE_CONFIG_DIR", str(Path.home() / ".claude")))
+        creds = original / ".credentials.json"
+        if creds.is_file():
+            shutil.copyfile(creds, config / ".credentials.json")
+            (config / ".credentials.json").chmod(0o600)
+        settings = original / "settings.json"
+        provider_env = json.loads(settings.read_text()).get("env", {}) if settings.exists() else {}
+        self.env.update({str(k): str(v) for k, v in provider_env.items() if k.startswith(("ANTHROPIC_", "CLAUDE_CODE_USE_", "AWS_", "GOOGLE_"))})
+        account = Path.home() / ".claude.json"
+        metadata = {"hasCompletedOnboarding": True, "theme": "dark"}
+        if account.exists():
+            oauth = json.loads(account.read_text()).get("oauthAccount")
+            if oauth:
+                metadata["oauthAccount"] = oauth
+        (config / ".claude.json").write_text(json.dumps(metadata))
+        # If adapter auto-spawn is ever reached, the PATH shim refuses it. Only
+        # the driver starts the explicit scratch broker binary by absolute path.
+        shim = root / "shim"
+        shim.mkdir()
+        (shim / "c3-broker").write_text("#!/bin/sh\necho 'live matrix: implicit broker spawn refused' >&2\nexit 1\n")
+        (shim / "c3-broker").chmod(0o700)
+        self.env["PATH"] = str(shim) + os.pathsep + self.env.get("PATH", "")
+        market = root / "marketplace"
+        plugin = market / "plugin"
+        (market / ".claude-plugin").mkdir(parents=True)
+        (plugin / ".claude-plugin").mkdir(parents=True)
+        (plugin / "hooks").mkdir()
+        (market / ".claude-plugin/marketplace.json").write_text(json.dumps({
+            "name": "c3", "owner": {"name": "C3"}, "plugins": [{"name": "c3", "source": "./plugin"}]}))
+        (plugin / ".claude-plugin/plugin.json").write_text(json.dumps({"name": "c3", "version": "0.0.1", "description": "Local live matrix"}))
+        (plugin / ".mcp.json").write_text(json.dumps({"mcpServers": {"c3": {
+            "command": "python3", "args": [str(scripts / "proxy.py"), str(adapter), str(self.control), cell.transport, "42"]}}}))
+        hook_command = shlex.join(["python3", str(scripts / "hook.py"), str(broker), str(self.control)])
+        (plugin / "hooks/hooks.json").write_text(json.dumps({"hooks": {"SessionStart": [
+            {"matcher": "startup|resume|clear|compact", "hooks": [{"type": "command", "command": hook_command}]}]}}))
+        for args in (("plugin", "marketplace", "add", str(market)), ("plugin", "install", "c3@c3", "--scope", "user")):
+            with (self.control / "plugin-setup.log").open("ab") as out:
+                subprocess.run([str(claude), *args], env=self.env, cwd=self.cwd, stdout=out, stderr=out, timeout=timeout, check=True)
+        self.socket = root / "tmux.sock"
+        self.command = [str(claude), "--model", "haiku", "--setting-sources", "user", "--tools", "Bash",
+                        "--allowedTools", "mcp__plugin_c3_c3__*", "Bash(python3:*)", "--append-system-prompt",
+                        "This is a local delivery test. Acknowledge MATRIX_SAMPLE data with MATRIX_RECEIVED once locally. "
+                        "Never fetch C3 messages unless explicitly asked, and never send a channel reply. "
+                        "Run only the requested Python sleep commands."]
+        if cell.transport == "channel":
+            self.command += ["--dangerously-load-development-channels", "plugin:c3@c3"]
+        self.proc = None
+
+    def tmux(self, *args, check=True):
+        return subprocess.run(["tmux", "-S", str(self.socket), *args], env=self.env,
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=check)
+
+    def launch(self, continued=False):
+        command = self.command + (["--continue"] if continued else [])
+        self.tmux("new-session", "-d", "-s", "matrix", "-x", "160", "-y", "50", "-c", str(self.cwd), shlex.join(command))
+
+    def pane(self):
+        text = self.tmux("capture-pane", "-p", "-t", "matrix", "-S", "-200", check=False).stdout
+        (self.control / "pane.txt").write_text(text)
+        return text
+
+    def send(self, text):
+        self.tmux("send-keys", "-t", "matrix", "-l", "--", text)
+        self.tmux("send-keys", "-t", "matrix", "Enter")
+
+    def events(self, name=None, after=0):
+        return [e for e in read_jsonl(self.control / "events.jsonl") if e["time"] >= after and (name is None or e["event"] == name)]
+
+    def wait_event(self, name, after=0):
+        def check():
+            pane = self.pane()
+            if "Yes, I trust this folder" in pane:
+                self.tmux("send-keys", "-t", "matrix", "Enter")
+            return self.events(name, after)
+        return wait_for(check, self.timeout, f"host did not reach {name}")[-1]
+
+    def transcript(self):
+        sessions = read_jsonl(self.control / "sessions.jsonl")
+        if not sessions:
+            return None
+        path = Path(sessions[-1].get("transcript_path", ""))
+        # A host/config regression must not cause collection from production.
+        if not path.is_absolute() or not path.is_relative_to(self.root):
+            raise RuntimeError("SessionStart did not supply a private scratch transcript")
+        return path
+
+    def records(self):
+        path = self.transcript()
+        return read_jsonl(path) if path else []
+
+    def ready_turn(self):
+        stamp = time.time()
+        self.send("Reply MATRIX_READY. Do not call any tools or fetch messages.")
+        wait_for(lambda: any(r.get("type") == "assistant" and "MATRIX_READY" in json.dumps(r.get("message", {}))
+                             for r in self.records() if _stamp(r) >= stamp), self.timeout, "no warmup assistant response")
+
+    def stop_session(self):
+        self.send("/exit")
+        wait_for(lambda: self.tmux("has-session", "-t", "matrix", check=False).returncode != 0,
+                 15, "Claude did not exit")
+
+    def reconnect(self, keys=None):
+        stamp = time.time()
+        self.send("/mcp")
+        if keys:
+            for key in keys.split(","):
+                self.tmux("send-keys", "-t", "matrix", key)
+                time.sleep(0.3)
+        else:
+            # Menus vary by version: select labelled numbered rows, never guess
+            # a key sequence that could activate an unrelated action.
+            for label in (r"(?:plugin:)?c3(?::c3)?", r"Reconnect"):
+                def menu_number():
+                    for line in self.pane().splitlines():
+                        match = re.search(r"\b(\d+)\.\s+.*" + label, line, re.I)
+                        if match:
+                            return match.group(1)
+                    return None
+                number = wait_for(menu_number, 10, "unrecognized /mcp menu; supply --reconnect-keys for this version")
+                self.tmux("send-keys", "-t", "matrix", number, "Enter")
+                time.sleep(0.5)
+        return self.wait_event("initialized_waiting", stamp)
+
+    def tool_state(self, background, seconds):
+        stamp = time.time()
+        program = f"import pathlib,time; pathlib.Path('tool-running').write_text('running'); time.sleep({seconds}); pathlib.Path('tool-running').unlink()"
+        command = "python3 -c " + shlex.quote(program)
+        mode = "true" if background else "false"
+        self.send(f"Call Bash once with command {json.dumps(command)} and run_in_background={mode}. "
+                  "Do not fetch or reply through C3. After the tool returns, reply MATRIX_WAITING and wait.")
+        def evidence():
+            calls = [block for r in self.records() if _stamp(r) >= stamp
+                     for block in (r.get("message", {}).get("content", []) if isinstance(r.get("message", {}).get("content"), list) else [])
+                     if isinstance(block, dict) and block.get("type") == "tool_use" and block.get("name") == "Bash"]
+            return any(b.get("input", {}).get("command") == command and bool(b.get("input", {}).get("run_in_background", False)) == background for b in calls) and (self.cwd / "tool-running").exists()
+        wait_for(evidence, self.timeout, "required Bash sleep/run_in_background state was not observed")
+        return {"command": command, "background": background, "observed": time.time()}
+
+    def close(self):
+        if hasattr(self, "socket"):
+            self.tmux("kill-server", check=False)
+
+
+def _stamp(record):
+    from datetime import datetime
+    try:
+        return datetime.fromisoformat(record.get("timestamp", "").replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return 0
