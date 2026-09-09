@@ -35,7 +35,7 @@ import (
 // other goroutines iterated them via range — classic Go data race
 // (BLOCKER, code-review 2026-05-15).
 type Broker struct {
-	attempts  attemptTable // memory-only phase-1 delivery observations
+	attempts  attemptTable // negotiated authority and legacy delivery observations
 	Stubs     *StubRegistry
 	Routes    *Routes
 	Workers   *WorkerPool

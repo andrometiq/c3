@@ -121,6 +121,16 @@ func (c *Conn) WriteJSONContext(ctx context.Context, v any) (writeErr error) {
 		}
 		_ = c.c.SetWriteDeadline(time.Time{})
 	}()
+	// G4: remaining observation budget is measured after writer admission.
+	if prepare, ok := v.(interface{ PrepareFrame() any }); ok {
+		data, err = json.Marshal(prepare.PrepareFrame())
+		if err != nil {
+			return err
+		}
+		if len(data)+1 > MaxFrameSize {
+			return ErrFrameTooLarge
+		}
+	}
 	if _, err := c.w.Write(data); err != nil {
 		return err
 	}

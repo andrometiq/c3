@@ -70,7 +70,7 @@ func (b *Broker) HandleConn(nc net.Conn) {
 	var stub *Stub
 	var routeIdentity recoverRouteIdentity
 	if existing := b.Routes.FindByLogicalSession(hello.CLI, hello.PID, hello.CWD); existing != nil {
-		stub = b.Stubs.Register(hello.CLI, hello.PID, hello.CWD, conn)
+		stub = b.registerDeliveryHello(hello, conn, existing)
 		oldConnID := existing.ConnID
 		// Carry the stable session id across a reconnect so a post-reconnect
 		// recover op isn't needed to re-key recording — the same logical session
@@ -79,13 +79,13 @@ func (b *Broker) HandleConn(nc net.Conn) {
 		if sid := existing.StableSessionIDValue(); sid != "" {
 			stub.SetStableSessionID(sid)
 		}
-		// Apply the render-capability flag BEFORE the claims transfer: the moment
-		// the claim moves to this fresh stub the delivery path consults it, and
-		// setting the flag only in the shared block below would leave a window
-		// where one inbound could still take the push path into a host that
-		// can't render. Idempotent with the shared block below.
-		stub.ReceiptConfirming = hello.RenderState != ""
-		stub.SetRenderRoute(hello.RenderState, hello.RenderReason, hello.CannotRenderChannels)
+		// Negotiation is immutable before publishing the new stub. A changed
+		// contract releases old evidence before transferring any claims.
+		if (existing.negotiated() || stub.negotiated()) && existing.delivery != stub.delivery {
+			existing.deliveryReady.Store(false)
+			b.attempts.release(existing, "mode_changed", time.Now())
+			b.reconnectDelivery(existing, stub)
+		}
 		// Unregister the OLD stub (now superseded) and transfer its claims.
 		b.Stubs.Unregister(oldConnID)
 		transferred := b.Routes.TransferAllByConnID(oldConnID, stub)
@@ -146,14 +146,15 @@ func (b *Broker) HandleConn(nc net.Conn) {
 		// after the reconnect must still resolve to the route its push went out on
 		// (see Stub.pushRoutes). Ordered after the transfer so a push racing this
 		// hello records onto the stub that now holds the claim.
-		stub.AdoptPushRoutes(existing)
-		b.attempts.adopt(existing, shadowHolder(stub), time.Now())
+		b.reconnectDelivery(existing, stub)
+		if !stub.negotiated() && !existing.negotiated() {
+			stub.AdoptPushRoutes(existing)
+			b.attempts.adopt(existing, shadowHolder(stub), time.Now())
+		}
 		log.Printf("hello: RECONNECT cli=%s pid=%d cwd=%q old-conn=%d new-conn=%d (claims transferred)",
 			hello.CLI, hello.PID, hello.CWD, oldConnID, stub.ConnID)
 	} else {
-		stub = b.Stubs.Register(hello.CLI, hello.PID, hello.CWD, conn)
-		stub.ReceiptConfirming = hello.RenderState != ""
-		stub.SetRenderRoute(hello.RenderState, hello.RenderReason, hello.CannotRenderChannels)
+		stub = b.registerDeliveryHello(hello, conn, nil)
 		log.Printf("hello: NEW cli=%s pid=%d cwd=%q conn=%d",
 			hello.CLI, hello.PID, hello.CWD, stub.ConnID)
 	}
@@ -182,6 +183,7 @@ func (b *Broker) HandleConn(nc net.Conn) {
 				stub.CLI, stub.PID, stub.CWD, stub.ConnID)
 			return
 		}
+		b.releaseDelivery(stub)
 		b.attempts.release(stub, "holder_death", time.Now())
 		released := b.Routes.ReleaseAllByConnID(stub.ConnID)
 		log.Printf("conn-drop: cli=%s pid=%d cwd=%q conn=%d (PID dead — released %d claim(s))",
@@ -190,10 +192,17 @@ func (b *Broker) HandleConn(nc net.Conn) {
 	defer b.Stubs.Unregister(stub.ConnID)
 
 	ack := b.buildHelloAck(hello, stub)
+	if stub.negotiated() {
+		ack.Delivery = &ipc.DeliveryAcceptance{Version: 1, Modes: []string{"channel"}}
+	}
 	if err := conn.WriteJSON(ack); err != nil {
 		return
 	}
 
+	if stub.negotiated() {
+		stub.deliveryReady.Store(true)
+		b.rearmDelivery(stub)
+	}
 	// Stage 2: dispatch loop.
 	for {
 		raw, err := conn.ReadFrame()
@@ -206,6 +215,10 @@ func (b *Broker) HandleConn(nc net.Conn) {
 		op, err := ipc.PeekOp(raw)
 		if err != nil {
 			_ = conn.WriteJSON(ipc.ErrorMsg{Op: ipc.OpError, Err: err.Error()})
+			continue
+		}
+		if (op == ipc.OpAttemptResult || op == ipc.OpDeliveryReport) && !stub.negotiated() {
+			attemptNoop()
 			continue
 		}
 		if refuseIncompatibleStateChange(conn, stub, op, raw) {
@@ -272,6 +285,10 @@ func (b *Broker) HandleConn(nc net.Conn) {
 			b.handleRetranscribe(conn, stub, raw)
 		case ipc.OpRecoverSession:
 			b.handleRecoverSession(conn, stub, raw, &routeIdentity)
+		case ipc.OpAttemptResult:
+			b.handleAttemptResult(stub, raw)
+		case ipc.OpDeliveryReport:
+			b.handleDeliveryReport(stub, raw)
 		case ipc.OpRenderState:
 			b.handleRenderState(stub, raw)
 		case ipc.OpInboundDelivered:
@@ -960,7 +977,8 @@ func (b *Broker) handleListClaims(conn *ipc.Conn) {
 			ConnID:    e.Stub.ConnID,
 			Connected: e.Stub.IsConnected(),
 		}
-		render := e.Stub.RenderRoute()
+		render := e.Stub.RenderRouteFor(e.Key)
+		entry.ConfirmedAt = render.Confirmed
 		entry.RenderState, entry.RenderReason = render.State, render.Reason
 		if output := e.Stub.OutputRoute(); output != nil && *output == e.Key {
 			entry.IsOutput = true
@@ -1325,6 +1343,7 @@ func (b *Broker) handleListSessions(conn *ipc.Conn, raw []byte) {
 		}
 		render := s.RenderRoute()
 		e.RenderState, e.RenderReason = render.State, render.Reason
+		e.ConfirmedAt = render.Confirmed
 		routes := orderedHeldRoutes(s)
 		if len(routes) > 0 {
 			labels := make([]string, 0, len(routes))

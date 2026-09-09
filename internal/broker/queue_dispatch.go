@@ -43,6 +43,14 @@ const maxFetchIDBytes = 1024
 // single-owner worker access. Limit caps the combined batch; All drains all.
 func (b *Broker) handleFetchQueue(conn *ipc.Conn, stub *Stub, raw []byte) {
 	var req ipc.FetchQueueReq
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(raw, &fields) == nil {
+		if _, lease := fields["lease"]; lease {
+			_ = json.Unmarshal(raw, &req)
+			_ = conn.WriteJSON(ipc.FetchQueueResp{Op: ipc.OpFetchQueueResult, ID: req.ID, Err: "lease is not accepted in protocol v1 channel mode"})
+			return
+		}
+	}
 	if err := json.Unmarshal(raw, &req); err != nil {
 		_ = conn.WriteJSON(ipc.FetchQueueResp{Op: ipc.OpFetchQueueResult, Err: "malformed fetch_queue: " + err.Error()})
 		return
@@ -288,6 +296,10 @@ func (b *Broker) handleRetranscribe(conn *ipc.Conn, stub *Stub, raw []byte) {
 // Covered=0), and handleConsume skips Count<=0 so it never consumes a real
 // backlog message the push didn't deliver (C1).
 func (b *Broker) handleInboundDelivered(stub *Stub, raw []byte) {
+	if stub.negotiated() {
+		attemptNoop()
+		return
+	}
 	var msg ipc.InboundDeliveredMsg
 	if err := json.Unmarshal(raw, &msg); err != nil {
 		log.Printf("inbound_delivered: malformed: %v", err)

@@ -8,7 +8,9 @@ import (
 	"time"
 )
 
-// Phase 1 is observation only. At most 128 entries per route and 4096 globally
+// Legacy entries remain observation only. Negotiated entries supply retirement
+// identities; their terminal transitions run on the route worker. At most
+// 128 entries per route and 4096 globally
 // are retained. Admission evicts the oldest terminal entries first; if a cap
 // consists entirely of active entries, the new observation is discarded. This
 // never rejects a delivery. Expiry is lazy, using monotonic time.Time values.
@@ -21,16 +23,19 @@ type attemptHolder struct {
 	Stub      *Stub
 	ConnID    uint64
 	SessionID string
-	// No claim generation exists on the phase-1 baseline.
+	// Captured when a negotiated attempt reserves its exact claim.
 	ClaimGeneration uint64
 }
 
 type attemptMember struct {
 	ID       string
-	Revision string // empty: this baseline has no stored revision/digest
+	Revision string // digest for negotiated rows; empty for legacy shadow
 }
 
 type attemptRecord struct {
+	Negotiated        bool
+	Evidence          bool
+	RemovalTries      int
 	Token             string
 	Route             RouteKey
 	Transport         string // channel | inbox | fetch | unknown
@@ -49,7 +54,8 @@ type attemptKey struct {
 	route RouteKey
 }
 
-// attemptTable owns no timers, workers, durable state, or delivery authority.
+// attemptTable stores negotiated delivery authority and legacy shadow records.
+// It owns no timers, workers, or durable state.
 // All transitions take their clock and inputs from their caller. No method
 // consults routing, coverage, recovery, or queue state to choose an action.
 type attemptTable struct {
@@ -92,7 +98,7 @@ func memberIDs(members []attemptMember) []string {
 
 func (t *attemptTable) expireLocked(now time.Time) {
 	for _, a := range t.entries {
-		if a.Outcome == "open" && !a.Deadline.IsZero() && !now.Before(a.Deadline) {
+		if !a.Negotiated && a.Outcome == "open" && !a.Deadline.IsZero() && !now.Before(a.Deadline) {
 			a.Outcome, a.Reason = "expired", "unobserved"
 		}
 	}
@@ -223,7 +229,7 @@ func (t *attemptTable) release(holder *Stub, reason string, now time.Time) {
 	defer t.mu.Unlock()
 	t.expireLocked(now)
 	for _, a := range t.entries {
-		if a.Holder.Stub == holder && a.Outcome == "open" {
+		if !a.Negotiated && a.Holder.Stub == holder && a.Outcome == "open" {
 			a.Outcome, a.Reason = "released", reason
 		}
 	}
@@ -236,7 +242,7 @@ func (t *attemptTable) adopt(old *Stub, next attemptHolder, now time.Time) {
 	defer t.mu.Unlock()
 	t.expireLocked(now)
 	for _, a := range t.entries {
-		if a.Holder.Stub != old || (!a.Deadline.IsZero() && !now.Before(a.Deadline)) {
+		if a.Negotiated || a.Holder.Stub != old || (!a.Deadline.IsZero() && !now.Before(a.Deadline)) {
 			continue
 		}
 		if a.Transport != "channel" && a.Transport != "inbox" {
@@ -256,7 +262,7 @@ func (t *attemptTable) drop(route RouteKey, ids []string, cause, exceptToken str
 	defer t.mu.Unlock()
 	t.expireLocked(now)
 	for _, a := range t.entries {
-		if a.Route != route || a.Token == exceptToken || a.Outcome == "confirmed" {
+		if a.Negotiated || a.Route != route || a.Token == exceptToken || a.Outcome == "confirmed" {
 			continue
 		}
 		kept := a.Members[:0]

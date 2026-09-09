@@ -3,6 +3,7 @@ package ipc
 import (
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"github.com/Andrometiq/c3/internal/c3types"
 	"github.com/Andrometiq/c3/internal/mappings"
@@ -276,11 +277,12 @@ type QueuedItem struct {
 
 // HelloMsg is sent by the adapter on connect.
 type HelloMsg struct {
-	Op           Op       `json:"op"` // = OpHello
-	CLI          string   `json:"cli"`
-	PID          int      `json:"pid"`
-	CWD          string   `json:"cwd"`
-	Capabilities []string `json:"capabilities,omitempty"`
+	Delivery     json.RawMessage `json:"delivery,omitempty"`
+	Op           Op              `json:"op"` // = OpHello
+	CLI          string          `json:"cli"`
+	PID          int             `json:"pid"`
+	CWD          string          `json:"cwd"`
+	Capabilities []string        `json:"capabilities,omitempty"`
 
 	// CannotRenderChannels is the legacy delivery gate. New adapters set it true
 	// for both queue_only and probing, so old brokers safely hold unproven routes.
@@ -344,13 +346,14 @@ type RecoverSessionResp struct {
 
 // HelloAckMsg is the broker's response to HelloMsg.
 type HelloAckMsg struct {
-	Op           Op       `json:"op"` // = OpHelloAck
-	ConnID       uint64   `json:"conn_id"`
-	AutoAttached bool     `json:"auto_attached"`
-	Mapping      *Mapping `json:"mapping,omitempty"`
-	ClaimHolder  *Holder  `json:"claim_holder,omitempty"`
-	NoConfig     bool     `json:"no_config,omitempty"`
-	NoMapping    bool     `json:"no_mapping,omitempty"`
+	Delivery     *DeliveryAcceptance `json:"delivery,omitempty"`
+	Op           Op                  `json:"op"` // = OpHelloAck
+	ConnID       uint64              `json:"conn_id"`
+	AutoAttached bool                `json:"auto_attached"`
+	Mapping      *Mapping            `json:"mapping,omitempty"`
+	ClaimHolder  *Holder             `json:"claim_holder,omitempty"`
+	NoConfig     bool                `json:"no_config,omitempty"`
+	NoMapping    bool                `json:"no_mapping,omitempty"`
 
 	// Capabilities carries the resolvable channel's static capability
 	// manifest so the adapter can fold GuidanceFor(caps) into the agent's
@@ -444,19 +447,20 @@ type ClaimsListMsg struct {
 // when the route corresponds to a known topic in mappings.json (lookup is
 // best-effort; empty when the route is a DM or a yet-unregistered topic).
 type ClaimEntry struct {
-	RenderState  string `json:"render_state,omitempty"`
-	RenderReason string `json:"render_reason,omitempty"`
-	Channel      string `json:"channel"`
-	ChatID       int64  `json:"chat_id"`
-	HasTopic     bool   `json:"has_topic"`
-	TopicID      int64  `json:"topic_id,omitempty"`
-	TopicName    string `json:"topic_name,omitempty"`
-	GroupName    string `json:"group_name,omitempty"`
-	HolderCLI    string `json:"holder_cli"`
-	HolderPID    int    `json:"holder_pid"`
-	HolderCWD    string `json:"holder_cwd,omitempty"`
-	ConnID       uint64 `json:"conn_id"`
-	Connected    bool   `json:"connected"`
+	ConfirmedAt  time.Time `json:"confirmed_at,omitzero"`
+	RenderState  string    `json:"render_state,omitempty"`
+	RenderReason string    `json:"render_reason,omitempty"`
+	Channel      string    `json:"channel"`
+	ChatID       int64     `json:"chat_id"`
+	HasTopic     bool      `json:"has_topic"`
+	TopicID      int64     `json:"topic_id,omitempty"`
+	TopicName    string    `json:"topic_name,omitempty"`
+	GroupName    string    `json:"group_name,omitempty"`
+	HolderCLI    string    `json:"holder_cli"`
+	HolderPID    int       `json:"holder_pid"`
+	HolderCWD    string    `json:"holder_cwd,omitempty"`
+	ConnID       uint64    `json:"conn_id"`
+	Connected    bool      `json:"connected"`
 	// IsOutput marks the holder's outbound-default route. It is additive and
 	// omitted for input-only routes and older brokers.
 	IsOutput bool `json:"is_output,omitempty"`
@@ -664,16 +668,17 @@ type AttachReq struct {
 
 // AttachedMsg is the broker → adapter response.
 type AttachedMsg struct {
-	Op                Op        `json:"op"` // = OpAttached
-	OK                bool      `json:"ok"`
-	Channel           string    `json:"channel,omitempty"`
-	ChatID            int64     `json:"chat_id,omitempty"`
-	TopicID           *int64    `json:"topic_id,omitempty"`
-	Name              string    `json:"name,omitempty"`
-	Group             string    `json:"group,omitempty"`
-	NeedsConfirmation bool      `json:"needs_confirmation,omitempty"`
-	Proposal          *Proposal `json:"proposal,omitempty"`
-	Err               string    `json:"err,omitempty"`
+	DeliveryRoute     *RenderRoute `json:"delivery_route,omitempty"`
+	Op                Op           `json:"op"` // = OpAttached
+	OK                bool         `json:"ok"`
+	Channel           string       `json:"channel,omitempty"`
+	ChatID            int64        `json:"chat_id,omitempty"`
+	TopicID           *int64       `json:"topic_id,omitempty"`
+	Name              string       `json:"name,omitempty"`
+	Group             string       `json:"group,omitempty"`
+	NeedsConfirmation bool         `json:"needs_confirmation,omitempty"`
+	Proposal          *Proposal    `json:"proposal,omitempty"`
+	Err               string       `json:"err,omitempty"`
 
 	// Status disambiguates the outcome. See AttachStatus godoc. Omitted
 	// for backward compat with pre-2026-05-19 consumers that switch on
@@ -892,12 +897,13 @@ type ListSessionsReplyMsg struct {
 // SessionEntry is one row of ListSessionsReplyMsg.Sessions. Mirrors
 // what the user would see in the rendered table.
 type SessionEntry struct {
-	RenderState  string `json:"render_state,omitempty"`
-	RenderReason string `json:"render_reason,omitempty"`
-	CLI          string `json:"cli"`
-	PID          int    `json:"pid"`
-	CWD          string `json:"cwd"`
-	ConnID       uint64 `json:"conn_id"`
+	ConfirmedAt  time.Time `json:"confirmed_at,omitzero"`
+	RenderState  string    `json:"render_state,omitempty"`
+	RenderReason string    `json:"render_reason,omitempty"`
+	CLI          string    `json:"cli"`
+	PID          int       `json:"pid"`
+	CWD          string    `json:"cwd"`
+	ConnID       uint64    `json:"conn_id"`
 	// AttachedTo is the human-formatted topic label — "<name> (<group>)"
 	// for a regular topic, "dm" for a DM route, "topic-<id>" when the
 	// route refers to an unknown topic id, or "" when the stub holds no routes.

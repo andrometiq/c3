@@ -79,6 +79,7 @@ type Store struct {
 //     enrichment. Agent-visible placeholder text is deliberately not state.
 type storedInbound struct {
 	c3types.Inbound
+	Origin         string   `json:"origin,omitempty"`
 	RecordID       string   `json:"_c3_queue_id,omitempty"`
 	SourceRecordID string   `json:"_c3_drained_record_id,omitempty"`
 	VoicePending   []string `json:"_c3_voice_pending,omitempty"`
@@ -88,6 +89,7 @@ type storedInbound struct {
 // public Inbound remains unchanged, so neither private field can leak over IPC.
 // Empty IDs identify legacy lines written before the private envelope existed.
 type TrackedInbound struct {
+	Origin         string
 	Inbound        c3types.Inbound
 	RecordID       string
 	SourceRecordID string
@@ -138,10 +140,10 @@ func (s *Store) AppendTracked(rk RouteKey, in *c3types.Inbound, voicePending ...
 // legacy untracked source: retries then fail toward another copy, never toward
 // mistaking an unrelated same-MessageID line for the landed record.
 func (s *Store) AppendDrainedTracked(rk RouteKey, in *c3types.Inbound, sourceRecordID string) (string, error) {
-	return s.appendTracked(rk, in, sourceRecordID, nil)
+	return s.appendTracked(rk, in, sourceRecordID, nil, "drain")
 }
 
-func (s *Store) appendTracked(rk RouteKey, in *c3types.Inbound, sourceRecordID string, voicePending []string) (string, error) {
+func (s *Store) appendTracked(rk RouteKey, in *c3types.Inbound, sourceRecordID string, voicePending []string, origin ...string) (string, error) {
 	// Stamp the record format version on the way to disk. Append is the ONLY
 	// place a record enters the queue, so it is the only place that has to do
 	// this — rewrite() and snapshotDropped() re-serialize records that were
@@ -180,7 +182,13 @@ func (s *Store) appendTracked(rk RouteKey, in *c3types.Inbound, sourceRecordID s
 			cp.V = c3types.InboundRecordVersion
 		}
 		rec = &storedInbound{
-			Inbound:        cp,
+			Inbound: cp,
+			Origin: func() string {
+				if len(origin) > 0 {
+					return origin[0]
+				}
+				return ""
+			}(),
 			RecordID:       rand.Text(),
 			SourceRecordID: sourceRecordID,
 			VoicePending:   append([]string(nil), voicePending...),
@@ -482,6 +490,7 @@ func pendingTrackedFrom(lines []storedInbound, cursor int) []TrackedInbound {
 		}
 		out = append(out, TrackedInbound{
 			Inbound:        in.Inbound,
+			Origin:         in.Origin,
 			RecordID:       in.RecordID,
 			SourceRecordID: in.SourceRecordID,
 			VoicePending:   append([]string(nil), in.VoicePending...),
@@ -824,6 +833,12 @@ func (s *Store) ResolveVoiceText(rk RouteKey, recordID, fileID, newText string) 
 // cursor projection, quarantine, cursor-first remap, atomic JSONL rewrite, then
 // status refresh.
 func (s *Store) rewritePending(rk RouteKey, match func(storedInbound) bool, mutate func(*storedInbound)) (bool, error) {
+	return s.rewritePendingMatches(rk, match, mutate, false)
+}
+
+// all is reserved for explicit identity backfill; voice resolution keeps its
+// original first-match behavior and skips frozen drain copies.
+func (s *Store) rewritePendingMatches(rk RouteKey, match func(storedInbound) bool, mutate func(*storedInbound), all bool) (bool, error) {
 	lines, cursor, err := s.readLines(rk)
 	if err != nil || len(lines) == 0 {
 		return false, err
@@ -849,13 +864,15 @@ func (s *Store) rewritePending(rk RouteKey, match func(storedInbound) bool, muta
 	for idx := cursorReal; idx < len(real); idx++ {
 		// B7: drained-in copies keep frozen text; organic STT refresh (matched by
 		// per-chat MessageID) must never hit a moved line that collides on id.
-		if real[idx].DrainedFrom != "" {
+		if !all && real[idx].DrainedFrom != "" {
 			continue
 		}
 		if match(real[idx]) {
 			mutate(&real[idx])
 			found = true
-			break
+			if !all {
+				break
+			}
 		}
 	}
 	if !found {

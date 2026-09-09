@@ -10,6 +10,9 @@ import (
 )
 
 func (b *Broker) handleRenderState(stub *Stub, raw []byte) {
+	if stub.negotiated() {
+		return
+	}
 	var msg ipc.RenderStateMsg
 	if err := json.Unmarshal(raw, &msg); err != nil || msg.State == "" {
 		return
@@ -55,7 +58,7 @@ func (b *Broker) sendRenderNotice(stub *Stub, key RouteKey) {
 		}
 		text := route.Text() + " Messages remain available through fetch_queue."
 		if b.Queue != nil {
-			if count := b.Queue.StatusFor(queueRouteKey(key)).Pending; count > 0 {
+			if count := max(0, b.Queue.StatusFor(queueRouteKey(key)).Pending-b.attemptingCount(key)); count > 0 {
 				text = heldReplyText(key.Channel, count) + "\n\n" + route.Text()
 			}
 		} else {

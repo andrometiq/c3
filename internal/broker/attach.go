@@ -1027,6 +1027,7 @@ func (b *Broker) tryClaim(conn *ipc.Conn, stub *Stub, key RouteKey, label string
 	// Ordered after the claim succeeds: a refused claim (live collision) leaves the
 	// barrier standing, because nothing about the user's detach was reversed.
 	stub.SetExplicitlyDetached(false)
+	b.rearmDelivery(stub)
 	if isFresh {
 		go b.sendWelcome(stub, key, label)
 	}

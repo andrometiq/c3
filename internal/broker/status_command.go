@@ -80,7 +80,7 @@ func (b *Broker) statusForTopic(channelName string, chatID int64, topicID *int64
 	pending, oldest := 0, time.Time{}
 	if b.Queue != nil {
 		st := b.Queue.StatusFor(queueRouteKey(key))
-		pending = st.Pending
+		pending = max(0, st.Pending-b.attemptingCount(key))
 		if st.OldestUnix > 0 {
 			oldest = time.Unix(st.OldestUnix, 0)
 		}
@@ -88,7 +88,7 @@ func (b *Broker) statusForTopic(channelName string, chatID int64, topicID *int64
 	attached := "nothing attached"
 	if h, held := b.Routes.Holder(key); held {
 		if h.IsAlive() {
-			attached = surfaceLabel(h.CLI) + " attached · " + h.RenderRoute().Text()
+			attached = surfaceLabel(h.CLI) + " attached · " + h.RenderRouteFor(key).Text()
 		} else {
 			// Dead reference: the holder's adapter is gone (disconnected AND its
 			// PID is no longer in the OS process table). Verify liveness at READ

@@ -127,6 +127,7 @@ func run() error {
 		return fmt.Errorf("c3-claude-adapter must not run under Cursor Agent CLI; use c3-cursor-adapter (c3-broker install-cursor). Disable the Claude-plugin MCP: agent mcp disable plugin-c3-c3")
 	}
 	a.initialRenderRoute = hostRenderRoute()
+	a.deliveryHostRoute = hostRenderRoute
 	a.crossSession, a.crossSessionReason = startupCrossSessionTransport()
 	a.renderRoute = a.initialRenderRoute
 	if err := a.connectBroker(); err != nil {
@@ -245,6 +246,13 @@ type routeKey struct {
 }
 
 type adapter struct {
+	deliveryHostRoute func() ipc.RenderRoute
+	deliveryRoutes    map[routeKey]ipc.RenderRoute
+	deliveryAccepted  atomic.Bool
+	deliveryObservers map[string]*deliveryObserver
+	deliveryLoopOnce  sync.Once
+	deliveryLastFacts ipc.DeliveryLive
+
 	// notifyTx wraps the stdio transport to permit emitting custom
 	// `notifications/claude/channel` frames. Set in run() before Server.Run.
 	notifyTx *notifyTransport
@@ -493,8 +501,15 @@ func (a *adapter) hello() error {
 	}
 	a.resetLiveRoute(false)
 	route := a.liveRoute()
+	offer := a.deliveryOffer()
+	if a.deliveryAccepted.Load() {
+		route = a.initialRenderRoute
+		if len(offer) == 0 {
+			route = ipc.RenderRoute{State: ipc.RenderQueueOnly, Reason: "session transcript unavailable"}
+		}
+	}
 	if err := conn.WriteJSON(ipc.HelloMsg{
-		Op: ipc.OpHello, CLI: "claude", PID: os.Getpid(), CWD: cwd,
+		Delivery: offer, Op: ipc.OpHello, CLI: "claude", PID: os.Getpid(), CWD: cwd,
 		Capabilities: []string{"claude/channel"},
 		// Conservative fallback for old brokers: probing is also queue-only.
 		CannotRenderChannels: route.State != ipc.RenderCapable,
@@ -528,6 +543,14 @@ func (a *adapter) hello() error {
 	a.helloPending = false
 	a.connID = ack.ConnID
 	a.bmu.Unlock()
+	wasNegotiated := a.deliveryAccepted.Load()
+	a.acceptDelivery(offer, ack.Delivery)
+	if a.deliveryAccepted.Load() && a.runCtx != nil {
+		a.deliveryLoopOnce.Do(func() { go a.observeDeliveries(a.runCtx) })
+	}
+	if wasNegotiated && !a.deliveryAccepted.Load() {
+		a.resetLiveRoute(true)
+	}
 	return nil
 }
 
@@ -559,6 +582,10 @@ func (a *adapter) brokerReader(ctx context.Context) {
 			continue
 		}
 		switch op {
+		case ipc.OpDeliver:
+			a.handleDeliver(ctx, raw)
+		case ipc.OpRenderState:
+			a.handleDeliveryState(raw)
 		case ipc.OpInbound:
 			a.handleInbound(ctx, raw)
 		case ipc.OpToolResult:
@@ -790,7 +817,7 @@ func (a *adapter) setRouteState(routes []ipc.RouteRef, output *ipc.RouteRef) {
 			changed = true
 		}
 	}
-	if changed {
+	if changed && !a.deliveryAccepted.Load() {
 		a.cancelLiveReadbacks()
 	}
 	a.routes = cloneRouteRefs(routes)
@@ -1139,6 +1166,12 @@ func (a *adapter) handleInbound(ctx context.Context, raw []byte) {
 		frame["content"] = decoratePushContent(s, in.Pending, a.currentTopicName())
 	}
 
+	if a.deliveryAccepted.Load() {
+		if in.Inbound.IsEvent() && a.deliveryFacts().Channel.Eligible && a.notifyTx != nil {
+			_ = a.notifyTx.Notify(ctx, "notifications/claude/channel", frame)
+		}
+		return
+	}
 	a.pushWithReadback(ctx, in, frame)
 }
 
@@ -1532,6 +1565,15 @@ func (a *adapter) dispatchAttached(raw []byte) {
 		return
 	}
 	if attached.OK {
+		if a.deliveryAccepted.Load() && attached.DeliveryRoute != nil {
+			a.liveMu.Lock()
+			a.renderRoute = *attached.DeliveryRoute
+			if a.deliveryRoutes == nil {
+				a.deliveryRoutes = map[routeKey]ipc.RenderRoute{}
+			}
+			a.deliveryRoutes[routeKeyFor(attached.Channel, attached.ChatID, attached.TopicID)] = *attached.DeliveryRoute
+			a.liveMu.Unlock()
+		}
 		routes, output := attached.Routes, attached.Output
 		if len(routes) == 0 && attached.Channel != "" {
 			legacy := ipc.RouteRef{Channel: attached.Channel, ChatID: attached.ChatID, TopicID: attached.TopicID, Name: attached.Name, Group: attached.Group}

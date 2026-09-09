@@ -50,7 +50,11 @@ func (w *RouteWorker) shadowRemoval(before shadowRows, token, cause string) {
 	if token != "" {
 		w.broker.attempts.confirm(token, w.key, removed, cause, now)
 	}
+	if w.routeNegotiated() {
+		w.retirePendingRecords(removed)
+	}
 	w.broker.attempts.drop(w.key, removed, cause, token, now)
+	w.reconcileAttempt()
 }
 
 func (w *RouteWorker) shadowPush(token string, holder *Stub, ids []string) {

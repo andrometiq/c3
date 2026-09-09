@@ -32,7 +32,7 @@ Every op below is labelled.
 
 The Frozen core is deliberately small: handshake, ownership, message delivery with its acknowledgement, tool forwarding, durable-queue recovery, and errors.
 
-**Contract pin (D033; later phases implement negotiation and receipt enforcement):** duplicates after expiry, restart, or degraded mode are allowed; silent loss is not. Adapters will declare `transcript`, `accept`, or `none` in an explicit optional hello field; nothing weaker than the session's declared milestone retires a durable row. A hello without that field will retain the existing protocol-v1 path unchanged.
+**Contract pin (D033/D034):** duplicates after expiry, restart, or degraded mode are allowed; silent loss is not. Channel delivery can negotiate transcript receipts through the optional `delivery` hello offer below. Without broker acceptance the connection retains the existing protocol-v1 delivery path. Acceptance milestones and additional transports will be negotiated separately as they become available.
 
 **"Frozen" is a promise about shape, not a requirement to implement.** The two are easy to conflate and this document used to. Every Frozen op's shape is part of the release contract — but of the 15, **12 are required** and 3 are frozen conveniences you may skip: `bye` (an optional graceful close; closing the socket is equivalent, and no built-in sends it) and the `list_topics` → `topics_list` pair (discovery only — an adapter that attaches explicitly, and surfaces the broker's picker response when it does not, is complete without them). Implementing them is a choice; their shape not changing under you is not.
 
@@ -139,7 +139,7 @@ The broker never rejects unknown JSON fields, and neither should you.
 
 ## Op reference
 
-39 ops exist. This section documents all of them: **15 Frozen**, **12 Provisional**, **10 belonging to the bundled CLI rather than to adapters**, and **2 that are not implemented and must not be sent**.
+42 ops exist. This section documents all of them: **15 Frozen**, **12 Provisional**, **3 Provisional-negotiated**, **10 belonging to the bundled CLI rather than to adapters**, and **2 that are not implemented and must not be sent**.
 
 Field names below are the literal JSON keys. `?` marks an optional field (omitted when empty/zero).
 
@@ -166,6 +166,7 @@ An adapter that implements only these is correct and complete for a CLI with no 
 | `render_state`? | string | `capable`, `probing`, `cross_session`, or `queue_only`. Additive; protocol remains 1. |
 | `render_reason`? | string | Short generic explanation, without personal paths or identifiers. |
 | `protocol_version`? | int | absent ⇒ 1. |
+| `delivery`? | object | Provisional-negotiated offer; see Negotiated channel delivery. Absent, malformed, or unknown-version offers retain legacy delivery. |
 
 **The identity rule: `cli`, `pid` and `cwd` together are your session identity, and identity is what buys persistence.** A hello with an empty `cli` or `pid ≤ 0` is **accepted** — it is not a protocol error and your connection works normally — but it is **anonymous**, and the broker will never match it to any other connection. Concretely, an anonymous adapter gets no reconnect claim transfer (its claims are released when the connection drops, since a pid of `0` is never live), and no cross-connection continuation: a permission verdict arriving after a reconnect, or a "held by you" report, is refused rather than guessed at. Everything within one connection — attach, tools, inbound, permissions — works exactly as documented.
 
@@ -349,6 +350,104 @@ Sent by either side. **Not correlated to any request** — you cannot match it t
 
 ---
 
+### Provisional-negotiated — channel delivery (phase 2)
+
+This optional protocol-v1 extension has one delivery owner: the broker. The
+Claude adapter offers it only when a host was detected, a C3 channel flag is
+present, and its transcript is readable. Flagless sessions keep their existing
+adapter-driven inbox fallback until the inbox phase.
+
+```json
+{"op":"hello","cli":"claude","pid":123,"cwd":"/work/project",
+ "capabilities":["claude/channel"],"delivery":{"version":1,
+ "live":{"channel":{"eligible":true},
+         "inbox":{"eligible":false,"reason":"no owning session socket"}},
+ "receipts":"transcript","fetch":"receipt"}}
+{"op":"hello_ack","conn_id":1,
+ "delivery":{"version":1,"modes":["channel"]}}
+```
+
+`Capabilities` remains `[]string`. The broker accepts only the complete valid
+version-1 offer with eligible channel and transcript live receipts; `fetch` may
+be `receipt` or `consume`. It accepts only `["channel"]`, frozen for that
+connection. A degraded broker (`Queue == nil`) never accepts. No acceptance
+means **legacy for that connection**, including frozen `inbound`,
+`inbound_delivered`, render-state policy and consume/peek fetch behavior.
+Malformed optional delivery data does not invalidate an otherwise valid hello.
+Changing the offer or accepted mode on reconnect releases the old attempts
+before their evidence could be interpreted under the new contract.
+
+The three new ops are **Provisional-negotiated** and are sent/honoured only on
+accepted connections:
+
+```json
+{"op":"deliver","token":"opaque-token","transport":"channel",
+ "deadline_ms":14990,"inbound":{"Channel":"telegram","ChatID":-100,
+ "MessageID":7,"Text":"hello"}}
+{"op":"attempt_result","token":"opaque-token","outcome":"confirmed","reason":""}
+{"op":"delivery_report","live":{"channel":{"eligible":false,
+ "reason":"session transcript unavailable"},"inbox":{"eligible":false}}}
+```
+
+`inbound` is the existing PascalCase payload. `deadline_ms` is the remaining
+observation budget measured after write admission, immediately before writing.
+The broker's monotonic deadline starts at reservation, lasts 15 seconds, and is
+never extended by a receipt. `attempt_result.outcome` is `confirmed` or `failed`;
+there is no response. The connection must be negotiated and protocol-compatible;
+the token resolves the route and exact row revisions. The route worker checks
+the exact confirmed holder, captured claim generation, connection, open attempt,
+and deadline together. A miss is one logged no-op, including a copied token
+presented by a new holder. Tokens never appear in status or ordinary notices.
+
+The adapter notifies its host using `c3_delivery_id=token` and a `c3_attempt`
+marker, then uses the strict `deliveryReceipt` predicate for the known host
+intake shapes. Notify errors and unavailable transcripts report `failed` with a
+reason. The adapter never retries, falls back, or changes delivery state on this
+path. `delivery_report` reports eligibility facts only when they change
+semantically; it cannot change accepted modes or receipt milestones.
+
+Each route has one selected FIFO batch, bounded against the complete IPC frame.
+An unproven session admits one live attempt across all its routes; releasing
+that slot admits the longest-waiting eligible route. A confirmation proves the
+session and schedules the next batch. Exhaustion pauses the route until a
+semantic capability report, reconnect/hello, explicit attach, a live confirmation
+on this session, or inbound arriving at least 60 seconds after exhaustion.
+Earlier inbound neither retries nor resets that clock. Pending voice rows are
+excluded only from live scheduling. Enrichment invalidates the old member
+revision immediately. Drain/eviction remove only affected members; an empty
+attempt releases admission and proves nothing. Drain snapshots precede new
+reservations. Imported rows persist `origin:"drain"` and stay nudge-only.
+Confirmed retirement retries a failed storage write three times, retaining
+evidence until success or release; release can produce a duplicate.
+
+Process death releases attempts immediately. A socket reconnect by the same
+living CLI/PID/CWD with an uninterrupted claim adopts unexpired live attempts,
+transfers their claim generation and preserves route history. The adapter keeps
+its observers; delivery is never resent to restore observation.
+
+**Fetch boundary (G1/G2):** no `fetch_receipt` mode is accepted in phase 2.
+`fetch_queue` retains consume-on-return (`ack:true`) and nonmutating peek
+(`ack:false`) semantics, including its response shape and multi-route selection.
+Rows in open negotiated live attempts are excluded from fetch, attach backlog
+and Held counts. `lease` is refused on presence, without mutation, including
+`fetch:"consume"` with `ack:true, lease:true`. There is no `fetch_confirm` or
+receipt-fetch reservation on this baseline.
+
+The broker derives each negotiated route's display: `waiting`,
+`live: channel, confirmed <age>`, or `pull-only (<reason>)`. Exhaustion says
+`pull-only (no receipt on channel; retries on reconnect, attach or new messages after 60 s)`
+and preserves the prior confirmation as history. Ineligible routes show pull-only
+immediately. Restart resets proof; fetch never changes it. The existing
+`render_state` sender carries broker-derived route updates to the adapter, with
+optional `channel`, `chat_id`, `topic_id` and `confirmed_at`; the adapter does not
+send policy updates back. `attached.delivery_route` carries the same display
+snapshot. Claims/session status also includes optional `confirmed_at`.
+Held notices recount at send time and exclude attempting rows. Scheduling
+precedes Held evaluation after enqueue, attempt termination, ownership or
+capability changes, enrichment and drain import. The 60-second notice flap timer
+is deferred; the existing notice cooldown still applies. Legacy sessions retain
+their four-state wording.
+
 ### Provisional — 12 ops
 
 Implemented and shipping, but the shapes are not frozen for v0.1.0. Each entry names why.
@@ -527,6 +626,9 @@ On the broker dropping the connection:
 ---
 
 ## The inbound delivery contract
+
+This section describes **legacy connections** (no accepted `delivery` mode).
+Negotiated channel connections use the broker-owned contract above.
 
 This is the part a doc-conformant adapter previously got wrong in a way that works perfectly in a demo and then quietly corrupts the user's queue.
 

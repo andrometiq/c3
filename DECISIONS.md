@@ -3,6 +3,52 @@
 Entries are newest first. This is the public architecture record: it records
 rulings and rationale, never private operational details.
 
+## D034: Negotiated channel delivery (phase 2)
+
+**Date:** 2026-09-09
+
+**Decision:** Protocol v1 gains an optional bilateral delivery negotiation. A
+valid hello offers channel eligibility and transcript receipts; `hello_ack`
+accepts only channel, frozen per connection. Degraded brokers and ineligible
+Claude hosts stay legacy. Legacy wire semantics, recovery ledgers and adapter
+fallback policy remain unchanged.
+
+For accepted connections the broker owns reservation, deadlines, cycles,
+admission, retirement and per-route display. `deliver`, `attempt_result` and
+`delivery_report` are Provisional-negotiated. The attempt table supplies exact
+row identities and content revisions; confirmed-holder, connection and claim
+generation checks bound receipt authority. The 15-second monotonic deadline
+includes write admission. A cycle tries channel once, then waits for a specified
+rearm event; ordinary inbound before 60 seconds cannot retry or reset exhaustion.
+Unproven sessions admit one live attempt, handing the slot to the longest-waiting
+eligible route. Active attempts keep their worker alive; bounded writes run
+outside receipt processing, with no goroutine per attempt.
+
+Only surviving revisions return to queued. Enrichment, eviction, drain and
+set-aside reconcile individual members; empty attempts close without proof.
+Drain snapshots precede reservation and imports persist nudge-only provenance.
+Storage failures retain confirmation evidence for three removal attempts before
+release. Socket reconnects of the same living process adopt unexpired attempts
+under the uninterrupted claim; death or changed negotiation releases them.
+
+Fetch keeps its baseline consume/peek semantics. No fetch receipt mode or lease
+is accepted yet. Open live-attempt rows are invisible to fetch, backlog and Held.
+The broker renders waiting, confirmed channel, or pull-only per route, preserving
+confirmation history on exhaustion. Scheduling precedes Held evaluation, and
+notices recount at send time. The general flap timer remains deferred.
+
+The Claude adapter executes channel notification and observes the existing
+strict transcript receipt predicate, including the three known host intake
+shapes. It reports evidence or definitive transport failure and eligibility
+changes. Its retry, fallback and route-policy machine is bypassed on accepted
+connections; observation bookkeeping survives same-process socket reconnects.
+
+**Why:** Delivery must have one owner. A transport write cannot establish host
+receipt, and a copied token cannot establish ownership. Atomic negotiated
+cutover preserves older sessions while moving these decisions together.
+Duplicates after expiry, restart or a failed retirement are possible; durable
+rows are never silently discarded by failed attempts.
+
 ## D033: Inbound delivery contract pins
 
 Phase 1 lands a shadow attempt table; no behaviour change.

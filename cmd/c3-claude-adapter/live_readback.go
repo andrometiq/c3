@@ -25,6 +25,21 @@ const liveReadbackWindow = 15 * time.Second
 const maxLiveReadbacks = 64
 
 func (a *adapter) liveRoute() ipc.RenderRoute {
+	if a.deliveryAccepted.Load() {
+		a.amu.Lock()
+		var key routeKey
+		if a.outputRoute != nil {
+			key = routeKeyFor(a.outputRoute.Channel, a.outputRoute.ChatID, a.outputRoute.TopicID)
+		}
+		a.amu.Unlock()
+		a.liveMu.Lock()
+		defer a.liveMu.Unlock()
+		if route, ok := a.deliveryRoutes[key]; ok {
+			return route
+		}
+		return a.renderRoute
+	}
+
 	a.liveMu.Lock()
 	defer a.liveMu.Unlock()
 	return a.renderRoute
@@ -59,6 +74,9 @@ func transcriptOffset(path string) (int64, bool) {
 
 // Explicit attach or reconnect is the only retry boundary after a timeout.
 func (a *adapter) resetLiveRoute(publish bool) {
+	if a.deliveryAccepted.Load() {
+		return
+	}
 	a.liveMu.Lock()
 	defer a.liveMu.Unlock()
 	if a.initialRenderRoute.State == "" {
@@ -140,6 +158,7 @@ func (a *adapter) cancelLiveReadbacks() {
 	a.liveMu.Lock()
 	a.liveGeneration++
 	a.livePending = nil
+	a.deliveryObservers = nil
 	a.liveMu.Unlock()
 }
 
@@ -153,6 +172,9 @@ func (a *adapter) downgradeLiveLocked(conn *ipc.Conn, reason string) {
 }
 
 func (a *adapter) liveRoutePreamble() string {
+	if a.deliveryAccepted.Load() {
+		return a.liveRoute().Text() + "\n\n"
+	}
 	a.liveMu.Lock()
 	route, cross := a.renderRoute, a.liveCrossSession
 	a.liveMu.Unlock()

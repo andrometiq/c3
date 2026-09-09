@@ -35,21 +35,26 @@ const (
 	// and manual voice enrichment. STT stays off-worker; queue mutation and
 	// delivery remain on the route's existing single owner.
 	JobResolveVoice
+	JobAttemptWake
+	JobAttemptResult
+	JobAttemptAdopt
 )
 
 // Job is one unit of work for a route worker. Exactly one of the payload
 // fields is set based on Kind.
 type Job struct {
-	Kind         JobKind
-	Inbound      *c3types.Inbound
-	Outbound     *OutboundJob
-	Fetch        *FetchJob
-	Consume      *ConsumeJob
-	Backlog      *BacklogJob
-	DrainPeek    *DrainPeekJob
-	DrainAppend  *DrainAppendJob
-	DrainRemove  *DrainRemoveJob
-	ResolveVoice *ResolveVoiceJob
+	AttemptResult *attemptResultJob
+	AttemptAdopt  *attemptAdoptJob
+	Kind          JobKind
+	Inbound       *c3types.Inbound
+	Outbound      *OutboundJob
+	Fetch         *FetchJob
+	Consume       *ConsumeJob
+	Backlog       *BacklogJob
+	DrainPeek     *DrainPeekJob
+	DrainAppend   *DrainAppendJob
+	DrainRemove   *DrainRemoveJob
+	ResolveVoice  *ResolveVoiceJob
 }
 
 type ResolveVoiceJob struct {
@@ -198,6 +203,13 @@ type OutboundResult struct {
 // debounceWindow time, whichever comes first, then forward as a single
 // merged Inbound (concatenated text, latest message_id, sum of attachments).
 type RouteWorker struct {
+	attemptCtx         context.Context
+	attemptDisplay     ipc.RenderRoute
+	attemptDisplayConn uint64
+	attemptWrites      chan attemptWrite
+	attemptWritten     chan attemptWriteResult
+	attemptTick        *time.Ticker
+	attemptC           <-chan time.Time
 	shadowConsumeToken string // token already selected by takeCoveredByPush
 
 	key     RouteKey
@@ -368,6 +380,11 @@ func (w *RouteWorker) run(ctx context.Context) {
 	// path (ctx.Done, idleTimer, queue-closed, JobRelease) and even on a recovered
 	// panic (recoverGoroutine below runs first, then this).
 	defer w.shutdown()
+	defer func() {
+		if w.cancel != nil {
+			w.cancel()
+		}
+	}()
 	// Backstop: a panic in the run-loop machinery (outside the per-method guards
 	// below) is recovered + logged instead of crashing the whole broker. The
 	// worker then exits cleanly (done closes); WorkerPool.Submit respawns a fresh
@@ -380,6 +397,11 @@ func (w *RouteWorker) run(ctx context.Context) {
 	// Ensure the typing ticker is stopped on any exit (ctx cancel, idle,
 	// release, queue close) so it never leaks past the worker's life.
 	defer w.disarmTyping()
+	defer func() {
+		if w.attemptTick != nil {
+			w.attemptTick.Stop()
+		}
+	}()
 
 	var debBuf []*c3types.Inbound
 	var debTimer *time.Timer
@@ -435,10 +457,21 @@ func (w *RouteWorker) run(ctx context.Context) {
 			return
 		case <-idleTimer.C:
 			flushDeb()
+			if w.broker != nil && w.liveAttempt() != nil {
+				resetIdle()
+				continue
+			}
 			return
 		case <-debC:
 			// flushDeb resets idle AFTER the (possibly long) flush — see its body.
 			flushDeb()
+		case <-w.attemptC:
+			w.tickAttempt(ctx)
+		case result := <-w.attemptWritten:
+			if result.Err != nil {
+				w.finishAttempt(result.Token, "failed", "write failed")
+			}
+			w.scheduleAttempt(ctx, false)
 		case <-w.typingC:
 			// Typing relay tick (P5). Runs in the worker's single goroutine —
 			// no new concurrency. Pulse the channel's typing action for this
@@ -453,6 +486,15 @@ func (w *RouteWorker) run(ctx context.Context) {
 			}
 			resetIdle()
 			switch job.Kind {
+			case JobAttemptWake:
+				w.enableAttemptTimer()
+				w.tickAttempt(ctx)
+			case JobAttemptResult:
+				w.handleAttemptResult(job.AttemptResult)
+				w.scheduleAttempt(ctx, false)
+			case JobAttemptAdopt:
+				w.adoptAttempt(job.AttemptAdopt)
+
 			case JobInbound:
 				if job.Inbound == nil {
 					continue
@@ -490,10 +532,13 @@ func (w *RouteWorker) run(ctx context.Context) {
 				w.handleDrainPeek(job.DrainPeek)
 			case JobDrainAppend:
 				w.handleDrainAppend(job.DrainAppend)
+				w.scheduleAttempt(ctx, false)
 			case JobDrainRemove:
 				w.handleDrainRemove(job.DrainRemove)
+				w.scheduleAttempt(ctx, false)
 			case JobResolveVoice:
 				w.handleResolveVoice(ctx, job.ResolveVoice)
+				w.scheduleAttempt(ctx, false)
 			case JobRelease:
 				flushDeb()
 				return
@@ -561,6 +606,16 @@ var sttFlushTimeout = 750 * time.Second
 //     per-source origins remain available in Merged either way.
 //   - OnInbound chain runs ONCE on the merged Inbound, not per-message.
 func (w *RouteWorker) flushInbounds(ctx context.Context, batch []*c3types.Inbound) {
+	defer func() {
+		if w.broker != nil {
+			s, _ := w.broker.Routes.Holder(w.key)
+			if s.negotiated() {
+				w.enableAttemptTimer()
+				w.scheduleAttempt(ctx, true)
+			}
+		}
+	}()
+
 	defer recoverGoroutine(fmt.Sprintf("worker.flushInbounds chan=%s chat=%d", w.key.Channel, w.key.ChatID))
 	if w.broker == nil || len(batch) == 0 {
 		return
@@ -1065,8 +1120,13 @@ func (w *RouteWorker) forwardOrFallback(ctx context.Context, in *c3types.Inbound
 //
 // idsKnown says the caller enumerated the appended lines exactly, so
 // len(coveredIDs) — including ZERO — is authoritative for this push.
-func (w *RouteWorker) forwardOrFallbackCovering(_ context.Context, in *c3types.Inbound, sources []*c3types.Inbound, covered int, coveredIDs []string, idsKnown bool) {
+func (w *RouteWorker) forwardOrFallbackCovering(ctx context.Context, in *c3types.Inbound, sources []*c3types.Inbound, covered int, coveredIDs []string, idsKnown bool) {
 	holder, claimed := w.broker.Routes.Holder(w.key)
+	if holder.negotiated() && !in.IsEvent() {
+		w.enableAttemptTimer()
+		w.scheduleAttempt(ctx, true)
+		return
+	}
 
 	// Liveness sweep: if the holder's PID is dead (e.g. Claude Code killed
 	// the adapter as part of /mcp reconnect, or the user quit the CLI),
@@ -1651,7 +1711,13 @@ func (w *RouteWorker) setAsideOversize(qrk queue.RouteKey, head c3types.Inbound,
 	// what RemoveIDs' occurrence-ordinal selection addresses (it snapshots what it
 	// removes into .trash/ before the rewrite).
 	shadowBefore := w.shadowRows()
-	removed, err := w.broker.Queue.RemoveIDs(qrk, map[int64][]int{head.MessageID: {1}})
+	var removed []c3types.Inbound
+	var err error
+	if w.routeNegotiated() && head.ConsumedRecordID != "" {
+		removed, err = w.broker.Queue.RemoveRecordIDs(qrk, []string{head.ConsumedRecordID})
+	} else {
+		removed, err = w.broker.Queue.RemoveIDs(qrk, map[int64][]int{head.MessageID: {1}})
+	}
 	if err != nil {
 		return c3types.Inbound{}, err
 	}
@@ -1727,11 +1793,15 @@ func (w *RouteWorker) handleFetch(_ context.Context, job *FetchJob) {
 	// for 2000 ordinary records is just as capable of assembling an unsendable
 	// frame as an unbounded drain is.
 	total, _ := w.broker.Queue.Pending(qrk)
+	if w.routeNegotiated() {
+		rows, _ := w.visibleAttemptRows(-1)
+		total = len(rows)
+	}
 	// Include consumed identities in the candidates BEFORE frame sizing. The
 	// worker owns the queue throughout peek/size/consume, under the existing
 	// confirmed-holder gate for every destructive mutation.
 	peek := func() ([]c3types.Inbound, error) {
-		rows, err := w.broker.Queue.PeekTracked(qrk, n)
+		rows, err := w.visibleAttemptRows(n)
 		out := make([]c3types.Inbound, 0, len(rows))
 		for _, row := range rows {
 			in := row.Inbound
@@ -1756,6 +1826,16 @@ func (w *RouteWorker) handleFetch(_ context.Context, job *FetchJob) {
 			func() {
 				defer job.Lease.finishConsume()
 				consume := func() {
+					// Identity backfill is a mutation: keep it inside both cancellation
+					// admission and the confirmed-holder gate, including old drain rows.
+					if w.routeNegotiated() {
+						if err = w.broker.Queue.EnsureIdentities(qrk); err != nil {
+							return
+						}
+						if cand, err = peek(); err != nil {
+							return
+						}
+					}
 					// A head record too large for an EMPTY frame blocks everything
 					// behind it. A normal record that only fails the remaining budget
 					// of a multi-route response stays queued for the next fetch.
@@ -1805,11 +1885,19 @@ func (w *RouteWorker) handleFetch(_ context.Context, job *FetchJob) {
 						take = 0
 					}
 					var records []queue.TrackedInbound
-					records, err = w.broker.Queue.PeekTracked(qrk, take)
+					records, err = w.visibleAttemptRows(take)
 					if err != nil {
 						return
 					}
-					msgs, err = w.broker.Queue.Consume(qrk, take)
+					if w.routeNegotiated() {
+						ids := make([]string, 0, len(records))
+						for _, r := range records {
+							ids = append(ids, r.RecordID)
+						}
+						msgs, err = w.broker.Queue.RemoveRecordIDs(qrk, ids)
+					} else {
+						msgs, err = w.broker.Queue.Consume(qrk, take)
+					}
 					if err == nil {
 						w.retireConsumedRecords(msgs, records)
 						w.shadowLegacyFetch(job.Owner, msgs)
@@ -1856,6 +1944,10 @@ func (w *RouteWorker) handleFetch(_ context.Context, job *FetchJob) {
 		}
 	}
 	remaining, _ := w.broker.Queue.Pending(qrk)
+	if w.routeNegotiated() {
+		rows, _ := w.visibleAttemptRows(-1)
+		remaining = len(rows)
+	}
 	if !effectiveAck {
 		remaining -= len(msgs) // peek doesn't advance; "remaining after this batch"
 		if remaining < 0 {
@@ -1890,7 +1982,7 @@ func encodedSize(in c3types.Inbound) int {
 // ATOMICALLY on the single-owner worker goroutine (I7), so an attach-time backlog
 // summary is consistent with itself and never races a concurrent Append/Consume/
 // rewrite. Peek does not advance the cursor (the agent drains via fetch_queue).
-func (w *RouteWorker) handleBacklog(_ context.Context, job *BacklogJob) {
+func (w *RouteWorker) handleBacklog(ctx context.Context, job *BacklogJob) {
 	if job == nil || job.ResultCh == nil {
 		return
 	}
@@ -1902,6 +1994,20 @@ func (w *RouteWorker) handleBacklog(_ context.Context, job *BacklogJob) {
 	})
 	if w.broker == nil || w.broker.Queue == nil {
 		job.ResultCh <- BacklogResult{}
+		return
+	}
+	if w.routeNegotiated() {
+		w.enableAttemptTimer()
+		w.scheduleAttempt(ctx, false)
+		rows, err := w.visibleAttemptRows(-1)
+		var preview []c3types.Inbound
+		for i, r := range rows {
+			if job.PeekN >= 0 && i >= job.PeekN {
+				break
+			}
+			preview = append(preview, r.Inbound)
+		}
+		job.ResultCh <- BacklogResult{Total: len(rows), Preview: preview, Err: err}
 		return
 	}
 	qrk := queueRouteKey(w.key)
@@ -2130,6 +2236,7 @@ func (w *RouteWorker) handleResolveVoiceTarget(ctx context.Context, scheduler *V
 		return true
 	}
 	if resolved {
+		w.reconcileAttempt()
 		scheduler.markResolveApplied(job.Key, target.recordID)
 		durableApplied = true
 		w.runVoiceResolveTestHook("after_durable")

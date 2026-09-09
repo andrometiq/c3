@@ -218,7 +218,7 @@ func runStatus() error {
 			fmt.Fprintf(&b, "  • %s — held by %s pid %d conn=%d [%s] [%s]\n",
 				route, c.HolderCLI, c.HolderPID, c.ConnID, role, liveness)
 			if c.RenderState != "" {
-				fmt.Fprintln(&b, "    "+(ipc.RenderRoute{State: c.RenderState, Reason: c.RenderReason}).Text())
+				fmt.Fprintln(&b, "    "+(ipc.RenderRoute{State: c.RenderState, Reason: c.RenderReason, Confirmed: c.ConfirmedAt}).Text())
 			}
 		}
 	}

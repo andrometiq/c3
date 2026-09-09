@@ -9,6 +9,9 @@ package ipc
 type Op string
 
 const (
+	OpDeliver        Op = "deliver"
+	OpAttemptResult  Op = "attempt_result"
+	OpDeliveryReport Op = "delivery_report"
 	// adapter → broker
 	// OpRenderState updates delivery eligibility without changing claims.
 	OpRenderState Op = "render_state"

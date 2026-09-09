@@ -21,10 +21,14 @@ import (
 // confirmed-dead holder, Routes.Claim will release the stale claim and
 // grant the new one.
 type Stub struct {
-	CLI    string
-	PID    int
-	CWD    string
-	ConnID uint64
+	deliveryReady    atomic.Bool
+	delivery         *negotiatedSession
+	claimGenerations map[RouteKey]uint64
+	claimSequence    uint64
+	CLI              string
+	PID              int
+	CWD              string
+	ConnID           uint64
 
 	// Conn is opaque from the registry's POV — broker package wires it after
 	// constructing, used by route workers to write inbound to the right
@@ -225,6 +229,11 @@ func (s *Stub) AddRoute(key RouteKey) {
 	if s.hasRouteLocked(key) {
 		return
 	}
+	s.claimSequence++
+	if s.claimGenerations == nil {
+		s.claimGenerations = map[RouteKey]uint64{}
+	}
+	s.claimGenerations[key] = s.claimSequence
 	s.routes = append(s.routes, key)
 	if s.output == nil {
 		k := key
@@ -544,9 +553,12 @@ func NewStubRegistry() *StubRegistry {
 // Register creates a new Stub with a monotonic ConnID and returns it. The
 // stable session id (used for auto-attach-on-resume) is NOT set here — it
 // arrives later via RecoverSessionReq and is stored with SetStableSessionID.
-func (r *StubRegistry) Register(cli string, pid int, cwd string, conn any) *Stub {
+func (r *StubRegistry) Register(cli string, pid int, cwd string, conn any, initialize ...func(*Stub)) *Stub {
 	id := r.next.Add(1)
 	s := &Stub{CLI: cli, PID: pid, CWD: cwd, ConnID: id, Conn: conn}
+	for _, init := range initialize {
+		init(s)
+	}
 	r.mu.Lock()
 	r.byConn[id] = s
 	r.mu.Unlock()
@@ -599,6 +611,13 @@ func (s *Stub) SetRenderRoute(state, reason string, cannot bool) {
 }
 
 func (s *Stub) RenderRoute() ipc.RenderRoute {
+	if s.negotiated() {
+		key := s.OutputRoute()
+		if key != nil {
+			return s.deliveryRoute(*key)
+		}
+		return ipc.RenderRoute{State: "waiting"}
+	}
 	s.stubMu.Lock()
 	defer s.stubMu.Unlock()
 	if s.renderRoute.State == "" {
@@ -609,9 +628,10 @@ func (s *Stub) RenderRoute() ipc.RenderRoute {
 
 // scheduleRenderNotice reserves one sending loop per route through completion.
 func (s *Stub) scheduleRenderNotice(key RouteKey) bool {
+	route := s.RenderRouteFor(key)
 	s.stubMu.Lock()
 	defer s.stubMu.Unlock()
-	state := s.renderRoute.State + ":" + s.renderRoute.Reason
+	state := route.Semantic()
 	if s.renderNoticePending[key] || s.renderNoticeRoutes[key] == state {
 		return false
 	}
@@ -626,24 +646,26 @@ func (s *Stub) scheduleRenderNotice(key RouteKey) bool {
 // to the last sent state needs no notice. Clearing pending under the same lock
 // lets a later state change reserve a new loop without losing an update.
 func (s *Stub) nextRenderNotice(key RouteKey) (ipc.RenderRoute, bool) {
+	route := s.RenderRouteFor(key)
 	s.stubMu.Lock()
 	defer s.stubMu.Unlock()
-	if s.renderNoticeRoutes[key] == s.renderRoute.State+":"+s.renderRoute.Reason {
+	if s.renderNoticeRoutes[key] == route.Semantic() {
 		delete(s.renderNoticePending, key)
 		return ipc.RenderRoute{}, false
 	}
-	return s.renderRoute, true
+	return route, true
 }
 
 func (s *Stub) finishRenderNotice(key RouteKey, route ipc.RenderRoute, sent bool) bool {
+	current := s.RenderRouteFor(key)
 	s.stubMu.Lock()
 	defer s.stubMu.Unlock()
 	if sent {
 		if s.renderNoticeRoutes == nil {
 			s.renderNoticeRoutes = map[RouteKey]string{}
 		}
-		s.renderNoticeRoutes[key] = route.State + ":" + route.Reason
-		if s.renderRoute != route {
+		s.renderNoticeRoutes[key] = route.Semantic()
+		if current.Semantic() != route.Semantic() {
 			return true // keep the reservation while sending the latest state
 		}
 	}

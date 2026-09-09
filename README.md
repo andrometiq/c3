@@ -228,7 +228,11 @@ isn't a C3 hack. Without the flag, C3 can probe the session's inherited cross-se
 inbox as a fallback; only transcript-confirmed delivery consumes the queued message.
 That route has no Telegram permission relay or native question answering, and its
 peer transcript shape is verified on Claude Code 2.1.263. If neither route confirms,
-inbound stays available through `fetch_queue`. Status shows which route is live.
+inbound stays available through `fetch_queue`. Status shows which route is live. Eligible Claude channel sessions now negotiate
+broker-owned delivery: status shows `waiting`, `live: channel, confirmed <age>`,
+or `pull-only (<reason>)`. After a channel timeout, retries wait for reconnect,
+attach, changed eligibility, another confirmed route, or a new message arriving
+at least 60 seconds after exhaustion. Flagless sessions keep the inbox fallback.
 The installer can
 also offer a small `claude` shim so the flag is automatic for interactive
 launches. **The wrapper is opt-in, default no:** setup changes `~/.local/bin/claude`
