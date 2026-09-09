@@ -673,6 +673,10 @@ func isSTTFailurePlaceholder(text string) bool {
 // collapse to spaces, over-long text truncates on a rune boundary, a text-less
 // media line names its attachment kind. drainPreview delegates here.
 func previewLine(in *c3types.Inbound, max int) string {
+	return c3types.WithTestInjectionMarker(in, previewLineBody(in, max))
+}
+
+func previewLineBody(in *c3types.Inbound, max int) string {
 	text := strings.TrimSpace(strings.ReplaceAll(in.Text, "\n", " "))
 	if text == "" {
 		if len(in.Attachments) > 0 {

@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -240,7 +241,50 @@ func TestAppServerMeta_IsPerPortAndNamesItsOwnHolder(t *testing.T) {
 
 // Nothing on disk means we say nothing rather than guessing.
 func TestAppServerPortOwner_UnknownPortSaysNothing(t *testing.T) {
-	if got := appServerPortOwner("ws://127.0.0.1:" + strconv.Itoa(freePort(t))); got != "" {
-		t.Errorf("described an app-server we have no record of: %q", got)
+	// Free TCP ports can still have stale files in the shared metadata dir.
+	// Pin the promised filesystem condition instead of hoping a random port
+	// has never been used. Only this test's private directory is accessed.
+	path := filepath.Join(t.TempDir(), "missing.json")
+	got := appServerPortOwnerWithReader("ws://127.0.0.1:32123", func(actual string) ([]byte, error) {
+		if actual != appServerMetaPath(32123) {
+			t.Fatalf("wrong lookup path: %s", actual)
+		}
+		return os.ReadFile(path)
+	})
+	if got != "" {
+		t.Fatalf("described an app-server with no metadata: %q", got)
+	}
+}
+
+func TestAppServerPortOwner_SharedMetadataCollision(t *testing.T) {
+	// Reproduce the environmental failure deterministically with one URL and
+	// no app-server. A valid old file suffices to produce the diagnostic even
+	// though this test has never bound that port or started an app-server.
+	path := filepath.Join(t.TempDir(), "metadata.json")
+	read := func(actual string) ([]byte, error) {
+		if actual != appServerMetaPath(32123) {
+			t.Fatalf("wrong lookup path: %s", actual)
+		}
+		return os.ReadFile(path)
+	}
+	url := "ws://127.0.0.1:32123"
+	if got := appServerPortOwnerWithReader(url, read); got != "" {
+		t.Fatal(got)
+	}
+	data, err := json.Marshal(map[string]any{"pid": deadPID(t), "signature": map[string]string{"cwd": "/work/example"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if got := appServerPortOwnerWithReader(url, read); !strings.Contains(got, "no longer running") {
+		t.Fatalf("stale metadata was not sufficient to reproduce the diagnostic: %q", got)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if got := appServerPortOwnerWithReader(url, read); got != "" {
+		t.Fatalf("same URL with metadata removed: %q", got)
 	}
 }

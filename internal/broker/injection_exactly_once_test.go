@@ -116,21 +116,15 @@ func TestInjectedMidTurnExactlyOnce(t *testing.T) {
 						}
 						return result
 					}
-					if late {
-						// The fake legacy adapter has only a channel path. A
-						// negotiated adapter also reports inbox unavailable
-						// for this expiry branch so expiry returns rows to fetch.
-						if mode != "legacy" {
-							s.delivery.mu.Lock()
-							s.delivery.live.Inbox.Eligible = false
-							s.delivery.mu.Unlock()
-						}
+					if late && mode != "legacy" {
+						// Broker-owned expiry applies only to negotiated attempts.
+						// Exhaust live transports so expiry returns rows to fetch.
+						s.delivery.mu.Lock()
+						s.delivery.live.Inbox.Eligible = false
+						s.delivery.mu.Unlock()
 						b.attempts.mu.Lock()
 						b.attempts.entries[attemptKey{token, key}].Deadline = time.Now().Add(-time.Second)
 						b.attempts.mu.Unlock()
-						if mode == "legacy" {
-							s.SetRenderRoute(ipc.RenderQueueOnly, "host receipt window expired", true)
-						}
 						waitForVoiceCondition(t, "attempt expiry", func() bool { return b.attempts.lookup(token, time.Now())[0].Outcome == "expired" })
 						receipt()
 						// Serialized fetch is also the barrier after receipt.
@@ -148,6 +142,16 @@ func TestInjectedMidTurnExactlyOnce(t *testing.T) {
 							t.Fatal("late receipt resurrected fetched rows", got)
 						}
 					} else {
+						if late {
+							// Legacy channel timeout -> adapter-owned inbox fallback
+							// reuses this exact token, with its own fresh deadline.
+							b.attempts.mu.Lock()
+							b.attempts.entries[attemptKey{token, key}].Deadline = time.Now().Add(-time.Second)
+							b.attempts.mu.Unlock()
+							requireShadow(t, b, token, "expired", "unobserved")
+							raw, _ := json.Marshal(ipc.RenderStateMsg{Op: ipc.OpRenderState, RenderRoute: ipc.RenderRoute{State: ipc.RenderCrossSession}})
+							b.handleRenderState(s, raw)
+						}
 						receipt()
 						waitForFetchPending(t, b, queueRouteKey(key), 0, "receipt retirement")
 						waitForVoiceCondition(t, "attempt confirmation", func() bool { return b.attempts.lookup(token, time.Now())[0].Outcome == "confirmed" })

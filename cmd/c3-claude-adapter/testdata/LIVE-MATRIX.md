@@ -5,13 +5,17 @@ The `claude-<version>/` directories contain sanitized host records, with a
 `transport`, `token`, `attempt`, `accept` and a provenance/rejection `reason`.
 The existing top-level 2.1.263 and 2.1.266 captures are the sources of these seeds;
 no host envelopes were synthesized. Tokenless channel input and queue removal
-are negative fixtures. The bare cross-session enqueue is also negative.
+are negative fixtures. The bare cross-session enqueue is verified positive on 2.1.266.
 
-TODO: the 2026-09-09 inbox mid-turn incident reports a different envelope but
-provides no verified JSON shape here. Capture it with the live harness. Also
-capture background, startup, reconnect and receipt-based fetch on each version.
-A startup readiness failure is an ordering failure, not a new transcript shape;
-it has no invented positive JSON fixture.
+The captured 2.1.266 peer-intake fixture supplies verified bare enqueue and nested
+peer queued_command positives, plus a negative queue removal. Provenance/prefix
+negatives follow each envelope: top-level peer metadata and literal prefix on
+user turns, nested peer metadata on attachments, and exact C3 source binding on
+bare enqueues. The receipt predicate is unchanged from master.
+
+TODO: capture background, startup, reconnect and receipt-based fetch on each
+version. A startup readiness failure is an ordering failure, not a new transcript
+shape; it has no invented positive JSON fixture.
 
 Harness exports may contain `accept: null` with a `TODO:` reason. The unit test
 makes those gaps explicit with skips; review an actual record before classifying

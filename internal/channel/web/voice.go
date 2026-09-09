@@ -170,7 +170,7 @@ func (c *Channel) acceptVoiceInbound(ctx context.Context, sessionID string, curr
 		voice := true
 		c.publish(streamEvent{kind: "own", payload: streamPayload{
 			MessageID: messageID, ClientID: clientID, Timestamp: streamTimestamp(inbound.Timestamp),
-			Voice: &voice, DurationSeconds: duration,
+			Voice: &voice, DurationSeconds: duration, Text: c3types.WithTestInjectionMarker(inbound, ""),
 		}})
 		c.pruneVoiceFiles()
 		return messageID, http.StatusAccepted, nil

@@ -77,25 +77,7 @@ func TestVersionedDeliveryReceiptCorpus(t *testing.T) {
 						t.Fatal("accepted wrong attempt")
 					}
 					if cross && *e.Accept {
-						// Remove independently: provenance and the exact host
-						// prefix must each be required, not just the token.
-						var obj map[string]any
-						if err := json.Unmarshal(record, &obj); err != nil {
-							t.Fatal(err)
-						}
-						deletePeerProvenance(obj)
-						missing, _ := json.Marshal(obj)
-						if deliveryReceipt(missing, e.Token, true, e.Attempt) {
-							t.Fatal("accepted without peer provenance")
-						}
-						if err := json.Unmarshal(record, &obj); err != nil {
-							t.Fatal(err)
-						}
-						stripPeerPrefix(obj)
-						missing, _ = json.Marshal(obj)
-						if deliveryReceipt(missing, e.Token, true, e.Attempt) {
-							t.Fatal("accepted without host peer prefix")
-						}
+						assertPeerFixtureBoundaries(t, record, e)
 					}
 				})
 			}
@@ -140,6 +122,78 @@ func stripPeerPrefix(value any) {
 				v[i] = strings.ReplaceAll(text, prefix, "")
 			} else {
 				stripPeerPrefix(child)
+			}
+		}
+	}
+}
+
+// The verified envelopes have different provenance locations. User turns need
+// the literal host prefix and top-level peer metadata. Attachments need nested
+// peer metadata and a bare opener. Enqueue has no peer fields: its envelope plus
+// the exact C3 source/token/attempt is the host evidence on this version.
+func assertPeerFixtureBoundaries(t *testing.T, record []byte, e receiptExpectation) {
+	t.Helper()
+	var original map[string]any
+	if err := json.Unmarshal(record, &original); err != nil {
+		t.Fatal(err)
+	}
+	kind, _ := original["type"].(string)
+	reject := func(name string, mutate func(map[string]any)) {
+		t.Helper()
+		var obj map[string]any
+		if err := json.Unmarshal(record, &obj); err != nil {
+			t.Fatal(err)
+		}
+		before, _ := json.Marshal(obj)
+		mutate(obj)
+		raw, err := json.Marshal(obj)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(raw) == string(before) {
+			t.Fatalf("%s did not mutate fixture", name)
+		}
+		if deliveryReceipt(raw, e.Token, true, e.Attempt) {
+			t.Fatalf("accepted %s", name)
+		}
+	}
+	if kind == "user" || kind == "attachment" {
+		reject("missing peer provenance", func(obj map[string]any) { deletePeerProvenance(obj) })
+	}
+	if kind == "user" {
+		reject("missing user-turn peer prefix", func(obj map[string]any) { stripPeerPrefix(obj) })
+	} else if kind == "queue-operation" {
+		reject("wrong intake operation", func(obj map[string]any) { obj["operation"] = "remove" })
+	} else if kind == "attachment" {
+		reject("wrong attachment subtype", func(obj map[string]any) { obj["attachment"].(map[string]any)["type"] = "other" })
+	} else {
+		t.Fatalf("unclassified positive peer envelope %q", kind)
+	}
+	// Every peer envelope requires C3 source provenance, including bare intake.
+	reject("missing C3 source", func(obj map[string]any) { rewriteFixtureText(obj, ` source="plugin:c3:c3"`, "") })
+	if kind != "user" {
+		reject("invented intake prefix", func(obj map[string]any) {
+			rewriteFixtureText(obj, "<channel ", "Another Claude session sent a message:\n<channel ")
+		})
+	}
+}
+
+func rewriteFixtureText(value any, old, replacement string) {
+	switch v := value.(type) {
+	case map[string]any:
+		for key, child := range v {
+			if text, ok := child.(string); ok {
+				v[key] = strings.ReplaceAll(text, old, replacement)
+			} else {
+				rewriteFixtureText(child, old, replacement)
+			}
+		}
+	case []any:
+		for i, child := range v {
+			if text, ok := child.(string); ok {
+				v[i] = strings.ReplaceAll(text, old, replacement)
+			} else {
+				rewriteFixtureText(child, old, replacement)
 			}
 		}
 	}

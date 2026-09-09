@@ -10,8 +10,8 @@
     "transport": "inbox",
     "token": "TOKEN",
     "attempt": "cross-session:3",
-    "accept": false,
-    "reason": "Captured bare cross-session enqueue has no verified peer prefix/provenance"
+    "accept": true,
+    "reason": "Verified bare peer enqueue envelope also used by legacy cross-session attempts"
   },
   {
     "transport": "channel",

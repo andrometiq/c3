@@ -1,6 +1,7 @@
 """The complete Cartesian product; no host processes are needed to list it."""
 from dataclasses import dataclass
 from itertools import product
+from fnmatch import fnmatchcase
 
 
 @dataclass(frozen=True)
@@ -31,3 +32,18 @@ def cells():
         ("channel", "inbox", "fetch"),
         ("idle", "foreground", "background", "startup", "reconnect"),
         ("fresh", "resumed"), ("text", "voice", "photo"), ("single", "double"))]
+
+
+def selection(pattern="*"):
+    """Matched cells, runnable cells, and actual conversational launches."""
+    matched = [c for c in cells() if fnmatchcase(c.name, pattern)]
+    feasible = [c for c in matched if not c.infeasible]
+    launches = sum(2 if c.session == "resumed" else 1 for c in feasible)
+    return matched, feasible, launches
+
+
+def selection_summary(pattern="*"):
+    matched, feasible, launches = selection(pattern)
+    return (f"Selected {len(matched)} cells: {len(feasible)} feasible, "
+            f"{len(matched) - len(feasible)} N/A; launches {launches} Claude sessions "
+            "(including resume seeds).")

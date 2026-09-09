@@ -1,0 +1,23 @@
+[
+  {
+    "transport": "inbox",
+    "token": "TOKEN",
+    "attempt": "inbox:2",
+    "accept": true,
+    "reason": "Verified 2.1.266 bare peer enqueue"
+  },
+  {
+    "transport": "inbox",
+    "token": "TOKEN",
+    "attempt": "inbox:2",
+    "accept": false,
+    "reason": "Peer queue removal is not receipt evidence"
+  },
+  {
+    "transport": "inbox",
+    "token": "TOKEN",
+    "attempt": "inbox:2",
+    "accept": true,
+    "reason": "Verified 2.1.266 queued_command with nested peer provenance"
+  }
+]

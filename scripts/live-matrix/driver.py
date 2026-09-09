@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """Maintainer-only real-host matrix. Importing modules never launches a host."""
 import argparse
-import fnmatch
 import json
 import os
 from pathlib import Path
@@ -13,7 +12,7 @@ import time
 
 from collect import attempt_events, collect, export_fixtures
 from host import Host, read_jsonl, wait_for
-from matrix import cells
+from matrix import cells, selection, selection_summary
 
 
 def queue_rows(root):
@@ -202,8 +201,10 @@ def main():
     lane_temp.mkdir(parents=True, exist_ok=True)
     (lane_temp / "go-cache").mkdir(exist_ok=True)
     tempfile.tempdir = str(lane_temp)
+    matched, selected, _ = selection(args.cell)
+    print(selection_summary(args.cell), flush=True)
     if args.list:
-        for cell in cells():
+        for cell in matched:
             print(cell.name + "\t" + ("N/A: " + cell.infeasible if cell.infeasible else "FEASIBLE"))
         return
     if args.sleep_seconds <= 15 or args.observe_seconds < args.sleep_seconds + 5:
@@ -221,7 +222,6 @@ def main():
         if not shutil.which(command):
             parser.error(f"missing dependency: {command}")
     args.output = (args.output or repo / "local-notes/live-matrix").resolve()
-    selected = [c for c in cells() if fnmatch.fnmatchcase(c.name, args.cell) and not c.infeasible]
     if not selected:
         parser.error("cell filter selects no feasible cells")
     results = {}

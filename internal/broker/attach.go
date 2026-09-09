@@ -1757,11 +1757,11 @@ func inboundKindLabel(in *c3types.Inbound) string {
 
 // previewText returns a rune-safe truncated snippet of an inbound's text.
 func previewText(in *c3types.Inbound, n int) string {
-	r := []rune(in.Text)
-	if len(r) <= n {
-		return in.Text
+	text := in.Text
+	if r := []rune(text); len(r) > n {
+		text = string(r[:n]) + "…"
 	}
-	return string(r[:n]) + "…"
+	return c3types.WithTestInjectionMarker(in, text)
 }
 
 // withBacklog returns msg with the route's queued-count + compact summary

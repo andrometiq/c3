@@ -58,12 +58,14 @@ func (b *Broker) sendRenderNotice(stub *Stub, key RouteKey) {
 		}
 		text := route.Text() + " Messages remain available through fetch_queue."
 		if b.Queue != nil {
-			count := b.noticePending(key, stub)
-			if stub.negotiated() {
+			count, countErr := b.noticePending(key, stub)
+			if countErr == nil && stub.negotiated() {
 				count, _ = b.backlogSummary(key)
 			}
 			if count > 0 {
 				text = heldReplyText(key.Channel, count) + "\n\n" + route.Text()
+			} else if countErr != nil {
+				text = "📨 Held — queue count unavailable. Check the broker log.\n\n" + route.Text()
 			}
 		} else {
 			text += "\n" + queueDisabledWarning

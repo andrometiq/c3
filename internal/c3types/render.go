@@ -5,6 +5,20 @@ import (
 	"strings"
 )
 
+// TestInjectedMarker is provenance supplied by the broker, independent of the
+// route label (single-route adapters intentionally omit that label).
+const TestInjectedMarker = `c3_test_injected="true"`
+
+// WithTestInjectionMarker marks compact previews and human-facing renderers
+// that do not use RenderQueuedInbound's metadata trailer. Apply after clipping
+// the body so even a short or empty preview retains the complete marker.
+func WithTestInjectionMarker(in *Inbound, text string) string {
+	if in.TestInjected {
+		return TestInjectedMarker + " " + text
+	}
+	return text
+}
+
 // ReplyContextFields renders the reply-context metadata fields shared by the
 // queued (fetch_queue) renderer in both adapters and the Codex live-forward turn
 // header. Returning a single slice from one place is what keeps those renderers
@@ -121,7 +135,7 @@ func RenderInboundBody(in *Inbound) string {
 // metaPrefixes are the tokens the trailing metadata line can begin with. A body
 // line that starts with one of them is indistinguishable from that metadata line
 // once the body is rendered bare, which is what makes attribution forgeable.
-var metaPrefixes = []string{"from=", "message_id=", "reply_to", "attachment=", "event=", "merged=", "fwd:"}
+var metaPrefixes = []string{"from=", "message_id=", "reply_to", "attachment=", "event=", "merged=", "fwd:", "c3_test_injected="}
 
 // bodyCouldForgeMeta reports whether any line of a message body could be read as
 // the metadata line RenderQueuedInbound appends.
@@ -187,6 +201,9 @@ func RenderQueuedInbound(in *Inbound) string {
 		}
 	}
 	var meta []string
+	if in.TestInjected {
+		meta = append(meta, TestInjectedMarker)
+	}
 	switch {
 	case in.Sender.Username != "":
 		meta = append(meta, "from=@"+in.Sender.Username)

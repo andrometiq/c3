@@ -16,6 +16,7 @@ import (
 	"github.com/Andrometiq/c3/internal/ipc"
 	"github.com/Andrometiq/c3/internal/queue"
 	"github.com/Andrometiq/c3/internal/sessionhandoff"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 // Recreates the review's real consumption + holder-death path. No Claude or
@@ -24,6 +25,12 @@ func TestReviewQuotedReceiptConsumesDurableRow(t *testing.T) {
 	for _, variant := range []string{"quoted", "oversized", "valid"} {
 		t.Run(variant, func(t *testing.T) { crossSessionBrokerLifecycle(t, variant) })
 	}
+}
+
+// This runs the real legacy adapter fallback and broker ack handler together.
+// The 16s channel window deliberately outlives the broker's 15s observation.
+func TestLegacyChannelTimeoutInboxSameTokenRetires(t *testing.T) {
+	crossSessionBrokerLifecycle(t, "channel-timeout")
 }
 
 func crossSessionBrokerLifecycle(t *testing.T, variant string) {
@@ -71,6 +78,15 @@ func crossSessionBrokerLifecycle(t *testing.T, variant string) {
 	a.conn = conn
 	a.liveTimeout = 600 * time.Millisecond
 	a.initialRenderRoute = ipc.RenderRoute{State: ipc.RenderQueueOnly, Reason: "channel not registered"}
+	var channelOutput safeBuffer
+	if variant == "channel-timeout" {
+		a.initialRenderRoute = ipc.RenderRoute{State: ipc.RenderCapable}
+		a.liveTimeout = 16 * time.Second
+		a.notifyTx = newNotifyTransport(&mcp.IOTransport{Reader: nopCloseReader{strings.NewReader("")}, Writer: nopCloseWriter{&channelOutput}})
+		if _, err := a.notifyTx.Connect(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	}
 	tx, pushes := fakeInbox(t, nil, "")
 	a.crossSession = tx
 	sessionID := "11111111-2222-4333-8444-555555555555"
@@ -103,9 +119,42 @@ func crossSessionBrokerLifecycle(t *testing.T, variant string) {
 		// A valid durable row can expand past IPC's cap after rendering/JSON escaping.
 		frame["content"] = strings.Repeat("<", ipc.MaxFrameSize/6)
 	}
+	started := time.Now()
 	a.pushWithReadback(ctx, in, frame)
 	if variant != "oversized" {
-		push := nextInbox(t, pushes)
+		var push inboxPush
+		if variant == "channel-timeout" {
+			select {
+			case push = <-pushes:
+			case <-time.After(20 * time.Second):
+				t.Fatal("legacy fallback did not start")
+			}
+			if push.Err != nil {
+				t.Fatal(push.Err)
+			}
+			if time.Since(started) < 15*time.Second {
+				t.Fatal("fallback did not outlive broker observation")
+			}
+			var notification struct {
+				Params struct {
+					Meta map[string]string `json:"meta"`
+				} `json:"params"`
+			}
+			if err := json.Unmarshal(channelOutput.Bytes(), &notification); err != nil {
+				t.Fatal(err)
+			}
+			if notification.Params.Meta["c3_delivery_id"] != in.DeliveryToken || notification.Params.Meta["c3_attempt"] != "channel:1" {
+				t.Fatalf("channel correlation: %+v", notification)
+			}
+			if !strings.Contains(push.User.Message.Content, `c3_delivery_id="`+in.DeliveryToken+`"`) || !strings.Contains(push.User.Message.Content, `c3_attempt="cross-session:2"`) {
+				t.Fatal("fallback changed token or failed to mint its own attempt")
+			}
+			if n, _ := b.Queue.Pending(qrk); n != 1 {
+				t.Fatal("transport write retired before fallback receipt")
+			}
+		} else {
+			push = nextInbox(t, pushes)
+		}
 		if push.User.SessionID != sessionID {
 			t.Fatal("known stable session UUID missing from user frame")
 		}
@@ -120,10 +169,10 @@ func crossSessionBrokerLifecycle(t *testing.T, variant string) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	want := 1
-	if variant == "valid" {
+	if variant == "valid" || variant == "channel-timeout" {
 		want = 0
 	}
-	invalidPromotion := variant != "valid" && a.liveRoute().State != ipc.RenderQueueOnly
+	invalidPromotion := want != 0 && a.liveRoute().State != ipc.RenderQueueOnly
 	// An IPC round trip is a barrier after any adapter ack and before the worker
 	// snapshot. This proves actual broker consumption, not just adapter output.
 	if err := conn.WriteJSON(ipc.FetchQueueReq{Op: ipc.OpFetchQueue, ID: "barrier", All: true, Ack: false}); err != nil {

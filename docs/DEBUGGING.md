@@ -104,3 +104,17 @@ No injected route resolves to Telegram. Treat log contents as local test data.
 The full specification is [TESTING-LIVE-MATRIX.md](TESTING-LIVE-MATRIX.md).
 The maintainer runs `scripts/live-matrix/run.sh` outside the coding sandbox;
 see `scripts/live-matrix/README.md` for collection, fixtures, isolation and timing.
+
+With injection enabled, any same-UID process with access to the private socket
+can invoke the hook, matching the broker socket's existing trust model. The flag
+is not an additional caller-authentication boundary. The harness isolates its
+configuration and paths; it does not confine Claude's filesystem access.
+
+For a bounded channel/inbox text sample, run:
+
+```sh
+scripts/live-matrix/run.sh --cell '[ci]*-[ifs]*-*-text-single'
+```
+
+The driver reports 12 matched cells, 10 feasible, 2 N/A and **16 Claude sessions**
+(including the six resume seeds). `--list` applies the same filter without launches.

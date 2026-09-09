@@ -100,7 +100,7 @@ func (c *Channel) acceptInbound(sessionID string, current session, text, clientI
 			payload: streamPayload{
 				MessageID: record.messageID,
 				ClientID:  clientID,
-				Text:      inbound.Text,
+				Text:      c3types.WithTestInjectionMarker(inbound, inbound.Text),
 				Timestamp: streamTimestamp(inbound.Timestamp),
 			},
 		})

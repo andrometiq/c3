@@ -689,11 +689,17 @@ func processAlive(pid int) bool {
 // topics into one Codex TUI. Nothing branches on this function's result; it only
 // makes the refusal actionable by naming the process to look at.
 func appServerPortOwner(wsURL string) string {
+	return appServerPortOwnerWithReader(wsURL, os.ReadFile)
+}
+
+// Keep diagnostic file reads injectable so tests never assume a free port has
+// no record in the shared per-UID metadata directory.
+func appServerPortOwnerWithReader(wsURL string, readFile func(string) ([]byte, error)) string {
 	_, port, err := parseWSURL(wsURL)
 	if err != nil {
 		return ""
 	}
-	data, err := os.ReadFile(appServerMetaPath(port))
+	data, err := readFile(appServerMetaPath(port))
 	if err != nil {
 		return ""
 	}

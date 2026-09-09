@@ -2,14 +2,79 @@ package broker
 
 import (
 	"context"
+	"fmt"
+	"log"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
 
+func TestHeldNoticeQueueReadErrorKeepsCachedCount(t *testing.T) {
+	for _, negotiated := range []bool{false, true} {
+		for _, cached := range []int{0, 1} {
+			t.Run(fmt.Sprintf("negotiated=%v/cached=%d", negotiated, cached), func(t *testing.T) { heldReadError(t, negotiated, cached) })
+		}
+	}
+}
+
+func heldReadError(t *testing.T, negotiated bool, cached int) {
+	logs := &matrixLogBuffer{}
+	prior := log.Writer()
+	log.SetOutput(logs)
+	t.Cleanup(func() { log.SetOutput(prior) })
+	b := injectionFixture(t, true)
+	topic := int64(42)
+	key := MakeRouteKey(TestInjectChannel, TestInjectChatID, &topic)
+	var s *Stub
+	if negotiated {
+		s, _ = negotiatedHolder(t, b, key, 1)
+		s.delivery.mu.Lock()
+		s.delivery.live.Channel.Eligible = false
+		s.delivery.mu.Unlock()
+	} else {
+		s, _ = liveHolderFrames(t, b, key)
+		s.AddRoute(key)
+		s.MarkRouteConfirmed(key)
+		s.SetRenderRoute("queue_only", "test host unavailable", true)
+	}
+	path := filepath.Join(filepath.Dir(b.Queue.RetentionDir()), queueRouteKey(key).File()+".jsonl")
+	if cached > 0 {
+		in := inboundOn(key.ChatID, &topic, 1, "waiting sample")
+		in.Channel = key.Channel
+		if _, err := b.Queue.AppendTracked(queueRouteKey(key), in); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Rename(path, path+".saved"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Mkdir(path, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.Queue.PeekTracked(queueRouteKey(key), -1); err == nil {
+		t.Fatal("read error was not injected")
+	}
+	if got, err := b.noticePending(key, s); got != cached || err == nil {
+		t.Fatalf("cached pending=%d, want %d", got, cached)
+	}
+	b.notifyRenderRoute(s)
+	want := "queue count unavailable"
+	if cached > 0 {
+		want = "1 message queued"
+	}
+	waitForVoiceCondition(t, "Held despite unreadable queue", func() bool {
+		return strings.Contains(logs.text(), want)
+	})
+	if !strings.Contains(logs.text(), "Held count read failed") || !strings.Contains(logs.text(), fmt.Sprintf("using cached pending=%d", cached)) {
+		t.Fatal("read failure was not logged", logs.text())
+	}
+}
+
 func TestLegacyLateAcceptanceKeepsDeclaredMilestone(t *testing.T) {
-	// Only transcript-confirming legacy adapters have the observation deadline.
-	// Other legacy hosts can spend longer accepting a submission (for example
-	// an old adapter waiting for its host's foreground tool to complete).
+	// Shadow observation deadlines never change legacy acceptance semantics.
+	// The injection matrix also pins the transcript-confirming inbox fallback.
 	b, w, s, frames := shadowFixture(t)
 	push := shadowPushOne(t, w, frames, time.Now())
 	w.updateAttempt(push.DeliveryToken, func(a *attemptRecord) { a.Deadline = time.Now().Add(-time.Second) })
@@ -23,14 +88,14 @@ func TestLegacyLateAcceptanceKeepsDeclaredMilestone(t *testing.T) {
 func TestNoticePendingIntersectsSurvivingAttemptIDs(t *testing.T) {
 	b, w, s, frames := shadowFixture(t)
 	push := shadowPushOne(t, w, frames, time.Now())
-	if n := b.noticePending(w.key, s); n != 0 {
+	if n, err := b.noticePending(w.key, s); err != nil || n != 0 {
 		t.Fatal("attempt counted as Held", n)
 	}
 	queued := inboundOn(w.key.ChatID, nil, 2, "still queued")
 	if _, err := b.Queue.AppendTracked(queueRouteKey(w.key), queued); err != nil {
 		t.Fatal(err)
 	}
-	if n := b.noticePending(w.key, s); n != 1 {
+	if n, err := b.noticePending(w.key, s); err != nil || n != 1 {
 		t.Fatal("queued row hidden", n)
 	}
 	if _, err := b.Queue.RemoveRecordIDs(queueRouteKey(w.key), push.RecordIDs); err != nil {
@@ -38,7 +103,7 @@ func TestNoticePendingIntersectsSurvivingAttemptIDs(t *testing.T) {
 	}
 	// The observation can lag the durable removal; its stale member must not
 	// subtract an unrelated queued row from the notice.
-	if n := b.noticePending(w.key, s); n != 1 {
+	if n, err := b.noticePending(w.key, s); err != nil || n != 1 {
 		t.Fatal("stale attempt member hid a surviving queued row", n)
 	}
 }

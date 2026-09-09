@@ -22,7 +22,8 @@ scripts/live-matrix/run.sh --claude "$HOME/.local/share/claude/versions/2.1.266"
   --output "$PWD/local-notes/live-matrix-review"
 ```
 
-Budget **2–4 hours per complete pass** (126 real cells, roughly 1–2 minutes each;
+Budget **2–4 hours per complete pass** (126 real cells, 216 conversational
+launches including resume seeds, roughly 1–2 minutes per cell;
 slow authentication/model setup can take longer). Foreground/background sleeps
 are 35 seconds, deliberately beyond the 15-second live receipt window. Every
 cell observes for another 45 seconds after injection, including after early
@@ -42,8 +43,8 @@ is refreshed after every cell, so an interrupted run keeps completed evidence.
 Review before committing. Only previously captured envelope families are
 classified automatically; unknown shapes have `accept: null` and a TODO reason.
 The Go fixture test explicitly skips these unverified records. Do not turn a
-TODO into a positive just to make the test green. The 2.1.266 inbox incident has
-no verified mid-turn JSON shape in the baseline and needs this capture.
+TODO into a positive just to make the test green. The verified 2.1.266 inbox mid-turn enqueue and queued_command records are now
+included in the corpus and recognized by the collector.
 
 This branch's fetch path **consumes on return** and has no receipt token. Fetch
 assertion cells should FAIL the requested stronger contract until receipt mode
@@ -61,9 +62,11 @@ transcript at injection; a version that already wrote one produces a setup FAIL.
 
 Only authentication material and provider environment values are copied from the
 user configuration; production plugins, hooks, MCP servers, and permissions are
-not inherited. All XDG paths point into scratch. The driver never modifies
-`~/.claude` or `~/.config`, never installs global plugins, and uses a private tmux
-socket. Claude runs with `--model haiku`, `--tools Bash`, and `--allowedTools`
+not inherited. All XDG paths point into scratch. Harness configuration writes
+use scratch paths, including plugin installation, and tmux uses a private socket.
+This is configuration isolation, not filesystem confinement: HOME remains inherited
+and `Bash(python3:*)` permits arbitrary Python, so Claude still has the invoking
+user’s filesystem authority. Claude runs with `--model haiku`, `--tools Bash`, and `--allowedTools`
 limited to C3 MCP tools and `Bash(python3:*)`. Channel cells add
 `--dangerously-load-development-channels plugin:c3@c3`. Fetch cells omit it and
 remove the inherited peer endpoint **only in the adapter child's environment**.
@@ -102,3 +105,20 @@ Host CLI/plugin flags follow the [Claude Code CLI reference](https://code.claude
 [plugin reference](https://code.claude.com/docs/en/plugins-reference), and
 [channel guide](https://code.claude.com/docs/en/channels). Live execution is still
 required to validate a particular binary's intake envelopes and UI.
+
+The orchestrator subset is:
+
+```sh
+scripts/live-matrix/run.sh --cell '[ci]*-[ifs]*-*-text-single'
+```
+
+This matches channel + inbox × idle + foreground + startup × fresh + resumed ×
+text × single: 12 matched cells, 10 feasible, 2 N/A (fresh foreground requires a
+transcript). It launches **16 Claude sessions**: four fresh launches plus six
+resume seeds and six resumed launches. The driver prints these counts before
+building or launching; add `--list` to print only the matching cells and counts.
+`--collect-only --fixtures` still launches the same sessions.
+
+With injection enabled, any same-UID process that can access the private socket
+can invoke the hook. This is the broker socket's existing trust model; the flag
+is an opt-in, not an additional caller-authentication boundary.

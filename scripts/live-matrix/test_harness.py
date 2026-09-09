@@ -10,7 +10,7 @@ from unittest.mock import patch
 from collect import classify, count_receives, sanitize, verdict
 from driver import false_held, offered_before_ready, write_report
 from host import read_jsonl
-from matrix import Cell, cells
+from matrix import Cell, cells, selection, selection_summary
 
 
 class MatrixTests(unittest.TestCase):
@@ -23,6 +23,34 @@ class MatrixTests(unittest.TestCase):
             if c.infeasible:
                 self.assertEqual(c.session, "fresh")
                 self.assertNotIn(c.state, ("idle", "startup"))
+
+    def test_orchestrator_subset_and_session_count(self):
+        pattern = "[ci]*-[ifs]*-*-text-single"
+        matched, feasible, launches = selection(pattern)
+        self.assertEqual(len(matched), 12)
+        self.assertEqual(len(feasible), 10)
+        self.assertEqual(launches, 16)
+        self.assertEqual({c.transport for c in matched}, {"channel", "inbox"})
+        self.assertEqual({c.state for c in matched}, {"idle", "foreground", "startup"})
+        self.assertEqual({c.session for c in matched}, {"fresh", "resumed"})
+        self.assertTrue(all(c.kind == "text" and c.burst == "single" for c in matched))
+        self.assertEqual({c.name for c in matched if c.infeasible}, {
+            "channel-foreground-fresh-text-single", "inbox-foreground-fresh-text-single"})
+        self.assertIn("launches 16 Claude sessions", selection_summary(pattern))
+        self.assertEqual(selection()[2], 216)
+
+    def test_verified_peer_intake_classification_keeps_boundaries(self):
+        fixture = Path(__file__).resolve().parents[2] / "cmd/c3-claude-adapter/testdata/claude-2.1.266-peer-intake.jsonl"
+        records = read_jsonl(fixture)
+        self.assertEqual([classify(r)["accept"] for r in records], [True, False, True])
+        attachment = copy.deepcopy(records[2])
+        del attachment["attachment"]["origin"]
+        self.assertFalse(classify(attachment)["accept"])
+        for record in (records[0], records[2]):
+            obj = copy.deepcopy(record)
+            field, key = (obj, "content") if obj["type"] == "queue-operation" else (obj["attachment"], "prompt")
+            field[key] = field[key].replace(' source="plugin:c3:c3"', '')
+            self.assertFalse(classify(obj)["accept"])
 
     def test_records_ignore_partial_tail(self):
         with tempfile.TemporaryDirectory() as root:
@@ -40,7 +68,7 @@ class MatrixTests(unittest.TestCase):
         self.assertEqual(count_receives(records + [duplicate], {"DELIVERYTOKEN-1"}, [11380]), {"11380": 2})
         self.assertTrue(classify(records[0])["accept"])
         self.assertFalse(classify(records[2])["accept"])
-        self.assertIsNone(classify(records[1])["accept"])
+        self.assertTrue(classify(records[1])["accept"])
 
     def test_redaction_preserves_attempt_and_peer_provenance(self):
         sample = {"uuid": "private", "cwd": "/home/example/private", "origin": {"kind": "peer", "from": "c3", "verifiedPeerPid": 123},

@@ -955,7 +955,7 @@ func (w *RouteWorker) echoReadback(in *c3types.Inbound, transcript, failNotice s
 	if failNotice != "" {
 		if _, serr := ch.SendReply(c3types.ReplyArgs{
 			Channel: in.Channel, ChatID: in.ChatID, TopicID: in.TopicID, ReplyTo: &in.MessageID,
-			Text: failNotice,
+			Text: c3types.WithTestInjectionMarker(in, failNotice),
 		}); serr != nil {
 			log.Printf("readback notice chan=%s chat=%d topic=%s msg=%d: send failed (non-fatal): %v",
 				w.key.Channel, w.key.ChatID, TopicKeyStr(w.key), in.MessageID, serr)
@@ -971,7 +971,7 @@ func (w *RouteWorker) echoReadback(in *c3types.Inbound, transcript, failNotice s
 		return
 	}
 	if _, serr := rb.SendReadback(c3types.ReadbackArgs{
-		ChatID: in.ChatID, ReplyTo: &in.MessageID, TopicID: in.TopicID, Transcript: transcript,
+		ChatID: in.ChatID, ReplyTo: &in.MessageID, TopicID: in.TopicID, Transcript: c3types.WithTestInjectionMarker(in, transcript),
 	}); serr != nil {
 		log.Printf("readback chan=%s chat=%d topic=%s msg=%d: SendReadback failed (non-fatal): %v",
 			w.key.Channel, w.key.ChatID, TopicKeyStr(w.key), in.MessageID, serr)
@@ -2050,10 +2050,6 @@ func (w *RouteWorker) handleConsume(_ context.Context, job *ConsumeJob) {
 		// queued for re-delivery. RemoveIDs snapshots to .trash before rewriting and is
 		// idempotent, so an id already evicted/consumed simply matches nothing.
 		if ids := w.takeCoveredByPush(job.MessageID, job.Token); len(ids) > 0 {
-			if !w.legacyReceiptCurrent(job.Owner, w.shadowConsumeToken) {
-				log.Print("live receipt expired; rows remain available through fetch_queue")
-				return
-			}
 			shadowBefore := w.shadowRows()
 			removed, err := w.broker.Queue.RemoveRecordIDs(qrk, ids)
 			if err != nil {

@@ -55,10 +55,15 @@ def classify(record):
                 result.update(accept=bool(record.get("isMeta") and record.get("origin", {}).get("kind") == "peer"
                                           and record.get("origin", {}).get("from") == "c3" and text.startswith(PEER_PREFIX)),
                               reason="verified 2.1.263 peer user shape and prefix")
-            elif not text.startswith(PEER_PREFIX):
-                # A new peer shape might intentionally omit this prefix. Leave
-                # it unknown; a human must verify the real provenance field.
-                result["reason"] = "TODO: unverified inbox intake/provenance; do not infer a positive"
+            elif record.get("type") in ("queue-operation", "attachment"):
+                source = re.match(r'<channel\s[^>]*\bsource=["\']plugin:c3:c3["\']', text)
+                if record.get("type") == "queue-operation":
+                    provenance = record.get("operation") == "enqueue"
+                else:
+                    attachment = record.get("attachment", {})
+                    provenance = (attachment.get("isMeta") and attachment.get("origin", {}).get("kind") == "peer"
+                                  and attachment.get("origin", {}).get("from") == "c3")
+                result.update(accept=bool(source and provenance), reason="verified 2.1.266 bare peer intake envelope")
         elif text.lstrip().startswith("<channel"):
             known = record.get("type") == "user" or (record.get("type") == "queue-operation" and record.get("operation") == "enqueue") or (
                 record.get("type") == "attachment" and record.get("attachment", {}).get("origin", {}).get("kind") == "channel")

@@ -1864,6 +1864,8 @@ func renderQueuedInbound(in *c3types.Inbound) string {
 		body = fmt.Sprintf("(%s event)", in.Kind)
 	}
 
+	body = c3types.WithTestInjectionMarker(in, body)
+
 	var b strings.Builder
 	if body != "" {
 		b.WriteString(body)
