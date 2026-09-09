@@ -1,0 +1,30 @@
+[
+  {
+    "transport": "channel",
+    "token": "TOKEN",
+    "attempt": "channel:1",
+    "accept": true,
+    "reason": "Captured immediate channel enqueue"
+  },
+  {
+    "transport": "inbox",
+    "token": "TOKEN",
+    "attempt": "cross-session:3",
+    "accept": false,
+    "reason": "Captured bare cross-session enqueue has no verified peer prefix/provenance"
+  },
+  {
+    "transport": "channel",
+    "token": "TOKEN",
+    "attempt": "channel:1",
+    "accept": false,
+    "reason": "remove is housekeeping, not an intake receipt"
+  },
+  {
+    "transport": "channel",
+    "token": "TOKEN",
+    "attempt": "channel:1",
+    "accept": true,
+    "reason": "Captured channel queued_command attachment"
+  }
+]

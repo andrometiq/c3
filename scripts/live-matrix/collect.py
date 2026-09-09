@@ -90,7 +90,7 @@ def sanitize(value, tokens=(), key=""):
                        lambda m: m[1] + '="' + ("USER" if m[1] in ("user", "reply_to_user") else "ID") + '"', value)
         value = re.sub(r'\b[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}\b', "ID", value)
         value = re.sub(r'(?:/home/|/Users/|/tmp/|/private/|/run/)[^\s"<>\']+', "/work/ID", value)
-        value = re.sub(r'\b(token|message_id|topic|pid|conn|record_id|file_id)=[^\s]+',
+        value = re.sub(r'\b(token|message_id|topic|pid|conn|record_id|file_id)=(?!["\'])[^\s]+',
                        lambda m: m[1] + "=" + ("TOKEN" if m[1] == "token" else "ID"), value)
         if identity in {"cwd", "transcriptpath", "path"}:
             return "/work/ID"
@@ -140,12 +140,16 @@ def verdict(cell, evidence):
     if evidence.get("false_held"):
         failures.append("Held notice counted an attempting row")
     if cell.transport == "fetch":
+        if any(e.get("phase") == "reserved" for e in evidence.get("attempts", [])):
+            failures.append("live offer in fetch-only cell")
         if evidence.get("rows_while_fetch_result_held") != cell.count:
             failures.append("rows retired before host tool-result receipt (baseline consume-on-fetch)")
         if not evidence.get("fetch_tool_result"):
             failures.append("no successful fetch tool-result record")
         if not evidence.get("fetch_token"):
             failures.append("fetch result has no broker receipt token")
+        if evidence.get("fetch_source_occurrences") != cell.count:
+            failures.append("fetch did not return each injected source exactly once")
     else:
         reserved = [e for e in evidence.get("attempts", []) if e.get("phase") == "reserved"]
         confirmed = [e for e in evidence.get("attempts", []) if e.get("phase") == "confirmed"]
@@ -177,7 +181,7 @@ def collect(cell, host, root, output, evidence, collect_only=False):
         evidence.setdefault("setup_errors", []).append(f"collection: {type(exc).__name__}: {exc}")
     tokens.update(match[1] for r in records for text in strings(r) for match in TOKEN.finditer(text))
     selected = [r for r in records if any(token in text for text in strings(r) for token in tokens)
-                or (cell.transport == "fetch" and "MATRIX_SAMPLE" in json.dumps(r))]
+                or (cell.transport == "fetch" and ("MATRIX_SAMPLE" in json.dumps(r) or "__fetch_queue" in json.dumps(r)))]
     expectations = []
     for record in selected:
         expectation = classify(record)
@@ -192,9 +196,15 @@ def collect(cell, host, root, output, evidence, collect_only=False):
         (output / "events.jsonl").write_text("".join(json.dumps(sanitize(r, tokens)) + "\n" for r in host.events()))
     evidence["attempts"] = attempts
     evidence["received"] = count_receives(records, tokens, evidence.get("message_ids", []))
-    evidence["fetch_tool_result"] = any(b.get("type") == "tool_result" and not b.get("is_error") and "MATRIX_SAMPLE" in json.dumps(b.get("content"))
-        for r in records if r.get("type") == "user" for b in (r.get("message", {}).get("content", []) if isinstance(r.get("message", {}).get("content"), list) else []) if isinstance(b, dict))
-    evidence["fetch_token"] = any("c3_delivery_id" in json.dumps(r) or "lease_token" in json.dumps(r) for r in selected) if cell.transport == "fetch" else False
+    fetch_calls = {b.get("id") for r in records for b in (r.get("message", {}).get("content", []) if isinstance(r.get("message", {}).get("content"), list) else [])
+                   if isinstance(b, dict) and b.get("type") == "tool_use" and b.get("name", "").endswith("__fetch_queue")}
+    fetch_results = [b for r in records if r.get("type") == "user"
+                     for b in (r.get("message", {}).get("content", []) if isinstance(r.get("message", {}).get("content"), list) else [])
+                     if isinstance(b, dict) and b.get("type") == "tool_result" and not b.get("is_error")
+                     and b.get("tool_use_id") in fetch_calls and "MATRIX_SAMPLE" in json.dumps(b.get("content"))]
+    evidence["fetch_tool_result"] = bool(fetch_results)
+    evidence["fetch_source_occurrences"] = sum(json.dumps(b.get("content")).count("MATRIX_SAMPLE") for b in fetch_results)
+    evidence["fetch_token"] = any("c3_delivery_id" in json.dumps(r) or "lease_token" in json.dumps(r) for r in fetch_results) if cell.transport == "fetch" else False
     failures = verdict(cell, evidence)
     status = "COLLECTED" if collect_only and not evidence.get("setup_errors") else ("FAIL" if failures else "PASS")
     result = {"cell": cell.name, "status": status, "reasons": failures, "evidence": sanitize(evidence, tokens),

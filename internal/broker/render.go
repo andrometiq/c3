@@ -58,7 +58,7 @@ func (b *Broker) sendRenderNotice(stub *Stub, key RouteKey) {
 		}
 		text := route.Text() + " Messages remain available through fetch_queue."
 		if b.Queue != nil {
-			count := b.Queue.StatusFor(queueRouteKey(key)).Pending
+			count := b.noticePending(key, stub)
 			if stub.negotiated() {
 				count, _ = b.backlogSummary(key)
 			}

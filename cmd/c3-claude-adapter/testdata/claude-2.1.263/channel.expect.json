@@ -1,0 +1,9 @@
+[
+  {
+    "transport": "channel",
+    "token": "TOKEN",
+    "attempt": "channel:1",
+    "accept": false,
+    "reason": "Captured before token metadata existed"
+  }
+]

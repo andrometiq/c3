@@ -1,0 +1,9 @@
+[
+  {
+    "transport": "inbox",
+    "token": "TOKEN",
+    "attempt": "cross-session:1",
+    "accept": true,
+    "reason": "Captured peer user record"
+  }
+]

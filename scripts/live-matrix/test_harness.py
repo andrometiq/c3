@@ -4,10 +4,11 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+import xml.etree.ElementTree as ET
 from unittest.mock import patch
 
 from collect import classify, count_receives, sanitize, verdict
-from driver import false_held, write_report
+from driver import false_held, offered_before_ready, write_report
 from host import read_jsonl
 from matrix import Cell, cells
 
@@ -51,6 +52,9 @@ class MatrixTests(unittest.TestCase):
         self.assertEqual(clean["origin"]["from"], "c3")
         self.assertIn('c3_attempt="inbox:3"', clean["content"])
         self.assertIn('c3_delivery_id="TOKEN"', clean["content"])
+        tag = ET.fromstring(clean["content"].split("\n", 1)[1])
+        self.assertEqual(tag.attrib["user_id"], "ID")
+        self.assertEqual(tag.attrib["chat_id"], "ID")
         self.assertIsInstance(clean["origin"]["verifiedPeerPid"], int)
 
     def evidence(self):
@@ -74,10 +78,24 @@ class MatrixTests(unittest.TestCase):
 
     def test_fetch_rejects_consume_before_tool_result(self):
         cell = Cell("fetch", "idle", "resumed", "text", "single")
-        evidence = dict(self.evidence(), rows_while_fetch_result_held=0, fetch_tool_result=True, fetch_token=True)
+        evidence = dict(self.evidence(), attempts=[], rows_while_fetch_result_held=0, fetch_tool_result=True, fetch_token=True, fetch_source_occurrences=1)
         self.assertTrue(verdict(cell, evidence))
         evidence["rows_while_fetch_result_held"] = 1
         self.assertEqual(verdict(cell, evidence), [])
+
+    def test_startup_detects_legacy_and_negotiated_offers(self):
+        from unittest.mock import Mock
+        host = Mock()
+        host.events.return_value = []
+        with patch("driver.broker_text", return_value=""):
+            self.assertFalse(offered_before_ready(host, Path("unused"), 0))
+        with patch("driver.broker_text", return_value="delivered chan=test-inject chat=-1"):
+            self.assertTrue(offered_before_ready(host, Path("unused"), 0))
+        with patch("driver.broker_text", return_value="TEST ATTEMPT token=x phase=reserved"):
+            self.assertTrue(offered_before_ready(host, Path("unused"), 0))
+        host.events.return_value = [{"event": "channel_notify"}]
+        with patch("driver.broker_text", return_value=""):
+            self.assertTrue(offered_before_ready(host, Path("unused"), 0))
 
     def test_held_counts_exclude_only_open_members(self):
         begin = "TEST ATTEMPT token=x phase=reserved members=1\n"

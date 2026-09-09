@@ -2050,6 +2050,10 @@ func (w *RouteWorker) handleConsume(_ context.Context, job *ConsumeJob) {
 		// queued for re-delivery. RemoveIDs snapshots to .trash before rewriting and is
 		// idempotent, so an id already evicted/consumed simply matches nothing.
 		if ids := w.takeCoveredByPush(job.MessageID, job.Token); len(ids) > 0 {
+			if !w.legacyReceiptCurrent(job.Owner, w.shadowConsumeToken) {
+				log.Print("live receipt expired; rows remain available through fetch_queue")
+				return
+			}
 			shadowBefore := w.shadowRows()
 			removed, err := w.broker.Queue.RemoveRecordIDs(qrk, ids)
 			if err != nil {

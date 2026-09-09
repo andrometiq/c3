@@ -26,6 +26,12 @@ def broker_text(root):
     return path.read_text(errors="replace") if path.exists() else ""
 
 
+def offered_before_ready(host, root, after):
+    return (bool(attempt_events(broker_text(root)))
+            or "delivered chan=test-inject " in broker_text(root)
+            or bool(host.events("channel_notify", after)))
+
+
 def false_held(log, count):
     active = {}
     retired = 0
@@ -92,7 +98,7 @@ def run_cell(args, cell, binaries, repo, version):
         if cell.transport == "fetch":
             (host.control / "gate-fetch").touch()
         if gate:
-            evidence["attempt_before_ready"] = bool(attempt_events(broker_text(root)))
+            evidence["attempt_before_ready"] = offered_before_ready(host, root, final_launch)
         command = [str(binaries / "c3-broker"), "inject", "--socket", str(root / "broker/c3.sock"),
                    "--topic", "42", "--text", "MATRIX_SAMPLE: generic delivery sample.", "--count", str(cell.count)]
         if cell.kind == "voice":
@@ -106,7 +112,8 @@ def run_cell(args, cell, binaries, repo, version):
             # Allow ordinary debounce/persistence to finish while initialized is
             # demonstrably withheld. No sleep substitutes for a readiness test.
             wait_for(lambda: len(queue_rows(root)) == cell.count, 5, "startup input was not persisted")
-            evidence["attempt_before_ready"] |= bool(attempt_events(broker_text(root)))
+            time.sleep(0.3)  # let the persisted batch finish scheduling while the real gate remains closed
+            evidence["attempt_before_ready"] |= offered_before_ready(host, root, final_launch)
             evidence["rows_before_ready"] = len(queue_rows(root))
             (host.control / f"release-initialized-{gate['pid']}").touch()
             host.wait_event("attached", gate["time"])

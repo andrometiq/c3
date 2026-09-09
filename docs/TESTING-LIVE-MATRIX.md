@@ -82,3 +82,19 @@ success. Its report says COLLECTED, never PASS. `--fixtures` exports sanitized
 records plus per-record expectations for review; unknown shapes remain TODO and
 must be classified from actual evidence before entering positive unit coverage.
 Do not run collection as a coding-lane acceptance check.
+
+## In-process compatibility coverage
+
+The injection tests also cover legacy transcript-confirming adapters. A delayed
+wire write/receipt keeps durable rows out of Held notices. A receipt for a known
+expired attempt leaves them available for exactly one fetch, and duplicate or
+post-fetch receipts cannot retire them again. Legacy hosts that declare only
+submission acceptance keep their historical timing; the transcript deadline is
+not applied to their potentially longer host submission. If bounded legacy
+attempt history is absent, the existing exact covered-row correlation remains
+authoritative. No new legacy fallback ladder is introduced.
+
+The current baseline consumes fetch rows when returning them and has no fetch
+receipt token. The live harness intentionally reports FAIL for that behavior
+against the stronger tool-result receipt contract above. That is an uncovered
+implementation phase, not a missing JSON shape that a fixture may invent.
