@@ -192,16 +192,15 @@ func TestAttemptInboxReconnectAdoptsWithoutResend(t *testing.T) {
 	}
 }
 
-func TestNegotiatedPhase2HelloBroadenedAckConflict(t *testing.T) {
-	// Pin 6 conflict: phase-2 ChannelOnly requires EXACTLY ["channel"], not a subset.
-	// P1/P2 mandate the broadened ack. An unchanged phase-2 binary rejects it;
-	// silently changing this offer/ack contract would invent a version handshake.
+func TestNegotiatedHelloAckForwardModes(t *testing.T) {
+	// Maintainer ruling: any supported subset may be acknowledged; a known,
+	// offered mode must intersect the ack, while unknown modes are ignored.
 	t.Setenv("C3_QUEUE_DIR", t.TempDir())
 	b := brokerWithChannel(t, mfWithTelegram(), &fakeChannel{})
 	t.Cleanup(b.Shutdown)
 	peer, closePeer := peerPair(t, b)
 	t.Cleanup(closePeer)
-	if err := peer.WriteJSON(ipc.HelloMsg{Op: ipc.OpHello, CLI: "claude", PID: os.Getpid(), CWD: "/work", Capabilities: []string{"claude/channel"}, Delivery: json.RawMessage(channelOffer)}); err != nil {
+	if err := peer.WriteJSON(ipc.HelloMsg{Op: ipc.OpHello, CLI: "claude", PID: os.Getpid(), CWD: "/work", Delivery: json.RawMessage(channelOffer)}); err != nil {
 		t.Fatal(err)
 	}
 	raw, err := peer.ReadFrame()
@@ -209,14 +208,21 @@ func TestNegotiatedPhase2HelloBroadenedAckConflict(t *testing.T) {
 		t.Fatal(err)
 	}
 	var ack ipc.HelloAckMsg
-	if json.Unmarshal(raw, &ack) != nil || ack.Delivery == nil || !slices.Equal(ack.Delivery.Modes, []string{"channel", "inbox"}) {
+	if json.Unmarshal(raw, &ack) != nil || !ack.Delivery.AcceptsOffer(ipc.ParseDeliveryOffer([]byte(channelOffer))) {
 		t.Fatal(string(raw))
 	}
-	phase2 := func(d *ipc.DeliveryAcceptance) bool {
-		return d != nil && d.Version == 1 && len(d.Modes) == 1 && d.Modes[0] == "channel"
-	}
-	if phase2(ack.Delivery) || !phase2(&ipc.DeliveryAcceptance{Version: 1, Modes: []string{"channel"}}) {
-		t.Fatal("phase-2 acceptance shape changed")
+	for _, tc := range []struct {
+		modes []string
+		want  bool
+	}{
+		{[]string{"channel"}, true}, {[]string{"inbox", "channel"}, true},
+		{[]string{"future", "channel"}, true}, {[]string{"inbox"}, false},
+		{[]string{"future"}, false}, {nil, false},
+	} {
+		ack.Delivery.Modes = tc.modes
+		if got := ack.Delivery.AcceptsOffer(ipc.ParseDeliveryOffer([]byte(channelOffer))); got != tc.want {
+			t.Fatalf("modes=%v accepted=%v", tc.modes, got)
+		}
 	}
 }
 

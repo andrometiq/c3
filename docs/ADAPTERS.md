@@ -384,14 +384,13 @@ Changing declared milestones or accepted modes on reconnect releases the old att
 before their evidence could be interpreted under the new contract. Refreshed
 eligibility facts alone do not change that contract or prevent live adoption.
 
-Adapters execute only modes they implement in the accepted subset; unknown
-modes may be ignored. **Phase-2 binary compatibility limitation:** the shipped
-phase-2 Claude adapter checks for exactly `["channel"]`, so it rejects the
-broadened acknowledgement instead of ignoring inbox. Its hello has no version
-marker distinguishing it from a newer channel-only offer. It cannot remain
-negotiated against this broker without an adapter upgrade; restart that CLI
-with the phase-3 adapter. This limitation is pinned by
-`TestNegotiatedPhase2HelloBroadenedAckConflict`. No new handshake is inferred.
+The broker may acknowledge any subset of its supported modes; an adapter accepts `hello_ack.delivery` only if it includes at least one mode it offered, ignores unknown modes, and otherwise stays legacy.
+
+When an un-negotiated connection gains eligible facts (for example, its first
+transcript or owning socket appears), the adapter reconnects and re-offers:
+at most once per fact change and once per 10 seconds, waiting for any legacy
+push to finish its ack or expire before changing connections. The existing
+same-process reconnect path transfers claims; modes remain frozen per connection.
 
 The three new ops are **Provisional-negotiated** and are sent/honoured only on
 accepted connections:

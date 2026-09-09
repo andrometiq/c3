@@ -234,8 +234,8 @@ broker-owned delivery: status shows `waiting`, `live: channel, confirmed <age>`,
 the broker tries an eligible inbox with a new attempt. Flagless and background
 sessions can use inbox first. After both transports are exhausted, retries wait
 for reconnect, attach, changed eligibility, another confirmed route, or a new
-message arriving at least 60 seconds after exhaustion. Sessions still running
-the phase-2 adapter need a CLI restart to accept the broadened delivery modes.
+message arriving at least 60 seconds after exhaustion. If the transcript or
+inbox becomes available after startup, C3 reconnects to offer delivery automatically.
 The installer can
 also offer a small `claude` shim so the flag is automatic for interactive
 launches. **The wrapper is opt-in, default no:** setup changes `~/.local/bin/claude`

@@ -58,6 +58,7 @@ eviction or revision reconciliation releases the slot without proving transport.
 Drain imports retain durable `origin:"drain"` provenance and are never live pushed.
 The legacy suite continues to assert `attempt shadow suite divergences=0`.
 
-The phase-2 Claude binary requires an exact channel-only acknowledgement and
-rejects the phase-3 mode set. Restart it with the phase-3 adapter; this is a
-known compatibility limitation, not a reason to retry or weaken receipt checks.
+`delivery eligibility available: reconnecting to offer delivery` means a legacy
+connection gained an eligible transcript or inbox. This automatic re-hello is
+limited to once per fact change and once per 10 seconds, after any active legacy
+push's ack or expiry; the existing reconnect path transfers its claims.

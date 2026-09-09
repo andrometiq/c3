@@ -115,7 +115,7 @@ func TestNegotiatedAcceptanceAbsentKeepsLegacy(t *testing.T) {
 func TestNegotiatedDocsContract(t *testing.T) {
 	// P9: "phase 2 ... P8 per-route display for negotiated sessions; legacy sessions untouched".
 	for path, claims := range map[string][]string{
-		"../../docs/ADAPTERS.md":  {"Provisional-negotiated", "no `fetch_receipt` mode is accepted", "lease` is refused on presence only for negotiated", "Legacy sessions retain", "c3_attempt=\"inbox:N\"", "validateCrossSessionPeer", "peer variants fail", "channel OR inbox is eligible", "Phase-2 binary compatibility limitation"},
+		"../../docs/ADAPTERS.md":  {"Provisional-negotiated", "no `fetch_receipt` mode is accepted", "lease` is refused on presence only for negotiated", "Legacy sessions retain", "c3_attempt=\"inbox:N\"", "validateCrossSessionPeer", "peer variants fail", "channel OR inbox is eligible", "at least one mode it offered", "once per 10 seconds"},
 		"../../docs/DEBUGGING.md": {"attempt retirement released: storage retry limit reached", "attempt shadow suite divergences=0", "no phase-5 flap timer", "attempt reserved transport=inbox", "attempt finished transport=inbox outcome=confirmed"},
 		"../../DECISIONS.md":      {"D034: Negotiated channel delivery (phase 2)", "no goroutine per attempt", "D035: Inbox as a broker-owned transport (phase 3)", "supersedes the delivery parts of D031"},
 	} {
@@ -204,28 +204,34 @@ func waitDeliveryWritten(t *testing.T, a *adapter, token string) {
 }
 
 func TestNegotiatedAcceptedModeSubset(t *testing.T) {
-	// P1/P2: "accepted mode set is frozen for the life of the connection".
-	for _, modes := range [][]string{{"channel"}, {"inbox"}, {"channel", "inbox"}, {"channel", "future"}} {
-		a, _, _ := liveFixture(t, ipc.RenderCapable)
-		a.initialRenderRoute = ipc.RenderRoute{State: ipc.RenderCapable}
-		a.acceptDelivery(a.deliveryOffer(), &ipc.DeliveryAcceptance{Version: 1, Modes: modes})
-		if !a.deliveryAccepted.Load() {
-			t.Fatal(modes)
-		}
-		a.liveMu.Lock()
-		inbox := a.deliveryInboxAccepted
-		channel := a.deliveryChannelAccepted
-		a.liveMu.Unlock()
-		has := func(mode string) bool {
-			for _, m := range modes {
-				if m == mode {
-					return true
+	// Maintainer ruling (1): an ack with no offered mode means legacy.
+	for _, offered := range []string{"channel", "inbox", "both"} {
+		for _, modes := range [][]string{{"channel"}, {"inbox"}, {"channel", "inbox"}, {"channel", "future"}, {"inbox", "future"}, {"future"}, nil} {
+			a, _, _ := liveFixture(t, ipc.RenderCapable)
+			live := ipc.DeliveryLive{Channel: ipc.DeliveryEligibility{Eligible: offered != "inbox"}, Inbox: ipc.DeliveryEligibility{Eligible: offered != "channel"}}
+			offer := deliveryOfferFor(live)
+			has := func(mode string) bool {
+				for _, m := range modes {
+					if m == mode {
+						return true
+					}
+				}
+				return false
+			}
+			want := (live.Channel.Eligible && has("channel")) || (live.Inbox.Eligible && has("inbox"))
+			for _, version := range []int{1, 2} {
+				a.acceptDelivery(offer, &ipc.DeliveryAcceptance{Version: version, Modes: modes})
+				enabled := want && version == 1
+				if a.deliveryAccepted.Load() != enabled {
+					t.Fatalf("offered=%s modes=%v version=%d", offered, modes, version)
+				}
+				a.liveMu.Lock()
+				channel, inbox := a.deliveryChannelAccepted, a.deliveryInboxAccepted
+				a.liveMu.Unlock()
+				if channel != (enabled && has("channel")) || inbox != (enabled && has("inbox")) {
+					t.Fatal("unknown or unaccepted mode enabled")
 				}
 			}
-			return false
-		}
-		if inbox != has("inbox") || channel != has("channel") {
-			t.Fatal("accepted set changed", modes)
 		}
 	}
 }

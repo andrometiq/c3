@@ -52,7 +52,9 @@ func (a *adapter) deliveryFacts() ipc.DeliveryLive {
 	return ipc.DeliveryLive{Channel: channel, Inbox: inbox}
 }
 func (a *adapter) deliveryOffer() json.RawMessage {
-	live := a.deliveryFacts()
+	return deliveryOfferFor(a.deliveryFacts())
+}
+func deliveryOfferFor(live ipc.DeliveryLive) json.RawMessage {
 	if !live.Channel.Eligible && !live.Inbox.Eligible {
 		return nil
 	}
@@ -61,7 +63,7 @@ func (a *adapter) deliveryOffer() json.RawMessage {
 }
 func (a *adapter) acceptDelivery(offer json.RawMessage, accepted *ipc.DeliveryAcceptance) {
 	offered := ipc.ParseDeliveryOffer(offer)
-	enabled := offered != nil && accepted.SupportsLive()
+	enabled := accepted.AcceptsOffer(offered)
 	inbox := enabled && accepted.HasMode("inbox")
 	a.deliveryAccepted.Store(enabled)
 	a.liveMu.Lock()
@@ -159,6 +161,7 @@ func (a *adapter) observeDeliveries(ctx context.Context) {
 		case <-tick.C:
 		}
 		if !a.deliveryAccepted.Load() {
+			a.pollDeliveryRehello(a.deliveryFacts(), time.Now())
 			continue
 		}
 		a.pollDeliveries()

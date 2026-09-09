@@ -256,6 +256,7 @@ type adapter struct {
 	deliveryObservers       map[string]*deliveryObserver
 	deliveryLoopOnce        sync.Once
 	deliveryLastFacts       ipc.DeliveryLive
+	deliveryRehello         deliveryRehelloState // liveMu
 
 	// notifyTx wraps the stdio transport to permit emitting custom
 	// `notifications/claude/channel` frames. Set in run() before Server.Run.
@@ -505,7 +506,8 @@ func (a *adapter) hello() error {
 	}
 	a.resetLiveRoute(false)
 	route := a.liveRoute()
-	offer := a.deliveryOffer()
+	facts := a.deliveryFacts()
+	offer := deliveryOfferFor(facts)
 	if a.deliveryAccepted.Load() {
 		route = a.initialRenderRoute
 		if len(offer) == 0 {
@@ -549,7 +551,12 @@ func (a *adapter) hello() error {
 	a.bmu.Unlock()
 	wasNegotiated := a.deliveryAccepted.Load()
 	a.acceptDelivery(offer, ack.Delivery)
-	if a.deliveryAccepted.Load() && a.runCtx != nil {
+	a.liveMu.Lock()
+	a.deliveryRehello.facts = facts
+	a.deliveryRehello.pending = false
+	a.deliveryRehello.closing = false
+	a.liveMu.Unlock()
+	if a.runCtx != nil {
 		a.startDeliveryLoops(a.runCtx)
 	}
 	if wasNegotiated && !a.deliveryAccepted.Load() {

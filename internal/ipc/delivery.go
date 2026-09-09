@@ -86,9 +86,6 @@ func StrictJSON(raw []byte, dst any) error {
 	}
 	return nil
 }
-func (d *DeliveryAcceptance) ChannelOnly() bool {
-	return d != nil && d.Version == 1 && len(d.Modes) == 1 && d.Modes[0] == "channel"
-}
 
 // P1/P2: accepted modes are frozen per connection. Ignore modes this adapter
 // does not implement; execute only supported modes present in the acceptance.
@@ -103,6 +100,11 @@ func (d *DeliveryAcceptance) HasMode(mode string) bool {
 	}
 	return false
 }
-func (d *DeliveryAcceptance) SupportsLive() bool {
-	return d.HasMode("channel") || d.HasMode("inbox")
+
+// AcceptsOffer requires an understood live mode actually offered as eligible;
+// unknown modes do not invalidate a supported intersection.
+func (d *DeliveryAcceptance) AcceptsOffer(offer *DeliveryOffer) bool {
+	return offer != nil && offer.Version == 1 &&
+		((offer.Live.Channel.Eligible && d.HasMode("channel")) ||
+			(offer.Live.Inbox.Eligible && d.HasMode("inbox")))
 }

@@ -30,12 +30,13 @@ and provenance rules apply to the versioned host fixtures. Capability reports
 include socket availability changes. Per-route display names channel or inbox;
 fetch cannot change that history.
 
-**Compatibility limitation:** The phase-2 adapter's exact `ChannelOnly()` check
-rejects a broadened ack. Its hello cannot distinguish it from a phase-3
-channel-only offer. The requirement that an unchanged phase-2 binary remain
-negotiated conflicts with the required mode set. We pin this conflict in tests
-and require upgrading that adapter, rather than inventing a handshake. New
-adapters honor supported modes within an accepted subset.
+**Maintainer ruling:** The phase-2 binary was never released or run by user
+sessions, so it carries no compatibility obligation. Acceptance requires an
+intersection with an offered mode and ignores unknown modes. If initial facts
+are ineligible, newly eligible facts trigger a fresh hello on a new connection,
+at most once per fact change and once per 10 seconds, after any legacy push's
+ack or expiry. This preserves frozen modes without stranding fresh sessions
+whose transcript did not exist at startup.
 
 **Why:** The broker owns durable row delivery, including fallback identity,
 admission and deadlines. Keeping transport execution and receipt parsing in the
