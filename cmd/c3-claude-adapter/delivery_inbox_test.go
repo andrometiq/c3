@@ -266,8 +266,8 @@ func TestNegotiatedInboxEligibilityChangesAndNoUnsafeWrite(t *testing.T) {
 		t.Fatal("repeated report", string(f))
 	default:
 	}
-	if len(a.deliveryOffer()) != 0 {
-		t.Fatal("neither eligible still offered")
+	if len(a.deliveryOffer()) == 0 {
+		t.Fatal("readable pull-only host did not offer fetch receipts")
 	}
 	if err := os.Chmod(tx.runtimeDir, 0700); err != nil {
 		t.Fatal(err)

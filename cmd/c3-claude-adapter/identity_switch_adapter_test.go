@@ -280,10 +280,13 @@ func reconnectSwitchMappings() *mappings.MappingsFile {
 
 func wireReconnectTestBroker(t *testing.T, a *adapter, b *c3broker.Broker) {
 	t.Helper()
-	// These fixtures reconnect an already initialized MCP host.
+	// These identity/replay fixtures exercise legacy connections. A readable
+	// transcript now offers fetch_receipt and legitimately emits route notices;
+	// that negotiated path has its own delivery/fetch integration coverage.
 	a.notifyTx = newNotifyTransport(&scriptedTransport{conn: &scriptedConn{}})
 	a.deliveryHostInitialized.Store(true)
-	seedLiveTranscript(t, a)
+	a.liveTranscriptPath = func() string { return "" }
+	a.renderRoute = ipc.RenderRoute{State: ipc.RenderCapable}
 	a.connectBrokerFn = func() error {
 		adapterSide, brokerSide := net.Pipe()
 		a.bmu.Lock()

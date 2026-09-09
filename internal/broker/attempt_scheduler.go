@@ -48,7 +48,7 @@ func rowRevision(r queue.TrackedInbound) string {
 }
 func (w *RouteWorker) liveAttempt() *attemptRecord {
 	for _, a := range w.broker.attempts.snapshot(time.Now()) {
-		if a.Negotiated && a.Route == w.key && a.Outcome == "open" {
+		if a.Negotiated && a.Route == w.key && a.Outcome == "open" && a.Transport != "fetch" {
 			return &a
 		}
 	}
@@ -125,7 +125,7 @@ func (w *RouteWorker) scheduleAttempt(ctx context.Context, inbound bool) {
 	if !authorized || identityErr != nil {
 		return
 	}
-	rows, err := w.broker.Queue.PeekTracked(queueRouteKey(w.key), -1)
+	rows, err := w.visibleAttemptRows(-1)
 	if err != nil {
 		return
 	}
@@ -146,7 +146,7 @@ func (w *RouteWorker) scheduleAttempt(ctx context.Context, inbound bool) {
 			return !slices.Contains(state.CycleMembers, attemptMember{ID: r.RecordID, Revision: rowRevision(r)})
 		})
 	}
-	transport := state.nextTransport(d.live)
+	transport := state.nextTransport(s.acceptedLive())
 	ready := s.deliveryReady.Load() && transport != "" && state.Exhausted.IsZero() && len(eligible) > 0 && s.IsConnected()
 	if !ready {
 		d.waiting = slices.DeleteFunc(d.waiting, func(k RouteKey) bool { return k == w.key })

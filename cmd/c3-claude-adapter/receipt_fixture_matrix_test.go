@@ -7,14 +7,18 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/Andrometiq/c3/internal/ipc"
 )
 
 type receiptExpectation struct {
-	Transport string `json:"transport"`
-	Token     string `json:"token"`
-	Attempt   string `json:"attempt"`
-	Accept    *bool  `json:"accept"`
-	Reason    string `json:"reason"`
+	Transport string                   `json:"transport"`
+	ToolUseID string                   `json:"tool_use_id"`
+	Members   []ipc.FetchReceiptMember `json:"members"`
+	Token     string                   `json:"token"`
+	Attempt   string                   `json:"attempt"`
+	Accept    *bool                    `json:"accept"`
+	Reason    string                   `json:"reason"`
 }
 
 // The sidecar describes evidence, never a reconstructed host record. Every JSONL
@@ -60,6 +64,18 @@ func TestVersionedDeliveryReceiptCorpus(t *testing.T) {
 							t.Fatal("unverified record needs an explicit TODO")
 						}
 						t.Skip(e.Reason)
+					}
+					if e.Transport == "fetch" {
+						if got := fetchToolReceipt(record, e.ToolUseID, e.Token, e.Members); got != *e.Accept {
+							t.Fatalf("fetch receipt=%v want=%v: %s", got, *e.Accept, e.Reason)
+						}
+						if fetchToolReceipt(record, "WRONG-CALL", e.Token, e.Members) || fetchToolReceipt(record, e.ToolUseID, "WRONG-TOKEN", e.Members) {
+							t.Fatal("fetch correlation not bound")
+						}
+						if len(e.Members) > 1 && fetchToolReceipt(record, e.ToolUseID, e.Token, e.Members[:1]) {
+							t.Fatal("fetch member set not bound")
+						}
+						return
 					}
 					if e.Transport != "channel" && e.Transport != "inbox" {
 						t.Fatal("deliveryReceipt accepts only live transports; fetch needs a verified tool-result predicate")

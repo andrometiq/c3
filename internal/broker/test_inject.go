@@ -108,6 +108,9 @@ func (w *RouteWorker) logTestAttempt(token, phase string) {
 		return
 	}
 	for _, a := range w.broker.attempts.lookup(token, time.Now()) {
+		if a.Route != w.key {
+			continue
+		}
 		log.Printf("TEST ATTEMPT token=%s topic=%d transport=%s phase=%s members=%d retired=%d elapsed_ms=%d", token, w.key.TopicID, a.Transport, phase, len(a.Members), len(a.Retired), time.Since(a.Started).Milliseconds())
 	}
 }

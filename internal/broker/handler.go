@@ -81,8 +81,7 @@ func (b *Broker) HandleConn(nc net.Conn) {
 		}
 		// Negotiation is immutable before publishing the new stub. A changed
 		// contract releases old evidence before transferring any claims.
-		if (existing.negotiated() || stub.negotiated()) && existing.delivery != stub.delivery {
-			existing.deliveryReady.Store(false)
+		if (existing.delivery != nil || stub.delivery != nil) && existing.delivery != stub.delivery {
 			b.attempts.release(existing, "mode_changed", time.Now())
 			b.reconnectDelivery(existing, stub)
 		}
@@ -146,7 +145,9 @@ func (b *Broker) HandleConn(nc net.Conn) {
 		// after the reconnect must still resolve to the route its push went out on
 		// (see Stub.pushRoutes). Ordered after the transfer so a push racing this
 		// hello records onto the stub that now holds the claim.
-		b.reconnectDelivery(existing, stub)
+		if existing.delivery != stub.delivery {
+			b.reconnectDelivery(existing, stub)
+		}
 		if !stub.negotiated() && !existing.negotiated() {
 			stub.AdoptPushRoutes(existing)
 			b.attempts.adopt(existing, shadowHolder(stub), time.Now())
@@ -193,8 +194,8 @@ func (b *Broker) HandleConn(nc net.Conn) {
 
 	ack := b.buildHelloAck(hello, stub)
 	fallback := b.prepareUpgrade(hello, stub, &ack)
-	if stub.negotiated() {
-		ack.Delivery = &ipc.DeliveryAcceptance{Version: 1, Modes: []string{"channel", "inbox"}}
+	if stub.delivery != nil {
+		ack.Delivery = deliveryAcceptance(stub.delivery.offer)
 	}
 	if err := conn.WriteJSON(ack); err != nil {
 		return
@@ -202,10 +203,6 @@ func (b *Broker) HandleConn(nc net.Conn) {
 
 	if fallback != "" {
 		b.sendUpgradeNotice(stub, fallback)
-	}
-	if stub.negotiated() {
-		stub.deliveryReady.Store(true)
-		b.rearmDelivery(stub)
 	}
 	// Stage 2: dispatch loop.
 	for {
@@ -221,7 +218,11 @@ func (b *Broker) HandleConn(nc net.Conn) {
 			_ = conn.WriteJSON(ipc.ErrorMsg{Op: ipc.OpError, Err: err.Error()})
 			continue
 		}
-		if (op == ipc.OpAttemptResult || op == ipc.OpDeliveryReport) && !stub.negotiated() {
+		if op == ipc.OpFetchConfirm && !stub.acceptsDeliveryMode("fetch_receipt") {
+			_ = conn.WriteJSON(ipc.ErrorMsg{Op: ipc.OpError, Err: fmt.Sprintf("op not implemented yet: %s", op)})
+			continue
+		}
+		if op == ipc.OpAttemptResult && !stub.negotiated() {
 			attemptNoop()
 			continue
 		}
@@ -291,6 +292,8 @@ func (b *Broker) HandleConn(nc net.Conn) {
 			b.handleRetranscribe(conn, stub, raw)
 		case ipc.OpRecoverSession:
 			b.handleRecoverSession(conn, stub, raw, &routeIdentity)
+		case ipc.OpFetchConfirm:
+			b.handleFetchConfirm(stub, raw)
 		case ipc.OpAttemptResult:
 			b.handleAttemptResult(stub, raw)
 		case ipc.OpDeliveryReport:

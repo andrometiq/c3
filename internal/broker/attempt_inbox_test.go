@@ -19,6 +19,7 @@ func enableInbox(s *Stub, channel bool) {
 }
 
 func TestAttemptInboxFallbackSurvivingBatchAndLateChannel(t *testing.T) {
+	clearFetchTestEnvironment(t)
 	// P6: "Cycle = one selected batch"; P2 case (c): late receipts are no-ops.
 	b, w, s, frames, ctx := negotiatedFixture(t)
 	enableInbox(s, true)
@@ -65,6 +66,7 @@ func TestAttemptInboxFallbackSurvivingBatchAndLateChannel(t *testing.T) {
 }
 
 func TestAttemptInboxCycleKeepsAdmissionAndExhausts(t *testing.T) {
+	clearFetchTestEnvironment(t)
 	// P6: "A cycle holds the slot until it terminates"; each transport once.
 	b, w, s, frames, ctx := negotiatedFixture(t)
 	enableInbox(s, true)
@@ -109,6 +111,7 @@ func TestAttemptInboxCycleKeepsAdmissionAndExhausts(t *testing.T) {
 }
 
 func TestNegotiatedInboxFirstReportAndHistory(t *testing.T) {
+	clearFetchTestEnvironment(t)
 	// P1/P2: "channel OR inbox is eligible". P8: "Fetch never changes" display.
 	b, w, s, frames, ctx := negotiatedFixture(t)
 	raw := `{"version":1,"live":{"channel":{"eligible":false,"reason":"no channel"},"inbox":{"eligible":true}},"receipts":"transcript","fetch":"receipt"}`
@@ -163,6 +166,7 @@ func TestNegotiatedInboxFirstReportAndHistory(t *testing.T) {
 }
 
 func TestAttemptInboxReconnectAdoptsWithoutResend(t *testing.T) {
+	clearFetchTestEnvironment(t)
 	// P6: "adopts live attempts ... nothing is resent to restore observation".
 	b, w, s, frames, ctx := negotiatedFixture(t)
 	enableInbox(s, false)
@@ -193,6 +197,7 @@ func TestAttemptInboxReconnectAdoptsWithoutResend(t *testing.T) {
 }
 
 func TestNegotiatedHelloAckForwardModes(t *testing.T) {
+	clearFetchTestEnvironment(t)
 	// Maintainer ruling: any supported subset may be acknowledged; a known,
 	// offered mode must intersect the ack, while unknown modes are ignored.
 	t.Setenv("C3_QUEUE_DIR", t.TempDir())
@@ -243,6 +248,7 @@ func nextAttemptDelivery(t *testing.T, w *RouteWorker, frames <-chan ipc.Deliver
 }
 
 func TestNegotiatedInboxTopicStatus(t *testing.T) {
+	clearFetchTestEnvironment(t)
 	// P8: the operator's /status uses the confirmed transport on this route.
 	b, w, s, frames, ctx := negotiatedFixture(t)
 	enableInbox(s, false)

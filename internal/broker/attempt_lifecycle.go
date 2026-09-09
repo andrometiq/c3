@@ -55,10 +55,13 @@ func (w *RouteWorker) finishAttempt(token, outcome, reason string) {
 	}
 	w.logTestAttempt(token, outcome)
 	log.Printf("attempt finished transport=%s outcome=%s", transport, outcome)
+	if transport == "fetch" {
+		return
+	}
 	d := owner.delivery
 	d.mu.Lock()
 	state := d.route(w.key)
-	fallback := (outcome == "failed" || outcome == "expired") && state.Exhausted.IsZero() && len(members) > 0 && state.nextTransport(d.live) != ""
+	fallback := (outcome == "failed" || outcome == "expired") && state.Exhausted.IsZero() && len(members) > 0 && state.nextTransport(owner.acceptedLive()) != ""
 	if fallback {
 		state.CycleMembers = members
 	} else {
@@ -76,35 +79,36 @@ func (w *RouteWorker) finishAttempt(token, outcome, reason string) {
 
 // P4/G3: partial reconciliation never recreates removed identities; an empty
 // attempt proves nothing and cannot rearm a route.
-func (w *RouteWorker) reconcileAttempt() {
-	a := w.liveAttempt()
-	if a == nil {
-		return
+func (w *RouteWorker) reconcileAttempt() error {
+	if len(w.openAttempts()) == 0 {
+		return nil
 	}
 	rows, err := w.broker.Queue.PeekTracked(queueRouteKey(w.key), -1)
 	if err != nil {
-		return
+		return err
 	}
 	live := map[string]string{}
 	for _, r := range rows {
 		live[r.RecordID] = rowRevision(r)
 	}
-	w.updateAttempt(a.Token, func(a *attemptRecord) {
-		a.Members = slices.DeleteFunc(a.Members, func(m attemptMember) bool { return live[m.ID] != m.Revision })
-	})
-	for _, current := range w.broker.attempts.lookup(a.Token, time.Now()) {
-		if len(current.Members) == 0 {
+	for _, a := range w.openAttempts() {
+		w.updateAttempt(a.Token, func(a *attemptRecord) {
+			a.Members = slices.DeleteFunc(a.Members, func(m attemptMember) bool { return live[m.ID] != m.Revision })
+		})
+		if current := w.attempt(a.Token); current != nil && len(current.Members) == 0 {
 			w.finishAttempt(a.Token, "released", "members removed")
 		}
 	}
+	return nil
 }
+
 func (w *RouteWorker) handleAttemptResult(job *attemptResultJob) {
 	if job == nil {
 		return
 	}
 	accepted := false
 	w.broker.Routes.withConfirmedHolder(w.key, job.Owner, func() {
-		a := w.liveAttempt()
+		a := w.attempt(job.Msg.Token)
 		if a == nil || a.Token != job.Msg.Token || a.Holder.Stub != job.Owner || a.Holder.ConnID != job.Owner.ConnID || a.Holder.ClaimGeneration != job.Owner.claimGeneration(w.key) || !time.Now().Before(a.Deadline) || len(a.Members) == 0 || a.Evidence {
 			return
 		}
@@ -119,10 +123,15 @@ func (w *RouteWorker) handleAttemptResult(job *attemptResultJob) {
 		attemptNoop()
 		return
 	}
-	w.retireAttempt()
+	w.retireAttemptToken(job.Msg.Token)
 }
 func (w *RouteWorker) retireAttempt() {
-	a := w.liveAttempt()
+	if a := w.liveAttempt(); a != nil {
+		w.retireAttemptToken(a.Token)
+	}
+}
+func (w *RouteWorker) retireAttemptToken(token string) {
+	a := w.attempt(token)
 	if a == nil || !a.Evidence {
 		return
 	}
@@ -130,12 +139,14 @@ func (w *RouteWorker) retireAttempt() {
 		if a.Holder.ClaimGeneration != a.Holder.Stub.claimGeneration(w.key) {
 			return
 		}
-		w.reconcileAttempt()
-		a = w.liveAttempt()
-		if a == nil {
-			return
+		err := w.reconcileAttempt()
+		if err == nil {
+			a = w.attempt(token)
+			if a == nil {
+				return
+			}
+			_, err = w.broker.Queue.RemoveRecordIDs(queueRouteKey(w.key), memberIDs(a.Members))
 		}
-		_, err := w.broker.Queue.RemoveRecordIDs(queueRouteKey(w.key), memberIDs(a.Members))
 		if err != nil {
 			tries := a.RemovalTries + 1
 			w.updateAttempt(a.Token, func(a *attemptRecord) { a.RemovalTries = tries })
@@ -153,6 +164,13 @@ func (w *RouteWorker) retireAttempt() {
 		w.broker.attempts.drop(w.key, ids, "negotiated_confirm", a.Token, time.Now())
 		w.updateAttempt(a.Token, func(a *attemptRecord) { a.Retired = memberIDs(a.Members) })
 		s := a.Holder.Stub
+		if a.Transport == "fetch" {
+			w.finishAttempt(a.Token, "confirmed", "tool result")
+			if a.FetchGroup != nil && a.FetchGroup.rearmed.CompareAndSwap(false, true) {
+				w.broker.rearmDelivery(s)
+			}
+			return
+		}
 		d := s.delivery
 		d.mu.Lock()
 		d.proven = true
@@ -164,16 +182,15 @@ func (w *RouteWorker) retireAttempt() {
 	})
 }
 func (w *RouteWorker) tickAttempt(ctx context.Context) {
-	a := w.liveAttempt()
-	if a != nil {
+	for _, a := range w.openAttempts() {
 		s, _ := w.broker.Routes.Holder(w.key)
-		if s != a.Holder.Stub && s.negotiated() && s.delivery == a.Holder.Stub.delivery && time.Now().Before(a.Deadline) {
-			return
+		if a.Transport != "fetch" && s != a.Holder.Stub && s != nil && s.delivery == a.Holder.Stub.delivery && !s.deliveryRefused.Load() && time.Now().Before(a.Deadline) {
+			continue
 		}
 		if s != a.Holder.Stub || !s.IsAlive() || !s.RouteConfirmed(w.key) || s.claimGeneration(w.key) != a.Holder.ClaimGeneration {
 			w.finishAttempt(a.Token, "released", "holder changed")
 		} else if a.Evidence {
-			w.retireAttempt()
+			w.retireAttemptToken(a.Token)
 		} else if !time.Now().Before(a.Deadline) {
 			w.finishAttempt(a.Token, "expired", "deadline")
 		}
@@ -182,21 +199,22 @@ func (w *RouteWorker) tickAttempt(ctx context.Context) {
 }
 func (w *RouteWorker) adoptAttempt(job *attemptAdoptJob) {
 	defer close(job.Done)
-	a := w.liveAttempt()
-	if a == nil || a.Holder.Stub != job.Old {
-		return
-	}
-	if !job.Same || a.Holder.ClaimGeneration != job.Old.claimGeneration(w.key) || !time.Now().Before(a.Deadline) {
-		w.finishAttempt(a.Token, "released", "reconnect changed or expired")
-		return
-	}
-	ok, _ := w.broker.Routes.withConfirmedHolder(w.key, job.Next, func() {
-		holder := shadowHolder(job.Next)
-		holder.ClaimGeneration = job.Next.claimGeneration(w.key)
-		w.updateAttempt(a.Token, func(a *attemptRecord) { a.Holder = holder; a.Adopted = true })
-	})
-	if !ok {
-		w.finishAttempt(a.Token, "released", "claim interrupted")
+	for _, a := range w.openAttempts() {
+		if a.Holder.Stub != job.Old {
+			continue
+		}
+		if a.Transport == "fetch" || !job.Same || a.Holder.ClaimGeneration != job.Old.claimGeneration(w.key) || !time.Now().Before(a.Deadline) {
+			w.finishAttempt(a.Token, "released", "reconnect changed or expired")
+			continue
+		}
+		ok, _ := w.broker.Routes.withConfirmedHolder(w.key, job.Next, func() {
+			holder := shadowHolder(job.Next)
+			holder.ClaimGeneration = job.Next.claimGeneration(w.key)
+			w.updateAttempt(a.Token, func(a *attemptRecord) { a.Holder = holder; a.Adopted = true })
+		})
+		if !ok {
+			w.finishAttempt(a.Token, "released", "claim interrupted")
+		}
 	}
 }
 

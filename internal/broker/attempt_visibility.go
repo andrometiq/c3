@@ -9,7 +9,7 @@ import (
 
 func (w *RouteWorker) routeNegotiated() bool {
 	s, _ := w.broker.Routes.Holder(w.key)
-	return s.negotiated() || w.liveAttempt() != nil
+	return s.negotiated() || len(w.openAttempts()) > 0
 }
 
 // G1: "rows inside a negotiated live attempt are invisible to fetch."
@@ -19,7 +19,7 @@ func (w *RouteWorker) visibleAttemptRows(n int) ([]queue.TrackedInbound, error) 
 	}
 	rows, err := w.broker.Queue.PeekTracked(queueRouteKey(w.key), -1)
 	hidden := map[string]bool{}
-	if a := w.liveAttempt(); a != nil {
+	for _, a := range w.openAttempts() {
 		for _, m := range a.Members {
 			hidden[m.ID] = true
 		}
@@ -61,19 +61,20 @@ func (s *Stub) deliveryRoute(key RouteKey) ipc.RenderRoute {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	state := d.route(key)
+	live := s.acceptedLive()
 	r := ipc.RenderRoute{State: "waiting", Held: state.Held}
 	if !state.Confirmed.IsZero() {
 		r.State = "live_" + state.Transport
 		r.Transport = state.Transport
 		r.Confirmed = state.Confirmed
 	}
-	if (!d.live.Channel.Eligible && !d.live.Inbox.Eligible) ||
-		(state.Transport == "channel" && !d.live.Channel.Eligible) ||
-		(state.Transport == "inbox" && !d.live.Inbox.Eligible) {
+	if (!live.Channel.Eligible && !live.Inbox.Eligible) ||
+		(state.Transport == "channel" && !live.Channel.Eligible) ||
+		(state.Transport == "inbox" && !live.Inbox.Eligible) {
 		r.State = "pull_only"
-		r.Reason = d.live.Channel.Reason
+		r.Reason = live.Channel.Reason
 		if state.Transport == "inbox" {
-			r.Reason = d.live.Inbox.Reason
+			r.Reason = live.Inbox.Reason
 		}
 	}
 	if !state.Exhausted.IsZero() {

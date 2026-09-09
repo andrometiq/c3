@@ -128,7 +128,8 @@ func TestEvictOverCap_QuarantinesCorruptLine(t *testing.T) {
 	}
 	logbuf := captureLog(t)
 
-	dropped, err := s.EvictOverCap(rk)
+	aged, overCount, err := s.EvictOverCap(rk)
+	dropped := aged + overCount
 	if err != nil {
 		t.Fatalf("EvictOverCap: %v", err)
 	}
@@ -153,7 +154,8 @@ func TestEvictOverCap_AllCorruptQuarantinesBeforeRetire(t *testing.T) {
 	writeTornTail(t, rk, "{ONLY-CORRUPT-BYTES\n")
 	logbuf := captureLog(t)
 
-	dropped, err := s.EvictOverCap(rk)
+	aged, overCount, err := s.EvictOverCap(rk)
+	dropped := aged + overCount
 	if err != nil {
 		t.Fatalf("EvictOverCap: %v", err)
 	}

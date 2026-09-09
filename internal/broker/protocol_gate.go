@@ -52,7 +52,7 @@ func refuseIncompatibleStateChange(conn *ipc.Conn, stub *Stub, op ipc.Op, raw []
 		refuse()
 		_ = conn.WriteJSON(ipc.FetchQueueResp{Op: ipc.OpFetchQueueResult, ID: req.ID, Err: reason})
 		return true
-	case ipc.OpInboundDelivered, ipc.OpAttemptResult:
+	case ipc.OpInboundDelivered, ipc.OpAttemptResult, ipc.OpFetchConfirm:
 		refuse()
 		_ = conn.WriteJSON(ipc.ErrorMsg{Op: ipc.OpError, Err: reason})
 		return true

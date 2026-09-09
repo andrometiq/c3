@@ -10,6 +10,7 @@ import (
 )
 
 func TestWorkerReadbackSurvivesDetachAndIdleExit(t *testing.T) {
+	clearFetchTestEnvironment(t)
 	// Follow-up A: "detach/idle exit with a pending chained echo still delivers the echo".
 	for _, exit := range []string{"detach", "idle"} {
 		t.Run(exit, func(t *testing.T) {
@@ -73,6 +74,7 @@ func TestWorkerReadbackSurvivesDetachAndIdleExit(t *testing.T) {
 }
 
 func TestAttemptWriterCancelledOnWorkerExit(t *testing.T) {
+	clearFetchTestEnvironment(t)
 	// Follow-up A: "give the attempt writer its own context and cancel only that on run() exit".
 	for _, exit := range []string{"detach", "idle"} {
 		t.Run(exit, func(t *testing.T) {

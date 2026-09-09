@@ -693,12 +693,12 @@ func (s *Store) StatusAll() map[RouteKey]Status {
 
 // EvictOverCap drops the oldest lines exceeding MaxMessages OR older than MaxAge
 // (a cap-only rewrite), adjusting the cursor by the number dropped. Returns the
-// count dropped (0 when under cap). Never silent — the broker logs + sends a
+// age-dropped and count-dropped totals (both zero when under cap). Never silent — the broker logs + sends a
 // Telegram notice when dropped > 0.
-func (s *Store) EvictOverCap(rk RouteKey) (int, error) {
+func (s *Store) EvictOverCap(rk RouteKey) (aged, overCount int, err error) {
 	lines, cursor, err := s.readLines(rk)
 	if err != nil || len(lines) == 0 {
-		return 0, err
+		return 0, 0, err
 	}
 	// rewrite() strips corrupt placeholders from the file, so the cap/age/cursor
 	// math must run on the corrupt-free real-line view — otherwise corrupt lines
@@ -723,16 +723,16 @@ func (s *Store) EvictOverCap(rk RouteKey) (int, error) {
 		// zero-byte .jsonl carries nothing recoverable, so retirePair plain-removes
 		// it rather than cluttering .trash/ with an empty snapshot.
 		if err := s.quarantineCorrupt(rk, corrupt); err != nil {
-			return 0, err
+			return 0, 0, err
 		}
 		if err := s.rewrite(rk, real); err != nil {
-			return 0, err
+			return 0, 0, err
 		}
 		if err := s.retirePair(rk); err != nil {
-			return 0, err
+			return 0, 0, err
 		}
 		s.refreshIndex(rk)
-		return 0, nil
+		return 0, 0, nil
 	}
 	cutoff := time.Now().Add(-MaxAge)
 	// Find how many leading real lines to drop: by age first, then by count.
@@ -744,15 +744,17 @@ func (s *Store) EvictOverCap(rk RouteKey) (int, error) {
 		}
 		break
 	}
+	aged = drop
 	if len(real)-drop > MaxMessages {
 		drop += (len(real) - drop) - MaxMessages
 	}
 	if drop == 0 {
-		return 0, nil
+		return 0, 0, nil
 	}
 	if drop > len(real) {
 		drop = len(real)
 	}
+	overCount = drop - aged
 	kept := real[drop:]
 	// Snapshot the dropped lines into .trash/ BEFORE the live rewrite discards
 	// them, so a cap/age eviction stays recoverable for TrashTTL — UNLESS retention
@@ -762,10 +764,10 @@ func (s *Store) EvictOverCap(rk RouteKey) (int, error) {
 	// a harmless duplicate GC'd later; a snapshot failure returns before the
 	// rewrite, so the live queue is untouched (fail-toward-keeping).
 	if err := s.snapshotDropped(rk, real[:drop]); err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 	if err := s.quarantineCorrupt(rk, corrupt); err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 	newCursor := cursorReal - drop
 	if newCursor < 0 {
@@ -778,20 +780,20 @@ func (s *Store) EvictOverCap(rk RouteKey) (int, error) {
 	// hides a pending line.
 	if !retire {
 		if err := s.writeCursor(rk, newCursor); err != nil {
-			return 0, err
+			return 0, 0, err
 		}
 	}
 	if err := s.rewrite(rk, kept); err != nil {
 		s.refreshIndex(rk)
-		return 0, err
+		return 0, 0, err
 	}
 	if retire {
 		if err := s.retirePair(rk); err != nil {
-			return 0, err
+			return 0, 0, err
 		}
 	}
 	s.refreshIndex(rk)
-	return drop, nil
+	return aged, overCount, nil
 }
 
 // ResolveVoiceText atomically records one attachment's terminal text and removes

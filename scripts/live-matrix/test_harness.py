@@ -7,7 +7,7 @@ import unittest
 import xml.etree.ElementTree as ET
 from unittest.mock import patch
 
-from collect import classify, count_receives, sanitize, verdict
+from collect import classify_fetch, fetch_trailer, classify, count_receives, sanitize, verdict
 from driver import false_held, offered_before_ready, write_report
 from host import read_jsonl
 from matrix import Cell, cells, selection, selection_summary
@@ -109,7 +109,28 @@ class MatrixTests(unittest.TestCase):
         evidence = dict(self.evidence(), attempts=[], rows_while_fetch_result_held=0, fetch_tool_result=True, fetch_token=True, fetch_source_occurrences=1)
         self.assertTrue(verdict(cell, evidence))
         evidence["rows_while_fetch_result_held"] = 1
+        evidence["fetch_trailer_complete"] = True
+        evidence["attempts"] = [dict(e, transport="fetch") for e in self.evidence()["attempts"]]
         self.assertEqual(verdict(cell, evidence), [])
+
+    def test_fetch_trailer_sidecar_expectations(self):
+        trailer = "[C3_FETCH_RECEIPT_V1]\ngroup group-1\nmember row-1 " + "a" * 64 + "\nmember row-2 " + "b" * 64 + "\n[/C3_FETCH_RECEIPT_V1]"
+        expected = fetch_trailer(trailer)
+        self.assertEqual(len(expected["members"]), 2)
+        def record(text, error=False, call="call-1"):
+            return {"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": call, "is_error": error, "content": text}]}}
+        good = record("body\n" + trailer)
+        expectation = classify_fetch(good, expected, {"call-1"})
+        self.assertTrue(expectation["accept"])
+        for text in (trailer + "\nextra", trailer + "\n", trailer[:-1], trailer.replace("group-1", "wrong"), trailer.replace("member row-2 " + "b" * 64 + "\n", "")):
+            self.assertFalse(classify_fetch(record(text), expected, {"call-1"})["accept"])
+        self.assertFalse(classify_fetch(record(trailer, True), expected, {"call-1"})["accept"])
+        self.assertFalse(classify_fetch(record(trailer, call="wrong"), expected, {"call-1"})["accept"])
+        ids = [m["record_id"] for m in expected["members"]]
+        clean = sanitize(good, {"group-1"}, receipt_ids=ids)
+        sidecar = sanitize(expectation, {"group-1"}, receipt_ids=ids)
+        self.assertEqual([m["record_id"] for m in sidecar["members"]], ["ROW1", "ROW2"])
+        self.assertTrue(classify_fetch(clean, sidecar, {"ID"})["accept"])
 
     def test_startup_detects_legacy_and_negotiated_offers(self):
         from unittest.mock import Mock

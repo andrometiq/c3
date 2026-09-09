@@ -28,7 +28,7 @@ type negotiatedSession struct {
 	routes  map[RouteKey]*negotiatedRoute
 }
 
-func (s *Stub) negotiated() bool { return s != nil && s.delivery != nil }
+func (s *Stub) negotiated() bool { return s != nil && s.delivery != nil && s.deliveryReady.Load() }
 func (s *Stub) claimGeneration(key RouteKey) uint64 {
 	s.stubMu.Lock()
 	defer s.stubMu.Unlock()
@@ -36,7 +36,7 @@ func (s *Stub) claimGeneration(key RouteKey) uint64 {
 }
 func (b *Broker) configureDelivery(s *Stub, raw json.RawMessage) {
 	offer := ipc.ParseDeliveryOffer(raw)
-	if b.Queue == nil || offer == nil || (!offer.Live.Channel.Eligible && !offer.Live.Inbox.Eligible) {
+	if b.Queue == nil || offer == nil {
 		return
 	}
 	s.delivery = &negotiatedSession{offer: *offer, live: offer.Live, routes: map[RouteKey]*negotiatedRoute{}}
@@ -68,24 +68,6 @@ func (b *Broker) wakeDelivery(key RouteKey) {
 		b.Workers.Submit(key, Job{Kind: JobAttemptWake})
 	}
 }
-func (b *Broker) handleDeliveryReport(s *Stub, raw []byte) {
-	if !s.negotiated() {
-		return
-	}
-	var msg ipc.DeliveryReportMsg
-	var fields map[string]json.RawMessage
-	if ipc.StrictJSON(raw, &msg) != nil || json.Unmarshal(raw, &fields) != nil || !ipc.ValidDeliveryLive(fields["live"]) {
-		return
-	}
-	d := s.delivery
-	d.mu.Lock()
-	changed := d.live != msg.Live
-	d.live = msg.Live
-	d.mu.Unlock()
-	if changed {
-		b.rearmDelivery(s)
-	}
-}
 func attemptNoop() {
 	log.Print("attempt result ignored: authority, deadline or open membership mismatch")
 }
@@ -99,20 +81,23 @@ func (b *Broker) handleAttemptResult(s *Stub, raw []byte) {
 		attemptNoop()
 		return
 	}
+	submitted := false
 	for _, a := range b.attempts.lookup(msg.Token, time.Now()) {
-		if a.Negotiated && a.Holder.Stub == s && a.Holder.ConnID == s.ConnID {
+		if a.Negotiated && a.Holder.Stub == s && a.Holder.ConnID == s.ConnID && a.Outcome == "open" {
 			if b.Workers != nil && b.Workers.Submit(a.Route, Job{Kind: JobAttemptResult, AttemptResult: &attemptResultJob{Owner: s, Msg: msg}}) {
-				return
+				submitted = true
 			}
 		}
 	}
-	attemptNoop()
+	if !submitted {
+		attemptNoop()
+	}
 }
 
 // P1: "Reconnect that changes mode or declared milestones: release every attempt
 // of the old connection first". The worker validates adoption under the claim gate.
 func (b *Broker) reconnectDelivery(old, next *Stub) {
-	same := old.negotiated() && next.negotiated() && sameDeliveryContract(old.delivery.offer, next.delivery.offer) && isPIDAlive(old.PID)
+	same := old.negotiated() && next != nil && next.delivery != nil && old.delivery == next.delivery && !next.deliveryRefused.Load() && sameAcceptedModes(old, next) && isPIDAlive(old.PID)
 
 	for _, a := range b.attempts.snapshot(time.Now()) {
 		if a.Negotiated && a.Holder.Stub == old && a.Outcome == "open" && b.Workers != nil {
@@ -150,7 +135,8 @@ func (b *Broker) registerDeliveryHello(hello ipc.HelloMsg, conn *ipc.Conn, old *
 		b.configureDelivery(s, hello.Delivery)
 		s.ReceiptConfirming = hello.RenderState != ""
 		s.SetRenderRoute(hello.RenderState, hello.RenderReason, hello.CannotRenderChannels)
-		if old.negotiated() && s.negotiated() && sameDeliveryContract(old.delivery.offer, s.delivery.offer) && isPIDAlive(old.PID) {
+		s.deliveryPrevious = old
+		if old.negotiated() && s.delivery != nil && sameDeliveryContract(old.delivery.offer, s.delivery.offer) && isPIDAlive(old.PID) {
 			live := s.delivery.live
 			s.delivery = old.delivery
 			s.delivery.mu.Lock()
@@ -163,7 +149,7 @@ func (b *Broker) registerDeliveryHello(hello ipc.HelloMsg, conn *ipc.Conn, old *
 // Called with Routes.mu held at every actual release. AddRoute alone cannot
 // distinguish release/reclaim of the same stub from an uninterrupted claim.
 func (s *Stub) invalidateDeliveryClaim(key RouteKey) {
-	if !s.negotiated() {
+	if s == nil || s.delivery == nil {
 		return
 	}
 	s.stubMu.Lock()

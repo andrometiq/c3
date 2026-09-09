@@ -311,8 +311,8 @@ func TestAppendTracked_RecordIdentitySurvivesEveryRewrite(t *testing.T) {
 			},
 			rewrite: func(t *testing.T, s *Store, rk RouteKey) {
 				t.Helper()
-				if dropped, err := s.EvictOverCap(rk); err != nil || dropped != 1 {
-					t.Fatalf("EvictOverCap = %d, %v", dropped, err)
+				if aged, overCount, err := s.EvictOverCap(rk); err != nil || aged+overCount != 1 {
+					t.Fatalf("EvictOverCap = %d, %v", aged+overCount, err)
 				}
 			},
 		},

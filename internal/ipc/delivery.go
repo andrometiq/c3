@@ -42,17 +42,21 @@ type AttemptResultMsg struct {
 	Reason  string `json:"reason"`
 }
 type DeliveryReportMsg struct {
-	Op   Op           `json:"op"`
-	Live DeliveryLive `json:"live"`
+	Op       Op           `json:"op"`
+	Live     DeliveryLive `json:"live"`
+	Accepted []string     `json:"accepted,omitzero"`
 }
 
 func ParseDeliveryOffer(raw []byte) *DeliveryOffer {
 	var offer DeliveryOffer
-	if StrictJSON(raw, &offer) != nil || offer.Version != 1 || offer.Receipts != "transcript" || (offer.Fetch != "receipt" && offer.Fetch != "consume") {
+	if StrictJSON(raw, &offer) != nil || offer.Version != 1 || (offer.Receipts != "transcript" && offer.Receipts != "none") || (offer.Fetch != "receipt" && offer.Fetch != "consume") {
 		return nil
 	}
 	var fields map[string]json.RawMessage
 	if json.Unmarshal(raw, &fields) != nil || !ValidDeliveryLive(fields["live"]) {
+		return nil
+	}
+	if offer.Receipts == "none" && (offer.Live.Channel.Eligible || offer.Live.Inbox.Eligible) {
 		return nil
 	}
 	return &offer
@@ -106,5 +110,6 @@ func (d *DeliveryAcceptance) HasMode(mode string) bool {
 func (d *DeliveryAcceptance) AcceptsOffer(offer *DeliveryOffer) bool {
 	return offer != nil && offer.Version == 1 &&
 		((offer.Live.Channel.Eligible && d.HasMode("channel")) ||
-			(offer.Live.Inbox.Eligible && d.HasMode("inbox")))
+			(offer.Live.Inbox.Eligible && d.HasMode("inbox")) ||
+			(offer.Fetch == "receipt" && d.HasMode("fetch_receipt")))
 }

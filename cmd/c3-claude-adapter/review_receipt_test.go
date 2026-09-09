@@ -20,8 +20,8 @@ func TestAdapterDocsNameReceiptAndPermissionReaders(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, claim := range []string{
-		"Live receipts use `scanReceipt`",
-		"`scanTranscriptRecords` serves permission readback",
+		"Live, inbox and fetch receipts use the visitor reader `scanTranscriptRecords`",
+		"also used by permission readback",
 	} {
 		if !strings.Contains(string(body), claim) {
 			t.Fatalf("adapter docs missing reader distinction: %s", claim)

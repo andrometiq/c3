@@ -131,7 +131,8 @@ func TestEvictOverCap_DropsOldestAndAdjustsCursor(t *testing.T) {
 	for i := int64(1); i <= MaxMessages+5; i++ {
 		_ = s.Append(rk, msg(i, "m"))
 	}
-	dropped, err := s.EvictOverCap(rk)
+	aged, overCount, err := s.EvictOverCap(rk)
+	dropped := aged + overCount
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -162,7 +163,7 @@ func TestEvictOverCap_RewriteFailureCannotHidePendingBehindOldCursor(t *testing.
 
 	injected := errors.New("crash before JSONL rewrite")
 	s.rewriteTestHook = func() error { return injected }
-	if _, err := s.EvictOverCap(rk); !errors.Is(err, injected) {
+	if _, _, err := s.EvictOverCap(rk); !errors.Is(err, injected) {
 		t.Fatalf("EvictOverCap error = %v, want injected rewrite failure", err)
 	}
 
@@ -199,7 +200,8 @@ func TestEvictOverCap_DropsByAge(t *testing.T) {
 	if err := s.Append(rk, held); err != nil {
 		t.Fatal(err)
 	}
-	dropped, err := s.EvictOverCap(rk)
+	aged, overCount, err := s.EvictOverCap(rk)
+	dropped := aged + overCount
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -261,7 +263,8 @@ func TestEvictOverCap_CorruptLineCursorConsistent(t *testing.T) {
 	_ = s.Append(rk, msg(2, "fresh"))
 	_ = s.Append(rk, msg(3, "fresh"))
 
-	dropped, err := s.EvictOverCap(rk)
+	aged, overCount, err := s.EvictOverCap(rk)
+	dropped := aged + overCount
 	if err != nil {
 		t.Fatal(err)
 	}

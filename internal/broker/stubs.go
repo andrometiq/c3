@@ -25,6 +25,9 @@ type Stub struct {
 	UpgradeDisabled  bool
 	ResumeContract   string
 	deliveryReady    atomic.Bool
+	deliveryModes    atomic.Pointer[ipc.DeliveryAcceptance]
+	deliveryPrevious *Stub
+	deliveryRefused  atomic.Bool
 	delivery         *negotiatedSession
 	claimGenerations map[RouteKey]uint64
 	claimSequence    uint64

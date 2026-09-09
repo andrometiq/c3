@@ -262,6 +262,9 @@ type adapter struct {
 	deliveryWriterOnce      sync.Once
 	deliveryChannelAccepted bool // liveMu
 	deliveryInboxAccepted   bool // liveMu
+	deliveryFetchAccepted   bool // liveMu
+	deliveryFetchObservers  map[string]*deliveryFetchObserver
+	deliveryFetchPreparing  int
 	deliveryHostRoute       func() ipc.RenderRoute
 	deliveryRoutes          map[routeKey]ipc.RenderRoute
 	deliveryAccepted        atomic.Bool
@@ -520,7 +523,7 @@ func (a *adapter) hello() error {
 	a.resetLiveRoute(false)
 	route := a.liveRoute()
 	facts := a.deliveryFacts()
-	offer := deliveryOfferFor(facts)
+	offer := a.deliveryOffer()
 	if a.deliveryAccepted.Load() {
 		route = a.initialRenderRoute
 		if len(offer) == 0 {
@@ -558,6 +561,11 @@ func (a *adapter) hello() error {
 	if w := ipc.AdapterProtocolWarning("claude", ack.ProtocolVersion); w != "" {
 		log.Print(w)
 	}
+	wasNegotiated := a.deliveryAccepted.Load()
+	a.acceptDelivery(offer, ack.Delivery)
+	if err := a.confirmDeliveryAcceptance(conn, ack.Delivery); err != nil {
+		return err
+	}
 	a.bmu.Lock()
 	if a.conn != conn {
 		a.bmu.Unlock()
@@ -569,10 +577,9 @@ func (a *adapter) hello() error {
 	a.connID = ack.ConnID
 	a.bmu.Unlock()
 	a.acceptUpgrade(ack.Upgrade)
-	wasNegotiated := a.deliveryAccepted.Load()
-	a.acceptDelivery(offer, ack.Delivery)
 	a.liveMu.Lock()
 	a.deliveryRehello.facts = facts
+	a.deliveryRehello.fetch = a.deliveryFetchEligible()
 	a.deliveryRehello.pending = false
 	a.deliveryRehello.closing = false
 	a.liveMu.Unlock()
@@ -2159,7 +2166,7 @@ func (a *adapter) toolAttach(ctx context.Context, req *mcp.CallToolRequest) (*mc
 		// gracefully when the broker reports QueuedCount>0 with an EMPTY
 		// QueuedSummary (count-only fallback when Peek failed): the agent still
 		// gets the count + a fetch_queue hint.
-		if summary := renderBacklogSummary(attached.QueuedCount, attached.QueuedSummary, attached.Name); summary != "" {
+		if summary := a.renderDeliveryBacklog(attached.QueuedCount, attached.QueuedSummary, attached.Name); summary != "" {
 			text += "\n\n" + summary
 		}
 		return toolTextResult(text), nil
@@ -2400,6 +2407,9 @@ func (a *adapter) toolFetchQueue(ctx context.Context, req *mcp.CallToolRequest) 
 		fq.Ack = v
 	}
 	fq.Limit, fq.All = parseFetchLimit(args["limit"])
+	if a.fetchReceiptAccepted() {
+		return a.toolAttemptFetch(ctx, req, fq)
+	}
 
 	ch := make(chan ipc.FetchQueueResp, 1)
 	a.fqmu.Lock()

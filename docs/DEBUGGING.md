@@ -12,14 +12,16 @@ evicting oldest terminal entries first and skipping new observations if only act
 entries fill a cap. Channel observations expire lazily after 15 seconds with reason
 `unobserved`; inbox fallback cannot be distinguished on this baseline. Legacy fetch
 opens and immediately confirms a `fetch` attempt labelled `legacy_consume`; fetch
-receipts join the table in phase 4. The legacy shadow itself adds no wire or display behavior.
+receipts use negotiated group entries in phase 4. The legacy shadow itself adds no wire or display behavior.
 
 
 ## Negotiated channel and inbox delivery (phase 3)
 
-A valid `delivery` offer and `hello_ack.delivery` acceptance select the broker-owned channel/inbox
-attempt path. A missing acceptance means legacy, including degraded brokers
-and Claude sessions with neither eligible transport. Use `attach`, `/status`, or
+A valid `delivery` offer, `hello_ack.delivery` acknowledgement and the adapter
+confirmation `delivery_report{accepted:[...]}` select the broker-owned attempt
+path. Missing confirmation means legacy, including degraded brokers. Ready
+Claude sessions with readable transcripts can use fetch receipts when neither
+live transport is eligible. Use `attach`, `/status`, or
 `c3-broker status` to inspect broker-derived route state; the adapter preamble
 shows the same state.
 
@@ -52,8 +54,8 @@ Diagnostic lines are deliberately generic:
   reported; surviving rows remain queued and a later delivery can duplicate them.
 - `protocol gate REFUSED op=attempt_result`: incompatible protocol version.
 
-A socket reconnect of the same living process adopts unexpired attempts without
-resending; process death releases them. Removing the final member through drain,
+A socket reconnect of the same living process adopts unexpired live attempts
+without resending; fetch attempts release, and process death releases them. Removing the final member through drain,
 eviction or revision reconciliation releases the slot without proving transport.
 Drain imports retain durable `origin:"drain"` provenance and are never live pushed.
 The legacy suite continues to assert `attempt shadow suite divergences=0`.
@@ -118,6 +120,36 @@ scripts/live-matrix/run.sh --cell '[ci]*-[ifs]*-*-text-single'
 
 The driver reports 12 matched cells, 10 feasible, 2 N/A and **16 Claude sessions**
 (including the six resume seeds). `--list` applies the same filter without launches.
+
+### Fetch receipt attempts (phase 4, D036)
+
+Negotiation starts after `delivery_report{accepted:[...]}`, immediately following
+`hello_ack`. Until it arrives, legacy pushes continue. An unaccepted mode logs
+`delivery negotiation protocol error: unaccepted mode; legacy connection`.
+Mixed builds without confirmation therefore remain usable through legacy delivery.
+
+For accepted `fetch_receipt`, returning the MCP response reserves rows; it does
+not consume them. The final `[C3_FETCH_RECEIPT_V1]` trailer contains the group
+and all record/revision pairs. A complete successful matching host tool result
+must retain this trailer with nothing after its closing delimiter. Missing host
+`claudecode/toolUseId`, unavailable transcripts, incomplete trailers and error
+results leave rows durable. They become fetchable again at the 60-second deadline.
+The group result fans out to route workers; changed holders and revised voice rows
+cannot consume another member's current content. `fetch_confirm` is the migration
+alias for the same group evidence, bound to the original connection.
+
+Attach reports messages fetchable now; Held and backlog exclude open fetch
+attempts. Fetch confirmation never updates live transport proof or age. The
+shared visitor reader discards oversized records across bounded polls. The store
+now reports `aged` and `overCount` separately, while eviction notice wording is
+still the phase-5 follow-up.
+
+Hermetic coverage includes `TestFetchGroupLifecycleIndependentRoutes`,
+`TestFetchGroupRevisionEvictionDrainAndExpiry`, `TestFetchReceiptMultiRouteIPCConfirm`,
+`TestFetchTrailerGrammarAndToolResult`, and `TestFetchReceiptBrokerAdapterToolResult`.
+See `TESTING-LIVE-MATRIX.md` for maintainer-run verification; fixture absence is
+not evidence of host success.
+
 ## Adapter upgrades
 The broker bounce at the end of `/c3:update` and `/c3:build` triggers a new hello.
 `c3-broker status` lists session builds and marks builds differing from the

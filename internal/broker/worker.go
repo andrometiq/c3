@@ -109,6 +109,7 @@ type FetchJob struct {
 	// Observe uses the encoded base ObserveResp as a conservative reserve for
 	// its resolved identity and holder fields; ordinary fetch_queue leaves it 0.
 	FrameReserve int
+	ReceiptGroup *attemptFetchGroup
 	Lease        *fetchLease
 	ResultCh     chan<- FetchResult
 }
@@ -116,6 +117,7 @@ type FetchJob struct {
 // FetchResult carries the pulled messages + remaining count back to the handler.
 type FetchResult struct {
 	Messages   []c3types.Inbound
+	Members    []ipc.FetchReceiptMember
 	Remaining  int
 	SkipReason string
 	Err        error
@@ -458,7 +460,7 @@ func (w *RouteWorker) run(ctx context.Context) {
 			return
 		case <-idleTimer.C:
 			flushDeb()
-			if w.broker != nil && w.liveAttempt() != nil {
+			if w.broker != nil && len(w.openAttempts()) > 0 {
 				resetIdle()
 				continue
 			}
@@ -542,6 +544,11 @@ func (w *RouteWorker) run(ctx context.Context) {
 				w.scheduleAttempt(ctx, false)
 			case JobRelease:
 				flushDeb()
+				if w.broker != nil {
+					for _, a := range w.openAttempts() {
+						w.finishAttempt(a.Token, "released", "holder released")
+					}
+				}
 				return
 			}
 		}
@@ -1526,7 +1533,8 @@ func (w *RouteWorker) notePersistFailure(in *c3types.Inbound) {
 // Telegram notice (never silent). Errors are logged, not fatal.
 func (w *RouteWorker) evictIfOverCap(qrk queue.RouteKey) {
 	shadowBefore := w.shadowRows()
-	dropped, err := w.broker.Queue.EvictOverCap(qrk)
+	aged, overCount, err := w.broker.Queue.EvictOverCap(qrk)
+	dropped := aged + overCount
 	if err != nil {
 		log.Printf("queue evict FAIL chan=%s chat=%d topic=%s: %v", w.key.Channel, w.key.ChatID, TopicKeyStr(w.key), err)
 		return
@@ -1762,7 +1770,7 @@ func (w *RouteWorker) notifyOversizeSetAside(n int) {
 	})
 }
 
-func (w *RouteWorker) handleFetch(_ context.Context, job *FetchJob) {
+func (w *RouteWorker) handleFetch(ctx context.Context, job *FetchJob) {
 	if job == nil || job.ResultCh == nil {
 		return
 	}
@@ -1774,6 +1782,14 @@ func (w *RouteWorker) handleFetch(_ context.Context, job *FetchJob) {
 	})
 	if w.broker == nil || w.broker.Queue == nil {
 		job.ResultCh <- FetchResult{Err: errOutboundNotImpl}
+		return
+	}
+	if job.ReceiptGroup != nil {
+		w.handleAttemptFetch(ctx, job)
+		return
+	}
+	if job.Ack && job.Owner.acceptsDeliveryMode("fetch_receipt") {
+		job.ResultCh <- FetchResult{Err: fmt.Errorf("fetch_receipt requires a reservation")}
 		return
 	}
 	qrk := queueRouteKey(w.key)

@@ -94,8 +94,11 @@ func TestDeliveryRehelloFreshSessionNegotiates(t *testing.T) {
 			if err := a.hello(); err != nil {
 				t.Fatal(err)
 			}
-			if a.deliveryAccepted.Load() || len(a.deliveryOffer()) != 0 {
-				t.Fatal("fresh ineligible session negotiated")
+			if appears == "transcript" && (a.deliveryAccepted.Load() || len(a.deliveryOffer()) != 0) {
+				t.Fatal("unreadable session negotiated")
+			}
+			if appears == "socket" && !a.fetchReceiptAccepted() {
+				t.Fatal("readable pull-only session did not negotiate fetch")
 			}
 			old := b.Stubs.Snapshot()[0]
 			topic := int64(281)
@@ -119,8 +122,13 @@ func TestDeliveryRehelloFreshSessionNegotiates(t *testing.T) {
 			})
 			restore()
 			waitRehelloCondition(t, "eligible session never negotiated", a.deliveryAccepted.Load)
+			wantDials := int32(2)
+			if appears == "socket" {
+				wantDials = 1
+				waitRehelloCondition(t, "socket eligibility not reported", func() bool { return old.RenderRouteFor(key).State == "waiting" })
+			}
 			next, _ := b.Routes.Holder(key)
-			if next == nil || next.ConnID == old.ConnID || dials.Load() != 2 {
+			if next == nil || (appears == "transcript" && next.ConnID == old.ConnID) || dials.Load() != wantDials {
 				t.Fatal("re-hello failed to transfer claim exactly once")
 			}
 			if !b.Workers.Submit(key, broker.Job{Kind: broker.JobInbound, Inbound: &c3types.Inbound{Channel: "telegram", ChatID: -100, TopicID: &topic, MessageID: 1, Text: "after re-hello", Timestamp: time.Now()}}) {
@@ -152,7 +160,7 @@ func TestDeliveryRehelloFreshSessionNegotiates(t *testing.T) {
 			route := queue.RouteKey{Channel: "telegram", ChatID: -100, TopicID: &topic}
 			waitRehelloCondition(t, "negotiated receipt did not retire durable row", func() bool { n, _ := b.Queue.Pending(route); return n == 0 })
 			time.Sleep(250 * time.Millisecond)
-			if dials.Load() != 2 {
+			if dials.Load() != wantDials {
 				t.Fatal("facts generated more than one re-hello")
 			}
 		})

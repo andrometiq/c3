@@ -96,7 +96,17 @@ expiry rejection. Duplicate and post-fetch receipts cannot retire a row twice.
 Held notices exclude surviving attempting identities. A queue read error is logged
 and uses the cached count, or explicitly reports that the count is unavailable.
 
-The current baseline consumes fetch rows when returning them and has no fetch
-receipt token. The live harness intentionally reports FAIL for that behavior
-against the stronger tool-result receipt contract above. That is an uncovered
-implementation phase, not a missing JSON shape that a fixture may invent.
+Phase 4 implements `fetch_receipt`. The collector takes the expected group and
+record/revision set from the held MCP response, then requires that exact complete
+trailer in the successful matching host tool result. `records.expect.json` now
+carries `transport:"fetch"`, `tool_use_id`, `token`, `members` and an explicit
+accept/reject expectation per captured record. Sanitization preserves distinct
+member identities as ROW1, ROW2, etc. No inferred host records are checked in.
+
+Fetch cells require fetch attempts (no live transport), group confirmation and
+retirement inside 60 seconds, durable rows while the result is held, a complete
+matching final trailer, and one occurrence of each injected source. Missing,
+truncated, wrong-token/member or trailing-text trailers fail. The corpus test
+executes these sidecars through the same visitor-backed fetch receipt predicate.
+The coding lane runs collector unit tests only; a maintainer must run this matrix
+and review/export actual host fetch fixtures before claiming live acceptance.

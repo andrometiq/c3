@@ -72,7 +72,60 @@ def classify(record):
     return result
 
 
-def sanitize(value, tokens=(), key=""):
+def result_text(content):
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list) and all(isinstance(p, dict) and p.get("type") == "text" and isinstance(p.get("text"), str) for p in content):
+        return "\n".join(p["text"] for p in content)
+    return ""
+
+
+def fetch_trailer(text):
+    """The phase-4 grammar: final delimiter, complete unique member set."""
+    marker = "[C3_FETCH_RECEIPT_V1]\n"
+    start = text.rfind(marker)
+    if start < 0 or (start and text[start - 1] != "\n"):
+        return None
+    lines = text[start:].split("\n")
+    if len(lines) < 4 or lines[-1] != "[/C3_FETCH_RECEIPT_V1]":
+        return None
+    group = re.fullmatch(r"group ([A-Za-z0-9_-]+)", lines[1])
+    if not group:
+        return None
+    members = []
+    for line in lines[2:-1]:
+        member = re.fullmatch(r"member ([A-Za-z0-9_-]+) ([0-9a-f]{64})", line)
+        if not member or any(m["record_id"] == member[1] for m in members):
+            return None
+        members.append(dict(record_id=member[1], revision=member[2]))
+    return dict(token=group[1], members=members)
+
+
+def classify_fetch(record, expected, call_ids):
+    """Expected identities come from the held MCP response, not the transcript."""
+    result = dict(transport="fetch", token=expected["token"] if expected else "TOKEN",
+                  members=expected["members"] if expected else [], tool_use_id="ID", accept=False,
+                  reason="not a matching successful complete fetch tool result")
+    if not expected:
+        result.update(accept=None, reason="TODO: capture a complete broker fetch trailer")
+        return result
+    content = record.get("message", {}).get("content", [])
+    if record.get("type") != "user" or not isinstance(content, list):
+        return result
+    for block in content:
+        if not isinstance(block, dict) or block.get("type") != "tool_result" or block.get("tool_use_id") not in call_ids:
+            continue
+        result["tool_use_id"] = block["tool_use_id"]
+        if block.get("is_error", False) is not False:
+            continue
+        trailer = fetch_trailer(result_text(block.get("content")))
+        if trailer and trailer["token"] == expected["token"] and sorted(trailer["members"], key=lambda m: m["record_id"]) == sorted(expected["members"], key=lambda m: m["record_id"]):
+            result.update(accept=True, reason="matching tool result with complete phase-4 receipt trailer")
+            return result
+    return result
+
+
+def sanitize(value, tokens=(), key="", receipt_ids=()):
     """Keep envelope keys and types; replace identifiers and local paths.
 
     Numeric identity fields use 1, the numeric stand-in for ID. Host prose from
@@ -80,14 +133,18 @@ def sanitize(value, tokens=(), key=""):
     """
     identity = key.lower().replace("_", "")
     if isinstance(value, dict):
-        return {k: sanitize(v, tokens, k) for k, v in value.items()}
+        return {k: sanitize(v, tokens, k, receipt_ids) for k, v in value.items()}
     if isinstance(value, list):
-        return [sanitize(v, tokens, key) for v in value]
+        return [sanitize(v, tokens, key, receipt_ids) for v in value]
+    if identity == "recordid" and value in receipt_ids:
+        return "ROW" + str(receipt_ids.index(value) + 1)
     if identity in {"uuid", "parentuuid", "promptid", "sessionid", "recordid", "tooluseid", "verifiedpeerpid", "verifiedpeerprocstart", "pid", "chatid", "topicid", "messageid", "userid", "id", "requestid"}:
         return 1 if isinstance(value, (int, float)) else "ID"
     if identity in {"user", "username"}:
         return "USER"
     if isinstance(value, str):
+        for i, record_id in enumerate(receipt_ids):
+            value = value.replace(record_id, "ROW" + str(i + 1))
         for token in sorted(set(tokens), key=len, reverse=True):
             value = value.replace(token, "TOKEN")
         value = TOKEN.sub('c3_delivery_id="TOKEN"', value)
@@ -145,12 +202,20 @@ def verdict(cell, evidence):
     if evidence.get("false_held"):
         failures.append("Held notice counted an attempting row")
     if cell.transport == "fetch":
-        if any(e.get("phase") == "reserved" for e in evidence.get("attempts", [])):
+        if any(e.get("phase") == "reserved" and e.get("transport") != "fetch" for e in evidence.get("attempts", [])):
             failures.append("live offer in fetch-only cell")
         if evidence.get("rows_while_fetch_result_held") != cell.count:
             failures.append("rows retired before host tool-result receipt (baseline consume-on-fetch)")
         if not evidence.get("fetch_tool_result"):
             failures.append("no successful fetch tool-result record")
+        reserved = [e for e in evidence.get("attempts", []) if e.get("phase") == "reserved" and e.get("transport") == "fetch"]
+        confirmed = [e for e in evidence.get("attempts", []) if e.get("phase") == "confirmed" and e.get("transport") == "fetch"]
+        if not reserved or {e["token"] for e in reserved} != {e["token"] for e in confirmed} or any(int(e.get("elapsed_ms", 60000)) >= 60000 for e in confirmed):
+            failures.append("fetch group confirmation missing or outside 60-second window")
+        if sum(int(e.get("retired", 0)) for e in confirmed) != cell.count:
+            failures.append("fetch group retirement count differs from injected sources")
+        if not evidence.get("fetch_trailer_complete"):
+            failures.append("fetch tool result lacks the complete matching receipt trailer")
         if not evidence.get("fetch_token"):
             failures.append("fetch result has no broker receipt token")
         if evidence.get("fetch_source_occurrences") != cell.count:
@@ -187,13 +252,17 @@ def collect(cell, host, root, output, evidence, collect_only=False):
     tokens.update(match[1] for r in records for text in strings(r) for match in TOKEN.finditer(text))
     selected = [r for r in records if any(token in text for text in strings(r) for token in tokens)
                 or (cell.transport == "fetch" and ("MATRIX_SAMPLE" in json.dumps(r) or "__fetch_queue" in json.dumps(r)))]
+    fetch_calls = {b.get("id") for r in records for b in (r.get("message", {}).get("content", []) if isinstance(r.get("message", {}).get("content"), list) else [])
+                   if isinstance(b, dict) and b.get("type") == "tool_use" and b.get("name", "").endswith("__fetch_queue")}
+    expected = fetch_trailer(result_text((evidence.get("fetch_result") or {}).get("content")))
+    receipt_ids = [m["record_id"] for m in expected["members"]] if expected else []
+    if expected:
+        tokens.add(expected["token"])
     expectations = []
     for record in selected:
-        expectation = classify(record)
-        if cell.transport == "fetch":
-            expectation.update(transport="fetch", accept=None, reason="TODO: pin fetch tool-result receipt after receipt mode exists")
-        expectations.append(sanitize(expectation, tokens))
-    (output / "records.jsonl").write_text("".join(json.dumps(sanitize(r, tokens), ensure_ascii=False) + "\n" for r in selected))
+        expectation = classify_fetch(record, expected, fetch_calls) if cell.transport == "fetch" else classify(record)
+        expectations.append(sanitize(expectation, tokens, receipt_ids=receipt_ids))
+    (output / "records.jsonl").write_text("".join(json.dumps(sanitize(r, tokens, receipt_ids=receipt_ids), ensure_ascii=False) + "\n" for r in selected))
     (output / "records.expect.json").write_text(json.dumps(expectations, indent=2) + "\n")
     for name, log in (("broker.log", broker_log), ("adapter.log", adapter_log)):
         (output / name).write_text(sanitize(log, tokens))
@@ -201,18 +270,17 @@ def collect(cell, host, root, output, evidence, collect_only=False):
         (output / "events.jsonl").write_text("".join(json.dumps(sanitize(r, tokens)) + "\n" for r in host.events()))
     evidence["attempts"] = attempts
     evidence["received"] = count_receives(records, tokens, evidence.get("message_ids", []))
-    fetch_calls = {b.get("id") for r in records for b in (r.get("message", {}).get("content", []) if isinstance(r.get("message", {}).get("content"), list) else [])
-                   if isinstance(b, dict) and b.get("type") == "tool_use" and b.get("name", "").endswith("__fetch_queue")}
     fetch_results = [b for r in records if r.get("type") == "user"
                      for b in (r.get("message", {}).get("content", []) if isinstance(r.get("message", {}).get("content"), list) else [])
                      if isinstance(b, dict) and b.get("type") == "tool_result" and not b.get("is_error")
                      and b.get("tool_use_id") in fetch_calls and "MATRIX_SAMPLE" in json.dumps(b.get("content"))]
     evidence["fetch_tool_result"] = bool(fetch_results)
     evidence["fetch_source_occurrences"] = sum(json.dumps(b.get("content")).count("MATRIX_SAMPLE") for b in fetch_results)
-    evidence["fetch_token"] = any("c3_delivery_id" in json.dumps(r) or "lease_token" in json.dumps(r) for r in fetch_results) if cell.transport == "fetch" else False
+    evidence["fetch_token"] = bool(expected)
+    evidence["fetch_trailer_complete"] = any(classify_fetch(r, expected, fetch_calls)["accept"] for r in records) if expected else False
     failures = verdict(cell, evidence)
     status = "COLLECTED" if collect_only and not evidence.get("setup_errors") else ("FAIL" if failures else "PASS")
-    result = {"cell": cell.name, "status": status, "reasons": failures, "evidence": sanitize(evidence, tokens),
+    result = {"cell": cell.name, "status": status, "reasons": failures, "evidence": sanitize(evidence, tokens, receipt_ids=receipt_ids),
               "todo_records": sum(e["accept"] is None for e in expectations)}
     # Counter keys must not leak raw message ids; preserve per-source order.
     result["evidence"]["received"] = {f"ID{i+1}": n for i, n in enumerate(evidence["received"].values())}

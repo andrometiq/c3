@@ -3,6 +3,49 @@
 Entries are newest first. This is the public architecture record: it records
 rulings and rationale, never private operational details.
 
+## D036: Fetch as an attempt transport (phase 4)
+
+**Date:** 2026-09-09
+
+**Decision:** This supersedes the fetch parts of D033–D035 and D035's
+one-sided negotiation wording. `hello_ack` offers modes; the adapter immediately
+confirms its supported accepted subset with `delivery_report{accepted:[...]}`.
+Until confirmation the connection remains legacy. Unaccepted modes cause a
+protocol error and legacy behavior. Eligibility reports cannot expand the set.
+
+`fetch_receipt` is accepted for `fetch:"receipt"` declarations, including ready
+pull-only Claude sessions with readable transcripts. Fetch reservations use the
+existing attempt table: one group token and one attempt per selected route, with
+exact durable ids and content revisions, a 60-second deadline, and independent
+confirmed-holder/claim-generation checks. Fetch does not take live admission.
+Peek remains read-only; identity backfill runs only inside authorized mutation.
+Consume declarations retain removal on return, not proof of display, and refuse
+leases. Without accepted fetch receipt mode the baseline wire and semantics stay
+unchanged.
+
+A fixed broker-authored trailer binds the group token and complete member set to
+the successful matching host tool result. Message formatting is unrestricted;
+truncation, wrong correlation, missing members, errors and trailing text never
+confirm. `attempt_result` confirms the group; `fetch_confirm` remains its
+original-connection alias during the protocol-v1 migration window. Every route
+retires only surviving unchanged revisions. Fetch releases on reconnect; deadline
+expiry permits duplicates and never recreates removed rows. Nonempty group success
+rearms once and preserves live proof and age.
+
+Live, inbox, fetch and permission readback share the visitor transcript reader.
+Receipt scans preserve bounded oversized-record discard across polls and reset
+on truncation. Drain snapshots exclude attempting rows before new reservations;
+partial drain, eviction and enrichment reconcile only affected memberships.
+Oversize originals retire only after their replacement notice is confirmed.
+The store returns separate age and count eviction totals; notice wording remains
+phase 5. Held/backlog exclude attempting rows and attach states the fetchable count.
+
+**Why:** Fetch is another way to deliver a durable row. Reusing worker-owned
+attempt authority prevents a tool return, copied token, stale voice revision or
+partial group result from silently consuming messages. The live-matrix collector
+now checks the trailer contract; fresh host fetch fixtures still require a
+maintainer-run collection, not inferred transcript evidence.
+
 ## D035: Inbox as a broker-owned transport (phase 3)
 
 **Date:** 2026-09-09

@@ -22,7 +22,7 @@ func TestNegotiatedHelloEligibility(t *testing.T) {
 			a.initialRenderRoute = ipc.RenderRoute{State: state}
 			a.deliveryHostInitialized.Store(true)
 			offer := a.deliveryOffer()
-			eligible := state == ipc.RenderCapable || state == ipc.RenderProbing
+			eligible := true // readable, ready pull-only hosts can negotiate fetch receipts
 			if (len(offer) > 0) != eligible {
 				t.Fatalf("offer=%s", offer)
 			}
@@ -124,7 +124,7 @@ func TestNegotiatedDocsContract(t *testing.T) {
 	isolateAdapterTest(t)
 	// P9: "phase 2 ... P8 per-route display for negotiated sessions; legacy sessions untouched".
 	for path, claims := range map[string][]string{
-		"../../docs/ADAPTERS.md":  {"Provisional-negotiated", "no `fetch_receipt` mode is accepted", "lease` is refused on presence only for negotiated", "Legacy sessions retain", "c3_attempt=\"inbox:N\"", "validateCrossSessionPeer", "peer intake is VERIFIED", "channel OR inbox is eligible", "at least one mode it offered", "once per 10 seconds", "notifications/initialized` received AND notify transport present", "startup hello carries no offer"},
+		"../../docs/ADAPTERS.md":  {"Provisional-negotiated", "until `fetch_receipt` is confirmed", "`fetch_confirm{lease_token:<group>}`", "Legacy sessions retain", "c3_attempt=\"inbox:N\"", "validateCrossSessionPeer", "peer intake is VERIFIED", "channel OR inbox is eligible", "at least one mode it offered", "once per 10 seconds", "notifications/initialized` received AND notify transport present", "startup hello carries no offer", "D036"},
 		"../../docs/DEBUGGING.md": {"attempt retirement released: storage retry limit reached", "attempt shadow suite divergences=0", "no phase-5 flap timer", "attempt reserved transport=inbox", "attempt finished transport=inbox outcome=confirmed", "Definite notify failures immediately send"},
 		"../../DECISIONS.md":      {"D034: Negotiated channel delivery (phase 2)", "no goroutine per attempt", "D035: Inbox as a broker-owned transport (phase 3)", "supersedes the delivery parts of D031"},
 	} {

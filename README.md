@@ -228,7 +228,9 @@ isn't a C3 hack. Without the flag, C3 can use the session's inherited owning-ses
 inbox; only transcript-confirmed delivery consumes the queued message.
 That route has no Telegram permission relay or native question answering, and its
 peer transcript shape is verified on Claude Code 2.1.263. If neither route confirms,
-inbound stays available through `fetch_queue`. Status shows which route is live. Eligible Claude sessions negotiate
+inbound stays available through `fetch_queue`. With negotiated fetch receipts,
+rows remain queued until the host records the complete tool result; unconfirmed
+reservations become fetchable again after 60 seconds. Status shows which route is live. Eligible Claude sessions negotiate
 broker-owned delivery: status shows `waiting`, `live: channel, confirmed <age>`,
 `live: inbox, confirmed <age>`, or `pull-only (<reason>)`. After a channel timeout,
 the broker tries an eligible inbox with a new attempt. Flagless and background

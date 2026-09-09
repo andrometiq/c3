@@ -63,6 +63,7 @@ func shadowPushOne(t *testing.T, w *RouteWorker, frames <-chan ipc.InboundMsg, s
 }
 
 func TestShadowLifecycle(t *testing.T) {
+	clearFetchTestEnvironment(t)
 	for _, seam := range []string{"ack", "legacy_empty_token_ack", "nack", "invalid_count", "holder_death", "drain", "eviction", "legacy_fetch", "unobserved"} {
 		t.Run(seam, func(t *testing.T) {
 			b, w, holder, frames := shadowFixture(t)
@@ -154,6 +155,7 @@ func TestShadowLifecycle(t *testing.T) {
 }
 
 func TestShadowMergedAndUntrackedPush(t *testing.T) {
+	clearFetchTestEnvironment(t)
 	for _, seam := range []string{"merged", "event", "degraded", "no_identities"} {
 		t.Run(seam, func(t *testing.T) {
 			b, w, holder, frames := shadowFixture(t)
@@ -192,6 +194,7 @@ func TestShadowMergedAndUntrackedPush(t *testing.T) {
 }
 
 func TestShadowReconnectDisconnectAdoptionAck(t *testing.T) {
+	clearFetchTestEnvironment(t)
 	t.Setenv("C3_QUEUE_DIR", t.TempDir())
 	b := brokerWithChannel(t, fastDebounceTelegram(), &fakeChannel{})
 	t.Cleanup(b.Shutdown)
@@ -238,6 +241,7 @@ func TestShadowReconnectDisconnectAdoptionAck(t *testing.T) {
 }
 
 func TestShadowVoiceResolutionPushAck(t *testing.T) {
+	clearFetchTestEnvironment(t)
 	g := newGateChannel(100, nil)
 	b := gateBroker(t, g)
 	t.Cleanup(b.Shutdown)
@@ -269,6 +273,7 @@ func TestShadowVoiceResolutionPushAck(t *testing.T) {
 }
 
 func TestShadowPushWriteFailure(t *testing.T) {
+	clearFetchTestEnvironment(t)
 	b, w, holder, _ := shadowFixture(t)
 	holder.Conn.(*ipc.Conn).Close()
 	in := inboundOn(-100, nil, 1, "write failure")
@@ -291,6 +296,7 @@ func TestShadowPushWriteFailure(t *testing.T) {
 }
 
 func TestShadowPartialDrainMergedAck(t *testing.T) {
+	clearFetchTestEnvironment(t)
 	b, w, holder, frames := shadowFixture(t)
 	w.flushInbounds(context.Background(), []*c3types.Inbound{inboundOn(-100, nil, 1, "one"), inboundOn(-100, nil, 2, "two")})
 	push := waitInboundPush(t, frames)
@@ -314,6 +320,7 @@ func TestShadowPartialDrainMergedAck(t *testing.T) {
 }
 
 func TestShadowFetchPeekCancelledAndRejected(t *testing.T) {
+	clearFetchTestEnvironment(t)
 	for _, mode := range []string{"peek", "cancelled", "rejected"} {
 		t.Run(mode, func(t *testing.T) {
 			b, w, holder, _ := shadowFixture(t)
@@ -341,6 +348,7 @@ func TestShadowFetchPeekCancelledAndRejected(t *testing.T) {
 }
 
 func TestShadowAckRejectedHolderAndWorker(t *testing.T) {
+	clearFetchTestEnvironment(t)
 	for _, reason := range []string{"unauthorized", "worker_unavailable", "unknown_correlation", "wrong_holder"} {
 		t.Run(reason, func(t *testing.T) {
 			b, w, holder, frames := shadowFixture(t)
@@ -373,6 +381,7 @@ func TestShadowAckRejectedHolderAndWorker(t *testing.T) {
 }
 
 func TestAttemptTableTransitions(t *testing.T) {
+	clearFetchTestEnvironment(t)
 	now := time.Now()
 	route := MakeRouteKey("telegram", 1, nil)
 	for _, transport := range []string{"channel", "fetch", "inbox", "unknown"} {
@@ -409,6 +418,7 @@ func TestAttemptTableTransitions(t *testing.T) {
 }
 
 func TestAttemptShadowDivergenceOncePerToken(t *testing.T) {
+	clearFetchTestEnvironment(t)
 	var lines []string
 	table := attemptTable{logf: func(line string) { lines = append(lines, line) }}
 	now := time.Now()
@@ -425,6 +435,7 @@ func TestAttemptShadowDivergenceOncePerToken(t *testing.T) {
 }
 
 func TestAttemptBoundedCapEviction(t *testing.T) {
+	clearFetchTestEnvironment(t)
 	for _, global := range []bool{false, true} {
 		t.Run(fmt.Sprint("global=", global), func(t *testing.T) {
 			var table attemptTable
@@ -465,6 +476,7 @@ func TestAttemptBoundedCapEviction(t *testing.T) {
 }
 
 func TestAttemptConcurrentSnapshots(t *testing.T) {
+	clearFetchTestEnvironment(t)
 	var table attemptTable
 	now := time.Now()
 	var wg sync.WaitGroup

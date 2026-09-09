@@ -496,7 +496,8 @@ func TestSnapshotDropped_EvictSnapshot(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	dropped, err := s.EvictOverCap(rk)
+	aged, overCount, err := s.EvictOverCap(rk)
+	dropped := aged + overCount
 	if err != nil {
 		t.Fatal(err)
 	}

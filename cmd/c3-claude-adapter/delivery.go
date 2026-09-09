@@ -63,7 +63,12 @@ func (a *adapter) deliveryFacts() ipc.DeliveryLive {
 	return ipc.DeliveryLive{Channel: channel, Inbox: inbox}
 }
 func (a *adapter) deliveryOffer() json.RawMessage {
-	return deliveryOfferFor(a.deliveryFacts())
+	if !a.deliveryFetchEligible() {
+		return nil
+	}
+	live := a.deliveryFacts()
+	data, _ := json.Marshal(ipc.DeliveryOffer{Version: 1, Live: live, Receipts: "transcript", Fetch: "receipt"})
+	return data
 }
 func deliveryOfferFor(live ipc.DeliveryLive) json.RawMessage {
 	if !live.Channel.Eligible && !live.Inbox.Eligible {
@@ -79,6 +84,8 @@ func (a *adapter) acceptDelivery(offer json.RawMessage, accepted *ipc.DeliveryAc
 	a.deliveryAccepted.Store(enabled)
 	a.liveMu.Lock()
 	a.deliveryInboxAccepted = inbox
+	a.deliveryFetchAccepted = enabled && accepted.HasMode("fetch_receipt")
+	a.deliveryFetchObservers = nil
 	a.deliveryChannelAccepted = enabled && accepted.HasMode("channel")
 	if !enabled {
 		a.deliveryObservers = nil
@@ -185,10 +192,11 @@ func (a *adapter) observeDeliveries(ctx context.Context) {
 		a.flushUpgradeNotice()
 		a.pollUpgrade(time.Now())
 		if !a.deliveryAccepted.Load() {
-			a.pollDeliveryRehello(a.deliveryFacts(), time.Now())
+			a.pollDeliveryRehello(a.deliveryFacts(), time.Now(), a.deliveryFetchEligible())
 			continue
 		}
 		a.pollDeliveries()
+		a.pollFetchReceipts()
 	}
 }
 func (a *adapter) pollDeliveries() {

@@ -1,14 +1,12 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
 	"encoding/xml"
 	"fmt"
-	"io"
 	"log"
 	"log/slog"
 	"maps"
@@ -431,59 +429,7 @@ func (a *adapter) awaitLiveReadback(ctx context.Context, conn *ipc.Conn, generat
 }
 
 func scanReceipt(path string, offset int64, marker string, discarding *bool, cross bool, attempt string) (int64, bool) {
-	info, err := os.Stat(path)
-	if err != nil || !info.Mode().IsRegular() {
-		return offset, false
-	}
-	f, err := os.Open(path)
-	if err != nil {
-		return offset, false
-	}
-	defer f.Close()
-	info, err = f.Stat()
-	if err != nil || !info.Mode().IsRegular() {
-		return offset, false
-	}
-	if info.Size() < offset {
-		offset = 0
-		*discarding = false
-	}
-	if _, err := f.Seek(offset, io.SeekStart); err != nil {
-		return offset, false
-	}
-	// Bound each poll's work and memory. Once oversized, advance through the
-	// record across polls, retaining only a discard bit until its newline.
-	r := bufio.NewReader(io.LimitReader(f, min(info.Size()-offset, 32<<20)))
-	start := offset
-	var line []byte
-	for {
-		chunk, err := r.ReadSlice('\n')
-		offset += int64(len(chunk))
-		if !*discarding {
-			if len(line)+len(chunk) > maxTranscriptLineBytes {
-				*discarding = true
-				line = nil
-			} else {
-				line = append(line, chunk...)
-			}
-		}
-		if err == nil {
-			if !*discarding && deliveryReceipt(line, marker, cross, attempt) {
-				return offset, true
-			}
-			*discarding = false
-			line = line[:0]
-			start = offset
-			continue
-		}
-		if err == bufio.ErrBufferFull {
-			continue
-		}
-		if !*discarding {
-			offset = start
-		} // retry incomplete, bounded record
-		return offset, false
-	}
+	return scanReceiptRecords(path, offset, discarding, func(line []byte) bool { return deliveryReceipt(line, marker, cross, attempt) })
 }
 
 func deliveryReceipt(line []byte, marker string, cross bool, attempt string) bool {

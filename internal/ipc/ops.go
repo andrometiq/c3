@@ -12,6 +12,7 @@ const (
 	OpDeliver        Op = "deliver"
 	OpAttemptResult  Op = "attempt_result"
 	OpDeliveryReport Op = "delivery_report"
+	OpFetchConfirm   Op = "fetch_confirm"
 	// adapter → broker
 	// OpRenderState updates delivery eligibility without changing claims.
 	OpRenderState Op = "render_state"

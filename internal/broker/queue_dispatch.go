@@ -107,7 +107,7 @@ func (b *Broker) handleFetchQueue(conn *ipc.Conn, stub *Stub, raw []byte) {
 	// who knows to look.
 	if err := conn.WriteJSON(resp); err != nil {
 		lost := ""
-		if req.Ack && len(resp.Messages) > 0 {
+		if req.Ack && resp.LeaseToken == "" && len(resp.Messages) > 0 {
 			lost = fmt.Sprintf(" — those %d message(s) were already consumed and did NOT reach the session; recover them from the queue retention window", len(resp.Messages))
 		}
 		log.Printf("fetch_queue conn=%d: response not sent (%d messages, remaining=%d): %v%s",
@@ -127,6 +127,14 @@ func (b *Broker) handleFetchQueue(conn *ipc.Conn, stub *Stub, raw []byte) {
 // route is skipped and counted in Remaining; valid siblings continue.
 func (b *Broker) fetchSelectedRoutes(stub *Stub, req ipc.FetchQueueReq, routes []RouteKey) ipc.FetchQueueResp {
 	resp := ipc.FetchQueueResp{Op: ipc.OpFetchQueueResult, ID: req.ID}
+	var group *attemptFetchGroup
+	if stub.acceptsDeliveryMode("fetch_receipt") && req.Ack {
+		if string(req.Lease) != "true" {
+			resp.Err = "fetch_receipt requires ack:true, lease:true; nothing reserved or consumed"
+			return resp
+		}
+		group = &attemptFetchGroup{token: b.mintDeliveryToken()}
+	}
 	remainingLimit := req.Limit
 	authorizedRoutes := 0
 	for routeIndex, route := range routes {
@@ -135,12 +143,18 @@ func (b *Broker) fetchSelectedRoutes(stub *Stub, req ipc.FetchQueueReq, routes [
 			limit = -1
 		}
 		frameReserve := 0
+		if group != nil {
+			frameReserve = 32
+		} // width of the final multi-route remaining count
 		if len(resp.Messages) > 0 {
 			if encoded, err := json.Marshal(resp); err == nil {
 				frameReserve = len(encoded)
+				if group != nil {
+					frameReserve += 32
+				}
 			}
 		}
-		res, err := b.fetchHeldRoute(stub, route, req, limit, frameReserve)
+		res, err := b.fetchHeldRoute(stub, route, req, limit, frameReserve, group)
 		if res.SkipReason != "" {
 			pending, _ := b.Queue.Pending(queueRouteKey(route))
 			resp.Remaining += pending
@@ -169,6 +183,13 @@ func (b *Broker) fetchSelectedRoutes(stub *Stub, req ipc.FetchQueueReq, routes [
 		// Codex invalidates only matching pending pushes; neither the combined
 		// Remaining count nor this response's frame order is a drain boundary.
 		resp.Messages = append(resp.Messages, res.Messages...)
+		if group != nil {
+			resp.Members = append(resp.Members, res.Members...)
+			if len(resp.Members) > 0 {
+				resp.LeaseToken = group.token
+				resp.ReceiptTrailer = ipc.FetchReceiptTrailer(group.token, resp.Members)
+			}
+		}
 		resp.Remaining += res.Remaining
 		if !req.All && remainingLimit > 0 {
 			remainingLimit -= len(res.Messages)
@@ -187,14 +208,19 @@ func (b *Broker) fetchSelectedRoutes(stub *Stub, req ipc.FetchQueueReq, routes [
 	return resp
 }
 
-func (b *Broker) fetchHeldRoute(stub *Stub, route RouteKey, req ipc.FetchQueueReq, limit, frameReserve int) (FetchResult, error) {
+func (b *Broker) fetchHeldRoute(stub *Stub, route RouteKey, req ipc.FetchQueueReq, limit, frameReserve int, groups ...*attemptFetchGroup) (FetchResult, error) {
 	resultCh := make(chan FetchResult, 1)
 	var lease *fetchLease
 	if req.Ack {
 		lease = newFetchLease()
 	}
+	var group *attemptFetchGroup
+	if len(groups) > 0 {
+		group = groups[0]
+	}
 	job := Job{Kind: JobFetch, Fetch: &FetchJob{
-		Limit: limit, All: req.All, Ack: req.Ack,
+		ReceiptGroup: group,
+		Limit:        limit, All: req.All, Ack: req.Ack,
 		RespID: req.ID, FrameReserve: frameReserve,
 		Owner: stub, Lease: lease, ResultCh: resultCh,
 	}}

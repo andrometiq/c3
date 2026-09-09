@@ -15,6 +15,7 @@ import (
 )
 
 func TestNegotiatedVoiceRevisionInvalidatesOneMember(t *testing.T) {
+	clearFetchTestEnvironment(t)
 	// P4: "Voice enrichment immediately invalidates that row's membership in any open attempt".
 	b, w, s, frames, ctx := negotiatedFixture(t)
 	in := inboundOn(-100, nil, 1, "pending voice")
@@ -51,6 +52,7 @@ func TestNegotiatedVoiceRevisionInvalidatesOneMember(t *testing.T) {
 	}
 }
 func TestNegotiatedDrainSnapshotBeforeReservation(t *testing.T) {
+	clearFetchTestEnvironment(t)
 	// G3: "including a drain snapshot taken before reservation".
 	b, w, _, frames, ctx := negotiatedFixture(t)
 	negotiatedAppend(t, w, 1, "draining")
@@ -70,6 +72,7 @@ func TestNegotiatedDrainSnapshotBeforeReservation(t *testing.T) {
 	nextDeliver(t, frames)
 }
 func TestNegotiatedEvictionClosesEmptyAttempt(t *testing.T) {
+	clearFetchTestEnvironment(t)
 	// P4: "an attempt left empty closes, releases admission and worker liveness".
 	b, w, s, frames, ctx := negotiatedFixture(t)
 	in := inboundOn(-100, nil, 1, "expired retention")
@@ -87,6 +90,7 @@ func TestNegotiatedEvictionClosesEmptyAttempt(t *testing.T) {
 	}
 }
 func TestNegotiatedOversizeNoticeRetiresAfterReceipt(t *testing.T) {
+	clearFetchTestEnvironment(t)
 	// Model/P4: "oversize set-aside ... only after a confirmed attempt of the replacement notice".
 	b, w, s, frames, ctx := negotiatedFixture(t)
 	record := map[string]any{"Channel": "telegram", "ChatID": -100, "MessageID": 1, "Text": strings.Repeat("x", ipc.MaxFrameSize), "_c3_queue_id": "oversize-row"}
@@ -111,6 +115,7 @@ func TestNegotiatedOversizeNoticeRetiresAfterReceipt(t *testing.T) {
 	}
 }
 func TestNegotiatedMixedLegacyPaths(t *testing.T) {
+	clearFetchTestEnvironment(t)
 	for _, transport := range []string{"channel", "inbox"} {
 		t.Run(transport, func(t *testing.T) { testNegotiatedMixedLegacyPaths(t, transport) })
 	}
@@ -150,6 +155,7 @@ func testNegotiatedMixedLegacyPaths(t *testing.T, transport string) {
 	}
 }
 func TestNegotiatedFetchLeaseRefusal(t *testing.T) {
+	clearFetchTestEnvironment(t)
 	// Follow-up C/G2: refuse lease only for negotiated fetch:"consume";
 	// legacy and channel-only receipt peers retain unknown-field behavior.
 	for _, declared := range []string{"consume", "receipt", "legacy"} {
@@ -162,6 +168,7 @@ func TestNegotiatedFetchLeaseRefusal(t *testing.T) {
 				s := &Stub{CLI: "claude", PID: os.Getpid(), CWD: "/work", ConnID: 1}
 				if declared != "legacy" {
 					b.configureDelivery(s, []byte(strings.Replace(channelOffer, `"fetch":"receipt"`, `"fetch":"`+declared+`"`, 1)))
+					b.handleDeliveryReport(s, []byte(`{"op":"delivery_report","accepted":["channel","inbox"]}`))
 				}
 				b.Routes.Claim(key, s)
 				s.AddRoute(key)
@@ -203,6 +210,7 @@ func TestNegotiatedFetchLeaseRefusal(t *testing.T) {
 }
 
 func TestNegotiatedHelloWireAndProtocolGate(t *testing.T) {
+	clearFetchTestEnvironment(t)
 	// P1/P3: negotiation precedes the protocol refusal switch.
 	for _, offer := range []string{channelOffer, `42`, `{"version":9}`, `{"live":null}`} {
 		t.Run(offer, func(t *testing.T) {
@@ -224,6 +232,7 @@ func TestNegotiatedHelloWireAndProtocolGate(t *testing.T) {
 				t.Fatalf("acceptance=%s", raw)
 			}
 			if ack.Delivery != nil {
+				peer.WriteJSON(map[string]any{"op": "delivery_report", "accepted": []string{"channel", "inbox"}})
 				peer.WriteJSON(ipc.AttemptResultMsg{Op: ipc.OpAttemptResult, Token: "unknown", Outcome: "confirmed"})
 				raw, err = peer.ReadFrame()
 				if err != nil {
@@ -238,6 +247,7 @@ func TestNegotiatedHelloWireAndProtocolGate(t *testing.T) {
 }
 
 func TestNegotiatedSiblingConfirmationRearmsExhaustedRoute(t *testing.T) {
+	clearFetchTestEnvironment(t)
 	b, w, s, frames, ctx := negotiatedFixture(t)
 	negotiatedAppend(t, w, 1, "first")
 	w.scheduleAttempt(ctx, false)
@@ -260,6 +270,7 @@ func TestNegotiatedSiblingConfirmationRearmsExhaustedRoute(t *testing.T) {
 	}
 }
 func TestNegotiatedDisplayHistoryAndFetchDoesNotProve(t *testing.T) {
+	clearFetchTestEnvironment(t)
 	_, w, s, frames, ctx := negotiatedFixture(t)
 	negotiatedAppend(t, w, 1, "first")
 	w.scheduleAttempt(ctx, false)
@@ -288,6 +299,7 @@ func TestNegotiatedDisplayHistoryAndFetchDoesNotProve(t *testing.T) {
 }
 
 func TestNegotiatedBackfillAllLegacyRowsPreservesFIFO(t *testing.T) {
+	clearFetchTestEnvironment(t)
 	// P4/P6/G1: FIFO among live-eligible rows; drain provenance survives backfill,
 	// and unchanged consume fetch can remove old rows by their assigned identities.
 	b, w, s, frames, ctx := negotiatedFixture(t)
@@ -324,6 +336,7 @@ func TestNegotiatedBackfillAllLegacyRowsPreservesFIFO(t *testing.T) {
 	}
 }
 func TestNegotiatedFetchBackfillsOnlyOnAdmittedConsume(t *testing.T) {
+	clearFetchTestEnvironment(t)
 	b, w, s, _, ctx := negotiatedFixture(t)
 	raw, _ := json.Marshal(inboundOn(-100, nil, 1, "old"))
 	path := filepath.Join(filepath.Dir(b.Queue.RetentionDir()), queueRouteKey(w.key).File()+".jsonl")
@@ -350,6 +363,7 @@ func TestNegotiatedFetchBackfillsOnlyOnAdmittedConsume(t *testing.T) {
 	}
 }
 func TestNegotiatedBacklogSchedulesRecoveredRows(t *testing.T) {
+	clearFetchTestEnvironment(t)
 	// P6: "Reconnect/backlog rows are scheduled automatically."
 	_, w, _, frames, ctx := negotiatedFixture(t)
 	negotiatedAppend(t, w, 1, "recovered")
@@ -366,6 +380,7 @@ func TestNegotiatedBacklogSchedulesRecoveredRows(t *testing.T) {
 }
 
 func TestNegotiatedRetirementClearsEarlierLegacyRecovery(t *testing.T) {
+	clearFetchTestEnvironment(t)
 	// R1/P4: "Recovery state is never discarded before the mutation succeeds";
 	// transcript-confirmed removal must not be resurrected by a legacy ledger.
 	for _, seam := range []string{"confirmed", "eviction"} {

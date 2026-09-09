@@ -31,6 +31,9 @@ func negotiatedFixture(t *testing.T) (*Broker, *RouteWorker, *Stub, <-chan ipc.D
 		if w.attemptTick != nil {
 			w.attemptTick.Stop()
 		}
+		if w.attemptWriteCancel != nil {
+			w.attemptWriteCancel()
+		}
 	})
 	return b, w, s, frames, ctx
 }
@@ -40,7 +43,7 @@ func negotiatedHolder(t *testing.T, b *Broker, key RouteKey, id uint64) (*Stub, 
 	t.Cleanup(func() { a.Close(); c.Close() })
 	s := &Stub{CLI: "claude", PID: os.Getpid(), CWD: "/work", ConnID: id, Conn: ipc.NewConn(c)}
 	b.configureDelivery(s, []byte(channelOffer))
-	s.deliveryReady.Store(true)
+	b.handleDeliveryReport(s, []byte(`{"op":"delivery_report","accepted":["channel","inbox"]}`))
 	b.Routes.Claim(key, s)
 	s.AddRoute(key)
 	s.MarkRouteConfirmed(key)
@@ -84,6 +87,7 @@ func resultFor(s *Stub, f ipc.DeliverMsg, outcome string) *attemptResultJob {
 	return &attemptResultJob{Owner: s, Msg: ipc.AttemptResultMsg{Op: ipc.OpAttemptResult, Token: f.Token, Outcome: outcome}}
 }
 func TestNegotiatedLifecycle(t *testing.T) {
+	clearFetchTestEnvironment(t)
 	// P3/P4/P6: "One serialised terminal transition per attempt inside the route worker".
 	for _, outcome := range []string{"confirmed", "failed", "deadline", "late", "removed"} {
 		t.Run(outcome, func(t *testing.T) {
@@ -161,6 +165,7 @@ func TestNegotiatedLifecycle(t *testing.T) {
 
 }
 func TestNegotiatedAuthorityMisses(t *testing.T) {
+	clearFetchTestEnvironment(t)
 	// P3: "A copied token on another connection consumes nothing even if that connection now holds the route."
 	for _, miss := range []string{"other_connection", "unconfirmed", "generation", "claim_interrupted", "released", "unknown_token", "legacy_ack"} {
 		t.Run(miss, func(t *testing.T) {
@@ -205,6 +210,7 @@ func TestNegotiatedAuthorityMisses(t *testing.T) {
 	}
 }
 func TestNegotiatedFetchBacklogHeldExclusion(t *testing.T) {
+	clearFetchTestEnvironment(t)
 	// G1/P8: "rows inside a negotiated live attempt are invisible to fetch" and counts.
 	b, w, s, frames, ctx := negotiatedFixture(t)
 	negotiatedAppend(t, w, 1, "attempting")
@@ -233,6 +239,7 @@ func TestNegotiatedFetchBacklogHeldExclusion(t *testing.T) {
 	}
 }
 func TestNegotiatedRearmEvents(t *testing.T) {
+	clearFetchTestEnvironment(t)
 	// P6: "Exhaustion sets the 60 s clock; ordinary inbound before it neither retries nor resets it".
 	for _, event := range []string{"inbound30", "inbound60", "attach", "reconnect", "confirmed_sibling", "report_same", "report_changed"} {
 		t.Run(event, func(t *testing.T) {
@@ -271,6 +278,7 @@ func TestNegotiatedRearmEvents(t *testing.T) {
 	}
 }
 func TestNegotiatedAdmissionFIFO(t *testing.T) {
+	clearFetchTestEnvironment(t)
 	// P6: "on release the slot goes to the longest-waiting route with queued live-eligible rows".
 	b, w, s, frames, ctx := negotiatedFixture(t)
 	siblings := []*RouteWorker{w}
@@ -301,6 +309,7 @@ func TestNegotiatedAdmissionFIFO(t *testing.T) {
 	}
 }
 func TestNegotiatedReconcileRevisionAndDrainOrigin(t *testing.T) {
+	clearFetchTestEnvironment(t)
 	// P4/G3: "reconcile that member only; the attempt continues for the rest".
 	b, w, s, frames, ctx := negotiatedFixture(t)
 	first := negotiatedAppend(t, w, 1, "first")
@@ -325,6 +334,7 @@ func TestNegotiatedReconcileRevisionAndDrainOrigin(t *testing.T) {
 	}
 }
 func TestNegotiatedRetirementStorageFailure(t *testing.T) {
+	clearFetchTestEnvironment(t)
 	// P4: "keep the confirmation evidence and retry removal a bounded number of times".
 	b, w, s, frames, ctx := negotiatedFixture(t)
 	negotiatedAppend(t, w, 1, "hello")
@@ -360,6 +370,7 @@ func TestNegotiatedRetirementStorageFailure(t *testing.T) {
 
 }
 func TestNegotiatedOfferAcceptance(t *testing.T) {
+	clearFetchTestEnvironment(t)
 	// P1: "A degraded broker (Queue == nil) never accepts"; malformed offers stay legacy.
 	b, _, _, _, _ := negotiatedFixture(t)
 	for _, raw := range []string{`null`, `{}`, `{"version":2}`, strings.Replace(channelOffer, `"eligible":true`, `"eligible":null`, 1), strings.Replace(channelOffer, `"version":1`, `"version":1,"unknown":true`, 1)} {
@@ -377,6 +388,7 @@ func TestNegotiatedOfferAcceptance(t *testing.T) {
 	}
 }
 func TestNegotiatedReconnectAdoption(t *testing.T) {
+	clearFetchTestEnvironment(t)
 	// P6: "same living process ... adopts live attempts ... nothing is resent".
 	for _, adopt := range []bool{true, false} {
 		t.Run(map[bool]string{true: "adopt", false: "death_or_changed_offer"}[adopt], func(t *testing.T) {
@@ -403,6 +415,7 @@ func TestNegotiatedReconnectAdoption(t *testing.T) {
 	}
 }
 func TestNegotiatedIdentityBackfillMutation(t *testing.T) {
+	clearFetchTestEnvironment(t)
 	b, w, _, frames, ctx := negotiatedFixture(t)
 	raw, _ := json.Marshal(c3types.Inbound{Channel: "telegram", ChatID: -100, MessageID: 1, Text: "old"})
 	dir := filepath.Dir(b.Queue.RetentionDir())

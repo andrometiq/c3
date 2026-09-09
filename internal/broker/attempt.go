@@ -33,6 +33,7 @@ type attemptMember struct {
 }
 
 type attemptRecord struct {
+	FetchGroup        *attemptFetchGroup
 	Negotiated        bool
 	Evidence          bool
 	RemovalTries      int

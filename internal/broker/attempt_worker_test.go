@@ -11,6 +11,7 @@ import (
 )
 
 func TestNegotiatedWorkerDeadlineHeldOnceAndLiveness(t *testing.T) {
+	clearFetchTestEnvironment(t)
 	// P6/P8: "Active attempts hold the route worker alive"; Held after termination excludes attempting rows.
 	t.Setenv("C3_QUEUE_DIR", t.TempDir())
 	fc := &fakeChannel{}
@@ -60,6 +61,7 @@ func TestNegotiatedWorkerDeadlineHeldOnceAndLiveness(t *testing.T) {
 	}
 }
 func TestNegotiatedAttemptResultDispatchedToWorker(t *testing.T) {
+	clearFetchTestEnvironment(t)
 	// P3: "the broker's token record names the route ... dispatched to that route worker".
 	t.Setenv("C3_QUEUE_DIR", t.TempDir())
 	b := brokerWithChannel(t, mfWithTelegram(), &fakeChannel{})
@@ -81,6 +83,7 @@ func TestNegotiatedAttemptResultDispatchedToWorker(t *testing.T) {
 	t.Fatal("worker never retired confirmed attempt")
 }
 func TestNegotiatedProcessDeathReleasesImmediately(t *testing.T) {
+	clearFetchTestEnvironment(t)
 	// P6: "Process death ... releases every attempt immediately".
 	t.Setenv("C3_QUEUE_DIR", t.TempDir())
 	b := brokerWithChannel(t, mfWithTelegram(), &fakeChannel{})
@@ -97,6 +100,7 @@ func TestNegotiatedProcessDeathReleasesImmediately(t *testing.T) {
 	}
 }
 func TestNegotiatedReadbackDoesNotWaitForPushAdmission(t *testing.T) {
+	clearFetchTestEnvironment(t)
 	// P6: "receipt processing never waits behind a push".
 	b, w, s, frames, ctx := negotiatedFixture(t)
 	negotiatedAppend(t, w, 1, "first")
@@ -124,6 +128,7 @@ func nextWireOp(t *testing.T, peer *ipc.Conn, want ipc.Op) []byte {
 	}
 }
 func TestNegotiatedSocketReconnectAdoptsWithoutResend(t *testing.T) {
+	clearFetchTestEnvironment(t)
 	for _, transport := range []string{"channel", "inbox"} {
 		t.Run(transport, func(t *testing.T) { testNegotiatedSocketReconnect(t, transport) })
 	}
@@ -146,6 +151,7 @@ func testNegotiatedSocketReconnect(t *testing.T, transport string) {
 			raw := nextWireOp(t, first, ipc.OpHelloAck)
 			var ack ipc.HelloAckMsg
 			json.Unmarshal(raw, &ack)
+			first.WriteJSON(map[string]any{"op": "delivery_report", "accepted": []string{"channel", "inbox"}})
 			old, _ := b.Stubs.Get(ack.ConnID)
 			key := MakeRouteKey("telegram", -100, nil)
 			b.Routes.Claim(key, old)
@@ -168,6 +174,9 @@ func testNegotiatedSocketReconnect(t *testing.T, transport string) {
 			second.WriteJSON(hello)
 			raw = nextWireOp(t, second, ipc.OpHelloAck)
 			json.Unmarshal(raw, &ack)
+			second.WriteJSON(map[string]any{"op": "delivery_report", "accepted": []string{"channel", "inbox"}})
+			next, _ := b.Stubs.Get(ack.ConnID)
+			waitForVoiceCondition(t, "acceptance confirmed", next.negotiated)
 			a := b.attempts.lookup(f.Token, time.Now())[0]
 			if changed {
 				if a.Outcome != "released" {
@@ -192,6 +201,7 @@ func testNegotiatedSocketReconnect(t *testing.T, transport string) {
 }
 
 func TestNegotiatedHeldRecountsAfterScheduling(t *testing.T) {
+	clearFetchTestEnvironment(t)
 	// P8: "the count is recomputed at the moment a delayed notice actually sends".
 	t.Setenv("C3_QUEUE_DIR", t.TempDir())
 	fc := &fakeChannel{}

@@ -656,7 +656,7 @@ func (w *RouteWorker) handleDrainPeek(job *DrainPeekJob) {
 		job.ResultCh <- DrainPeekResult{Err: errOutboundNotImpl}
 		return
 	}
-	pending, err := w.broker.Queue.PeekTracked(queueRouteKey(w.key), -1)
+	pending, err := w.visibleAttemptRows(-1)
 	if err != nil {
 		job.ResultCh <- DrainPeekResult{Err: err}
 		return

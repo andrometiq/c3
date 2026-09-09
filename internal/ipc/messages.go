@@ -80,6 +80,8 @@ type FetchQueueReq struct {
 	Limit   int    `json:"limit,omitempty"`
 	All     bool   `json:"all,omitempty"`
 	Ack     bool   `json:"ack"`
+	// Raw preserves legacy unknown-field decoding, including non-boolean values.
+	Lease json.RawMessage `json:"lease,omitempty"`
 }
 
 // FetchQueueResp is the broker → adapter response to FetchQueueReq. Messages
@@ -87,11 +89,14 @@ type FetchQueueReq struct {
 // is the count still queued after this batch. Err is set (and Messages nil) on
 // failure (e.g. no route claimed).
 type FetchQueueResp struct {
-	Op        Op                `json:"op"` // = OpFetchQueueResult
-	ID        string            `json:"id"`
-	Messages  []c3types.Inbound `json:"messages,omitempty"`
-	Remaining int               `json:"remaining"`
-	Err       string            `json:"err,omitempty"`
+	Op             Op                   `json:"op"` // = OpFetchQueueResult
+	ID             string               `json:"id"`
+	Messages       []c3types.Inbound    `json:"messages,omitempty"`
+	Remaining      int                  `json:"remaining"`
+	Err            string               `json:"err,omitempty"`
+	LeaseToken     string               `json:"lease_token,omitempty"`
+	Members        []FetchReceiptMember `json:"members,omitempty"`
+	ReceiptTrailer string               `json:"receipt_trailer,omitempty"`
 }
 
 // ObserveReq is the adapter → broker READ-ONLY peek of a topic's held inbound,
