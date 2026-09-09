@@ -22,6 +22,7 @@ import (
 // Recreates the review's real consumption + holder-death path. No Claude or
 // broker daemon: HandleConn and the durable worker run inside the test process.
 func TestReviewQuotedReceiptConsumesDurableRow(t *testing.T) {
+	isolateAdapterTest(t)
 	for _, variant := range []string{"quoted", "oversized", "valid"} {
 		t.Run(variant, func(t *testing.T) { crossSessionBrokerLifecycle(t, variant) })
 	}

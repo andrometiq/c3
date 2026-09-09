@@ -8,6 +8,7 @@ import (
 )
 
 func TestBuildInstructions_NoConfig(t *testing.T) {
+	isolateAdapterTest(t)
 	a := &adapter{helloAck: ipc.HelloAckMsg{NoConfig: true}}
 	out := a.buildInstructions()
 	if !strings.Contains(out, "/c3:setup") {
@@ -16,6 +17,7 @@ func TestBuildInstructions_NoConfig(t *testing.T) {
 }
 
 func TestBuildInstructions_Default(t *testing.T) {
+	isolateAdapterTest(t)
 	a := &adapter{helloAck: ipc.HelloAckMsg{}}
 	out := a.buildInstructions()
 	if !strings.Contains(out, "Use the `attach` tool") {
@@ -29,6 +31,7 @@ func TestBuildInstructions_Default(t *testing.T) {
 }
 
 func TestInstanceIDFromEnv(t *testing.T) {
+	isolateAdapterTest(t)
 	t.Setenv("CLAUDE_CODE_SESSION_ID", "inst-abc")
 	if got := instanceIDFromEnv(); got != "inst-abc" {
 		t.Fatalf("instanceIDFromEnv = %q, want inst-abc", got)
@@ -42,6 +45,7 @@ func TestInstanceIDFromEnv(t *testing.T) {
 // renderRecoverNotice is the new surface for auto-attach-on-resume (the notice
 // the adapter emits after a successful RecoverSessionResp).
 func TestRenderRecoverNotice_WithBacklog(t *testing.T) {
+	isolateAdapterTest(t)
 	out := renderRecoverNotice(ipc.RecoverSessionResp{Recovered: true, Name: "c3", QueuedCount: 2})
 	if !strings.Contains(out, `Auto-attached to "c3"`) || !strings.Contains(out, "2 messages held") || !strings.Contains(out, "fetch_queue") {
 		t.Fatalf("backlog notice malformed: %q", out)
@@ -49,6 +53,7 @@ func TestRenderRecoverNotice_WithBacklog(t *testing.T) {
 }
 
 func TestRenderRecoverNotice_SingularAndNone(t *testing.T) {
+	isolateAdapterTest(t)
 	one := renderRecoverNotice(ipc.RecoverSessionResp{Recovered: true, Name: "c3", QueuedCount: 1})
 	if !strings.Contains(one, "1 message held") {
 		t.Fatalf("expected singular '1 message held': %q", one)

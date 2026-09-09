@@ -31,6 +31,7 @@ func waitRehelloCondition(t *testing.T, what string, ready func() bool) {
 }
 
 func TestDeliveryRehelloFreshSessionNegotiates(t *testing.T) {
+	isolateAdapterTest(t)
 	// F: "fresh session hello (no transcript) → legacy; transcript appears →
 	// re-hello with offer → hello_ack accepts → next inbound ... negotiated deliver".
 	for _, appears := range []string{"transcript", "socket"} {

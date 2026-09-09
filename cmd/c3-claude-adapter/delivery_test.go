@@ -14,6 +14,7 @@ import (
 )
 
 func TestNegotiatedHelloEligibility(t *testing.T) {
+	isolateAdapterTest(t)
 	// P1/P2: "channel OR inbox is eligible"; no inbox in this fixture.
 	for _, state := range []string{ipc.RenderCapable, ipc.RenderProbing, ipc.RenderQueueOnly, ""} {
 		t.Run(state, func(t *testing.T) {
@@ -43,6 +44,7 @@ func negotiatedAdapter(t *testing.T) (*adapter, *safeBuffer, <-chan []byte, cont
 	return a, output, frames, ctx
 }
 func TestNegotiatedDeliverReceiptShapes(t *testing.T) {
+	isolateAdapterTest(t)
 	// Live incident pin: "known intake shapes ... strict opening-tag parse".
 	fixtures, err := os.ReadFile("testdata/claude-2.1.266-intake.jsonl")
 	if err != nil {
@@ -81,6 +83,7 @@ func TestNegotiatedDeliverReceiptShapes(t *testing.T) {
 	}
 }
 func TestNegotiatedNoFallbackRetry(t *testing.T) {
+	isolateAdapterTest(t)
 	// P9: "never retry, never fall back, never change its own route state".
 	a, output, frames, ctx := negotiatedAdapter(t)
 	raw, _ := json.Marshal(ipc.DeliverMsg{Op: ipc.OpDeliver, Token: "expires", Transport: "channel", DeadlineMS: 50, Inbound: c3types.Inbound{Text: "hello"}})
@@ -95,6 +98,7 @@ func TestNegotiatedNoFallbackRetry(t *testing.T) {
 	noLiveFrame(t, frames)
 }
 func TestNegotiatedDefinitiveFailure(t *testing.T) {
+	isolateAdapterTest(t)
 	a, _, frames, ctx := negotiatedAdapter(t)
 	a.notifyTx = nil
 	raw, _ := json.Marshal(ipc.DeliverMsg{Op: ipc.OpDeliver, Token: "failed", Transport: "channel", DeadlineMS: 1000, Inbound: c3types.Inbound{Text: "hello"}})
@@ -106,6 +110,7 @@ func TestNegotiatedDefinitiveFailure(t *testing.T) {
 	}
 }
 func TestNegotiatedAcceptanceAbsentKeepsLegacy(t *testing.T) {
+	isolateAdapterTest(t)
 	a, _, _ := liveFixture(t, ipc.RenderCapable)
 	a.initialRenderRoute = ipc.RenderRoute{State: ipc.RenderCapable}
 	a.deliveryHostInitialized.Store(true)
@@ -116,6 +121,7 @@ func TestNegotiatedAcceptanceAbsentKeepsLegacy(t *testing.T) {
 }
 
 func TestNegotiatedDocsContract(t *testing.T) {
+	isolateAdapterTest(t)
 	// P9: "phase 2 ... P8 per-route display for negotiated sessions; legacy sessions untouched".
 	for path, claims := range map[string][]string{
 		"../../docs/ADAPTERS.md":  {"Provisional-negotiated", "no `fetch_receipt` mode is accepted", "lease` is refused on presence only for negotiated", "Legacy sessions retain", "c3_attempt=\"inbox:N\"", "validateCrossSessionPeer", "peer intake is VERIFIED", "channel OR inbox is eligible", "at least one mode it offered", "once per 10 seconds", "notifications/initialized` received AND notify transport present", "startup hello carries no offer"},
@@ -134,6 +140,7 @@ func TestNegotiatedDocsContract(t *testing.T) {
 	}
 }
 func TestNegotiatedDeliveryReportSemanticChange(t *testing.T) {
+	isolateAdapterTest(t)
 	a, _, frames, _ := negotiatedAdapter(t)
 	a.pollDeliveries()
 	select {
@@ -156,6 +163,7 @@ func TestNegotiatedDeliveryReportSemanticChange(t *testing.T) {
 	}
 }
 func TestNegotiatedRouteDisplayUsesOutput(t *testing.T) {
+	isolateAdapterTest(t)
 	a, _, _, _ := negotiatedAdapter(t)
 	topic := int64(7)
 	ref := ipc.RouteRef{Channel: "telegram", ChatID: -100, TopicID: &topic}
@@ -170,6 +178,7 @@ func TestNegotiatedRouteDisplayUsesOutput(t *testing.T) {
 }
 
 func TestNegotiatedHostDetectionFactChanges(t *testing.T) {
+	isolateAdapterTest(t)
 	// P9: "Send delivery_report when host detection facts change semantically".
 	a, _, frames, _ := negotiatedAdapter(t)
 	a.deliveryHostRoute = func() ipc.RenderRoute {
@@ -207,6 +216,7 @@ func waitDeliveryWritten(t *testing.T, a *adapter, token string) {
 }
 
 func TestNegotiatedAcceptedModeSubset(t *testing.T) {
+	isolateAdapterTest(t)
 	// Maintainer ruling (1): an ack with no offered mode means legacy.
 	for _, offered := range []string{"channel", "inbox", "both"} {
 		for _, modes := range [][]string{{"channel"}, {"inbox"}, {"channel", "inbox"}, {"channel", "future"}, {"inbox", "future"}, {"future"}, nil} {
@@ -240,6 +250,7 @@ func TestNegotiatedAcceptedModeSubset(t *testing.T) {
 }
 
 func TestNegotiatedInboxAttachAndPreamble(t *testing.T) {
+	isolateAdapterTest(t)
 	// P8: broker-derived inbox state is used in both attach text and preamble.
 	a, _, frames, ctx := negotiatedAdapter(t)
 	results := make(chan *mcp.CallToolResult, 1)

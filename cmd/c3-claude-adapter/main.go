@@ -2411,7 +2411,7 @@ func (a *adapter) toolFetchQueue(ctx context.Context, req *mcp.CallToolRequest) 
 	if conn == nil {
 		return toolErrorResult("broker reconnecting — retry fetch_queue in a moment"), nil
 	}
-	if err := conn.WriteJSON(fq); err != nil {
+	if err := conn.WriteJSONContext(ctx, fq); err != nil {
 		return toolErrorResult("broker write: " + err.Error()), nil
 	}
 	select {

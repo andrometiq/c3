@@ -128,6 +128,7 @@ func callToolAttachSync(t *testing.T, a *adapter, resp ipc.AttachedMsg) *mcp.Cal
 // ── tests ───────────────────────────────────────────────────────────────────
 
 func TestToolAttach_WebResultIncludesSpokenReplyGuidance(t *testing.T) {
+	isolateAdapterTest(t)
 	for _, test := range []struct {
 		name     string
 		initCaps *c3types.Capabilities
@@ -162,6 +163,7 @@ func TestToolAttach_WebResultIncludesSpokenReplyGuidance(t *testing.T) {
 }
 
 func TestToolAttach_TelegramResultMatchesPreModeText(t *testing.T) {
+	isolateAdapterTest(t)
 	a := newAdapterWithDummyConn(t)
 	a.helloAck.Capabilities = &c3types.Capabilities{Channel: "telegram", RichText: true}
 	_ = a.buildInstructions()
@@ -192,6 +194,7 @@ func TestToolAttach_TelegramResultMatchesPreModeText(t *testing.T) {
 // response triggers exactly one title-bar escape with the
 // "c3: <name> · <group>" body.
 func TestToolAttach_EmitsTitleOnOK(t *testing.T) {
+	isolateAdapterTest(t)
 	buf := titleScope(t)
 	a := newAdapterWithDummyConn(t)
 
@@ -216,6 +219,7 @@ func TestToolAttach_EmitsTitleOnOK(t *testing.T) {
 // TestToolAttach_EmitsTitleOnDM verifies DM attach (name="dm", no group)
 // renders "c3: dm".
 func TestToolAttach_EmitsTitleOnDM(t *testing.T) {
+	isolateAdapterTest(t)
 	buf := titleScope(t)
 	a := newAdapterWithDummyConn(t)
 
@@ -237,6 +241,7 @@ func TestToolAttach_EmitsTitleOnDM(t *testing.T) {
 // TestToolAttach_NoEmitOnNoTopicsConfigured verifies the
 // no_topics_configured failure path leaves the title untouched.
 func TestToolAttach_NoEmitOnNoTopicsConfigured(t *testing.T) {
+	isolateAdapterTest(t)
 	buf := titleScope(t)
 	a := newAdapterWithDummyConn(t)
 
@@ -255,6 +260,7 @@ func TestToolAttach_NoEmitOnNoTopicsConfigured(t *testing.T) {
 // TestToolAttach_NoEmitOnPolicyRejected verifies policy_rejected leaves
 // the title untouched.
 func TestToolAttach_NoEmitOnPolicyRejected(t *testing.T) {
+	isolateAdapterTest(t)
 	buf := titleScope(t)
 	a := newAdapterWithDummyConn(t)
 
@@ -274,6 +280,7 @@ func TestToolAttach_NoEmitOnPolicyRejected(t *testing.T) {
 // leave the title untouched — only the user-confirmed re-attach (which
 // lands as OK=true) should flip the title.
 func TestToolAttach_NoEmitOnProposal(t *testing.T) {
+	isolateAdapterTest(t)
 	buf := titleScope(t)
 	a := newAdapterWithDummyConn(t)
 
@@ -294,6 +301,7 @@ func TestToolAttach_NoEmitOnProposal(t *testing.T) {
 // TestToolAttach_SuppressedByEnv verifies C3_NO_TERMINAL_TITLE=1 short-
 // circuits emit even on a clean OK attach.
 func TestToolAttach_SuppressedByEnv(t *testing.T) {
+	isolateAdapterTest(t)
 	buf := titleScope(t)
 	t.Setenv("C3_NO_TERMINAL_TITLE", "1") // override titleScope's "" default
 	a := newAdapterWithDummyConn(t)
@@ -312,6 +320,7 @@ func TestToolAttach_SuppressedByEnv(t *testing.T) {
 // TestToolAttach_NonTTY_NoEmit verifies isTTY=false short-circuits emit.
 // Important so piped / log-captured stderr never sees escape garbage.
 func TestToolAttach_NonTTY_NoEmit(t *testing.T) {
+	isolateAdapterTest(t)
 	// Don't use the shared scope helper — we want isTTY=false here.
 	t.Setenv("C3_NO_TERMINAL_TITLE", "")
 	var buf bytes.Buffer
@@ -337,6 +346,7 @@ func TestToolAttach_NonTTY_NoEmit(t *testing.T) {
 // TestToolDetach_EmitsClearTitle verifies that detach restores the
 // terminal default by emitting the empty-title escape.
 func TestToolDetach_EmitsClearTitle(t *testing.T) {
+	isolateAdapterTest(t)
 	buf := titleScope(t)
 	a := newAdapterWithDummyConn(t)
 

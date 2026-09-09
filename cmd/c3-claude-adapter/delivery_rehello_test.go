@@ -11,6 +11,7 @@ import (
 )
 
 func TestDeliveryRehelloFactsFlapBounded(t *testing.T) {
+	isolateAdapterTest(t)
 	// F: "at most once per fact change, never more than once per 10 s".
 	a, _ := adapterWithConn(t)
 	off := ipc.DeliveryLive{}
@@ -54,6 +55,7 @@ func TestDeliveryRehelloFactsFlapBounded(t *testing.T) {
 }
 
 func TestDeliveryRehelloWaitsForLegacyAckOrExpiry(t *testing.T) {
+	isolateAdapterTest(t)
 	// F: "never while a legacy push is in flight (wait for its ack/expiry)".
 	for _, outcome := range []string{"ack", "expiry"} {
 		t.Run(outcome, func(t *testing.T) {

@@ -34,6 +34,7 @@ func writeIdentityHandoff(t *testing.T, key, stableID string, unixNano int64) {
 // TestResolveTerminalHandoff is T8's resolver coverage. It pins the chain walk,
 // strict monotonic guard, cycle stop, depth cap, and unchanged single-hop case.
 func TestResolveTerminalHandoff(t *testing.T) {
+	isolateAdapterTest(t)
 	t.Run("walks to terminal entry", func(t *testing.T) {
 		t.Setenv("XDG_STATE_HOME", t.TempDir())
 		writeIdentityHandoff(t, "spawn", "session-a", 10)
@@ -130,6 +131,7 @@ func TestResolveTerminalHandoff(t *testing.T) {
 // read as an identity switch, and the probe must advance its high-water mark so it
 // stops re-reading + re-resolving the alias on every subsequent tools/call.
 func TestCheckForIdentitySwitch_SameIdNewerAliasAdvancesWatermarkNoSwitch(t *testing.T) {
+	isolateAdapterTest(t)
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	a := newAdapter()
 	establishSettledIdentity(a, sessionhandoff.Entry{
@@ -358,6 +360,7 @@ func requireNoReconnectResumeNotice(t *testing.T, a *adapter, ch *reconnectSwitc
 // handler. Replay is the restoration operation; it must not be reclassified as
 // an identity switch merely because hello created an identity-empty fresh stub.
 func TestRecoverBroker_OrdinaryRestartReplayKeepsClaimWithoutResumeNotice(t *testing.T) {
+	isolateAdapterTest(t)
 	tests := []struct {
 		name       string
 		handoff    bool
@@ -442,6 +445,7 @@ func TestRecoverBroker_OrdinaryRestartReplayKeepsClaimWithoutResumeNotice(t *tes
 // is empty; the handoff then settles that same conversation before a broker
 // restart. Reconnect must replay the route and re-register the stable identity.
 func TestRecoverBroker_AttachBeforeIdentityReplayAndReregisters(t *testing.T) {
+	isolateAdapterTest(t)
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("C3_QUEUE_DIR", t.TempDir())
@@ -499,6 +503,7 @@ func TestRecoverBroker_AttachBeforeIdentityReplayAndReregisters(t *testing.T) {
 // recoverBroker entry point. This pins the production call-site ordering, not
 // only restoreSessionAfterReconnect in isolation.
 func TestRecoverBroker_IdentitySwitchSkipsStaleReplayAndPreservesAttachments(t *testing.T) {
+	isolateAdapterTest(t)
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("C3_QUEUE_DIR", t.TempDir())
@@ -546,6 +551,7 @@ func TestRecoverBroker_IdentitySwitchSkipsStaleReplayAndPreservesAttachments(t *
 // broker reconnects, A's stamped replay must not be restored or recorded under
 // B.
 func TestRecoverBroker_UnsettledTimeoutDoesNotReplayPreviousConversation(t *testing.T) {
+	isolateAdapterTest(t)
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("C3_QUEUE_DIR", t.TempDir())
@@ -616,6 +622,7 @@ func TestRecoverBroker_UnsettledTimeoutDoesNotReplayPreviousConversation(t *test
 // older recover owns recoverMu, restore must return so that same reader can
 // drain and dispatch the response that releases the lock holder.
 func TestReconnectIdentitySwitch_DoesNotBlockBrokerReaderDispatch(t *testing.T) {
+	isolateAdapterTest(t)
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	t.Setenv("CLAUDE_CODE_SESSION_ID", "spawn")
 	writeIdentityHandoff(t, "spawn", "conversation-a", 10)
@@ -691,6 +698,7 @@ func TestReconnectIdentitySwitch_DoesNotBlockBrokerReaderDispatch(t *testing.T) 
 // takes the second restore arm, while a missing handoff plus settled identity
 // takes the third. Either way, the fresh broker must learn the stable identity.
 func TestReconnectSameIdentity_ResetsRecoverFiredAndReregisters(t *testing.T) {
+	isolateAdapterTest(t)
 	tests := []struct {
 		name         string
 		writeHandoff bool
@@ -735,6 +743,7 @@ func TestReconnectSameIdentity_ResetsRecoverFiredAndReregisters(t *testing.T) {
 }
 
 func TestReconnectRefire_ReresolvesBeforeAsyncDispatch(t *testing.T) {
+	isolateAdapterTest(t)
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	t.Setenv("CLAUDE_CODE_SESSION_ID", "spawn")
 	writeIdentityHandoff(t, "spawn", "conversation-b", 20)
@@ -769,6 +778,7 @@ func TestReconnectRefire_ReresolvesBeforeAsyncDispatch(t *testing.T) {
 }
 
 func TestReconnectSupersededSwitchFallsBackToReregistration(t *testing.T) {
+	isolateAdapterTest(t)
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	t.Setenv("CLAUDE_CODE_SESSION_ID", "spawn")
 	writeIdentityHandoff(t, "spawn", "conversation-b", 20)
@@ -812,6 +822,7 @@ func TestReconnectSupersededSwitchFallsBackToReregistration(t *testing.T) {
 // T9: the process-lifetime watch detects a later hook, opens a fresh identity
 // epoch, and refires recovery with the terminal conversation id.
 func TestSwitchWatch_ReopensGateAndRefires(t *testing.T) {
+	isolateAdapterTest(t)
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	writeIdentityHandoff(t, "conversation-a", "conversation-b", 20)
 
@@ -856,6 +867,7 @@ func TestSwitchWatch_ReopensGateAndRefires(t *testing.T) {
 // Detection reopens the gate; the attach cannot reach the broker until the new
 // RecoverSession response settles it.
 func TestToolsCall_SwitchCheckRunsBeforeIdentityGate(t *testing.T) {
+	isolateAdapterTest(t)
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	writeIdentityHandoff(t, "conversation-a", "conversation-b", 20)
 
@@ -903,6 +915,7 @@ func TestToolsCall_SwitchCheckRunsBeforeIdentityGate(t *testing.T) {
 // the old "Re-attached" text, and an unattached switch installs the exact
 // corrective notice in the new epoch.
 func TestPendingRecoverNotice_DroppedOnEpochChange(t *testing.T) {
+	isolateAdapterTest(t)
 	t.Run("stale notice is rejected by epoch", func(t *testing.T) {
 		a := newAdapter()
 		a.setPendingRecoverNotice(`📨 Re-attached to "old-topic"`)

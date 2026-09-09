@@ -10,6 +10,7 @@ import (
 )
 
 func TestRenderRouteNearestHostAcrossPlatforms(t *testing.T) {
+	isolateAdapterTest(t)
 	for _, platform := range []string{"linux", "darwin", "windows"} {
 		for _, tc := range []struct {
 			name   string
@@ -71,6 +72,7 @@ func TestRenderRouteNearestHostAcrossPlatforms(t *testing.T) {
 }
 
 func TestRenderRouteProcessTreeReasons(t *testing.T) {
+	isolateAdapterTest(t)
 	for _, tc := range []struct {
 		name    string
 		parents map[int]int
@@ -93,6 +95,7 @@ func TestRenderRouteProcessTreeReasons(t *testing.T) {
 }
 
 func TestRenderDetectionRejectsHostNamesInPrompt(t *testing.T) {
+	isolateAdapterTest(t)
 	if cmdlineHasDevChannelForC3([]string{"claude", "--", devChannelsFlag, "plugin:c3@c3"}) {
 		t.Fatal("prompt after option terminator qualified host")
 	}

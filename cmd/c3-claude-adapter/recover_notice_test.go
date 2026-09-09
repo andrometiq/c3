@@ -14,6 +14,7 @@ import (
 // the deferred-notice (setPending → takePending) path the resume idle gap relies
 // on (channel frames in the idle gap are dropped by Claude Code).
 func TestRenderRecoverNotice_SurfacesBacklogPreview(t *testing.T) {
+	isolateAdapterTest(t)
 	resp := ipc.RecoverSessionResp{
 		Recovered: true, Name: "c3", QueuedCount: 3,
 		QueuedSummary: []ipc.QueuedItem{
@@ -47,6 +48,7 @@ func TestRenderRecoverNotice_SurfacesBacklogPreview(t *testing.T) {
 // exclusion drops the claim). A DM resolution (no topic) remembers {Target:"dm"} —
 // never a "dm" name, which the broker would treat as a topic lookup.
 func TestResolvedAttachReq_BareSubstitutesResolvedIdentity(t *testing.T) {
+	isolateAdapterTest(t)
 	bare := ipc.AttachReq{Op: ipc.OpAttach, CWD: "/proj"}
 
 	tid := int64(281)
@@ -66,6 +68,7 @@ func TestResolvedAttachReq_BareSubstitutesResolvedIdentity(t *testing.T) {
 // bare request: the bare OK resolves back to the SAME identity (id-addressed), so
 // the remembered request keeps pointing at the live route.
 func TestResolvedAttachReq_ExplicitRememberedVerbatim(t *testing.T) {
+	isolateAdapterTest(t)
 	explicit := ipc.AttachReq{Op: ipc.OpAttach, CWD: "/proj", Name: "feature-x", Group: "work"}
 	if got := resolvedAttachReq(explicit, ipc.AttachedMsg{OK: true, Name: "feature-x", Group: "work"}); got != explicit {
 		t.Fatalf("explicit request must be remembered verbatim: got %+v", got)
@@ -85,6 +88,7 @@ func TestResolvedAttachReq_ExplicitRememberedVerbatim(t *testing.T) {
 // flush's live re-peek makes a stale count impossible, so the old minutes-late
 // drop was a silent-loss-of-awareness bug).
 func TestTakePendingRecoverNotice(t *testing.T) {
+	isolateAdapterTest(t)
 	a := &adapter{}
 
 	// Nothing pending → no emit.

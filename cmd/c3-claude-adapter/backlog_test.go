@@ -9,6 +9,7 @@ import (
 )
 
 func TestRenderBacklogSummary(t *testing.T) {
+	isolateAdapterTest(t)
 	got := renderBacklogSummary(2, []ipc.QueuedItem{
 		{MessageID: 5, Sender: "@k", Kind: "text", Preview: "hello"},
 		{MessageID: 6, Sender: "@k", Kind: "voice", Preview: ""},
@@ -28,6 +29,7 @@ func TestRenderBacklogSummary(t *testing.T) {
 // reply_to_user and reply_to_text — not just reply_to=<id>. Kept byte-identical to
 // the Codex adapter's renderQueuedInbound.
 func TestRenderQueuedInbound_FullReplyContext(t *testing.T) {
+	isolateAdapterTest(t)
 	got := renderQueuedInbound(&c3types.Inbound{
 		Channel: "telegram", ChatID: -100, MessageID: 9,
 		ReplyTo: &c3types.ReplyContext{
@@ -45,6 +47,7 @@ func TestRenderQueuedInbound_FullReplyContext(t *testing.T) {
 
 // count > len(items) must render the "…and N more" truncation line.
 func TestRenderBacklogSummary_AndMore(t *testing.T) {
+	isolateAdapterTest(t)
 	got := renderBacklogSummary(5, []ipc.QueuedItem{
 		{MessageID: 1, Sender: "@k", Kind: "text", Preview: "a"},
 		{MessageID: 2, Sender: "@k", Kind: "text", Preview: "b"},
@@ -56,12 +59,14 @@ func TestRenderBacklogSummary_AndMore(t *testing.T) {
 }
 
 func TestRenderBacklogSummary_Empty(t *testing.T) {
+	isolateAdapterTest(t)
 	if got := renderBacklogSummary(0, nil, "myproject"); got != "" {
 		t.Errorf("empty backlog summary = %q, want empty string", got)
 	}
 }
 
 func TestPendingNudge(t *testing.T) {
+	isolateAdapterTest(t)
 	// §5: the nudge names the topic so a stale/wrong advertisement is distinguishable.
 	got := pendingNudge(3, "myproject")
 	if !strings.Contains(got, "3 pending") || !strings.Contains(got, "fetch_queue") || !strings.Contains(got, "myproject") {
@@ -77,6 +82,7 @@ func TestPendingNudge(t *testing.T) {
 }
 
 func TestDecoratePushContent_CarriesNudgeOnBacklog(t *testing.T) {
+	isolateAdapterTest(t)
 	got := decoratePushContent("hello", 2, "myproject")
 	if !strings.Contains(got, "hello") || !strings.Contains(got, "2 pending") || !strings.Contains(got, "fetch_queue") || !strings.Contains(got, "myproject") {
 		t.Errorf("push content = %q, want body + '2 pending' + fetch_queue nudge + topic name", got)
@@ -87,6 +93,7 @@ func TestDecoratePushContent_CarriesNudgeOnBacklog(t *testing.T) {
 }
 
 func TestRenderFetchedMessages_ExposesAttachmentFileID(t *testing.T) {
+	isolateAdapterTest(t)
 	got := renderFetchedMessages([]c3types.Inbound{{
 		Channel: "telegram", ChatID: -100, MessageID: 7,
 		Attachments: []c3types.Attachment{{Kind: "voice", FileID: "VOICE123", MIME: "audio/ogg", Size: 2048, Name: "note.ogg"}},
@@ -111,6 +118,7 @@ func TestRenderFetchedMessages_ExposesAttachmentFileID(t *testing.T) {
 
 // renderFetchedMessages with no messages must report the empty-queue line.
 func TestRenderFetchedMessages_Empty(t *testing.T) {
+	isolateAdapterTest(t)
 	if got := renderFetchedMessages(nil, 0, "myproject"); !strings.Contains(got, "empty") {
 		t.Errorf("empty fetch render = %q, want an 'empty' line", got)
 	}
@@ -119,6 +127,7 @@ func TestRenderFetchedMessages_Empty(t *testing.T) {
 // A non-zero Remaining must append the pending nudge (naming the topic, §5) so the
 // agent keeps draining.
 func TestRenderFetchedMessages_RemainingNudge(t *testing.T) {
+	isolateAdapterTest(t)
 	got := renderFetchedMessages([]c3types.Inbound{{
 		Channel: "telegram", MessageID: 1, Text: "hi",
 	}}, 4, "myproject")
@@ -131,6 +140,7 @@ func TestRenderFetchedMessages_RemainingNudge(t *testing.T) {
 // dropped to the default 3 (the old switch matched neither "all" nor float64).
 // Covers "all", JSON-number, string-number, clamps, and unparseable/absent.
 func TestParseFetchLimit(t *testing.T) {
+	isolateAdapterTest(t)
 	cases := []struct {
 		name      string
 		in        any

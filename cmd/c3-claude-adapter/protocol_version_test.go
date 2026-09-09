@@ -63,6 +63,7 @@ func waitForLog(t *testing.T, s *protoLogSink, substr string) {
 // a DIFFERENT version must NOT break the handshake — the adapter warns and keeps
 // the session. (`c3 update` routinely leaves an old adapter on a new broker.)
 func TestHello_CarriesVersion_AndSurvivesMismatchedAck(t *testing.T) {
+	isolateAdapterTest(t)
 	sink := captureProtoLog(t)
 	c1, c2 := net.Pipe()
 	defer c1.Close()
@@ -119,6 +120,7 @@ func TestHello_CarriesVersion_AndSurvivesMismatchedAck(t *testing.T) {
 }
 
 func TestDetach_IncompatibleBrokerRefusesWithoutClearingReplay(t *testing.T) {
+	isolateAdapterTest(t)
 	c1, c2 := net.Pipe()
 	defer c1.Close()
 	defer c2.Close()
@@ -139,6 +141,7 @@ func TestDetach_IncompatibleBrokerRefusesWithoutClearingReplay(t *testing.T) {
 
 // An ack from a broker that predates versioning (no field) is v1 — no warning.
 func TestHello_LegacyAckNoVersion_NoWarning(t *testing.T) {
+	isolateAdapterTest(t)
 	sink := captureProtoLog(t)
 	c1, c2 := net.Pipe()
 	defer c1.Close()
@@ -172,6 +175,7 @@ func TestHello_LegacyAckNoVersion_NoWarning(t *testing.T) {
 // An op from a NEWER broker must hit the dispatch default arm: logged by name
 // and skipped, never silently dropped.
 func TestBrokerReader_UnknownOp_LogsAndContinues(t *testing.T) {
+	isolateAdapterTest(t)
 	sink := captureProtoLog(t)
 	c1, c2 := net.Pipe()
 	defer c1.Close()

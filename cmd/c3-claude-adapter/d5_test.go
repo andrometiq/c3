@@ -11,6 +11,7 @@ import (
 // visible Claude channel frame — it reuses the broker's InboundSystem shape, so
 // buildClaudeChannelFrame's System case must produce non-empty content.
 func TestAdviseBrokerDown_FrameRenders(t *testing.T) {
+	isolateAdapterTest(t)
 	in := &c3types.Inbound{
 		Channel: "c3",
 		Kind:    c3types.InboundSystem,
@@ -29,6 +30,7 @@ func TestAdviseBrokerDown_FrameRenders(t *testing.T) {
 // outage and re-arms on clear. notifyTx is nil here — the CAS fires before the
 // nil-check, so the one-shot/re-arm logic is exercised without a transport double.
 func TestAdviseBrokerDown_OneShotAndReArm(t *testing.T) {
+	isolateAdapterTest(t)
 	a := newAdapter()
 	a.adviseBrokerDown(6)
 	if !a.brokerDownAdvised.Load() {

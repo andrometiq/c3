@@ -19,6 +19,7 @@ import (
 )
 
 func TestNegotiatedInboxBrokerAdapterLifecycle(t *testing.T) {
+	isolateAdapterTest(t)
 	// P3/P6: broker fallback gets a new token, adapter sends the existing inbox
 	// frames, and only attempt_result from the peer receipt retires the real row.
 	for _, tc := range []struct {

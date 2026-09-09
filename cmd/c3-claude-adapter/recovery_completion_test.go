@@ -101,6 +101,7 @@ func writeRecoveryHandoff(t *testing.T) {
 // the stable session id, which is how the same instant produced two opposite
 // answers — the channel said "attached", the CLI showed a topic picker.
 func TestToolAttach_IsNotAnsweredBeforeThisSessionsIdentityIsSettled(t *testing.T) {
+	isolateAdapterTest(t)
 	writeRecoveryHandoff(t)
 	a := newAdapter()
 	broker := newRecoveryBroker(t, a)
@@ -150,6 +151,7 @@ func TestToolAttach_IsNotAnsweredBeforeThisSessionsIdentityIsSettled(t *testing.
 // fireRecover, so treating it as "already handled" releases the call while the
 // identity question is still open.
 func TestFirstToolsCall_IsHeldUntilRecoveryFinishesNotUntilItStarts(t *testing.T) {
+	isolateAdapterTest(t)
 	a := newAdapter()
 	broker := newRecoveryBroker(t, a)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -187,6 +189,7 @@ func TestFirstToolsCall_IsHeldUntilRecoveryFinishesNotUntilItStarts(t *testing.T
 // who this session is before the call it is holding reaches it — which is only
 // true if it then waits for that recover to be answered.
 func TestFirstToolsCall_HoldsTheCallForTheRecoveryItStartsItself(t *testing.T) {
+	isolateAdapterTest(t)
 	writeRecoveryHandoff(t)
 	a := newAdapter()
 	broker := newRecoveryBroker(t, a)
@@ -224,6 +227,7 @@ func TestFirstToolsCall_HoldsTheCallForTheRecoveryItStartsItself(t *testing.T) {
 // nothing and answered with no identity. That is a permanently wedged session,
 // not a race.
 func TestFireRecover_ASendThatNeverHappenedMustNotWedgeTheSession(t *testing.T) {
+	isolateAdapterTest(t)
 	a := newAdapter() // deliberately NO broker connection
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -253,6 +257,7 @@ func TestFireRecover_ASendThatNeverHappenedMustNotWedgeTheSession(t *testing.T) 
 // every identity-dependent call wait out the whole settle budget, and a hung
 // attach is a worse failure than an unidentified one.
 func TestFireRecover_SettlesIdentityEvenWhenItCannotSend(t *testing.T) {
+	isolateAdapterTest(t)
 	a := newAdapter() // no broker connection: fireRecover fails without sending
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -277,6 +282,7 @@ func TestFireRecover_SettlesIdentityEvenWhenItCannotSend(t *testing.T) {
 // anyway would stall the attach of every fresh (non-resumed) session for the
 // full settle budget on a question nobody is going to answer.
 func TestAwaitIdentitySettled_DoesNotWaitWhenNoRecoveryWasEverStarted(t *testing.T) {
+	isolateAdapterTest(t)
 	a := newAdapter()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -299,6 +305,7 @@ func TestAwaitIdentitySettled_DoesNotWaitWhenNoRecoveryWasEverStarted(t *testing
 // identity-dependent call — the first tools/call waits it out, then the `attach`
 // inside that same call waits it out a second time.
 func TestAwaitIdentitySettled_GivingUpIsAnAnswerAndIsPaidOnlyOnce(t *testing.T) {
+	isolateAdapterTest(t)
 	prev := recoverSettleBudget
 	recoverSettleBudget = 50 * time.Millisecond
 	t.Cleanup(func() { recoverSettleBudget = prev })

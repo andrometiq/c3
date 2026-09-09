@@ -14,6 +14,7 @@ import (
 )
 
 func TestAdapterDocsNameReceiptAndPermissionReaders(t *testing.T) {
+	isolateAdapterTest(t)
 	body, err := os.ReadFile("../../docs/ADAPTERS.md")
 	if err != nil {
 		t.Fatal(err)
@@ -50,6 +51,7 @@ func realHostReceipt(t *testing.T, marker string) []byte {
 }
 
 func TestRealHostChannelReceipt(t *testing.T) {
+	isolateAdapterTest(t)
 	raw := realHostReceipt(t, "real-host-marker")
 	if !channelReceipt(raw, "real-host-marker") {
 		t.Fatal("real host receipt rejected")
@@ -67,6 +69,7 @@ func TestRealHostChannelReceipt(t *testing.T) {
 }
 
 func TestChannelReceiptAttributeBoundaries(t *testing.T) {
+	isolateAdapterTest(t)
 	for _, tc := range []struct {
 		name, text, marker string
 		want               bool
@@ -99,6 +102,7 @@ func TestChannelReceiptAttributeBoundaries(t *testing.T) {
 }
 
 func TestReceiptScanDiscardsOversizeAcrossPolls(t *testing.T) {
+	isolateAdapterTest(t)
 	path := t.TempDir() + "/transcript.jsonl"
 	f, err := os.Create(path)
 	if err != nil {
@@ -135,6 +139,7 @@ func TestReceiptScanDiscardsOversizeAcrossPolls(t *testing.T) {
 }
 
 func TestLiveReceiptSurvivesAttach(t *testing.T) {
+	isolateAdapterTest(t)
 	for _, success := range []bool{true, false} {
 		name := "failed"
 		if success {
@@ -184,6 +189,7 @@ func (w *blockedNotifyWriter) Write(p []byte) (int, error) {
 func (*blockedNotifyWriter) Close() error { return nil }
 
 func TestBlockedNotifyDoesNotBlockReceiptsOrTimeout(t *testing.T) {
+	isolateAdapterTest(t)
 	a, _, frames := liveFixture(t, ipc.RenderCapable)
 	a.liveTimeout = time.Second
 	pushLive(t, a, "earlier")
@@ -219,6 +225,7 @@ func TestBlockedNotifyDoesNotBlockReceiptsOrTimeout(t *testing.T) {
 }
 
 func TestLiveReceiptCancelsOnRouteOrSessionChange(t *testing.T) {
+	isolateAdapterTest(t)
 	for _, change := range []string{"route", "detach", "session"} {
 		t.Run(change, func(t *testing.T) {
 			a, _, frames := liveFixture(t, ipc.RenderCapable)
@@ -256,6 +263,7 @@ func realHostIntakeReceipt(t *testing.T, index int, marker string) []byte {
 }
 
 func TestRealHostIntakeReceipt(t *testing.T) {
+	isolateAdapterTest(t)
 	for _, tc := range []struct {
 		name    string
 		index   int
@@ -282,6 +290,7 @@ func TestRealHostIntakeReceipt(t *testing.T) {
 }
 
 func TestIntakeReceiptStrictFieldsAndParsing(t *testing.T) {
+	isolateAdapterTest(t)
 	for _, index := range []int{0, 3} {
 		name := "enqueue"
 		if index == 3 {

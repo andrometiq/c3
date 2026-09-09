@@ -65,6 +65,7 @@ func noLiveFrame(t *testing.T, frames <-chan []byte) {
 }
 
 func TestLiveReadbackReceiptBeforeAck(t *testing.T) {
+	isolateAdapterTest(t)
 	for _, state := range []string{ipc.RenderCapable, ipc.RenderProbing} {
 		t.Run(state, func(t *testing.T) {
 			a, output, frames := liveFixture(t, state)
@@ -113,6 +114,7 @@ func TestLiveReadbackReceiptBeforeAck(t *testing.T) {
 }
 
 func TestLiveReadbackTimeoutStopsPushes(t *testing.T) {
+	isolateAdapterTest(t)
 	a, output, frames := liveFixture(t, ipc.RenderProbing)
 	pushLive(t, a, "timeout-1")
 	var update ipc.RenderStateMsg
@@ -133,6 +135,7 @@ func TestLiveReadbackTimeoutStopsPushes(t *testing.T) {
 }
 
 func TestLiveReadbackUnresolvableTranscript(t *testing.T) {
+	isolateAdapterTest(t)
 	a, output, frames := liveFixture(t, ipc.RenderCapable)
 	a.liveTranscriptPath = func() string { return "" }
 	pushLive(t, a, "missing-1")
@@ -149,6 +152,7 @@ func TestLiveReadbackUnresolvableTranscript(t *testing.T) {
 }
 
 func TestChannelReceiptShapeAndPartialTail(t *testing.T) {
+	isolateAdapterTest(t)
 	channel := `<channel source="c3" c3_attempt="channel:1" c3_delivery_id="marker">hello</channel>`
 	for _, tc := range []struct {
 		name  string
@@ -198,6 +202,7 @@ func TestChannelReceiptShapeAndPartialTail(t *testing.T) {
 }
 
 func TestLiveRouteResetAndPreamble(t *testing.T) {
+	isolateAdapterTest(t)
 	for _, tc := range []struct{ state, text, relay string }{
 		{ipc.RenderCapable, "channel", "available"},
 		{ipc.RenderProbing, "probing", "unavailable"},

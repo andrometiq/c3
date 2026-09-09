@@ -19,6 +19,7 @@ import (
 // IMPERATIVE surface-now instruction (topic + count + fetch_queue); N==1 uses the
 // singular noun; N==0 is a bare re-attach note with no fetch_queue nudge.
 func TestRenderResumeReattachFrame(t *testing.T) {
+	isolateAdapterTest(t)
 	got := renderResumeReattachFrame("myproject", 3)
 	for _, want := range []string{"myproject", "3", "held", "fetch_queue"} {
 		if !strings.Contains(got, want) {
@@ -108,6 +109,7 @@ func answerPeek(t *testing.T, a *adapter, peer *ipc.Conn, returned, remaining in
 // the flush does a live re-peek and emits the CURRENT count (returned+remaining),
 // not the stored at-recover text.
 func TestFlushPendingRecoverNotice_LivePeekEmitsLiveCount(t *testing.T) {
+	isolateAdapterTest(t)
 	a, peer, _, emitted := newFlushTestAdapter(t)
 	setTestOutputRoute(a, "myproject")
 	a.setPendingRecoverNotice("STORED-FALLBACK should not be used")
@@ -137,6 +139,7 @@ func TestFlushPendingRecoverNotice_LivePeekEmitsLiveCount(t *testing.T) {
 // TestFlushPendingRecoverNotice_ZeroCountEmitsBareReattach: a live re-peek that
 // returns 0 held messages emits the bare re-attach note (no fetch_queue nudge).
 func TestFlushPendingRecoverNotice_ZeroCountEmitsBareReattach(t *testing.T) {
+	isolateAdapterTest(t)
 	a, peer, _, emitted := newFlushTestAdapter(t)
 	setTestOutputRoute(a, "myproject")
 	a.setPendingRecoverNotice("stored")
@@ -157,6 +160,7 @@ func TestFlushPendingRecoverNotice_ZeroCountEmitsBareReattach(t *testing.T) {
 // broker must not hang the tools/call — the flush falls back to the stored notice
 // within the (shortened) cap.
 func TestFlushPendingRecoverNotice_FallsBackToStoredOnTimeout(t *testing.T) {
+	isolateAdapterTest(t)
 	old := livePeekTimeout
 	livePeekTimeout = 50 * time.Millisecond
 	defer func() { livePeekTimeout = old }()
@@ -192,6 +196,7 @@ func TestFlushPendingRecoverNotice_FallsBackToStoredOnTimeout(t *testing.T) {
 // TestFlushPendingRecoverNotice_OnceOnly: after the first flush the pending flag
 // is cleared, so a second flush is a total no-op — it neither re-peeks nor emits.
 func TestFlushPendingRecoverNotice_OnceOnly(t *testing.T) {
+	isolateAdapterTest(t)
 	old := livePeekTimeout
 	livePeekTimeout = 50 * time.Millisecond
 	defer func() { livePeekTimeout = old }()
@@ -224,6 +229,7 @@ func TestFlushPendingRecoverNotice_OnceOnly(t *testing.T) {
 // tracked recover time is gone, so the sleep only documents that elapsed time no
 // longer matters.
 func TestFlushPendingRecoverNotice_NoTTLDropAfterDelay(t *testing.T) {
+	isolateAdapterTest(t)
 	a, peer, _, emitted := newFlushTestAdapter(t)
 	setTestOutputRoute(a, "myproject")
 	a.setPendingRecoverNotice("stored fallback")

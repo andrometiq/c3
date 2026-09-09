@@ -116,6 +116,7 @@ func nextAttemptResult(t *testing.T, frames <-chan []byte) ipc.AttemptResultMsg 
 }
 
 func TestNegotiatedInboxFlaglessAndBackground(t *testing.T) {
+	isolateAdapterTest(t)
 	// P1/P2: "channel OR inbox is eligible"; existing fakeTree host detection,
 	// including a background/fork host beneath a flagged interactive ancestor.
 	for _, args := range [][]string{{"claude"}, {"claude", "--bg"}, {"claude", "--fork-session", "--print"}} {
@@ -151,6 +152,7 @@ func TestNegotiatedInboxFlaglessAndBackground(t *testing.T) {
 }
 
 func TestNegotiatedInboxFixturesFailClosed(t *testing.T) {
+	isolateAdapterTest(t)
 	// R2: each verified host shape keeps its framing and provenance checks.
 	peer, err := os.ReadFile("testdata/claude-2.1.263-peer.jsonl")
 	if err != nil {
@@ -210,6 +212,7 @@ func TestNegotiatedInboxFixturesFailClosed(t *testing.T) {
 }
 
 func TestNegotiatedInboxWriteBoundAndFailure(t *testing.T) {
+	isolateAdapterTest(t)
 	// P6: "2 s bounded write" is inside the fresh 15 s observation deadline.
 	a, _, frames, pushes, ctx := inboxAdapter(t, true)
 	start := time.Now()
@@ -237,6 +240,7 @@ func TestNegotiatedInboxWriteBoundAndFailure(t *testing.T) {
 }
 
 func TestNegotiatedInboxEligibilityChangesAndNoUnsafeWrite(t *testing.T) {
+	isolateAdapterTest(t)
 	// P2/P5: "semantic-change rule; rearm on change"; D031: no auth to an invalid peer.
 	a, _, frames, pushes, _ := inboxAdapter(t, false)
 	a.pollDeliveries()
@@ -305,6 +309,7 @@ func TestNegotiatedInboxEligibilityChangesAndNoUnsafeWrite(t *testing.T) {
 }
 
 func TestNegotiatedInboxPeerPIDMismatch(t *testing.T) {
+	isolateAdapterTest(t)
 	a, _, frames, pushes, ctx := inboxAdapter(t, false)
 	tx := a.crossSession
 	wrong := os.Getpid() + 100000
@@ -328,6 +333,7 @@ func TestNegotiatedInboxPeerPIDMismatch(t *testing.T) {
 }
 
 func TestNegotiatedInboxNoSelfFallbackOrRetry(t *testing.T) {
+	isolateAdapterTest(t)
 	// P3: adapter self-fallback and probe latches are legacy only.
 	a, out, frames, pushes, ctx := inboxAdapter(t, false)
 	raw, _ := json.Marshal(ipc.DeliverMsg{Op: ipc.OpDeliver, Token: "channel-expired", Transport: "channel", DeadlineMS: 100, Inbound: c3types.Inbound{Text: "hello"}})

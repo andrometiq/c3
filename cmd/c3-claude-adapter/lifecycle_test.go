@@ -21,6 +21,7 @@ import (
 // of the MCP wire layer. This test exercises the same logic with an inline
 // fast-budget mini-watchdog.
 func TestIdleStartupWatchdog_CancelsWhenNoDispatch(t *testing.T) {
+	isolateAdapterTest(t)
 	a := newAdapter()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -55,6 +56,7 @@ func TestIdleStartupWatchdog_CancelsWhenNoDispatch(t *testing.T) {
 // a long-running session that goes quiet (no inbound, no tool calls)
 // would self-destruct.
 func TestIdleStartupWatchdog_StaysQuietAfterDispatch(t *testing.T) {
+	isolateAdapterTest(t)
 	a := newAdapter()
 	a.dispatched.Store(true)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -91,6 +93,7 @@ func TestIdleStartupWatchdog_StaysQuietAfterDispatch(t *testing.T) {
 // connecting an in-memory client/server pair and issuing a ping; the
 // middleware must observe the call before it reaches any handler.
 func TestDispatch_SetsDispatchedFlag(t *testing.T) {
+	isolateAdapterTest(t)
 	a := newAdapter()
 	if a.dispatched.Load() {
 		t.Fatal("dispatched should start false")
@@ -129,6 +132,7 @@ func TestDispatch_SetsDispatchedFlag(t *testing.T) {
 // in the stored copy so a post-broker-bounce replay does not silently force-evict
 // whoever holds the route (last-reconnector-wins). Other fields survive.
 func TestRememberAttach_SanitizesSteal(t *testing.T) {
+	isolateAdapterTest(t)
 	a := newAdapter()
 	tid := int64(914)
 	a.rememberAttach(ipc.AttachReq{Op: ipc.OpAttach, Name: "c3", TopicID: &tid, Group: "main", Steal: true})
@@ -156,6 +160,7 @@ func TestRememberAttach_SanitizesSteal(t *testing.T) {
 // We don't need a real broker; net.Pipe gives us an in-memory peer
 // from which we can read the frame the adapter writes.
 func TestReplayLastAttach_ResendsLastAttachWithReplayFlag(t *testing.T) {
+	isolateAdapterTest(t)
 	a := newAdapter()
 
 	pipeA, pipeB := net.Pipe()
@@ -222,6 +227,7 @@ func TestReplayLastAttach_ResendsLastAttachWithReplayFlag(t *testing.T) {
 // user ever attached must not blast garbage at the broker. The early-
 // return on `lastAttach == nil` should keep the wire silent.
 func TestReplayLastAttach_NoopWithoutPriorAttach(t *testing.T) {
+	isolateAdapterTest(t)
 	a := newAdapter()
 	pipeA, pipeB := net.Pipe()
 	defer pipeA.Close()

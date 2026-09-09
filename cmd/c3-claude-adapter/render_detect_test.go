@@ -26,6 +26,7 @@ func fakeTree(cmdlines map[int][]string, parents map[int]int) procReaders {
 }
 
 func TestDetectRenderCapable(t *testing.T) {
+	isolateAdapterTest(t)
 	claudeFlag := []string{"claude", devChannelsFlag, "plugin:c3@c3"}
 	claudeFlagResume := []string{"claude", devChannelsFlag, "plugin:c3@c3", "--resume"}
 	claudeNoFlag := []string{"claude"}
@@ -151,6 +152,7 @@ func TestDetectRenderCapable(t *testing.T) {
 }
 
 func TestCmdlineHasDevChannelForC3(t *testing.T) {
+	isolateAdapterTest(t)
 	yes := [][]string{
 		{"claude", devChannelsFlag, "plugin:c3@c3"},
 		{"claude", devChannelsFlag, "plugin:c3@other"},
@@ -180,6 +182,7 @@ func TestCmdlineHasDevChannelForC3(t *testing.T) {
 }
 
 func TestIsClaudeHost(t *testing.T) {
+	isolateAdapterTest(t)
 	hosts := [][]string{
 		{"claude"},
 		{"/usr/bin/claude", "--resume"},
@@ -212,6 +215,7 @@ func TestIsClaudeHost(t *testing.T) {
 }
 
 func TestIsCursorHost(t *testing.T) {
+	isolateAdapterTest(t)
 	yes := [][]string{
 		{"/home/u/.local/bin/agent", "--use-system-ca", "/home/u/.local/share/cursor-agent/versions/2026.07.23/index.js"},
 		{"cursor-agent"},
@@ -235,6 +239,7 @@ func TestIsCursorHost(t *testing.T) {
 }
 
 func TestDetectCursorHost_AncestorWalk(t *testing.T) {
+	isolateAdapterTest(t)
 	tree := map[int]struct {
 		args []string
 		ppid int
@@ -267,6 +272,7 @@ func TestDetectCursorHost_AncestorWalk(t *testing.T) {
 // buildInstructions must carry the degraded-delivery warning only when the host
 // cannot render, and never on the capable fast path.
 func TestBuildInstructions_DegradedWarningGate(t *testing.T) {
+	isolateAdapterTest(t)
 	a := newAdapter()
 	a.renderRoute = ipc.RenderRoute{State: ipc.RenderCapable}
 	if got := a.buildInstructions(); containsSub(got, "fetch_queue` tool to retrieve") {
@@ -290,6 +296,7 @@ func containsSub(s, sub string) bool {
 
 // Hello keeps the legacy gate conservative and reports all three route states.
 func TestHello_ReportsCannotRenderChannels(t *testing.T) {
+	isolateAdapterTest(t)
 	for _, tc := range []struct {
 		name         string
 		state        string
@@ -354,6 +361,7 @@ func TestHello_ReportsCannotRenderChannels(t *testing.T) {
 }
 
 func TestNodeOptionsCannotHideNearestClaude(t *testing.T) {
+	isolateAdapterTest(t)
 	for _, options := range [][]string{
 		{"--max-old-space-size=4096"}, {"--no-warnings", "--max-old-space-size=4096"},
 		{"--require", "/work/preload.js"}, {"--unknown-value-taking", "value"}, {"--eval", "something"}, {"--eval=something"}, {"--print=1"},
@@ -371,6 +379,7 @@ func TestNodeOptionsCannotHideNearestClaude(t *testing.T) {
 }
 
 func TestNodeOptionsIdentifyFlaggedScript(t *testing.T) {
+	isolateAdapterTest(t)
 	args := []string{"node", "--no-warnings", "--max-old-space-size=4096", "/work/node_modules/@anthropic-ai/claude-code/cli.js", devChannelsFlag + "=plugin:c3@c3"}
 	readers := fakeTree(map[int][]string{3: args, 2: {"claude"}}, map[int]int{4: 3, 3: 2, 2: 1})
 	if route := detectRenderRoute("linux", 4, readers); route.State != ipc.RenderCapable {

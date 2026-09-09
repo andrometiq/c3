@@ -20,6 +20,7 @@ func realHostPeerIntakeReceipt(t *testing.T, index int, marker, attempt string) 
 }
 
 func TestCrossSessionRealHostPeerIntakeReceipt(t *testing.T) {
+	isolateAdapterTest(t)
 	for _, index := range []int{0, 2} {
 		name := "enqueue"
 		if index == 2 {
@@ -106,6 +107,7 @@ func TestCrossSessionRealHostPeerIntakeReceipt(t *testing.T) {
 }
 
 func TestCrossSessionRealHostPeerReceipt(t *testing.T) {
+	isolateAdapterTest(t)
 	raw, err := os.ReadFile("testdata/claude-2.1.263-peer.jsonl")
 	if err != nil {
 		t.Fatal(err)
@@ -149,6 +151,7 @@ func TestCrossSessionRealHostPeerReceipt(t *testing.T) {
 }
 
 func TestCrossSessionReceiptWithHostPrefix(t *testing.T) {
+	isolateAdapterTest(t)
 	// Exercise block parsing behind the verified host prefix and peer provenance.
 	for _, tc := range []struct {
 		name, content string
@@ -196,6 +199,7 @@ func TestCrossSessionReceiptWithHostPrefix(t *testing.T) {
 }
 
 func TestCrossSessionReceiptProvenance(t *testing.T) {
+	isolateAdapterTest(t)
 	block := `<channel source="plugin:c3:c3" c3_delivery_id="T" c3_attempt="cross-session:1">body</channel>`
 	for _, tc := range []struct {
 		name          string
@@ -251,6 +255,7 @@ func TestCrossSessionReceiptProvenance(t *testing.T) {
 }
 
 func TestCrossSessionRejectedCandidateDebugRedactsSecrets(t *testing.T) {
+	isolateAdapterTest(t)
 	old := slog.Default()
 	oldWriter, oldFlags := log.Writer(), log.Flags()
 	defer func() { slog.SetDefault(old); log.SetOutput(oldWriter); log.SetFlags(oldFlags) }()
@@ -278,6 +283,7 @@ func TestCrossSessionRejectedCandidateDebugRedactsSecrets(t *testing.T) {
 }
 
 func TestCrossSessionRejectedCandidateDebugSwitch(t *testing.T) {
+	isolateAdapterTest(t)
 	oldWriter, oldFlags := log.Writer(), log.Flags()
 	oldLevel := slog.SetLogLoggerLevel(slog.LevelInfo)
 	defer func() {

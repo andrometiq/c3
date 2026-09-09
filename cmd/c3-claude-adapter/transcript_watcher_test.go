@@ -99,6 +99,7 @@ func pendingTranscriptCount(a *adapter) int {
 }
 
 func TestRequestIDCandidatesVectors(t *testing.T) {
+	isolateAdapterTest(t)
 	// These three candidate-zero pairs come from same-session broker and
 	// transcript records observed within three seconds of one another. They are
 	// real host vectors, not values derived by this implementation.
@@ -133,6 +134,7 @@ func TestRequestIDCandidatesVectors(t *testing.T) {
 }
 
 func TestTranscriptWatcher_MatchesOutcomesMultipleResultsAndRemoves(t *testing.T) {
+	isolateAdapterTest(t)
 	a, peer := adapterWithConn(t)
 	t.Setenv("CLAUDE_CODE_SESSION_ID", "")
 	path := filepath.Join(t.TempDir(), "session.jsonl")
@@ -170,6 +172,7 @@ func TestTranscriptWatcher_MatchesOutcomesMultipleResultsAndRemoves(t *testing.T
 }
 
 func TestTranscriptWatcher_PartialLineIsNotConsumed(t *testing.T) {
+	isolateAdapterTest(t)
 	a, peer := adapterWithConn(t)
 	t.Setenv("CLAUDE_CODE_SESSION_ID", "")
 	path := filepath.Join(t.TempDir(), "session.jsonl")
@@ -203,6 +206,7 @@ func TestTranscriptWatcher_PartialLineIsNotConsumed(t *testing.T) {
 }
 
 func TestTranscriptWatcher_FileLifecycle(t *testing.T) {
+	isolateAdapterTest(t)
 	t.Run("missing then created", func(t *testing.T) {
 		a, peer := adapterWithConn(t)
 		t.Setenv("CLAUDE_CODE_SESSION_ID", "")
@@ -253,6 +257,7 @@ func TestTranscriptWatcher_FileLifecycle(t *testing.T) {
 }
 
 func TestTranscriptWatcher_ContentStringAndOldSubagentAreIgnored(t *testing.T) {
+	isolateAdapterTest(t)
 	a := newTranscriptTestAdapter(t)
 	dir := t.TempDir()
 	path := filepath.Join(dir, "session.jsonl")
@@ -303,6 +308,7 @@ func TestTranscriptWatcher_ContentStringAndOldSubagentAreIgnored(t *testing.T) {
 }
 
 func TestParseTranscriptToolResults_IsErrorShapesAreIndependent(t *testing.T) {
+	isolateAdapterTest(t)
 	line := transcriptToolResultLine(
 		map[string]any{"type": "tool_result", "tool_use_id": "toolu_absent"},
 		map[string]any{"type": "tool_result", "tool_use_id": "toolu_false", "is_error": false},
@@ -326,6 +332,7 @@ func TestParseTranscriptToolResults_IsErrorShapesAreIndependent(t *testing.T) {
 }
 
 func TestTranscriptWatcher_SubagentTranscriptSettles(t *testing.T) {
+	isolateAdapterTest(t)
 	a, peer := adapterWithConn(t)
 	t.Setenv("CLAUDE_CODE_SESSION_ID", "")
 	dir := t.TempDir()
@@ -350,6 +357,7 @@ func TestTranscriptWatcher_SubagentTranscriptSettles(t *testing.T) {
 }
 
 func TestTranscriptWatcher_OversizedLineAndFollowingLine(t *testing.T) {
+	isolateAdapterTest(t)
 	a, peer := adapterWithConn(t)
 	t.Setenv("CLAUDE_CODE_SESSION_ID", "")
 	path := filepath.Join(t.TempDir(), "session.jsonl")
@@ -378,6 +386,7 @@ func TestTranscriptWatcher_OversizedLineAndFollowingLine(t *testing.T) {
 }
 
 func TestTranscriptWatcher_NeverReadsBeforeCapturedOffset(t *testing.T) {
+	isolateAdapterTest(t)
 	a := newTranscriptTestAdapter(t)
 	path := filepath.Join(t.TempDir(), "session.jsonl")
 	toolUseID := "toolu_before_offset"
@@ -413,6 +422,7 @@ func TestTranscriptWatcher_NeverReadsBeforeCapturedOffset(t *testing.T) {
 }
 
 func TestTranscriptWatcher_BrokerVerdictRemovesPending(t *testing.T) {
+	isolateAdapterTest(t)
 	a, peer := adapterWithConn(t)
 	t.Setenv("CLAUDE_CODE_SESSION_ID", "")
 	path := filepath.Join(t.TempDir(), "session.jsonl")
@@ -448,6 +458,7 @@ func TestTranscriptWatcher_BrokerVerdictRemovesPending(t *testing.T) {
 }
 
 func TestTranscriptWatcher_RetriesObservedSettleAfterReconnect(t *testing.T) {
+	isolateAdapterTest(t)
 	a, peer := adapterWithConn(t)
 	t.Setenv("CLAUDE_CODE_SESSION_ID", "")
 	path := filepath.Join(t.TempDir(), "session.jsonl")
@@ -475,6 +486,7 @@ func TestTranscriptWatcher_RetriesObservedSettleAfterReconnect(t *testing.T) {
 }
 
 func TestTranscriptWatcher_LifecycleAndTTL(t *testing.T) {
+	isolateAdapterTest(t)
 	a := newTranscriptTestAdapter(t)
 	path := filepath.Join(t.TempDir(), "missing.jsonl")
 	a.addPendingPermission("abcde", permissionSnapshot{
@@ -494,6 +506,7 @@ func TestTranscriptWatcher_LifecycleAndTTL(t *testing.T) {
 }
 
 func TestTranscriptWatcher_TTLExpiryLogsMissingSettle(t *testing.T) {
+	isolateAdapterTest(t)
 	sink := captureProtoLog(t)
 	a := newTranscriptTestAdapter(t)
 	path := filepath.Join(t.TempDir(), "missing.jsonl")
@@ -508,6 +521,7 @@ func TestTranscriptWatcher_TTLExpiryLogsMissingSettle(t *testing.T) {
 }
 
 func TestPermissionTranscriptLateHandoffLogsUnwatchedCount(t *testing.T) {
+	isolateAdapterTest(t)
 	sink := captureProtoLog(t)
 	a := newTranscriptTestAdapter(t)
 	a.addPendingPermission("first", permissionSnapshot{since: time.Now()})
@@ -529,6 +543,7 @@ func TestPermissionTranscriptLateHandoffLogsUnwatchedCount(t *testing.T) {
 }
 
 func TestOldBrokerPermissionSettledErrorDisablesOnce(t *testing.T) {
+	isolateAdapterTest(t)
 	sink := captureProtoLog(t)
 	a := newTranscriptTestAdapter(t)
 	path := filepath.Join(t.TempDir(), "session.jsonl")
@@ -561,6 +576,7 @@ func waitPermissionWatcherState(t *testing.T, a *adapter, want bool) {
 }
 
 func TestTranscriptPathRefreshesForSameStableSession(t *testing.T) {
+	isolateAdapterTest(t)
 	a := newTranscriptTestAdapter(t)
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	a.setCurrentStableIdentity(sessionhandoff.Entry{
@@ -579,6 +595,7 @@ func TestTranscriptPathRefreshesForSameStableSession(t *testing.T) {
 }
 
 func TestAdvanceIdentityHandoff_KeepsKnownTranscriptPathOnEmptyRewrite(t *testing.T) {
+	isolateAdapterTest(t)
 	a := newTranscriptTestAdapter(t)
 	known := filepath.Join(t.TempDir(), "known.jsonl")
 	a.setCurrentStableIdentity(sessionhandoff.Entry{
@@ -594,6 +611,7 @@ func TestAdvanceIdentityHandoff_KeepsKnownTranscriptPathOnEmptyRewrite(t *testin
 }
 
 func TestCapturePermissionSnapshotReadsHandoffAndFileOffsets(t *testing.T) {
+	isolateAdapterTest(t)
 	a := newAdapter()
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	t.Setenv("CLAUDE_CODE_SESSION_ID", "adapter-instance")
@@ -623,6 +641,7 @@ func TestCapturePermissionSnapshotReadsHandoffAndFileOffsets(t *testing.T) {
 }
 
 func TestInterceptConn_CapturesOffsetBeforeAsyncPermissionRelay(t *testing.T) {
+	isolateAdapterTest(t)
 	a, peer := adapterWithConn(t)
 	t.Setenv("CLAUDE_CODE_SESSION_ID", "")
 	path := filepath.Join(t.TempDir(), "session.jsonl")
@@ -693,6 +712,7 @@ func TestInterceptConn_CapturesOffsetBeforeAsyncPermissionRelay(t *testing.T) {
 }
 
 func TestOversizedScannerDoesNotMatchEscapedContent(t *testing.T) {
+	isolateAdapterTest(t)
 	toolUseID := "toolu_literal"
 	var hashes []uint32
 	scanner := oversizedToolIDScanner{}

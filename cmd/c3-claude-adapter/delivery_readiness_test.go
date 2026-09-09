@@ -14,6 +14,7 @@ import (
 )
 
 func TestDeliveryHostReadinessPrerequisite(t *testing.T) {
+	isolateAdapterTest(t)
 	// G: "notifications/initialized ... AND notify transport present".
 	a, _, _ := liveFixture(t, ipc.RenderCapable)
 	a.initialRenderRoute = ipc.RenderRoute{State: ipc.RenderCapable}
@@ -40,6 +41,7 @@ func (*deliveryErrorConn) Write(context.Context, jsonrpc.Message) error {
 }
 
 func TestDeliveryNotifyFailureReportsImmediately(t *testing.T) {
+	isolateAdapterTest(t)
 	// G: "missing notify transport or a failed notify write ... failed immediately".
 	// Disable the receipt ticker: an implementation that waits for polling or
 	// expiry cannot pass. Both a missing wrapper and a missing inner connection
@@ -83,6 +85,7 @@ func TestDeliveryNotifyFailureReportsImmediately(t *testing.T) {
 }
 
 func TestDeliveryHostReadinessInitializedNotification(t *testing.T) {
+	isolateAdapterTest(t)
 	// An initialize request (or ping) alone does not establish host readiness.
 	a, _, _ := liveFixture(t, ipc.RenderCapable)
 	a.initialRenderRoute = ipc.RenderRoute{State: ipc.RenderCapable}

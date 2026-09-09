@@ -129,6 +129,7 @@ func appendPeerReceipt(t *testing.T, path, content string) {
 }
 
 func TestCrossSessionTransportFrames(t *testing.T) {
+	isolateAdapterTest(t)
 	tx, pushes := fakeInbox(t, nil, "")
 	content := "<channel c3_delivery_id=\"one\">\n/text & body\n</channel>"
 	if err := tx.Send(context.Background(), content, "11111111-2222-4333-8444-555555555555"); err != nil {
@@ -144,6 +145,7 @@ func TestCrossSessionTransportFrames(t *testing.T) {
 }
 
 func TestCrossSessionStartupCapturesOwnEnvironmentOnce(t *testing.T) {
+	isolateAdapterTest(t)
 	tx, pushes := fakeInbox(t, nil, "")
 	t.Setenv("XDG_RUNTIME_DIR", tx.runtimeDir)
 	t.Setenv("CLAUDE_CODE_MESSAGING_SOCKET", tx.socketPath)
@@ -170,6 +172,7 @@ func TestCrossSessionStartupCapturesOwnEnvironmentOnce(t *testing.T) {
 }
 
 func TestCrossSessionAttachReportsProbeAndLimits(t *testing.T) {
+	isolateAdapterTest(t)
 	t.Setenv("CLAUDE_CODE_SESSION_ID", "")
 	a, _, frames := liveFixture(t, ipc.RenderQueueOnly)
 	tx, _ := fakeInbox(t, nil, "")
@@ -200,6 +203,7 @@ func TestCrossSessionAttachReportsProbeAndLimits(t *testing.T) {
 }
 
 func TestCrossSessionTransportRejectsUnsafePaths(t *testing.T) {
+	isolateAdapterTest(t)
 	tx, _ := fakeInbox(t, nil, "")
 	outside, _ := fakeInbox(t, nil, "")
 	regular := filepath.Join(tx.runtimeDir, "file")
@@ -230,6 +234,7 @@ func TestCrossSessionTransportRejectsUnsafePaths(t *testing.T) {
 }
 
 func TestCrossSessionTransportBoundedClose(t *testing.T) {
+	isolateAdapterTest(t)
 	for _, kind := range []string{"stall", "response"} {
 		t.Run(kind, func(t *testing.T) {
 			var hold chan struct{}
@@ -255,6 +260,7 @@ func TestCrossSessionTransportBoundedClose(t *testing.T) {
 }
 
 func TestCrossSessionBlockMatchesHostFixture(t *testing.T) {
+	isolateAdapterTest(t)
 	raw, err := os.ReadFile("testdata/claude-2.1.263-channel.jsonl")
 	if err != nil {
 		t.Fatal(err)
@@ -285,6 +291,7 @@ func TestCrossSessionBlockMatchesHostFixture(t *testing.T) {
 }
 
 func TestCrossSessionEligibility(t *testing.T) {
+	isolateAdapterTest(t)
 	for _, tc := range []struct {
 		state string
 		env   bool
@@ -326,6 +333,7 @@ func TestCrossSessionEligibility(t *testing.T) {
 }
 
 func TestCrossSessionProbeReceiptAndAckOnce(t *testing.T) {
+	isolateAdapterTest(t)
 	a, output, frames := liveFixture(t, ipc.RenderQueueOnly)
 	tx, pushes := fakeInbox(t, nil, "")
 	a.crossSession = tx
@@ -377,6 +385,7 @@ func TestCrossSessionProbeReceiptAndAckOnce(t *testing.T) {
 }
 
 func TestCrossSessionReceiptAlsoRequiresCleanClose(t *testing.T) {
+	isolateAdapterTest(t)
 	for _, response := range []string{"", "unexpected"} {
 		t.Run(response, func(t *testing.T) {
 			a, _, frames := liveFixture(t, ipc.RenderQueueOnly)
@@ -420,6 +429,7 @@ func TestCrossSessionReceiptAlsoRequiresCleanClose(t *testing.T) {
 }
 
 func TestCrossSessionTimeoutAndFailureStopPushes(t *testing.T) {
+	isolateAdapterTest(t)
 	var logs safeBuffer
 	old := log.Writer()
 	log.SetOutput(&logs)
@@ -462,6 +472,7 @@ func TestCrossSessionTimeoutAndFailureStopPushes(t *testing.T) {
 }
 
 func TestCrossSessionChannelFirstOnReconnect(t *testing.T) {
+	isolateAdapterTest(t)
 	a, output, frames := liveFixture(t, ipc.RenderProbing)
 	a.deliveryHostInitialized.Store(true) // Reconnect of an already initialized host.
 	tx, pushes := fakeInbox(t, nil, "")
@@ -518,6 +529,7 @@ func TestCrossSessionChannelFirstOnReconnect(t *testing.T) {
 }
 
 func TestLiveReadbackHostIntakePreventsCrossSessionFallback(t *testing.T) {
+	isolateAdapterTest(t)
 	for _, tc := range []struct {
 		name  string
 		index int

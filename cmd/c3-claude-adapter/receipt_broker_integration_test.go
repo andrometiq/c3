@@ -20,6 +20,7 @@ import (
 // No host or daemon runs here: a real in-process broker owns persistence and
 // acknowledgement, while the supplied host record stands in for transcript IO.
 func TestReceiptBrokerLifecycle(t *testing.T) {
+	isolateAdapterTest(t)
 	for _, variant := range []string{"receipt", "enqueue receipt", "same route attach", "failed attach", "crash before receipt", "timeout fetch then death", "death before fetch"} {
 		t.Run(variant, func(t *testing.T) {
 			t.Setenv("CLAUDE_CODE_SESSION_ID", "")

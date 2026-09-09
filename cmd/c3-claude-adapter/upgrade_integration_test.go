@@ -18,6 +18,7 @@ import (
 )
 
 func TestUpgradePushAckExecHelloDeliveryOnce(t *testing.T) {
+	isolateAdapterTest(t)
 	for _, name := range []string{"C3_QUEUE_DIR", "XDG_CONFIG_HOME", "XDG_STATE_HOME"} {
 		t.Setenv(name, t.TempDir())
 	}

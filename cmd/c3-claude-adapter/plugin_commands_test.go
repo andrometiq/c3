@@ -8,6 +8,7 @@ import (
 )
 
 func TestOnTheGoCommandFiles(t *testing.T) {
+	isolateAdapterTest(t)
 	tests := []struct {
 		name string
 		want []string

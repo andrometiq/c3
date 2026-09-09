@@ -19,6 +19,7 @@ import (
 )
 
 func TestReviewUnrelatedUserSocketMustNotReceiveCredentials(t *testing.T) {
+	isolateAdapterTest(t)
 	tx, pushes := fakeInbox(t, nil, "")
 	// This is a same-user socket with no owning-host PID basename.
 	wrong := filepath.Join(filepath.Dir(tx.socketPath), "unrelated.sock")
@@ -37,6 +38,7 @@ func TestReviewUnrelatedUserSocketMustNotReceiveCredentials(t *testing.T) {
 }
 
 func TestReviewQuotedTextMustNotBeReceipt(t *testing.T) {
+	isolateAdapterTest(t)
 	block := `<channel source="plugin:c3:c3" c3_attempt="cross-session:1" c3_delivery_id="T">body</channel>`
 	for _, text := range []string{"Please explain this quote: " + block, "<!--" + block + "-->", `<wrapper note='` + block + `'>quoted</wrapper>`} {
 		line, _ := json.Marshal(map[string]any{"type": "user", "isMeta": true, "origin": map[string]any{"kind": "peer", "from": "c3"}, "message": map[string]any{"role": "user", "content": "Another Claude session sent a message:\n" + text}})
@@ -47,6 +49,7 @@ func TestReviewQuotedTextMustNotBeReceipt(t *testing.T) {
 }
 
 func TestReviewLateChannelReceiptMustNotConfirmCrossSession(t *testing.T) {
+	isolateAdapterTest(t)
 	a, output, frames := liveFixture(t, ipc.RenderProbing)
 	tx, pushes := fakeInbox(t, nil, "")
 	a.crossSession = tx
@@ -81,6 +84,7 @@ func TestReviewLateChannelReceiptMustNotConfirmCrossSession(t *testing.T) {
 }
 
 func TestCrossSessionPeerPIDMismatchWritesZeroBytes(t *testing.T) {
+	isolateAdapterTest(t)
 	tx, pushes := fakeInbox(t, nil, "")
 	// Rename to the expected parent PID, but keep the listener in this process.
 	tx.hostPID = os.Getppid()
@@ -106,6 +110,7 @@ func TestCrossSessionPeerPIDMismatchWritesZeroBytes(t *testing.T) {
 }
 
 func TestCrossSessionOwningAncestor(t *testing.T) {
+	isolateAdapterTest(t)
 	for _, tc := range []struct {
 		name    string
 		args    map[int][]string
@@ -129,6 +134,7 @@ func TestCrossSessionOwningAncestor(t *testing.T) {
 }
 
 func TestCrossSessionOutboundCapBeforeAuth(t *testing.T) {
+	isolateAdapterTest(t)
 	for _, body := range []string{strings.Repeat("x", ipc.MaxFrameSize), strings.Repeat("<", ipc.MaxFrameSize/6)} {
 		tx, pushes := fakeInbox(t, nil, "")
 		if err := tx.Send(context.Background(), body, ""); err == nil || !strings.Contains(err.Error(), "exceeds IPC cap") {
@@ -143,6 +149,7 @@ func TestCrossSessionOutboundCapBeforeAuth(t *testing.T) {
 }
 
 func TestCrossSessionReceiptCannotConfirmChannelAttempt(t *testing.T) {
+	isolateAdapterTest(t)
 	a, output, frames := liveFixture(t, ipc.RenderProbing)
 	a.liveTimeout = time.Second
 	pushLive(t, a, "same-token")
@@ -185,6 +192,7 @@ func appendTranscriptContent(t *testing.T, path, content string, meta bool) {
 }
 
 func TestCrossSessionCredentialsRequirePIDAndUID(t *testing.T) {
+	isolateAdapterTest(t)
 	pid, uid := os.Getpid(), uint32(os.Getuid())
 	for _, tc := range []struct {
 		host, peer int
@@ -200,6 +208,7 @@ func TestCrossSessionCredentialsRequirePIDAndUID(t *testing.T) {
 }
 
 func TestCrossSessionValidatesConnectedDescriptor(t *testing.T) {
+	isolateAdapterTest(t)
 	tx, _ := fakeInbox(t, nil, "")
 	conn, err := net.Dial("unix", tx.socketPath)
 	if err != nil {
@@ -228,6 +237,7 @@ func TestCrossSessionValidatesConnectedDescriptor(t *testing.T) {
 }
 
 func TestCrossSessionUsesSessionStartUUID(t *testing.T) {
+	isolateAdapterTest(t)
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	t.Setenv("CLAUDE_CODE_SESSION_ID", "adapter-instance")
 	sessionID := "11111111-2222-4333-8444-555555555555"
@@ -246,6 +256,7 @@ func TestCrossSessionUsesSessionStartUUID(t *testing.T) {
 }
 
 func TestCrossSessionAttemptCounterSurvivesReprobe(t *testing.T) {
+	isolateAdapterTest(t)
 	a, _, frames := liveFixture(t, ipc.RenderQueueOnly)
 	tx, pushes := fakeInbox(t, nil, "")
 	a.crossSession = tx

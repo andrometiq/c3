@@ -77,6 +77,7 @@ func adapterWithConn(t *testing.T) (*adapter, *ipc.Conn) {
 // C1 (adapter side): a TEXT push must send a delivered-ack so the broker Consumes
 // the queued copy.
 func TestHandleInbound_TextPushSendsDeliveredAck(t *testing.T) {
+	isolateAdapterTest(t)
 	a, peer := adapterWithConn(t)
 
 	msg := ipc.InboundMsg{
@@ -102,6 +103,7 @@ func TestHandleInbound_TextPushSendsDeliveredAck(t *testing.T) {
 // queued, so the adapter must NOT send a delivered-ack — otherwise handleConsume
 // would drop a real queued backlog message the event never delivered.
 func TestHandleInbound_EventPushSkipsDeliveredAck(t *testing.T) {
+	isolateAdapterTest(t)
 	a, peer := adapterWithConn(t)
 
 	event := ipc.InboundMsg{
@@ -129,6 +131,7 @@ func TestHandleInbound_EventPushSkipsDeliveredAck(t *testing.T) {
 // the delivered-ack. The existing ack tests assert the ack frame; this asserts
 // the nudge text lands on the notify push itself.
 func TestHandleInbound_PendingDecoratesPushWithNudge(t *testing.T) {
+	isolateAdapterTest(t)
 	a := newAdapter()
 	seedLiveTranscript(t, a)
 

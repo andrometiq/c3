@@ -36,6 +36,7 @@ func multiRouteResultText(t *testing.T, result *mcp.CallToolResult) string {
 }
 
 func TestMultiRouteToolSchemas(t *testing.T) {
+	isolateAdapterTest(t)
 	a := newAdapter()
 	srv := a.buildMCPServer()
 	clientTransport, serverTransport := mcp.NewInMemoryTransports()
@@ -89,6 +90,7 @@ func TestMultiRouteToolSchemas(t *testing.T) {
 }
 
 func TestOriginTagAbsentSingleRoute(t *testing.T) {
+	isolateAdapterTest(t)
 	a := newAdapter()
 	topicID := int64(281)
 	telegram := ipc.RouteRef{Channel: "telegram", ChatID: -100, TopicID: &topicID, Name: "c3"}
@@ -100,6 +102,7 @@ func TestOriginTagAbsentSingleRoute(t *testing.T) {
 }
 
 func TestOriginTagPresentMultiRoute(t *testing.T) {
+	isolateAdapterTest(t)
 	a := newAdapter()
 	topicID := int64(281)
 	telegram := ipc.RouteRef{Channel: "telegram", ChatID: -100, TopicID: &topicID, Name: "c3"}
@@ -118,6 +121,7 @@ func TestOriginTagPresentMultiRoute(t *testing.T) {
 }
 
 func TestOutputToolSetsRoute(t *testing.T) {
+	isolateAdapterTest(t)
 	left, right := net.Pipe()
 	defer left.Close()
 	defer right.Close()
@@ -179,6 +183,7 @@ func TestOutputToolSetsRoute(t *testing.T) {
 }
 
 func TestOutputToolBrokerErrorFailsPendingWait(t *testing.T) {
+	isolateAdapterTest(t)
 	adapterSide, brokerSide := net.Pipe()
 	a := newAdapter()
 	a.conn = ipc.NewConn(adapterSide)
@@ -237,6 +242,7 @@ func TestOutputToolBrokerErrorFailsPendingWait(t *testing.T) {
 }
 
 func TestOutputToolSilentBrokerTimesOut(t *testing.T) {
+	isolateAdapterTest(t)
 	adapterSide, brokerSide := net.Pipe()
 	defer adapterSide.Close()
 	defer brokerSide.Close()
@@ -287,6 +293,7 @@ func TestOutputToolSilentBrokerTimesOut(t *testing.T) {
 }
 
 func TestDetachTargetReleasesOne(t *testing.T) {
+	isolateAdapterTest(t)
 	left, right := net.Pipe()
 	defer left.Close()
 	defer right.Close()
@@ -347,6 +354,7 @@ func TestDetachTargetReleasesOne(t *testing.T) {
 }
 
 func TestReplyChannelArgIsForwarded(t *testing.T) {
+	isolateAdapterTest(t)
 	left, right := net.Pipe()
 	defer left.Close()
 	defer right.Close()
@@ -379,6 +387,7 @@ func TestReplyChannelArgIsForwarded(t *testing.T) {
 }
 
 func TestFetchQueueChannelSelectorIsForwarded(t *testing.T) {
+	isolateAdapterTest(t)
 	left, right := net.Pipe()
 	defer left.Close()
 	defer right.Close()

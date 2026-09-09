@@ -17,6 +17,7 @@ import (
 // silently and lost the recovery. The background watch must keep looking and
 // surface a handoff that lands AFTER the watcher started polling.
 func TestWatchForHandoff_FiresOnLateArrival(t *testing.T) {
+	isolateAdapterTest(t)
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	const inst = "inst-late"
 
@@ -55,6 +56,7 @@ func TestWatchForHandoff_FiresOnLateArrival(t *testing.T) {
 // session that never gets a handoff (the hook never ran / not a resume) must let
 // the watch expire cleanly within its budget — no fire, no hang, no harm.
 func TestWatchForHandoff_ExpiresCleanlyWhenNoHandoff(t *testing.T) {
+	isolateAdapterTest(t)
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	a := newAdapter()
 
@@ -72,6 +74,7 @@ func TestWatchForHandoff_ExpiresCleanlyWhenNoHandoff(t *testing.T) {
 // must comfortably outlast the old ~10s fixed window that silently missed the
 // late hook writes.
 func TestRecoverWatchBudget_OutlastsOldWindow(t *testing.T) {
+	isolateAdapterTest(t)
 	if recoverWatchBudget <= 10*time.Second {
 		t.Fatalf("recoverWatchBudget=%s must outlast the old ~10s fixed window", recoverWatchBudget)
 	}
@@ -100,6 +103,7 @@ func waitLastAttach(t *testing.T, a *adapter) ipc.AttachReq {
 // onto a fresh broker can silently bind a TOPIC literally named "dm" (which is why
 // the disambiguate_dm flow exists). resp.TopicID==nil is the DM signal.
 func TestFireRecover_RemembersDMByTargetNotName(t *testing.T) {
+	isolateAdapterTest(t)
 	a := newAdapter()
 	pipeA, pipeB := net.Pipe()
 	defer pipeA.Close()
@@ -134,6 +138,7 @@ func TestFireRecover_RemembersDMByTargetNotName(t *testing.T) {
 // id-addressed ({TopicID, Group}), not by {Name, Group}, so a fresh-broker replay
 // re-claims it via attachByTopicID even across groups.
 func TestFireRecover_RemembersTopicById(t *testing.T) {
+	isolateAdapterTest(t)
 	a := newAdapter()
 	pipeA, pipeB := net.Pipe()
 	defer pipeA.Close()
@@ -167,6 +172,7 @@ func TestFireRecover_RemembersTopicById(t *testing.T) {
 // fireRecover, but the broker must never see a duplicate RecoverSessionReq for
 // the same session.
 func TestFireRecover_SendsOnceIdempotent(t *testing.T) {
+	isolateAdapterTest(t)
 	a := newAdapter()
 	pipeA, pipeB := net.Pipe()
 	defer pipeA.Close()

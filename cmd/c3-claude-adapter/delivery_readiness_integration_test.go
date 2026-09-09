@@ -18,6 +18,7 @@ import (
 )
 
 func TestDeliveryStartupHelloBeforeHostInitialized(t *testing.T) {
+	isolateAdapterTest(t)
 	// G: "hello_ack before host initialize → no attempt; after initialized →
 	// re-hello → offer → deliver works", with backlog already durable at hello.
 	for _, transport := range []string{"channel", "inbox"} {

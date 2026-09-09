@@ -58,6 +58,7 @@ func resultText(t *testing.T, res *mcp.CallToolResult) string {
 // one-per-line rendering keeps them unambiguously separable, where the old
 // ", " join did not.
 func TestRenderAskAnswer(t *testing.T) {
+	isolateAdapterTest(t)
 	cases := []struct {
 		name string
 		ans  ipc.AskAnswer
@@ -87,6 +88,7 @@ func TestRenderAskAnswer(t *testing.T) {
 // OK, then pushes the tapped answer as an OpAskResult — and the tool returns that
 // answer string ("B") as its result.
 func TestAskTool_ReturnsTappedAnswer(t *testing.T) {
+	isolateAdapterTest(t)
 	a, peer := adapterWithConn(t)
 
 	resultCh := make(chan *mcp.CallToolResult, 1)
@@ -139,6 +141,7 @@ func TestAskTool_ReturnsTappedAnswer(t *testing.T) {
 // timeout the tool returns a (non-error) result that reports the timeout so the
 // agent can recover.
 func TestAskTool_Timeout(t *testing.T) {
+	isolateAdapterTest(t)
 	prev := askAnswerTimeout
 	askAnswerTimeout = 30 * time.Millisecond
 	defer func() { askAnswerTimeout = prev }()
@@ -180,6 +183,7 @@ func TestAskTool_Timeout(t *testing.T) {
 // ask-before-attach / oversized keyboard) must return the broker's error as the
 // tool result immediately, without waiting for the answer timeout.
 func TestAskTool_BailsFastOnRegisterFailure(t *testing.T) {
+	isolateAdapterTest(t)
 	a, peer := adapterWithConn(t)
 
 	resultCh := make(chan *mcp.CallToolResult, 1)
@@ -217,6 +221,7 @@ func TestAskTool_BailsFastOnRegisterFailure(t *testing.T) {
 // TestAskTool_RequiresOptions: an ask without options is rejected locally with a
 // clear error (no broker round-trip) — free-text questions are not yet supported.
 func TestAskTool_RequiresOptions(t *testing.T) {
+	isolateAdapterTest(t)
 	a, _ := adapterWithConn(t)
 	res, _ := a.toolAsk(context.Background(), askRequest(t, "Free text?", nil))
 	if !res.IsError {
@@ -229,6 +234,7 @@ func TestAskTool_RequiresOptions(t *testing.T) {
 // bulleted list (FIX-2 — one option per line, so options that contain commas stay
 // separable; a plain ", " join could not be re-split by the agent).
 func TestAskTool_MultiSelect_ReturnsList(t *testing.T) {
+	isolateAdapterTest(t)
 	a, peer := adapterWithConn(t)
 
 	resultCh := make(chan *mcp.CallToolResult, 1)
@@ -274,6 +280,7 @@ func TestAskTool_MultiSelect_ReturnsList(t *testing.T) {
 // TestAskTool_Skip_ReturnsSkipped: an ask with allow_skip:true forwards the flag
 // and, when the broker pushes Skipped, the tool reports a skip to the agent.
 func TestAskTool_Skip_ReturnsSkipped(t *testing.T) {
+	isolateAdapterTest(t)
 	a, peer := adapterWithConn(t)
 
 	resultCh := make(chan *mcp.CallToolResult, 1)
@@ -320,6 +327,7 @@ func TestAskTool_Skip_ReturnsSkipped(t *testing.T) {
 // supported; requesting either returns a local tool error without a broker
 // round-trip (so the agent learns it must use single/multi-select).
 func TestAskTool_RejectsUnsupported(t *testing.T) {
+	isolateAdapterTest(t)
 	a, _ := adapterWithConn(t)
 
 	res, _ := a.toolAsk(context.Background(), askRequestRaw(t, map[string]any{

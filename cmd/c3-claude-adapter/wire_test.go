@@ -28,6 +28,7 @@ import (
 // code path that constructs the live MCP server (buildMCPServer) and
 // confirm Implementation.Name + experimental capability declaration.
 func TestServerInfoName(t *testing.T) {
+	isolateAdapterTest(t)
 	if adapterName != "c3" {
 		t.Fatalf("adapterName must be %q to match .mcp.json key; got %q", "c3", adapterName)
 	}
@@ -148,6 +149,7 @@ func TestServerInfoName(t *testing.T) {
 // handleInbound, and verify the bytes written to the SDK's stdout match
 // the channel-notification shape Claude Code expects.
 func TestHandleInboundEndToEnd(t *testing.T) {
+	isolateAdapterTest(t)
 	tid := int64(914)
 	in := c3types.Inbound{
 		Channel:   "telegram",
@@ -265,6 +267,7 @@ func claudeFrameContent(t *testing.T, raw []byte) string {
 }
 
 func TestHandleInboundOriginRouteTags(t *testing.T) {
+	isolateAdapterTest(t)
 	topicID := int64(281)
 	telegram := ipc.RouteRef{Channel: "telegram", ChatID: -100, TopicID: &topicID, Name: "c3"}
 	web := ipc.RouteRef{Channel: "web", ChatID: 42, Name: "web"}
@@ -320,6 +323,7 @@ func TestHandleInboundOriginRouteTags(t *testing.T) {
 // meta values are strings (per channels-reference.md), (c) no spurious fields,
 // (d) one trailing newline (line-framed).
 func TestChannelFrameWireBytes(t *testing.T) {
+	isolateAdapterTest(t)
 	tid := int64(914)
 	in := &c3types.Inbound{
 		Channel:   "telegram",
@@ -449,6 +453,7 @@ func TestChannelFrameWireBytes(t *testing.T) {
 // human-readable content string and string-only meta (the load-bearing contract:
 // Claude Code silently drops a frame with non-string meta). P4.
 func TestChannelFrame_PollResultEvent(t *testing.T) {
+	isolateAdapterTest(t)
 	in := &c3types.Inbound{
 		Channel:   "telegram",
 		ChatID:    -100,
@@ -505,6 +510,7 @@ func TestChannelFrame_PollResultEvent(t *testing.T) {
 // established" sentinel error rather than silently writing to a stale
 // reference. Closes report MINOR m2 (2026-05-19).
 func TestNotifyTransport_DisconnectClearsConn(t *testing.T) {
+	isolateAdapterTest(t)
 	var buf safeBuffer
 	tx := newNotifyTransport(&mcp.IOTransport{
 		Reader: nopCloseReader{strings.NewReader("")},
@@ -537,6 +543,7 @@ func TestNotifyTransport_DisconnectClearsConn(t *testing.T) {
 // surfaces EVERY attachment to the agent: the first on the canonical unsuffixed
 // keys, extras under _N keys, plus attachment_count.
 func TestChannelFrame_MultipleAttachments(t *testing.T) {
+	isolateAdapterTest(t)
 	tid := int64(914)
 	in := &c3types.Inbound{
 		Channel:   "telegram",
@@ -587,6 +594,7 @@ func TestChannelFrame_MultipleAttachments(t *testing.T) {
 // single attachment must emit NO attachment_count and NO _N keys, so existing
 // single-attachment frames are byte-identical to before the multi-attachment fix.
 func TestChannelFrame_SingleAttachmentUnchanged(t *testing.T) {
+	isolateAdapterTest(t)
 	in := &c3types.Inbound{
 		Channel:   "telegram",
 		ChatID:    -100,
@@ -614,6 +622,7 @@ func TestChannelFrame_SingleAttachmentUnchanged(t *testing.T) {
 // fallback reports the count (so an uncaptioned album does not masquerade as a
 // single "(photo message)").
 func TestChannelFrame_MultipleAttachmentsEmptyTextLabel(t *testing.T) {
+	isolateAdapterTest(t)
 	in := &c3types.Inbound{
 		Channel:   "telegram",
 		ChatID:    -100,
@@ -639,6 +648,7 @@ func TestChannelFrame_MultipleAttachmentsEmptyTextLabel(t *testing.T) {
 }
 
 func TestChannelFrame_MergedBurstGolden(t *testing.T) {
+	isolateAdapterTest(t)
 	topicID := int64(914)
 	in := &c3types.Inbound{
 		Channel:   "telegram",
@@ -684,6 +694,7 @@ func TestChannelFrame_MergedBurstGolden(t *testing.T) {
 }
 
 func TestChannelFrame_MergedCaptionlessAlbumGolden(t *testing.T) {
+	isolateAdapterTest(t)
 	in := &c3types.Inbound{
 		Channel:   "telegram",
 		ChatID:    -100,
@@ -764,6 +775,7 @@ func TestChannelFrame_MergedCaptionlessAlbumGolden(t *testing.T) {
 }
 
 func TestChannelFrame_SingleMessageGoldenUnchanged(t *testing.T) {
+	isolateAdapterTest(t)
 	topicID := int64(914)
 	in := &c3types.Inbound{
 		Channel:   "telegram",
@@ -803,6 +815,7 @@ func TestChannelFrame_SingleMessageGoldenUnchanged(t *testing.T) {
 }
 
 func TestChannelFrame_DiscreteForwardedGolden(t *testing.T) {
+	isolateAdapterTest(t)
 	in := &c3types.Inbound{
 		ChatID:        -100,
 		MessageID:     301,

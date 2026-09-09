@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net"
 	"strings"
@@ -21,21 +22,15 @@ import (
 )
 
 func TestUpgradeToolContract(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
+	isolateAdapterTest(t)
 	a := newAdapter()
-	srv := a.buildMCPServer()
-	ct, st := mcp.NewInMemoryTransports()
-	ss, err := srv.Connect(ctx, st, nil)
+	pair := connectUpgradeSDK(t, a, a.buildMCPServer(), nil)
+	ctx := pair.ctx
+	cs, err := newTestClient().Connect(ctx, &scriptedTransport{conn: pair.conn}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer ss.Close()
-	cs, err := newTestClient().Connect(ctx, ct, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer cs.Close()
+	t.Cleanup(func() { pair.abort(); _ = cs.Close() })
 	list, err := cs.ListTools(ctx, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -76,8 +71,7 @@ func TestUpgradeToolContract(t *testing.T) {
 }
 
 func TestResumeSDKMethodMatrix(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
+	isolateAdapterTest(t)
 	state := upgradeResumeState{Contract: upgradeContract(), MCP: mcp.ServerSessionState{
 		InitializeParams: &mcp.InitializeParams{ProtocolVersion: "2025-03-26"}, InitializedParams: &mcp.InitializedParams{},
 	}}
@@ -91,8 +85,6 @@ func TestResumeSDKMethodMatrix(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ct, st := mcp.NewInMemoryTransports()
-	a.notifyTx = newNotifyTransport(st)
 	srv := a.buildMCPServer()
 	initialized := make(chan error, 1)
 	srv.AddReceivingMiddleware(func(next mcp.MethodHandler) mcp.MethodHandler {
@@ -104,16 +96,8 @@ func TestResumeSDKMethodMatrix(t *testing.T) {
 			return result, err
 		}
 	})
-	ss, err := srv.Connect(ctx, a.notifyTx, opts)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer ss.Close()
-	conn, err := ct.Connect(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer conn.Close()
+	pair := connectUpgradeSDK(t, a, srv, opts)
+	ctx, conn := pair.ctx, pair.conn
 	call := func(method, params string) json.RawMessage {
 		t.Helper()
 		id := mustID(t, method)
@@ -148,6 +132,11 @@ func TestResumeSDKMethodMatrix(t *testing.T) {
 		raw, err := peer.ReadFrame()
 		if err != nil {
 			brokerDone <- err
+			return
+		}
+		if op, err := ipc.PeekOp(raw); err != nil || op != ipc.OpFetchQueue {
+			brokerDone <- fmt.Errorf("expected fetch_queue, got %s: %v", op, err)
+			pair.abort()
 			return
 		}
 		var request ipc.FetchQueueReq
@@ -219,6 +208,7 @@ func (c *upgradeClosingConn) Close() error {
 }
 
 func TestUpgradeRetryConcurrentAdmission(t *testing.T) {
+	isolateAdapterTest(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	a, output, _ := liveFixture(t, ipc.RenderCapable)
@@ -292,6 +282,7 @@ func TestUpgradeRetryConcurrentAdmission(t *testing.T) {
 }
 
 func TestUpgradePausedReaderClose(t *testing.T) {
+	isolateAdapterTest(t)
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	wire := &upgradeTransport{resumeReads: make(chan struct{})}
@@ -310,25 +301,13 @@ func TestUpgradePausedReaderClose(t *testing.T) {
 	}
 }
 func TestResumeSDKCallWithoutInitialize(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
+	isolateAdapterTest(t)
 	a := newAdapter()
 	a.upgrade.resumed = true
-	// This raw client sends tools/call as its FIRST frame. The real SDK must
-	// dispatch the tool, rather than reject it as invalid during initialization.
-	ct, st := mcp.NewInMemoryTransports()
-	ss, err := a.buildMCPServer().Connect(ctx, st, &mcp.ServerSessionOptions{State: &mcp.ServerSessionState{InitializeParams: &mcp.InitializeParams{ProtocolVersion: "2025-03-26"}, InitializedParams: &mcp.InitializedParams{}}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer ss.Close()
-	conn, err := ct.Connect(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer conn.Close()
+	pair := connectUpgradeSDK(t, a, a.buildMCPServer(), &mcp.ServerSessionOptions{State: &mcp.ServerSessionState{InitializeParams: &mcp.InitializeParams{ProtocolVersion: "2025-03-26"}, InitializedParams: &mcp.InitializedParams{}}})
+	ctx, conn := pair.ctx, pair.conn
 	id := mustID(t, "retained-host-id-41")
-	if err = conn.Write(ctx, &jsonrpc.Request{ID: id, Method: "tools/call", Params: json.RawMessage(`{"name":"fetch_queue","arguments":{}}`)}); err != nil {
+	if err := conn.Write(ctx, &jsonrpc.Request{ID: id, Method: "tools/call", Params: json.RawMessage(`{"name":"fetch_queue","arguments":{}}`)}); err != nil {
 		t.Fatal(err)
 	}
 	msg, err := conn.Read(ctx)
@@ -358,6 +337,7 @@ func upgradeReadyAdapter(t *testing.T) (*adapter, *int) {
 	return a, calls
 }
 func TestUpgradeExecGating(t *testing.T) {
+	isolateAdapterTest(t)
 	if !upgradeSupported {
 		t.Skip("exec unsupported")
 	}
@@ -390,6 +370,7 @@ func TestUpgradeExecGating(t *testing.T) {
 	}
 }
 func TestUpgradeTransportRetainsFramesUntilResponse(t *testing.T) {
+	isolateAdapterTest(t)
 	wire := &upgradeTransport{output: io.Discard}
 	input := []byte("{\"jsonrpc\":\"2.0\",\"id\":41,\"method\":\"ping\"}\n{\"jsonrpc\":\"2.0\",\"id\":42,\"method\":\"ping\"}\n")
 	wire.readAvailable = func(p []byte) (int, error) { n := copy(p, input); input = input[n:]; return n, nil }
@@ -420,6 +401,7 @@ func TestUpgradeTransportRetainsFramesUntilResponse(t *testing.T) {
 }
 
 func TestUpgradeRetriesExhausted(t *testing.T) {
+	isolateAdapterTest(t)
 	a, _ := upgradeReadyAdapter(t)
 	a.liveActive = 1
 	hint := &ipc.UpgradeHint{Path: "adapter", Build: "next"}
@@ -435,6 +417,7 @@ func TestUpgradeRetriesExhausted(t *testing.T) {
 	}
 }
 func TestUpgradeResumeRestoresStateAndIdleReadiness(t *testing.T) {
+	isolateAdapterTest(t)
 	if !upgradeSupported {
 		t.Skip("exec unsupported")
 	}
@@ -464,6 +447,7 @@ func TestUpgradeResumeRestoresStateAndIdleReadiness(t *testing.T) {
 	}
 }
 func TestUpgradeNoticeWaitsForReadyAndRelaysVerbatim(t *testing.T) {
+	isolateAdapterTest(t)
 	a, out, _ := liveFixture(t, ipc.RenderCapable)
 	const notice = "C3 was updated to next. This session still runs the previous adapter: run /mcp and reconnect c3 (or restart the session) to switch."
 	a.upgrade.notice = notice
@@ -484,6 +468,7 @@ func TestUpgradeNoticeWaitsForReadyAndRelaysVerbatim(t *testing.T) {
 }
 
 func TestUpgradeRetryDoesNotInterruptRequest(t *testing.T) {
+	isolateAdapterTest(t)
 	a, _ := upgradeReadyAdapter(t)
 	a.upgrade.wire.calls = map[jsonrpc.ID]bool{mustID(t, float64(7)): true}
 	if a.withUpgradeRehelloIdle(nil) {
@@ -501,6 +486,7 @@ func TestUpgradeRetryDoesNotInterruptRequest(t *testing.T) {
 }
 
 func TestUpgradeContractEpoch(t *testing.T) {
+	isolateAdapterTest(t)
 	sum := sha256.Sum256([]byte(upgradeContractEpoch + ":" + upgradeToolContract))
 	if hex.EncodeToString(sum[:]) != upgradeContract() {
 		t.Fatal("update the embedded resume contract when tools or the cached-contract epoch changes; older sessions must reconnect")
@@ -508,6 +494,7 @@ func TestUpgradeContractEpoch(t *testing.T) {
 }
 
 func TestUpgradeExecFailureRequiresFallback(t *testing.T) {
+	isolateAdapterTest(t)
 	if !upgradeSupported {
 		t.Skip("exec unsupported")
 	}
@@ -518,6 +505,7 @@ func TestUpgradeExecFailureRequiresFallback(t *testing.T) {
 	}
 }
 func TestUpgradeChangedContractRequiresFallback(t *testing.T) {
+	isolateAdapterTest(t)
 	if !upgradeSupported {
 		t.Skip("exec unsupported")
 	}
@@ -531,6 +519,7 @@ func TestUpgradeChangedContractRequiresFallback(t *testing.T) {
 }
 
 func TestUpgradeCanceledReaderDoesNotWaitForSocket(t *testing.T) {
+	isolateAdapterTest(t)
 	a, _ := adapterWithConn(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()

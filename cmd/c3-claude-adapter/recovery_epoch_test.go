@@ -15,6 +15,7 @@ import (
 )
 
 func TestIdentityWait_ReconnectChasesCurrentEpoch(t *testing.T) {
+	isolateAdapterTest(t)
 	a := newAdapter()
 	a.recoverStarted.Store(true)
 
@@ -73,6 +74,7 @@ func TestIdentityWait_ReconnectChasesCurrentEpoch(t *testing.T) {
 }
 
 func TestIdentityRecovery_OldCompletionCannotSettleNewGate(t *testing.T) {
+	isolateAdapterTest(t)
 	a := newAdapter()
 	oldGate := a.identityGate()
 	a.reopenIdentity()
@@ -94,6 +96,7 @@ func TestIdentityRecovery_OldCompletionCannotSettleNewGate(t *testing.T) {
 }
 
 func TestReconnectIdentity_UnknownSessionSettlesAgainstFreshConn(t *testing.T) {
+	isolateAdapterTest(t)
 	t.Setenv("CLAUDE_CODE_SESSION_ID", "")
 	a := newAdapter()
 	a.recoverStarted.Store(true) // an earlier attempt answered "unidentified"
@@ -153,6 +156,7 @@ func TestReconnectIdentity_UnknownSessionSettlesAgainstFreshConn(t *testing.T) {
 }
 
 func TestReconnectIdentity_TimeoutCannotSettlePreparedGate(t *testing.T) {
+	isolateAdapterTest(t)
 	prev := recoverSettleBudget
 	recoverSettleBudget = 20 * time.Millisecond
 	t.Cleanup(func() { recoverSettleBudget = prev })
@@ -171,6 +175,7 @@ func TestReconnectIdentity_TimeoutCannotSettlePreparedGate(t *testing.T) {
 }
 
 func TestReconnectIdentity_PreHelloConnectionCannotBeClaimed(t *testing.T) {
+	isolateAdapterTest(t)
 	a := newAdapter()
 	a.prepareIdentityReconnect()
 
@@ -235,6 +240,7 @@ func TestReconnectIdentity_PreHelloConnectionCannotBeClaimed(t *testing.T) {
 }
 
 func TestIdentitySwitch_CannotClearReconnectPreparedWhileWaitingForRecoveryLock(t *testing.T) {
+	isolateAdapterTest(t)
 	a := newAdapter()
 	a.runCtx = context.Background()
 	establishSettledIdentity(a, sessionhandoff.Entry{
@@ -276,6 +282,7 @@ func TestIdentitySwitch_CannotClearReconnectPreparedWhileWaitingForRecoveryLock(
 }
 
 func TestBrokerHelloGate_GenericToolCannotWriteBeforeAck(t *testing.T) {
+	isolateAdapterTest(t)
 	a := newAdapter()
 	a.prepareIdentityReconnect()
 
@@ -363,6 +370,7 @@ func TestBrokerHelloGate_GenericToolCannotWriteBeforeAck(t *testing.T) {
 }
 
 func TestBrokerHelloGate_RejectsNonAckWithoutPublishingConnection(t *testing.T) {
+	isolateAdapterTest(t)
 	a := newAdapter()
 	adapterSide, brokerSide := net.Pipe()
 	t.Cleanup(func() {
@@ -396,6 +404,7 @@ func TestBrokerHelloGate_RejectsNonAckWithoutPublishingConnection(t *testing.T) 
 }
 
 func TestBrokerHelloGate_OldAckCannotPublishReplacementConnection(t *testing.T) {
+	isolateAdapterTest(t)
 	a := newAdapter()
 	oldAdapter, oldBroker := net.Pipe()
 	newAdapter, newBroker := net.Pipe()

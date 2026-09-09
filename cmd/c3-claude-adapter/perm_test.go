@@ -58,6 +58,7 @@ func mustID(t *testing.T, v any) jsonrpc.ID {
 // Read byte-for-byte (and as the identical message object). The whole session's
 // inbound path runs through this wrapper, so a bug here breaks everything.
 func TestInterceptConn_PassThrough(t *testing.T) {
+	isolateAdapterTest(t)
 	ctx := context.Background()
 
 	// A representative spread of frames the SDK actually sends/receives.
@@ -108,6 +109,7 @@ func TestInterceptConn_PassThrough(t *testing.T) {
 // (no id) is diverted — it is NOT returned to the SDK, the handler is invoked
 // with the parsed fields, and Read returns the NEXT frame instead.
 func TestInterceptConn_DivertsPermissionRequest(t *testing.T) {
+	isolateAdapterTest(t)
 	ctx := context.Background()
 
 	permReq := &jsonrpc.Request{
@@ -152,6 +154,7 @@ func TestInterceptConn_DivertsPermissionRequest(t *testing.T) {
 // is emitted to Claude Code as a `notifications/claude/channel/permission` frame
 // carrying {request_id, behavior}.
 func TestDispatchPermissionVerdict_EmitShape(t *testing.T) {
+	isolateAdapterTest(t)
 	var buf safeBuffer
 	tx := newNotifyTransport(&mcp.IOTransport{
 		Reader: nopCloseReader{strings.NewReader("")},
@@ -193,6 +196,7 @@ func TestDispatchPermissionVerdict_EmitShape(t *testing.T) {
 // diverted permission_request to the broker as an OpPermissionRequest frame
 // carrying the parsed fields.
 func TestHandlePermissionRequest_SendsToBroker(t *testing.T) {
+	isolateAdapterTest(t)
 	a, peer := adapterWithConn(t)
 
 	// net.Pipe is synchronous: the broker write blocks until the test reads, so
@@ -230,6 +234,7 @@ func TestHandlePermissionRequest_SendsToBroker(t *testing.T) {
 // map: it must advertise claude/channel/permission so Claude Code routes
 // permission verdicts back to this server.
 func TestExperimentalDeclaresPermission(t *testing.T) {
+	isolateAdapterTest(t)
 	a := newAdapter()
 	srv := a.buildMCPServer()
 	if srv == nil {
