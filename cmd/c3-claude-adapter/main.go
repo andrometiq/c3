@@ -722,7 +722,7 @@ func (a *adapter) recoverBroker(ctx context.Context) bool {
 			log.Printf("broker reconnected (attempt %d)", attempt)
 			a.clearBrokerDownAdvisory()
 			a.restoreSessionAfterReconnect(ctx)
-			a.upgrade.reconnecting.Store(false)
+			a.finishUpgradeRecovery()
 			return true
 		}
 		log.Printf("broker reconnect attempt %d failed: %v (retry in %v)", attempt, err, backoff)
@@ -1751,6 +1751,9 @@ func (a *adapter) buildMCPServer() *mcp.Server {
 			defer a.upgradeNotificationDone(method)
 			if method == "notifications/initialized" {
 				a.deliveryHostInitialized.Store(true)
+				if a.resumedInitialized(method) {
+					return nil, nil
+				}
 			}
 			if method != "ping" {
 				log.Printf("mcp recv: method=%s", method)

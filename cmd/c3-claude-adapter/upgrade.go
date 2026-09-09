@@ -128,11 +128,19 @@ func (a *adapter) pollUpgrade(now time.Time) {
 		return
 	}
 	if !u.retryAt.IsZero() {
-		if !now.Before(u.retryAt) && a.upgradeRehelloIdle() {
-			u.waitingHello = true
-			if c := a.currentConn(); c != nil {
-				_ = c.Close()
-			}
+		if !now.Before(u.retryAt) {
+			a.withUpgradeRehelloIdle(func() {
+				if c := a.currentConn(); c != nil {
+					u.waitingHello = true
+					u.quiescing.Store(true)
+					// Keep unread host frames outside the SDK until recovery has
+					// canceled old broker calls and installed the new connection.
+					if u.wire != nil {
+						u.wire.resumeReads = make(chan struct{})
+					}
+					_ = c.Close()
+				}
+			})
 		}
 		return
 	}
@@ -301,13 +309,17 @@ func (a *adapter) flushUpgradeNotice() {
 
 // The retry itself must not cancel a broker call or discard an observer. Socket
 // replacement waits for the same work as exec; a later natural hello also retries.
-func (a *adapter) upgradeRehelloIdle() bool {
+func (a *adapter) withUpgradeRehelloIdle(action func()) bool {
 	if a.upgrade.reconnecting.Load() {
 		return false
 	}
+	if !a.recoverMu.TryLock() {
+		return false
+	}
+	defer a.recoverMu.Unlock()
 	a.liveMu.Lock()
 	defer a.liveMu.Unlock()
-	if a.liveActive != 0 || len(a.deliveryObservers) != 0 || a.upgrade.deliveryWrites.Load() != 0 {
+	if a.liveActive != 0 || len(a.livePending) != 0 || len(a.deliveryObservers) != 0 || a.upgrade.deliveryWrites.Load() != 0 {
 		return false
 	}
 	a.permMu.Lock()
@@ -322,5 +334,27 @@ func (a *adapter) upgradeRehelloIdle() bool {
 			return false
 		}
 	}
+	if action != nil {
+		action() // Admission locks remain held through the socket close.
+	}
 	return true
+}
+
+func (a *adapter) finishUpgradeRecovery() {
+	a.upgrade.reconnecting.Store(false)
+	if wire := a.upgrade.wire; wire != nil {
+		wire.mu.Lock()
+		defer wire.mu.Unlock()
+		if wire.resumeReads != nil {
+			close(wire.resumeReads)
+			wire.resumeReads = nil
+		}
+	}
+}
+
+// The saved SDK state already includes notifications/initialized. A host may
+// repeat it (with or without initialize) across the handoff; acknowledge it
+// locally instead of asking the SDK to initialize an already initialized session.
+func (a *adapter) resumedInitialized(method string) bool {
+	return a.upgrade.resumed && method == "notifications/initialized"
 }

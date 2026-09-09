@@ -1101,3 +1101,11 @@ The preceding broker bounce still follows the reconnect cancellation contract
 above; lossless broker-side in-flight work across shutdown is not implemented.
 Concurrent installers replacing the checked path before exec are also outside
 this provisional handoff's atomicity boundary.
+
+Retry reconnects close push and MCP admission under the same locks as the socket
+close. Host input remains unread until broker recovery finishes, then resumes on
+the existing MCP connection. In resume mode, a repeated
+`notifications/initialized` is accepted locally without reinitializing the SDK.
+If installed-binary inspection fails, disabled and pre-feature adapters still
+receive the fallback event using the broker build; inspection failure never
+produces an exec hint.

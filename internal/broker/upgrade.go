@@ -32,13 +32,18 @@ func (b *Broker) prepareUpgrade(hello ipc.HelloMsg, stub *Stub, ack *ipc.HelloAc
 		return ""
 	}
 	installed, err := b.installedAdapter()
-	if hello.Build == "" {
-		if err == nil {
-			return installed.Build
+	if err != nil {
+		// Inspection failure must never authorize exec, but a disabled or old
+		// adapter still needs the reconnect notice. Only the broker id is known.
+		if hello.Build == "" || hello.UpgradeDisabled {
+			return ack.Build
 		}
-		return ack.Build
+		return ""
 	}
-	if err != nil || installed.Build == hello.Build {
+	if hello.Build == "" {
+		return installed.Build
+	}
+	if installed.Build == hello.Build {
 		return ""
 	}
 	if hello.UpgradeDisabled || hello.ResumeContract == "" || hello.ResumeContract != installed.Contract {

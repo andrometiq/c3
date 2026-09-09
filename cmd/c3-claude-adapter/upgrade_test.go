@@ -3,14 +3,18 @@ package main
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"io"
+	"net"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/Andrometiq/c3/internal/buildidentity"
+	"github.com/Andrometiq/c3/internal/c3types"
 	"github.com/Andrometiq/c3/internal/ipc"
 	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -43,6 +47,266 @@ func TestUpgradeToolContract(t *testing.T) {
 	sum := sha256.Sum256(data)
 	if got := hex.EncodeToString(sum[:]); got != upgradeToolContract {
 		t.Fatalf("tool contract changed: got %s; change the compatibility epoch and require reconnect", got)
+	}
+	// Each cached field must independently change the same hash used by the pin.
+	for _, field := range []string{"name", "inputSchema", "description"} {
+		t.Run(field, func(t *testing.T) {
+			var changed []*mcp.Tool
+			if err := json.Unmarshal(data, &changed); err != nil {
+				t.Fatal(err)
+			}
+			baseline, err := json.Marshal(changed)
+			if err != nil || sha256.Sum256(baseline) != sum {
+				t.Fatalf("tool clone changed the hash before mutation: %v", err)
+			}
+			switch field {
+			case "name":
+				changed[0].Name += "_changed"
+			case "inputSchema":
+				changed[0].InputSchema = map[string]any{"type": "string"}
+			case "description":
+				changed[0].Description += " changed"
+			}
+			mutated, err := json.Marshal(changed)
+			if err != nil || sha256.Sum256(mutated) == sum {
+				t.Fatalf("%s is not covered by the contract hash: %v", field, err)
+			}
+		})
+	}
+}
+
+func TestResumeSDKMethodMatrix(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	state := upgradeResumeState{Contract: upgradeContract(), MCP: mcp.ServerSessionState{
+		InitializeParams: &mcp.InitializeParams{ProtocolVersion: "2025-03-26"}, InitializedParams: &mcp.InitializedParams{},
+	}}
+	raw, err := json.Marshal(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(upgradeResumeEnv, base64.StdEncoding.EncodeToString(raw))
+	a, peer := adapterWithConn(t)
+	opts, err := a.restoreUpgrade([]string{"--mcp-resume"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ct, st := mcp.NewInMemoryTransports()
+	a.notifyTx = newNotifyTransport(st)
+	srv := a.buildMCPServer()
+	initialized := make(chan error, 1)
+	srv.AddReceivingMiddleware(func(next mcp.MethodHandler) mcp.MethodHandler {
+		return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
+			result, err := next(ctx, method, req)
+			if method == "notifications/initialized" {
+				initialized <- err
+			}
+			return result, err
+		}
+	})
+	ss, err := srv.Connect(ctx, a.notifyTx, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ss.Close()
+	conn, err := ct.Connect(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	call := func(method, params string) json.RawMessage {
+		t.Helper()
+		id := mustID(t, method)
+		if err := conn.Write(ctx, &jsonrpc.Request{ID: id, Method: method, Params: json.RawMessage(params)}); err != nil {
+			t.Fatal(err)
+		}
+		msg, err := conn.Read(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		response, ok := msg.(*jsonrpc.Response)
+		if !ok || response.ID != id || response.Error != nil {
+			t.Fatalf("%s: %#v", method, msg)
+		}
+		return response.Result
+	}
+	// tools/list is the first frame: no initialize request is sent.
+	var list mcp.ListToolsResult
+	if err := json.Unmarshal(call("tools/list", `{}`), &list); err != nil {
+		t.Fatal(err)
+	}
+	toolJSON, err := json.Marshal(list.Tools)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(toolJSON)
+	if hex.EncodeToString(sum[:]) != upgradeToolContract {
+		t.Fatal("resumed tools differ from cached contract")
+	}
+	brokerDone := make(chan error, 1)
+	go func() {
+		raw, err := peer.ReadFrame()
+		if err != nil {
+			brokerDone <- err
+			return
+		}
+		var request ipc.FetchQueueReq
+		if err := json.Unmarshal(raw, &request); err != nil {
+			brokerDone <- err
+			return
+		}
+		response, err := json.Marshal(ipc.FetchQueueResp{Op: ipc.OpFetchQueueResult, ID: request.ID})
+		if err == nil {
+			a.dispatchFetchQueueResult(response)
+		}
+		brokerDone <- err
+	}()
+	var toolResult mcp.CallToolResult
+	if err := json.Unmarshal(call("tools/call", `{"name":"fetch_queue","arguments":{}}`), &toolResult); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-brokerDone; err != nil {
+		t.Fatal(err)
+	}
+	if toolResult.IsError || len(toolResult.Content) != 1 {
+		t.Fatalf("tool failed: %+v", toolResult)
+	}
+	if content, ok := toolResult.Content[0].(*mcp.TextContent); !ok || !strings.Contains(content.Text, "queue is empty") {
+		t.Fatalf("tool response: %+v", toolResult.Content)
+	}
+	if result := call("ping", `{}`); string(result) != `{}` {
+		t.Fatalf("ping: %s", result)
+	}
+	if err := conn.Write(ctx, &jsonrpc.Request{Method: "notifications/initialized", Params: json.RawMessage(`{}`)}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-initialized:
+		if err != nil || !a.deliveryHostInitialized.Load() {
+			t.Fatalf("initialized: %v", err)
+		}
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
+	notified := make(chan error, 1)
+	go func() {
+		notified <- a.notifyTx.Notify(ctx, "notifications/claude/channel", map[string]any{"content": "after resume", "meta": map[string]any{}})
+	}()
+	msg, err := conn.Read(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	notice, ok := msg.(*jsonrpc.Request)
+	if !ok || notice.ID.IsValid() || notice.Method != "notifications/claude/channel" || !strings.Contains(string(notice.Params), "after resume") {
+		t.Fatalf("notification: %#v", msg)
+	}
+	if err := <-notified; err != nil {
+		t.Fatal(err)
+	}
+	call("ping", `{}`) // The repeated initialized notification leaves the session usable.
+}
+
+type upgradeClosingConn struct {
+	net.Conn
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (c *upgradeClosingConn) Close() error {
+	c.once.Do(func() { close(c.entered); <-c.release })
+	return c.Conn.Close()
+}
+
+func TestUpgradeRetryConcurrentAdmission(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	a, output, _ := liveFixture(t, ipc.RenderCapable)
+	left, right := net.Pipe()
+	defer right.Close()
+	closing := &upgradeClosingConn{Conn: left, entered: make(chan struct{}), release: make(chan struct{})}
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(closing.release) }) }
+	defer release()
+	defer left.Close()
+	a.conn = ipc.NewConn(closing)
+	ready, _ := upgradeReadyAdapter(t)
+	a.upgrade.wire = ready.upgrade.wire
+	wire := a.upgrade.wire
+	input := []byte("{\"jsonrpc\":\"2.0\",\"id\":41,\"method\":\"ping\"}\n")
+	wire.readAvailable = func(p []byte) (int, error) { n := copy(p, input); input = input[n:]; return n, nil }
+	a.acceptUpgrade(&ipc.UpgradeHint{Path: "adapter", Build: "next"})
+	a.upgrade.quiescing.Store(false)
+	a.upgrade.retryAt = time.Now().Add(-time.Second)
+	gateDone := make(chan struct{})
+	go func() { a.pollUpgrade(time.Now()); close(gateDone) }()
+	select {
+	case <-closing.entered:
+	case <-ctx.Done():
+		t.Fatal("retry did not close socket")
+	}
+	// Race real push and MCP admission against an in-progress socket close.
+	pushStarted, pushDone := make(chan struct{}), make(chan struct{})
+	raw, _ := json.Marshal(ipc.InboundMsg{Op: ipc.OpInbound, DeliveryToken: "racing-push", Inbound: c3types.Inbound{Text: "hello"}})
+	go func() { close(pushStarted); a.handleInbound(ctx, raw); close(pushDone) }()
+	readStarted, readDone := make(chan struct{}), make(chan error, 1)
+	go func() { close(readStarted); _, err := wire.Read(ctx); readDone <- err }()
+	<-pushStarted
+	<-readStarted
+	select {
+	case <-pushDone:
+		t.Fatal("push admission escaped the socket-close lock")
+	case err := <-readDone:
+		t.Fatalf("MCP admission escaped the socket-close lock: %v", err)
+	case <-time.After(30 * time.Millisecond):
+	}
+	release()
+	<-gateDone
+	select {
+	case <-pushDone:
+	case <-ctx.Done():
+		t.Fatal("push did not leave row held")
+	}
+	if a.liveActive != 0 || len(a.livePending) != 0 || len(output.Bytes()) != 0 {
+		t.Fatal("push was admitted after close")
+	}
+	select {
+	case err := <-readDone:
+		t.Fatalf("MCP admission resumed before broker recovery: %v", err)
+	case <-time.After(30 * time.Millisecond):
+	}
+	a.acceptUpgrade(nil) // New hello finishes before request admission resumes.
+	a.finishUpgradeRecovery()
+	select {
+	case err := <-readDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-ctx.Done():
+		t.Fatal("MCP admission did not resume")
+	}
+	// The opposite ordering: a goroutine-admitted request makes retry postpone.
+	if a.withUpgradeRehelloIdle(func() { t.Error("closed with an admitted request") }) {
+		t.Fatal("retry accepted a busy transport")
+	}
+}
+
+func TestUpgradePausedReaderClose(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	wire := &upgradeTransport{resumeReads: make(chan struct{})}
+	done := make(chan error, 1)
+	go func() { _, err := wire.Read(ctx); done <- err }()
+	if err := wire.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		if err != io.EOF {
+			t.Fatalf("close: %v", err)
+		}
+	case <-ctx.Done():
+		t.Fatal("paused reader did not close")
 	}
 }
 func TestResumeSDKCallWithoutInitialize(t *testing.T) {
@@ -222,16 +486,16 @@ func TestUpgradeNoticeWaitsForReadyAndRelaysVerbatim(t *testing.T) {
 func TestUpgradeRetryDoesNotInterruptRequest(t *testing.T) {
 	a, _ := upgradeReadyAdapter(t)
 	a.upgrade.wire.calls = map[jsonrpc.ID]bool{mustID(t, float64(7)): true}
-	if a.upgradeRehelloIdle() {
+	if a.withUpgradeRehelloIdle(nil) {
 		t.Fatal("retry would cancel in-flight tool call")
 	}
 	a.upgrade.wire.calls = nil
 	a.liveActive = 1
-	if a.upgradeRehelloIdle() {
+	if a.withUpgradeRehelloIdle(nil) {
 		t.Fatal("retry would interrupt ack")
 	}
 	a.liveActive = 0
-	if !a.upgradeRehelloIdle() {
+	if !a.withUpgradeRehelloIdle(nil) {
 		t.Fatal("idle retry blocked")
 	}
 }

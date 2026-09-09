@@ -27,17 +27,36 @@ type upgradeTransport struct {
 	writes        int
 	state         mcp.ServerSessionState
 	closed        bool
+	resumeReads   chan struct{} // nonnil while an upgrade retry reconnects
 }
 
 func (t *upgradeTransport) Connect(context.Context) (mcp.Connection, error) { return t, nil }
 func (t *upgradeTransport) SessionID() string                               { return "" }
-func (t *upgradeTransport) Close() error                                    { t.mu.Lock(); t.closed = true; t.mu.Unlock(); return nil }
+func (t *upgradeTransport) Close() error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.closed = true
+	if t.resumeReads != nil {
+		close(t.resumeReads)
+		t.resumeReads = nil
+	}
+	return nil
+}
 func (t *upgradeTransport) Read(ctx context.Context) (jsonrpc.Message, error) {
 	for {
 		t.mu.Lock()
 		if t.closed {
 			t.mu.Unlock()
 			return nil, io.EOF
+		}
+		if resume := t.resumeReads; resume != nil {
+			t.mu.Unlock()
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-resume:
+				continue
+			}
 		}
 		if i := bytes.IndexByte(t.buffer, '\n'); i >= 0 {
 			frame := t.buffer[:i]

@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"errors"
 	"net"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -112,5 +114,70 @@ func TestUpgradePrefeatureUnreadableInstalledBuild(t *testing.T) {
 	var ack ipc.HelloAckMsg
 	if notice := b.prepareUpgrade(ipc.HelloMsg{CLI: "claude"}, &Stub{ConnID: 1}, &ack); notice != buildidentity.Current() || ack.Upgrade != nil {
 		t.Fatalf("prefeature fallback=%q hint=%+v", notice, ack.Upgrade)
+	}
+}
+
+func TestUpgradeUnreadableFallbackNotice(t *testing.T) {
+	for _, inspection := range []string{"missing", "invalid"} {
+		for _, kind := range []string{"prefeature", "disabled", "enabled"} {
+			t.Run(inspection+"/"+kind, func(t *testing.T) {
+				t.Setenv("XDG_STATE_HOME", t.TempDir())
+				path := filepath.Join(t.TempDir(), "adapter")
+				if inspection == "invalid" {
+					if err := os.WriteFile(path, []byte("C3_BUILD_ID_V1 invalid executable"), 0600); err != nil {
+						t.Fatal(err)
+					}
+				}
+				b := &Broker{}
+				b.upgrades.installed = func() (buildidentity.Installed, error) { return buildidentity.Read(path) }
+				hello := ipc.HelloMsg{CLI: "claude", Build: "old", UpgradeDisabled: kind == "disabled"}
+				if kind == "prefeature" {
+					hello.Build = ""
+				}
+				left, right := net.Pipe()
+				defer left.Close()
+				defer right.Close()
+				_ = right.SetReadDeadline(time.Now().Add(time.Second))
+				stub := &Stub{CLI: "claude", PID: 41, CWD: "/project", ConnID: 1, Conn: ipc.NewConn(left)}
+				var ack ipc.HelloAckMsg
+				fallback := b.prepareUpgrade(hello, stub, &ack)
+				if ack.Upgrade != nil {
+					t.Fatal("inspection failure produced an exec hint")
+				}
+				if kind == "enabled" {
+					if fallback != "" {
+						t.Fatal("enabled adapter received a guessed stale notice")
+					}
+					return
+				}
+				if fallback != buildidentity.Current() {
+					t.Fatalf("fallback=%q", fallback)
+				}
+				done := make(chan struct{})
+				go func() {
+					b.sendUpgradeNotice(stub, fallback)
+					stub.ConnID++
+					b.sendUpgradeNotice(stub, fallback)
+					close(done)
+				}()
+				raw, err := ipc.NewConn(right).ReadFrame()
+				if err != nil {
+					t.Fatal(err)
+				}
+				var notice ipc.InboundMsg
+				if err := json.Unmarshal(raw, &notice); err != nil {
+					t.Fatal(err)
+				}
+				want := "C3 was updated to " + fallback + ". This session still runs the previous adapter: run /mcp and reconnect c3 (or restart the session) to switch."
+				if notice.Inbound.Event == nil || notice.Inbound.Event.System == nil || notice.Inbound.Event.System.Message != want {
+					t.Fatalf("notice=%s", raw)
+				}
+				select {
+				case <-done:
+				case <-time.After(time.Second):
+					t.Fatal("fallback repeated on reconnect")
+				}
+			})
+		}
 	}
 }
