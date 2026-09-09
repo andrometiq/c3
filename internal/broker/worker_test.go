@@ -2,9 +2,11 @@ package broker
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -24,7 +26,13 @@ func TestMain(m *testing.M) {
 		panic(err)
 	}
 	_ = os.Setenv("C3_QUEUE_DIR", dir)
+	var divergences atomic.Int64
+	attemptShadowDivergence = func() { divergences.Add(1) }
 	code := m.Run()
+	fmt.Fprintf(os.Stderr, "attempt shadow suite divergences=%d\n", divergences.Load())
+	if divergences.Load() != 0 {
+		code = 1
+	}
 	_ = os.RemoveAll(dir)
 	os.Exit(code)
 }

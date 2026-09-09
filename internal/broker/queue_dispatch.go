@@ -294,12 +294,14 @@ func (b *Broker) handleInboundDelivered(stub *Stub, raw []byte) {
 		return
 	}
 	if !msg.OK {
+		b.attempts.fail(msg.DeliveryToken, stub, "nack", time.Now())
 		log.Printf("inbound_delivered NACK update=%d — leaving queued (backlog)", msg.UpdateID)
 		return
 	}
 	// Drop a zero-/negative-covered ack outright — there is nothing to consume and
 	// no job worth dispatching (handleConsume would skip it anyway).
 	if msg.Count < 1 {
+		b.attempts.fail(msg.DeliveryToken, stub, "invalid_count", time.Now())
 		log.Printf("inbound_delivered update=%d count=%d — nothing to consume (event / zero-covered ack)", msg.UpdateID, msg.Count)
 		return
 	}
@@ -321,6 +323,7 @@ func (b *Broker) handleInboundDelivered(stub *Stub, raw []byte) {
 	// drains.
 	route := stub.TakePushRoute(msg.UpdateID, msg.DeliveryToken)
 	if route == nil {
+		b.attempts.fail(msg.DeliveryToken, stub, "unknown_correlation", time.Now())
 		log.Printf("inbound_delivered update=%d count=%d conn=%d: no unique live push correlation for this session (unknown token / broker restart / record cap / ambiguous legacy MessageID) — consume DROPPED (the line stays queued, recoverable via fetch_queue)", msg.UpdateID, msg.Count, stub.ConnID)
 		return
 	}
@@ -334,6 +337,7 @@ func (b *Broker) handleInboundDelivered(stub *Stub, raw []byte) {
 		Count:     msg.Count,
 		Owner:     stub,
 	}}); !ok {
+		b.attempts.fail(msg.DeliveryToken, stub, "worker_unavailable", time.Now())
 		log.Printf("inbound_delivered update=%d count=%d: worker queue full or stopped — consume DROPPED (Count lines remain as backlog)", msg.UpdateID, msg.Count)
 	}
 }

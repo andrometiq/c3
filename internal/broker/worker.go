@@ -198,6 +198,8 @@ type OutboundResult struct {
 // debounceWindow time, whichever comes first, then forward as a single
 // merged Inbound (concatenated text, latest message_id, sum of attachments).
 type RouteWorker struct {
+	shadowConsumeToken string // token already selected by takeCoveredByPush
+
 	key     RouteKey
 	queue   chan Job
 	idle    time.Duration
@@ -1184,12 +1186,14 @@ func (w *RouteWorker) forwardOrFallbackCovering(_ context.Context, in *c3types.I
 		// below is made only on success, so such an ack resolves to the route and
 		// then hits handleConsume's "covered identity unavailable" skip.
 		if tracked {
+			w.shadowPush(deliveryToken, holder, coveredIDs)
 			holder.RecordPushRoute(in.MessageID, deliveryToken, w.key)
 		}
 		if err := conn.WriteJSON(ipc.InboundMsg{
 			Op: ipc.OpInbound, Inbound: *in, Covered: covered, Pending: pending,
 			DeliveryToken: deliveryToken, RecordIDs: coveredIDs,
 		}); err != nil {
+			w.broker.attempts.write(deliveryToken, w.key, err, time.Now())
 			if w.broker.Queue == nil {
 				log.Printf("deliver FAIL chan=%s chat=%d topic=%s msg=%d to cli=%s pid=%d: %v — %s, nothing stored — %s",
 					w.key.Channel, w.key.ChatID, TopicKeyStr(w.key), in.MessageID,
@@ -1214,6 +1218,7 @@ func (w *RouteWorker) forwardOrFallbackCovering(_ context.Context, in *c3types.I
 			}
 			return
 		}
+		w.broker.attempts.write(deliveryToken, w.key, nil, time.Now())
 		// Record the exact lines this push covered so the delivered-ack removes
 		// THOSE lines, not the queue head (see RouteWorker.coveredByPush). Only
 		// meaningful for a non-event push that actually covered stored lines and
@@ -1458,11 +1463,13 @@ func (w *RouteWorker) notePersistFailure(in *c3types.Inbound) {
 // evictIfOverCap enforces the per-route cap. On a drop it logs + sends ONE
 // Telegram notice (never silent). Errors are logged, not fatal.
 func (w *RouteWorker) evictIfOverCap(qrk queue.RouteKey) {
+	shadowBefore := w.shadowRows()
 	dropped, err := w.broker.Queue.EvictOverCap(qrk)
 	if err != nil {
 		log.Printf("queue evict FAIL chan=%s chat=%d topic=%s: %v", w.key.Channel, w.key.ChatID, TopicKeyStr(w.key), err)
 		return
 	}
+	w.shadowRemoval(shadowBefore, "", "eviction")
 	if dropped == 0 {
 		return
 	}
@@ -1643,10 +1650,12 @@ func (w *RouteWorker) setAsideOversize(qrk queue.RouteKey, head c3types.Inbound,
 	// The head is the FIRST pending occurrence of its message id, which is exactly
 	// what RemoveIDs' occurrence-ordinal selection addresses (it snapshots what it
 	// removes into .trash/ before the rewrite).
+	shadowBefore := w.shadowRows()
 	removed, err := w.broker.Queue.RemoveIDs(qrk, map[int64][]int{head.MessageID: {1}})
 	if err != nil {
 		return c3types.Inbound{}, err
 	}
+	w.shadowRemoval(shadowBefore, "", "oversize")
 	if len(removed) == 0 {
 		// Nothing was removed, so a retry would re-read the same head forever.
 		// Refuse the fetch instead of spinning, and say why.
@@ -1803,6 +1812,7 @@ func (w *RouteWorker) handleFetch(_ context.Context, job *FetchJob) {
 					msgs, err = w.broker.Queue.Consume(qrk, take)
 					if err == nil {
 						w.retireConsumedRecords(msgs, records)
+						w.shadowLegacyFetch(job.Owner, msgs)
 					}
 				}
 				if job.Owner == nil {
@@ -1932,12 +1942,14 @@ func (w *RouteWorker) handleConsume(_ context.Context, job *ConsumeJob) {
 		// queued for re-delivery. RemoveIDs snapshots to .trash before rewriting and is
 		// idempotent, so an id already evicted/consumed simply matches nothing.
 		if ids := w.takeCoveredByPush(job.MessageID, job.Token); len(ids) > 0 {
+			shadowBefore := w.shadowRows()
 			removed, err := w.broker.Queue.RemoveRecordIDs(qrk, ids)
 			if err != nil {
 				log.Printf("queue consume(live-ack, by-record) FAIL chan=%s chat=%d topic=%s msg=%d ids=%d: %v",
 					w.key.Channel, w.key.ChatID, TopicKeyStr(w.key), job.MessageID, len(ids), err)
 				return
 			}
+			w.shadowRemoval(shadowBefore, w.shadowConsumeToken, "live_ack")
 			if job.Owner != nil && job.Owner.ReceiptConfirming {
 				w.retirePendingRecords(ids)
 			}
@@ -1964,6 +1976,7 @@ func (w *RouteWorker) handleConsume(_ context.Context, job *ConsumeJob) {
 		return
 	}
 	if authorized, reason := w.broker.Routes.withConfirmedHolder(w.key, job.Owner, consume); !authorized {
+		w.broker.attempts.fail(job.Token, job.Owner, "unauthorized", time.Now())
 		log.Printf("inbound_delivered update=%d count=%d route=%s: consume SKIPPED: %s (Count lines remain as backlog)",
 			job.MessageID, job.Count, w.broker.routeLabel(w.key), reason)
 	}
@@ -1994,6 +2007,7 @@ func (w *RouteWorker) recordCoveredByPush(pushID int64, token string, ids []stri
 // no-token ack it succeeds only when exactly one outstanding record matches the
 // MessageID; ambiguity leaves every record intact. Worker-goroutine-only.
 func (w *RouteWorker) takeCoveredByPush(pushID int64, token string) []string {
+	w.shadowConsumeToken = ""
 	if w.coveredByPush == nil {
 		return nil
 	}
@@ -2020,6 +2034,7 @@ func (w *RouteWorker) takeCoveredByPush(pushID int64, token string) []string {
 	}
 	ids := records[idx].ids
 	recordToken := records[idx].token
+	w.shadowConsumeToken = recordToken
 	records = append(records[:idx], records[idx+1:]...)
 	if len(records) == 0 {
 		delete(w.coveredByPush, pushID)
@@ -2423,6 +2438,7 @@ func (w *RouteWorker) trackPendingAck(sources []*c3types.Inbound, ids ...string)
 // entries; legacy blind acks retain entries so only missing rows are restored. Called ONLY on confirmed holder death, so it never
 // fires for a merely-slow live session. No-op when nothing is tracked.
 func (w *RouteWorker) flushPendingAck(reason string) {
+	w.shadowHolderDeath()
 	// The holder is confirmed dead, so none of its outstanding push records may
 	// bleed into a replacement holder. Clear them even when pendingAck is empty
 	// (confirmed receipts may already have emptied the recovery tracker).

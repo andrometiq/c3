@@ -5,6 +5,8 @@ rulings and rationale, never private operational details.
 
 ## D033: Inbound delivery contract pins
 
+Phase 1 lands a shadow attempt table; no behaviour change.
+
 **Date:** 2026-09-08
 
 **Decision:** Pin three receipt milestones, declared by the adapter at hello,

@@ -147,6 +147,7 @@ func (b *Broker) HandleConn(nc net.Conn) {
 		// (see Stub.pushRoutes). Ordered after the transfer so a push racing this
 		// hello records onto the stub that now holds the claim.
 		stub.AdoptPushRoutes(existing)
+		b.attempts.adopt(existing, shadowHolder(stub), time.Now())
 		log.Printf("hello: RECONNECT cli=%s pid=%d cwd=%q old-conn=%d new-conn=%d (claims transferred)",
 			hello.CLI, hello.PID, hello.CWD, oldConnID, stub.ConnID)
 	} else {
@@ -176,10 +177,12 @@ func (b *Broker) HandleConn(nc net.Conn) {
 	defer func() {
 		stub.MarkDisconnected()
 		if isPIDAlive(stub.PID) {
+			b.attempts.release(stub, "disconnect", time.Now())
 			log.Printf("conn-drop: cli=%s pid=%d cwd=%q conn=%d (claims preserved while pid alive)",
 				stub.CLI, stub.PID, stub.CWD, stub.ConnID)
 			return
 		}
+		b.attempts.release(stub, "holder_death", time.Now())
 		released := b.Routes.ReleaseAllByConnID(stub.ConnID)
 		log.Printf("conn-drop: cli=%s pid=%d cwd=%q conn=%d (PID dead — released %d claim(s))",
 			stub.CLI, stub.PID, stub.CWD, stub.ConnID, len(released))
@@ -904,6 +907,7 @@ func (b *Broker) handleListTopics(conn *ipc.Conn) {
 				if holder.IsAlive() {
 					entry.ClaimedBy = &ipc.Holder{CLI: holder.CLI, PID: holder.PID, CWD: holder.CWD}
 				} else {
+					b.attempts.release(holder, "holder_death", time.Now())
 					b.Routes.Release(key, holder.ConnID)
 				}
 			}
@@ -919,6 +923,7 @@ func (b *Broker) handleListTopics(conn *ipc.Conn) {
 				if holder.IsAlive() {
 					entry.ClaimedBy = &ipc.Holder{CLI: holder.CLI, PID: holder.PID, CWD: holder.CWD}
 				} else {
+					b.attempts.release(holder, "holder_death", time.Now())
 					b.Routes.Release(key, holder.ConnID)
 				}
 			}
@@ -940,6 +945,7 @@ func (b *Broker) handleListClaims(conn *ipc.Conn) {
 			// disconnected holder (brief reconnect window) still shows, labelled
 			// as disconnected by the renderer. Snapshot returns a copy, so
 			// Releasing during iteration is safe.
+			b.attempts.release(e.Stub, "holder_death", time.Now())
 			b.Routes.Release(e.Key, e.Stub.ConnID)
 			continue
 		}

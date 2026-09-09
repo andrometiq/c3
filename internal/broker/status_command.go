@@ -96,6 +96,7 @@ func (b *Broker) statusForTopic(channelName string, chatID int64, topicID *int64
 			// honest instead of trusting a cached map entry that only gets swept
 			// lazily on the next inbound. Release is connID-guarded, so a live
 			// re-claim landing between Holder and here is never clobbered.
+			b.attempts.release(h, "holder_death", time.Now())
 			b.Routes.Release(key, h.ConnID)
 		}
 	}

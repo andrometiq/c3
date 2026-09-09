@@ -745,6 +745,7 @@ func (w *RouteWorker) handleDrainRemove(job *DrainRemoveJob) {
 		job.ResultCh <- DrainRemoveResult{Err: errOutboundNotImpl}
 		return
 	}
+	shadowBefore := w.shadowRows()
 	removed, err := w.broker.Queue.RemoveRecordIDs(queueRouteKey(w.key), job.RecordIDs)
 	if err != nil {
 		log.Printf("drain remove FAIL chan=%s chat=%d topic=%s: %v",
@@ -754,6 +755,7 @@ func (w *RouteWorker) handleDrainRemove(job *DrainRemoveJob) {
 	}
 	// Every selected identity landed on the target before this job. Retire
 	// source recovery only after removal succeeds, including rows already gone.
+	w.shadowRemoval(shadowBefore, "", "drain")
 	w.retirePendingRecords(job.RecordIDs)
 	log.Printf("drain remove chan=%s chat=%d topic=%s requested=%d removed=%d",
 		w.key.Channel, w.key.ChatID, TopicKeyStr(w.key), len(job.RecordIDs), len(removed))
