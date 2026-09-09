@@ -144,9 +144,13 @@ shared visitor reader discards oversized records across bounded polls. The store
 now reports `aged` and `overCount` separately, while eviction notice wording is
 still the phase-5 follow-up.
 
-Hermetic coverage includes `TestFetchGroupLifecycleIndependentRoutes`,
+In-process fixture coverage includes `TestFetchGroupLifecycleIndependentRoutes`,
 `TestFetchGroupRevisionEvictionDrainAndExpiry`, `TestFetchReceiptMultiRouteIPCConfirm`,
 `TestFetchTrailerGrammarAndToolResult`, and `TestFetchReceiptBrokerAdapterToolResult`.
+These tests isolate PATH and inject installed-adapter discovery when constructing
+brokers. They use synthetic transcripts and, where needed, test-owned Unix sockets
+in private temporary directories; they do not verify a machine-installed adapter
+or a live host. Setup-coverage tests guard both broker and adapter constructors.
 See `TESTING-LIVE-MATRIX.md` for maintainer-run verification; fixture absence is
 not evidence of host success.
 

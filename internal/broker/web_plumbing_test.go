@@ -94,7 +94,7 @@ func readAttach(t *testing.T, peer *ipc.Conn, req ipc.AttachReq) ipc.AttachedMsg
 }
 
 func TestPersistedWebInboundCollisionDoesNotInvokeTelegramCallback(t *testing.T) {
-	b := New(mfWithTelegram())
+	b := newTestBroker(t, mfWithTelegram())
 	defer b.Shutdown()
 	telegramSeam := []int64{17}
 	var webPersisted int

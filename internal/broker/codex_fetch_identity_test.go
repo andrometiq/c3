@@ -13,7 +13,7 @@ func TestFetchReturnsOnlyConsumedRecordIdentities(t *testing.T) {
 	for _, mode := range []string{"selected", "partial", "all", "peek", "stolen", "unconfirmed"} {
 		t.Run(mode, func(t *testing.T) {
 			t.Setenv("C3_QUEUE_DIR", t.TempDir())
-			b := New(multiMappings())
+			b := newTestBroker(t, multiMappings())
 			defer b.Shutdown()
 			registerTestChannel(b, &fakeChannel{})
 			registerTestChannel(b, &webFakeChannel{fakeChannel: &fakeChannel{}})

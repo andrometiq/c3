@@ -9,7 +9,7 @@ import (
 )
 
 func TestUpdateAvailability_DefaultAndSet(t *testing.T) {
-	b := newTestBroker()
+	b := newHealthTestBroker(t)
 	if avail, latest := b.UpdateAvailability(); avail || latest != "" {
 		t.Errorf("default: got (%v, %q), want (false, \"\")", avail, latest)
 	}
@@ -28,7 +28,7 @@ func TestUpdateAvailability_DefaultAndSet(t *testing.T) {
 func TestWriteHealthFile_UpdateFields(t *testing.T) {
 	hf := filepath.Join(t.TempDir(), "health.json")
 	t.Setenv("C3_HEALTH_FILE", hf)
-	b := newTestBroker()
+	b := newHealthTestBroker(t)
 
 	// Before any update is detected: version present, update fields absent (omitempty).
 	b.WriteHealthFile()

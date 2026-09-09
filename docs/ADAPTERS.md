@@ -1132,6 +1132,13 @@ If your target CLI has a plugin marketplace, ship the adapter as a thin manifest
 
 What actually works:
 
+The in-process broker fixtures inject installed-adapter lookup before serving
+connections and pin PATH to OS utilities. This avoids reading a machine-installed
+adapter or introducing unrelated upgrade hints/notices. Test-owned sockets in
+private temporary directories are allowed; ambient host endpoints are not.
+Corpus sidecars verify receipt predicates directly. Poll offsets, truncation and
+oversize discard are verified separately by the shared-reader regression tests.
+
 - **Hand-roll a fake broker.** Listen on a temporary unix socket, accept one connection, assert on the `hello` frame, and write scripted responses. That is the whole harness — the protocol is newline-JSON and the handshake is one round trip. Drive your adapter through handshake → attach → tool call → inbound → ack → reconnect against it.
 - **Mock the host-CLI side** with a stdin/stdout pipe pair and assert on the JSON-RPC traffic. The Claude and Codex adapters both have tests demonstrating this pattern.
 - **Test against a real broker** for anything involving the durable queue. Queue consumption, `covered`/`pending` arithmetic, and the never-ack backlog behaviour are the things a fake broker will not catch, and they are exactly the things that corrupt user data when wrong.

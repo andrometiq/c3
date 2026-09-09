@@ -24,7 +24,7 @@ import (
 // one debounce window. The event must be forwarded (a) as its own inbound, not
 // concatenated into the text, and (b) with its Kind/Event intact.
 func TestCB1_EventSharingWindowDeliveredIntactAndSeparately(t *testing.T) {
-	b := New(&mappings.MappingsFile{SchemaVersion: 1})
+	b := newTestBroker(t, &mappings.MappingsFile{SchemaVersion: 1})
 	defer b.Shutdown()
 
 	var mu sync.Mutex
@@ -119,7 +119,7 @@ func TestCB1_EventSharingWindowDeliveredIntactAndSeparately(t *testing.T) {
 // voice/STT substitution even if it (pathologically) carried a voice
 // attachment. The STT plugin must NOT be invoked for an event.
 func TestCB1_EventBypassesSTT(t *testing.T) {
-	b := New(&mappings.MappingsFile{SchemaVersion: 1})
+	b := newTestBroker(t, &mappings.MappingsFile{SchemaVersion: 1})
 	defer b.Shutdown()
 
 	var sttCalls int
@@ -173,7 +173,7 @@ func TestCB1_EventBypassesSTT(t *testing.T) {
 func TestCB2_PollResultNotGateDroppedInDM_WithStampedOwner(t *testing.T) {
 	const owner = int64(424242)
 	mf := &mappings.MappingsFile{SchemaVersion: 1, Allowlist: &mappings.Allowlist{Users: []int64{owner}}}
-	b := New(mf)
+	b := newTestBroker(t, mf)
 	defer b.Shutdown()
 
 	// DM route: ChatID > 0 == the owner's user id (Telegram private-chat invariant).
@@ -194,7 +194,7 @@ func TestCB2_PollResultNotGateDroppedInDM_WithStampedOwner(t *testing.T) {
 func TestCB2_PollResultNotGateDroppedInDM_OwnerUnknown(t *testing.T) {
 	// Empty allowlist — IsUserAllowed(anything) is false. A 0-stamp poll_result
 	// in a DM must STILL pass (the bot-initiated-route safety net), not drop.
-	b := New(&mappings.MappingsFile{SchemaVersion: 1})
+	b := newTestBroker(t, &mappings.MappingsFile{SchemaVersion: 1})
 	defer b.Shutdown()
 
 	in := &c3types.Inbound{
@@ -213,7 +213,7 @@ func TestCB2_PollResultNotGateDroppedInDM_OwnerUnknown(t *testing.T) {
 // allowlisted stranger in a DM is still dropped (the CB-2 allow is poll_result-
 // only, not a blanket event bypass).
 func TestCB2_StrangerReactionStillGateDropped(t *testing.T) {
-	b := New(&mappings.MappingsFile{SchemaVersion: 1}) // empty allowlist
+	b := newTestBroker(t, &mappings.MappingsFile{SchemaVersion: 1}) // empty allowlist
 	defer b.Shutdown()
 
 	in := &c3types.Inbound{

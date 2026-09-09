@@ -33,13 +33,13 @@ func (f *fakeNotifier) Notify(ev c3types.HealthEvent) bool {
 	return f.delivered
 }
 
-func newTestBroker() *Broker {
-	return New(&mappings.MappingsFile{SchemaVersion: 1, Channels: map[string]mappings.ChannelConfig{}, Mappings: map[string]mappings.Mapping{}})
+func newHealthTestBroker(t *testing.T) *Broker {
+	return newTestBroker(t, &mappings.MappingsFile{SchemaVersion: 1, Channels: map[string]mappings.ChannelConfig{}, Mappings: map[string]mappings.Mapping{}})
 }
 
 func brokerWithAgent(t *testing.T) (*Broker, *fakeNotifier, *ipc.Conn) {
 	t.Helper()
-	b := newTestBroker()
+	b := newHealthTestBroker(t)
 	fn := newFakeNotifier()
 	b.desktopNotifier = fn
 	agentSide, brokerSide := net.Pipe()
@@ -147,7 +147,7 @@ func TestNotifyHealth_RecoveryEdge_AmbientOnly(t *testing.T) {
 // delivered even though no allowlist is configured (a user message would be
 // dropped), and that it carries no user content (ChatID/Sender zero).
 func TestBroadcastSystemEvent_GateBypassIsBrokerOriginated(t *testing.T) {
-	b := newTestBroker()
+	b := newHealthTestBroker(t)
 	// No allowlist at all — a user inbound would be default-denied.
 
 	agentSide, brokerSide := net.Pipe()
@@ -194,7 +194,7 @@ func TestBroadcastSystemEvent_GateBypassIsBrokerOriginated(t *testing.T) {
 // keeps the newest edge in the cache even when an older edge is processed later
 // (NotifyHealth runs lock-free across 3 goroutines, so processing can invert).
 func TestSetLastHealth_OlderEdgeDoesNotOverwriteNewer(t *testing.T) {
-	b := newTestBroker()
+	b := newHealthTestBroker(t)
 	t2 := time.Now()
 	t1 := t2.Add(-1 * time.Minute)
 	b.setLastHealth(c3types.HealthEvent{Channel: "telegram", State: c3types.HealthStateUp, Since: t2})

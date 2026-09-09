@@ -88,7 +88,7 @@ func (t *fakeVoiceTimer) Stop() {
 func schedulerHarness(t *testing.T) (*Broker, *VoiceScheduler, *fakeVoiceClock) {
 	t.Helper()
 	t.Setenv("C3_QUEUE_DIR", t.TempDir())
-	b := New(&mappings.MappingsFile{SchemaVersion: 1})
+	b := newTestBroker(t, &mappings.MappingsFile{SchemaVersion: 1})
 	b.Voice.Stop()
 	clock := newFakeVoiceClock()
 	b.Voice = newVoiceScheduler(b, clock)

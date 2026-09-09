@@ -100,7 +100,7 @@ func TestRecoverSession_LegacyIdentityMigrationFailureRefusesRecovery(t *testing
 	mf := &mappings.MappingsFile{SessionAttachments: map[string]mappings.SessionAttachment{
 		"legacy-id": {Name: "c3", LastAttachedAt: time.Now().UTC()},
 	}}
-	b := New(mf)
+	b := newTestBroker(t, mf)
 	defer b.Shutdown()
 
 	if _, ok := b.lookupSessionAttachment("claude", "legacy-id"); ok {

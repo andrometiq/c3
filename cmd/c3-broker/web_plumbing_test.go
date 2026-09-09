@@ -5,11 +5,13 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
 
 	"github.com/Andrometiq/c3/internal/broker"
+	"github.com/Andrometiq/c3/internal/buildidentity"
 	"github.com/Andrometiq/c3/internal/c3types"
 	"github.com/Andrometiq/c3/internal/channel"
 	"github.com/Andrometiq/c3/internal/ipc"
@@ -78,10 +80,23 @@ func registrationMappings(webEnabled *bool) *mappings.MappingsFile {
 	}
 }
 
+// Channel-registration fixtures must not acquire installed-adapter or queue
+// dependencies if they later add hello/status assertions.
+func newRegistrationBroker(t *testing.T, mf *mappings.MappingsFile) *broker.Broker {
+	t.Helper()
+	path := "/usr/bin" + string(os.PathListSeparator) + "/bin"
+	if runtime.GOOS == "windows" {
+		path = filepath.Join(os.Getenv("SystemRoot"), "System32")
+	}
+	t.Setenv("PATH", path)
+	t.Setenv("C3_QUEUE_DIR", t.TempDir())
+	return broker.New(mf, broker.WithInstalledAdapterLookup(func() (buildidentity.Installed, error) { return buildidentity.Installed{}, nil }))
+}
+
 func TestRegisterConfiguredChannelsWebFailureKeepsTelegram(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	b := broker.New(registrationMappings(nil))
+	b := newRegistrationBroker(t, registrationMappings(nil))
 	defer b.Shutdown()
 	telegramChannel := &registrationChannel{name: "telegram"}
 	webChannel := &registrationChannel{name: "web", startErr: errors.New("listen: address in use")}
@@ -113,7 +128,7 @@ func TestRegisterConfiguredChannelsWebFailureKeepsTelegram(t *testing.T) {
 func TestRegisterConfiguredChannelsRegistersEnabledWebAfterTelegram(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	b := broker.New(registrationMappings(nil))
+	b := newRegistrationBroker(t, registrationMappings(nil))
 	defer b.Shutdown()
 	telegramChannel := &registrationChannel{name: "telegram"}
 	webChannel := &registrationChannel{name: "web"}
@@ -146,7 +161,7 @@ func TestRegisterConfiguredChannelsDoesNotConstructDisabledWeb(t *testing.T) {
 	disabled := false
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	b := broker.New(registrationMappings(&disabled))
+	b := newRegistrationBroker(t, registrationMappings(&disabled))
 	defer b.Shutdown()
 	constructed := 0
 	registerConfiguredChannels(b, b.Mappings(),
@@ -204,7 +219,7 @@ func TestRunWebLinkUsesDaemonWritePath(t *testing.T) {
 	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	b := broker.New(registrationMappings(nil))
+	b := newRegistrationBroker(t, registrationMappings(nil))
 	defer b.Shutdown()
 	telegramChannel := &registrationChannel{name: "telegram"}
 	webChannel := &registrationChannel{name: "web"}

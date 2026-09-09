@@ -157,7 +157,7 @@ type Broker struct {
 const defaultWorkerIdle = 60 * time.Second
 
 // New returns a Broker with empty registries and the given mappings config.
-func New(mf *mappings.MappingsFile) *Broker {
+func New(mf *mappings.MappingsFile, options ...Option) *Broker {
 	ctx, cancel := context.WithCancel(context.Background())
 	b := &Broker{
 		Stubs:               NewStubRegistry(),
@@ -178,6 +178,9 @@ func New(mf *mappings.MappingsFile) *Broker {
 		desktopNotifier:     newDesktopNotifier(), // desktop notifications removed 2026-07-07 per maintainer; retained dormant, health surfaces only on the status line
 		lastHealth:          map[string]c3types.HealthEvent{},
 		sessionPIDResolver:  proctree.CLISessionPID,
+	}
+	for _, configure := range options {
+		configure(b)
 	}
 	b.mappings.Store(mf)
 	b.Routes.SetPresenceChangeHandler(b.enqueuePresenceChange)

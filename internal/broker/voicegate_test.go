@@ -107,7 +107,7 @@ func countingSTT(b *Broker, transcript string) *atomic.Int64 {
 func gateBroker(t *testing.T, g *gateChannel) *Broker {
 	t.Helper()
 	t.Setenv("C3_QUEUE_DIR", t.TempDir())
-	b := New(&mappings.MappingsFile{SchemaVersion: 1})
+	b := newTestBroker(t, &mappings.MappingsFile{SchemaVersion: 1})
 	registerGateChannel(b, g)
 	return b
 }
@@ -248,7 +248,7 @@ func TestFlushInbounds_UnrecognizedRefusal_PassesTheRealErrorThrough(t *testing.
 // not become a refusal — the gate stands down and STT runs as before.
 func TestFlushInbounds_NothingToAsk_StillTranscribes(t *testing.T) {
 	t.Setenv("C3_QUEUE_DIR", t.TempDir())
-	b := New(&mappings.MappingsFile{SchemaVersion: 1})
+	b := newTestBroker(t, &mappings.MappingsFile{SchemaVersion: 1})
 	defer b.Shutdown()
 	// readbackRecorderChannel has no AttachmentSize method.
 	registerReadbackChannel(b, &readbackRecorderChannel{fakeChannel: &fakeChannel{}})
@@ -294,7 +294,7 @@ func TestFlushInbounds_RefusalIsAppendedToExistingText(t *testing.T) {
 func brokerWithProbe(t *testing.T, pc *probeChannel) *Broker {
 	t.Helper()
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	b := New(mfWithTelegram())
+	b := newTestBroker(t, mfWithTelegram())
 	b.chMu.Lock()
 	b.channels[pc.Name()] = &channelRegistration{Channel: pc}
 	b.chMu.Unlock()

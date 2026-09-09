@@ -34,8 +34,8 @@ func TestAttach_RefusesChannelThatIsConfiguredButNotRunning(t *testing.T) {
 		Groups:       map[string]mappings.GroupConfig{"main": {ChatID: -100}},
 		DMChatID:     42,
 	}
-	// New() and NOT brokerWithChannel(): configured, deliberately not registered.
-	br := New(mf)
+	// newTestBroker(t, ) and NOT brokerWithChannel(): configured, deliberately not registered.
+	br := newTestBroker(t, mf)
 	defer br.Shutdown()
 
 	a, b := net.Pipe()
@@ -80,7 +80,7 @@ func TestAttach_RefusesChannelThatIsConfiguredButNotRunning(t *testing.T) {
 
 func TestAttachWebWithoutStanzaSaysNotConfigured(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	br := New(mfWithTelegram())
+	br := newTestBroker(t, mfWithTelegram())
 	defer br.Shutdown()
 	br.chMu.Lock()
 	br.channels["web"] = &channelRegistration{Channel: &webFakeChannel{fakeChannel: &fakeChannel{}}}

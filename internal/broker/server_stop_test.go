@@ -24,7 +24,7 @@ func TestServer_StopUnblocksParkedConnection(t *testing.T) {
 	dir := t.TempDir()
 	sockPath := filepath.Join(dir, "test.sock")
 
-	b := New(&mappings.MappingsFile{SchemaVersion: 1})
+	b := newTestBroker(t, &mappings.MappingsFile{SchemaVersion: 1})
 	srv, err := Listen(sockPath, b)
 	if err != nil {
 		t.Fatal(err)

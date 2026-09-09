@@ -386,7 +386,7 @@ func TestRecoverBroker_OrdinaryRestartReplayKeepsClaimWithoutResumeNotice(t *tes
 
 			mf := reconnectSwitchMappings()
 			mf.AutoAttachOnResume = &tc.autoAttach
-			freshBroker := c3broker.New(mf)
+			freshBroker := newTestBroker(t, mf)
 			t.Cleanup(freshBroker.Shutdown)
 			testChannel := &reconnectSwitchChannel{}
 			if err := freshBroker.RegisterChannel(testChannel); err != nil {
@@ -458,7 +458,7 @@ func TestRecoverBroker_AttachBeforeIdentityReplayAndReregisters(t *testing.T) {
 	mf := reconnectSwitchMappings()
 	mf.AutoAttachOnResume = &disabled
 	delete(mf.SessionAttachmentsByCLI["claude"], "conversation-a")
-	freshBroker := c3broker.New(mf)
+	freshBroker := newTestBroker(t, mf)
 	t.Cleanup(freshBroker.Shutdown)
 	testChannel := &reconnectSwitchChannel{}
 	if err := freshBroker.RegisterChannel(testChannel); err != nil {
@@ -514,7 +514,7 @@ func TestRecoverBroker_IdentitySwitchSkipsStaleReplayAndPreservesAttachments(t *
 	writeIdentityHandoff(t, "spawn", "conversation-a", 10)
 	writeIdentityHandoff(t, "conversation-a", "conversation-b", 20)
 
-	freshBroker := c3broker.New(reconnectSwitchMappings())
+	freshBroker := newTestBroker(t, reconnectSwitchMappings())
 	t.Cleanup(freshBroker.Shutdown)
 	testChannel := &reconnectSwitchChannel{}
 	if err := freshBroker.RegisterChannel(testChannel); err != nil {
@@ -603,7 +603,7 @@ func TestRecoverBroker_UnsettledTimeoutDoesNotReplayPreviousConversation(t *test
 	}
 	writeIdentityHandoff(t, "conversation-a", "conversation-b", 20)
 
-	freshBroker := c3broker.New(reconnectSwitchMappings())
+	freshBroker := newTestBroker(t, reconnectSwitchMappings())
 	t.Cleanup(freshBroker.Shutdown)
 	testChannel := &reconnectSwitchChannel{}
 	if err := freshBroker.RegisterChannel(testChannel); err != nil {

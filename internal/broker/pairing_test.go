@@ -29,7 +29,7 @@ func pairingTestBroker(t *testing.T) *Broker {
 		Channels:      map[string]mappings.ChannelConfig{"telegram": {BotToken: "x"}},
 		Mappings:      map[string]mappings.Mapping{},
 	}
-	return New(mf)
+	return newTestBroker(t, mf)
 }
 
 func TestPairing_GenerateCode_FourDigits(t *testing.T) {

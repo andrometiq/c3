@@ -18,7 +18,7 @@ import (
 
 func TestFetchReceiptBrokerAdapterToolResult(t *testing.T) {
 	isolateAdapterTest(t)
-	b := broker.New(reconnectSwitchMappings())
+	b := newTestBroker(t, reconnectSwitchMappings())
 	t.Cleanup(b.Shutdown)
 	if err := b.RegisterChannel(&reconnectSwitchChannel{}); err != nil {
 		t.Fatal(err)

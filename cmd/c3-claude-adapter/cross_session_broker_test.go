@@ -40,7 +40,7 @@ func crossSessionBrokerLifecycle(t *testing.T, variant string) {
 	for _, name := range []string{"C3_QUEUE_DIR", "XDG_CONFIG_HOME", "XDG_STATE_HOME"} {
 		t.Setenv(name, t.TempDir())
 	}
-	b := broker.New(reconnectSwitchMappings())
+	b := newTestBroker(t, reconnectSwitchMappings())
 	defer b.Shutdown()
 	if err := b.RegisterChannel(&reconnectSwitchChannel{}); err != nil {
 		t.Fatal(err)

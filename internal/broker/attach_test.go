@@ -137,7 +137,7 @@ func brokerWithChannel(t *testing.T, mf *mappings.MappingsFile, fc *fakeChannel)
 	// Redirect SaveMappings to a scratch file via XDG_CONFIG_HOME.
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 
-	b := New(mf)
+	b := newTestBroker(t, mf)
 	// Bypass Broker.RegisterChannel (which would call fc.Start with a
 	// real broker context); register manually.
 	b.chMu.Lock()

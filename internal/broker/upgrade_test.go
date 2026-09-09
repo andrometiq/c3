@@ -17,7 +17,7 @@ import (
 func TestUpgradeHelloHint(t *testing.T) {
 	for _, kind := range []string{"same", "different", "unreadable", "prefeature", "contract", "disabled"} {
 		t.Run(kind, func(t *testing.T) {
-			b := &Broker{}
+			b := newUpgradeTestBroker(t)
 			b.upgrades.installed = func() (buildidentity.Installed, error) {
 				if kind == "unreadable" {
 					return buildidentity.Installed{}, errors.New("unreadable")
@@ -54,7 +54,7 @@ func TestUpgradeHelloHint(t *testing.T) {
 }
 func TestUpgradeFallbackNoticeOnceAcrossReconnect(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	b := &Broker{}
+	b := newUpgradeTestBroker(t)
 	left, right := net.Pipe()
 	defer left.Close()
 	defer right.Close()
@@ -78,7 +78,7 @@ func TestUpgradeFallbackNoticeOnceAcrossReconnect(t *testing.T) {
 	b.sendUpgradeNotice(stub, "new") // would block if repeated
 	stub.ConnID = 2
 	b.sendUpgradeNotice(stub, "new") // same logical process, new connection
-	restarted := &Broker{}
+	restarted := newUpgradeTestBroker(t)
 	restarted.sendUpgradeNotice(stub, "new") // persisted across the broker bounce too
 	_ = right.SetReadDeadline(time.Now().Add(10 * time.Millisecond))
 	if raw, err = conn.ReadFrame(); err == nil {
@@ -109,7 +109,7 @@ func TestUpgradeHelloWireIntegration(t *testing.T) {
 }
 
 func TestUpgradePrefeatureUnreadableInstalledBuild(t *testing.T) {
-	b := &Broker{}
+	b := newUpgradeTestBroker(t)
 	b.upgrades.installed = func() (buildidentity.Installed, error) { return buildidentity.Installed{}, errors.New("unreadable") }
 	var ack ipc.HelloAckMsg
 	if notice := b.prepareUpgrade(ipc.HelloMsg{CLI: "claude"}, &Stub{ConnID: 1}, &ack); notice != buildidentity.Current() || ack.Upgrade != nil {
@@ -128,7 +128,7 @@ func TestUpgradeUnreadableFallbackNotice(t *testing.T) {
 						t.Fatal(err)
 					}
 				}
-				b := &Broker{}
+				b := newUpgradeTestBroker(t)
 				b.upgrades.installed = func() (buildidentity.Installed, error) { return buildidentity.Read(path) }
 				hello := ipc.HelloMsg{CLI: "claude", Build: "old", UpgradeDisabled: kind == "disabled"}
 				if kind == "prefeature" {

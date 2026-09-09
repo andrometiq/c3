@@ -18,7 +18,7 @@ func injectionFixture(t *testing.T, enabled bool) *Broker {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	mf := &mappings.MappingsFile{SchemaVersion: 1, Mappings: map[string]mappings.Mapping{}, Allowlist: &mappings.Allowlist{Groups: []int64{-1}}, Channels: map[string]mappings.ChannelConfig{TestInjectChannel: {DebounceMS: 20}}}
-	b := New(mf)
+	b := newTestBroker(t, mf)
 	t.Cleanup(b.Shutdown)
 	if enabled {
 		if err := b.EnableTestInjection(); err != nil {

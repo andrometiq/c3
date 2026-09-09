@@ -46,7 +46,7 @@ func TestRegisterChannel_RefusesDuplicateName(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 
-	b := New(mfWithTelegram())
+	b := newTestBroker(t, mfWithTelegram())
 	defer b.Shutdown()
 
 	incumbent := &dupNameChannel{fakeChannel: &fakeChannel{}, name: "telegram"}
@@ -75,7 +75,7 @@ func TestRegisterChannel_RefusesDuplicateName(t *testing.T) {
 func TestRegisterChannel_RefusesWebBeforeTelegram(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	b := New(&mappings.MappingsFile{
+	b := newTestBroker(t, &mappings.MappingsFile{
 		SchemaVersion: 1,
 		Channels:      map[string]mappings.ChannelConfig{"web": {}},
 		Mappings:      map[string]mappings.Mapping{},

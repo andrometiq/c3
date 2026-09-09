@@ -32,7 +32,7 @@ func TestNegotiatedInboxBrokerAdapterLifecycle(t *testing.T) {
 				t.Setenv(name, t.TempDir())
 			}
 			t.Setenv("CLAUDE_CODE_SESSION_ID", "")
-			b := broker.New(reconnectSwitchMappings())
+			b := newTestBroker(t, reconnectSwitchMappings())
 			t.Cleanup(b.Shutdown)
 			if err := b.RegisterChannel(&reconnectSwitchChannel{}); err != nil {
 				t.Fatal(err)

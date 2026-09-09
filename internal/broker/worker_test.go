@@ -102,7 +102,7 @@ func TestSttFailureText_NamesCachedPathWhenPresent(t *testing.T) {
 // forgotten so Telegram's redelivery re-dispatches) — never via the persisted
 // callback, which would advance the offset and lose the message.
 func TestShutdown_DroppedInboundRecoversViaPersistFailed(t *testing.T) {
-	b := New(&mappings.MappingsFile{SchemaVersion: 1})
+	b := newTestBroker(t, &mappings.MappingsFile{SchemaVersion: 1})
 	defer b.Shutdown()
 
 	var mu sync.Mutex
@@ -144,7 +144,7 @@ func TestShutdown_DroppedInboundRecoversViaPersistFailed(t *testing.T) {
 // A dropped EVENT inbound needs no persist-failed recovery — events are never
 // persisted (no seam; the offset was already marked done in dispatchUpdate).
 func TestShutdown_DroppedEventNotRecovered(t *testing.T) {
-	b := New(&mappings.MappingsFile{SchemaVersion: 1})
+	b := newTestBroker(t, &mappings.MappingsFile{SchemaVersion: 1})
 	defer b.Shutdown()
 
 	var mu sync.Mutex
@@ -181,7 +181,7 @@ func TestShutdown_DroppedEventNotRecovered(t *testing.T) {
 // (download_attachment) or retry (retranscribe) without the user resending.
 func TestFlushInbounds_VoiceWithoutSTTPluginGetsSelfDocumentingFailure(t *testing.T) {
 	t.Setenv("C3_QUEUE_DIR", t.TempDir())
-	b := New(&mappings.MappingsFile{SchemaVersion: 1})
+	b := newTestBroker(t, &mappings.MappingsFile{SchemaVersion: 1})
 	defer b.Shutdown()
 
 	w := newRouteWorker(context.Background(), RouteKey{Channel: "telegram", ChatID: -100}, time.Hour, b)
@@ -204,7 +204,7 @@ func TestFlushInbounds_VoiceWithoutSTTPluginGetsSelfDocumentingFailure(t *testin
 }
 
 func TestFlushInbounds_VoiceWithCaptionKeepsCaptionWhenSTTAbsent(t *testing.T) {
-	b := New(&mappings.MappingsFile{SchemaVersion: 1})
+	b := newTestBroker(t, &mappings.MappingsFile{SchemaVersion: 1})
 	defer b.Shutdown()
 
 	w := newRouteWorker(context.Background(), RouteKey{Channel: "telegram", ChatID: -100}, time.Hour, b)
@@ -239,7 +239,7 @@ func TestFlushInbounds_VoiceWithCaptionKeepsCaptionWhenSTTAbsent(t *testing.T) {
 }
 
 func TestFlushInbounds_VoiceWithSTTPluginUsesTranscript(t *testing.T) {
-	b := New(&mappings.MappingsFile{SchemaVersion: 1})
+	b := newTestBroker(t, &mappings.MappingsFile{SchemaVersion: 1})
 	defer b.Shutdown()
 
 	b.Plugins.OnVoiceReceived(func(ctx context.Context, p c3types.VoicePayload) (string, error) {
@@ -282,7 +282,7 @@ func TestFlushInbounds_VoiceSTTTimeout_FallsBackToPlaceholder(t *testing.T) {
 	sttFlushTimeout = 50 * time.Millisecond
 	defer func() { sttFlushTimeout = orig }()
 
-	b := New(&mappings.MappingsFile{SchemaVersion: 1})
+	b := newTestBroker(t, &mappings.MappingsFile{SchemaVersion: 1})
 	defer b.Shutdown()
 
 	// Stub STT that hangs until its (per-call) ctx is cancelled, then returns
@@ -332,7 +332,7 @@ func TestFlushInbounds_VoiceSTTTimeout_FallsBackToPlaceholder(t *testing.T) {
 // never the raw marker.
 func TestFlushInbounds_VoiceSTTFailureMarkerBecomesRichText(t *testing.T) {
 	t.Setenv("C3_QUEUE_DIR", t.TempDir())
-	b := New(&mappings.MappingsFile{SchemaVersion: 1})
+	b := newTestBroker(t, &mappings.MappingsFile{SchemaVersion: 1})
 	defer b.Shutdown()
 
 	// STT builtin's real failure signal: a non-empty marker, not "".
@@ -556,7 +556,7 @@ func TestForwardOrFallback_UnclaimedEvent_DoesNotBounceFallback(t *testing.T) {
 func brokerWithGenericChannel(t *testing.T, mf *mappings.MappingsFile, ch channel.Channel) *Broker {
 	t.Helper()
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	b := New(mf)
+	b := newTestBroker(t, mf)
 	b.chMu.Lock()
 	b.channels[ch.Name()] = &channelRegistration{Channel: ch}
 	b.chMu.Unlock()
@@ -964,7 +964,7 @@ func registerReadbackChannel(b *Broker, rc *readbackRecorderChannel) {
 // carries the transcript — the echo is purely additive.
 func TestFlushInbounds_ReadbackOnSuccess(t *testing.T) {
 	t.Setenv("C3_QUEUE_DIR", t.TempDir())
-	b := New(&mappings.MappingsFile{SchemaVersion: 1})
+	b := newTestBroker(t, &mappings.MappingsFile{SchemaVersion: 1})
 	defer b.Shutdown()
 
 	rc := &readbackRecorderChannel{fakeChannel: &fakeChannel{}}
@@ -1014,7 +1014,7 @@ func TestFlushInbounds_ReadbackOnSuccess(t *testing.T) {
 // verbatim "[STT FAILED:" marker.
 func TestFlushInbounds_ReadbackFailureNotice(t *testing.T) {
 	t.Setenv("C3_QUEUE_DIR", t.TempDir())
-	b := New(&mappings.MappingsFile{SchemaVersion: 1})
+	b := newTestBroker(t, &mappings.MappingsFile{SchemaVersion: 1})
 	defer b.Shutdown()
 
 	rc := &readbackRecorderChannel{fakeChannel: &fakeChannel{}}
@@ -1073,7 +1073,7 @@ func TestFlushInbounds_ReadbackFailureNotice(t *testing.T) {
 // bare detached `go`) the fast second echo would record first and this fails.
 func TestFlushInbounds_EchoOrderingChained(t *testing.T) {
 	t.Setenv("C3_QUEUE_DIR", t.TempDir())
-	b := New(&mappings.MappingsFile{SchemaVersion: 1})
+	b := newTestBroker(t, &mappings.MappingsFile{SchemaVersion: 1})
 	defer b.Shutdown()
 
 	rc := &readbackRecorderChannel{fakeChannel: &fakeChannel{}}
@@ -1122,7 +1122,7 @@ func TestFlushInbounds_EchoOrderingChained(t *testing.T) {
 // must abort the parked echo promptly and close its own link.
 func TestFlushInbounds_EchoChainWorkerShutdown(t *testing.T) {
 	t.Setenv("C3_QUEUE_DIR", t.TempDir())
-	b := New(&mappings.MappingsFile{SchemaVersion: 1})
+	b := newTestBroker(t, &mappings.MappingsFile{SchemaVersion: 1})
 	defer b.Shutdown()
 
 	echo1Entered := make(chan struct{})

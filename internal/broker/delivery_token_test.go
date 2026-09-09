@@ -4,9 +4,9 @@ import "testing"
 
 func TestDeliveryTokenIncludesBrokerLifetimePrefix(t *testing.T) {
 	t.Setenv("C3_QUEUE_DIR", t.TempDir())
-	b1 := New(mfWithTelegram())
+	b1 := newTestBroker(t, mfWithTelegram())
 	defer b1.Shutdown()
-	b2 := New(mfWithTelegram())
+	b2 := newTestBroker(t, mfWithTelegram())
 	defer b2.Shutdown()
 
 	first := b1.mintDeliveryToken()

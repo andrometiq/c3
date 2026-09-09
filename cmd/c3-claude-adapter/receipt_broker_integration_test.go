@@ -27,7 +27,7 @@ func TestReceiptBrokerLifecycle(t *testing.T) {
 			t.Setenv("C3_QUEUE_DIR", t.TempDir())
 			t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 			t.Setenv("XDG_STATE_HOME", t.TempDir())
-			b := broker.New(reconnectSwitchMappings())
+			b := newTestBroker(t, reconnectSwitchMappings())
 			defer b.Shutdown()
 			if err := b.RegisterChannel(&reconnectSwitchChannel{}); err != nil {
 				t.Fatal(err)

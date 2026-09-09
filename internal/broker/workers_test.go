@@ -45,7 +45,7 @@ func TestWorkerPool_LazySpawnAndReap(t *testing.T) {
 // resolves.
 func TestWorkerPool_SubmitAfterIdleExitRespawns(t *testing.T) {
 	t.Setenv("C3_QUEUE_DIR", t.TempDir())
-	b := New(&mappings.MappingsFile{SchemaVersion: 1})
+	b := newTestBroker(t, &mappings.MappingsFile{SchemaVersion: 1})
 	defer b.Shutdown()
 
 	pool := NewWorkerPool(context.Background(), time.Hour, b)

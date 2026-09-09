@@ -16,6 +16,7 @@ import (
 
 func clearFetchTestEnvironment(t *testing.T) {
 	t.Helper()
+	isolateBrokerDiscovery(t)
 	for _, entry := range os.Environ() {
 		key, _, _ := strings.Cut(entry, "=")
 		if strings.HasPrefix(key, "C3_") || strings.HasPrefix(key, "CLAUDE_CODE_") {

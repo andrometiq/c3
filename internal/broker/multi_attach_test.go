@@ -240,7 +240,7 @@ func targetedReleaseForTest(t *testing.T, b *Broker, stub *Stub, target string) 
 
 func TestDetachTargetReleasesOneKeepsRest(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	b := New(multiMappings())
+	b := newTestBroker(t, multiMappings())
 	defer b.Shutdown()
 	telegram := &fakeChannel{}
 	web := &webFakeChannel{fakeChannel: &fakeChannel{}}
@@ -281,7 +281,7 @@ func TestDetachTargetReleasesOneKeepsRest(t *testing.T) {
 }
 
 func TestDetachTargetRespondsWithRemainingSet(t *testing.T) {
-	b := New(multiMappings())
+	b := newTestBroker(t, multiMappings())
 	defer b.Shutdown()
 	stub := b.Stubs.Register("claude", 11, "/proj", nil)
 	telegramKey := MakeRouteKey("telegram", -100, ptrI64Val(281))
@@ -350,7 +350,7 @@ func fetchForTest(t *testing.T, b *Broker, stub *Stub, req ipc.FetchQueueReq) ip
 
 func TestFetchQueueDrainsAllHeldRoutes(t *testing.T) {
 	t.Setenv("C3_QUEUE_DIR", t.TempDir())
-	b := New(multiMappings())
+	b := newTestBroker(t, multiMappings())
 	defer b.Shutdown()
 	registerTestChannel(b, &fakeChannel{})
 	registerTestChannel(b, &webFakeChannel{fakeChannel: &fakeChannel{}})
@@ -379,7 +379,7 @@ func TestFetchQueueDrainsAllHeldRoutes(t *testing.T) {
 
 func TestFetchQueueChannelSelector(t *testing.T) {
 	t.Setenv("C3_QUEUE_DIR", t.TempDir())
-	b := New(multiMappings())
+	b := newTestBroker(t, multiMappings())
 	defer b.Shutdown()
 	registerTestChannel(b, &fakeChannel{})
 	registerTestChannel(b, &webFakeChannel{fakeChannel: &fakeChannel{}})
@@ -411,7 +411,7 @@ func TestFetchQueueChannelSelector(t *testing.T) {
 
 func TestFetchQueueSkipsRouteStolenAfterSnapshot(t *testing.T) {
 	t.Setenv("C3_QUEUE_DIR", t.TempDir())
-	b := New(multiMappings())
+	b := newTestBroker(t, multiMappings())
 	defer b.Shutdown()
 	registerTestChannel(b, &fakeChannel{})
 
@@ -448,7 +448,7 @@ func TestFetchQueueSkipsRouteStolenAfterSnapshot(t *testing.T) {
 
 func TestPerRouteConfirmedGate(t *testing.T) {
 	t.Setenv("C3_QUEUE_DIR", t.TempDir())
-	b := New(multiMappings())
+	b := newTestBroker(t, multiMappings())
 	defer b.Shutdown()
 	registerTestChannel(b, &fakeChannel{})
 	registerTestChannel(b, &webFakeChannel{fakeChannel: &fakeChannel{}})
@@ -533,7 +533,7 @@ func setOutputForTest(t *testing.T, b *Broker, stub *Stub, target string) ipc.Se
 
 func TestSetOutputRouteValidatesHeld(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	b := New(multiMappings())
+	b := newTestBroker(t, multiMappings())
 	defer b.Shutdown()
 	stub := b.Stubs.Register("claude", 11, "/proj", nil)
 	stub.SetStableSessionID("output-session")
@@ -561,7 +561,7 @@ func TestSetOutputRouteValidatesHeld(t *testing.T) {
 }
 
 func TestSetOutputRouteReEmitsPresence(t *testing.T) {
-	b := New(multiMappings())
+	b := newTestBroker(t, multiMappings())
 	defer b.Shutdown()
 	telegram := &multiPresenceChannel{fakeChannel: &fakeChannel{}, name: "telegram"}
 	web := &multiPresenceChannel{fakeChannel: &fakeChannel{}, name: "web"}
@@ -637,7 +637,7 @@ func toolCallForTest(t *testing.T, b *Broker, stub *Stub, id, name string, args 
 }
 
 func TestToolChannelSelectorHeldOnly(t *testing.T) {
-	b := New(multiMappings())
+	b := newTestBroker(t, multiMappings())
 	defer b.Shutdown()
 	telegram := &routeCaptureChannel{fakeChannel: &fakeChannel{}, name: "telegram"}
 	web := &routeCaptureChannel{fakeChannel: &fakeChannel{}, name: "web"}
@@ -692,7 +692,7 @@ func TestToolChannelSelectorHeldOnly(t *testing.T) {
 }
 
 func TestPermGoesToKeyboardRouteAndNoticesTheRest(t *testing.T) {
-	b := New(multiMappings())
+	b := newTestBroker(t, multiMappings())
 	defer b.Shutdown()
 	telegramCaps := c3types.Capabilities{Channel: "telegram", InlineKeyboards: true}
 	telegram := &fakeChannel{caps: &telegramCaps}
@@ -724,7 +724,7 @@ func TestPermGoesToKeyboardRouteAndNoticesTheRest(t *testing.T) {
 }
 
 func TestAskGoesToKeyboardRoute(t *testing.T) {
-	b := New(multiMappings())
+	b := newTestBroker(t, multiMappings())
 	defer b.Shutdown()
 	telegramCaps := c3types.Capabilities{Channel: "telegram", InlineKeyboards: true}
 	telegram := &fakeChannel{caps: &telegramCaps, replyReturnID: 77}
@@ -761,7 +761,7 @@ func TestAskGoesToKeyboardRoute(t *testing.T) {
 
 func TestStealOneRouteEvictsFromSet(t *testing.T) {
 	t.Run("output route sends one notice and falls back", func(t *testing.T) {
-		b := New(multiMappings())
+		b := newTestBroker(t, multiMappings())
 		defer b.Shutdown()
 		victimSide, peerSide := net.Pipe()
 		defer victimSide.Close()
@@ -805,7 +805,7 @@ func TestStealOneRouteEvictsFromSet(t *testing.T) {
 	})
 
 	t.Run("non-output route sends no notice", func(t *testing.T) {
-		b := New(multiMappings())
+		b := newTestBroker(t, multiMappings())
 		defer b.Shutdown()
 		victimSide, peerSide := net.Pipe()
 		defer victimSide.Close()
@@ -827,7 +827,7 @@ func TestStealOneRouteEvictsFromSet(t *testing.T) {
 	})
 
 	t.Run("last output reports no routes held", func(t *testing.T) {
-		b := New(multiMappings())
+		b := newTestBroker(t, multiMappings())
 		defer b.Shutdown()
 		victimSide, peerSide := net.Pipe()
 		defer victimSide.Close()
@@ -870,7 +870,7 @@ func TestRecoverReclaimsSetAndOutput(t *testing.T) {
 		t.Setenv("C3_QUEUE_DIR", t.TempDir())
 		mf := multiMappings()
 		mf.UpsertSessionAttachment("claude", "multi", recoverableMultiAttachment())
-		b := New(mf)
+		b := newTestBroker(t, mf)
 		defer b.Shutdown()
 		stub := b.Stubs.Register("claude", 11, "/proj", nil)
 		stub.SetStableSessionID("multi")
@@ -889,7 +889,7 @@ func TestRecoverReclaimsSetAndOutput(t *testing.T) {
 		t.Setenv("C3_QUEUE_DIR", t.TempDir())
 		mf := multiMappings()
 		mf.UpsertSessionAttachment("claude", "multi", recoverableMultiAttachment())
-		b := New(mf)
+		b := newTestBroker(t, mf)
 		defer b.Shutdown()
 		telegramKey := MakeRouteKey("telegram", -100, ptrI64Val(281))
 		other := b.Stubs.Register("codex", 88, "/other", struct{}{})
@@ -906,7 +906,7 @@ func TestRecoverReclaimsSetAndOutput(t *testing.T) {
 		t.Setenv("C3_QUEUE_DIR", t.TempDir())
 		mf := multiMappings()
 		mf.UpsertSessionAttachment("claude", "multi", recoverableMultiAttachment())
-		b := New(mf)
+		b := newTestBroker(t, mf)
 		defer b.Shutdown()
 		webKey := MakeRouteKey("web", 42, nil)
 		other := b.Stubs.Register("codex", 88, "/other", struct{}{})
@@ -935,7 +935,7 @@ func TestRecoverReclaimsSetAndOutput(t *testing.T) {
 			Channel: "telegram", ChatID: -100, TopicID: &topicID, Name: "c3",
 			LastAttachedAt: time.Now().UTC(),
 		})
-		b := New(mf)
+		b := newTestBroker(t, mf)
 		defer b.Shutdown()
 		stub := b.Stubs.Register("claude", 11, "/proj", nil)
 		stub.SetStableSessionID("legacy")
@@ -981,7 +981,7 @@ func TestSessionAttachmentMatchesStubIgnoresRouteOrder(t *testing.T) {
 }
 
 func TestSessionsListsEveryHeldRoute(t *testing.T) {
-	b := New(multiMappings())
+	b := newTestBroker(t, multiMappings())
 	defer b.Shutdown()
 	stub := b.Stubs.Register("claude", 11, "/proj", struct{}{})
 	telegramKey := MakeRouteKey("telegram", -100, ptrI64Val(281))

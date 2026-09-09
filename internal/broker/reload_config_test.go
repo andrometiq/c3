@@ -21,7 +21,7 @@ func TestBroker_SetMappings_AtomicSwap(t *testing.T) {
 			"telegram": {BotToken: "old-token", DefaultGroup: "main"},
 		},
 	}
-	b := New(old)
+	b := newTestBroker(t, old)
 	defer b.Shutdown()
 
 	if got := b.Mappings().Channels["telegram"].BotToken; got != "old-token" {
@@ -49,7 +49,7 @@ func TestBroker_SetMappings_AtomicSwap(t *testing.T) {
 
 func TestBroker_SetMappings_ReloadsVoiceRetryExpiry(t *testing.T) {
 	t.Setenv("C3_QUEUE_DIR", t.TempDir())
-	b := New(&mappings.MappingsFile{
+	b := newTestBroker(t, &mappings.MappingsFile{
 		SchemaVersion: 1,
 		Plugins:       map[string]map[string]any{"stt": {"voice_retry_expiry": "12h"}},
 	})
@@ -92,7 +92,7 @@ func TestBroker_Mappings_ConcurrentAccess_NoRace(t *testing.T) {
 		},
 		Mappings: map[string]mappings.Mapping{},
 	}
-	b := New(mf)
+	b := newTestBroker(t, mf)
 	defer b.Shutdown()
 
 	const (

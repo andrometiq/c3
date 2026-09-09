@@ -107,6 +107,9 @@ Fetch cells require fetch attempts (no live transport), group confirmation and
 retirement inside 60 seconds, durable rows while the result is held, a complete
 matching final trailer, and one occurrence of each injected source. Missing,
 truncated, wrong-token/member or trailing-text trailers fail. The corpus test
-executes these sidecars through the same visitor-backed fetch receipt predicate.
+reads complete fixture lines with `bufio.Scanner` and calls `fetchToolReceipt`
+directly to verify the sidecar predicates. It does not exercise polling, offsets,
+truncation or oversized-record discard; the dedicated reader regression tests
+cover those behaviors.
 The coding lane runs collector unit tests only; a maintainer must run this matrix
 and review/export actual host fetch fixtures before claiming live acceptance.

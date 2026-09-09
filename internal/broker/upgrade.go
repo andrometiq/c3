@@ -17,7 +17,17 @@ type upgradeRegistry struct {
 	beforeAckRemoval func() // deterministic reconnect/ack regression seam
 	mu               sync.Mutex
 	notices          map[string]string
-	installed        func() (buildidentity.Installed, error) // test seam
+	installed        func() (buildidentity.Installed, error) // configured before serving; nil uses production discovery
+}
+
+// Option configures dependencies before a broker starts its workers.
+type Option func(*Broker)
+
+// WithInstalledAdapterLookup replaces PATH lookup and executable inspection.
+// A zero Installed value with no error means discovery is disabled. Callers
+// must configure the dependency at construction, before serving connections.
+func WithInstalledAdapterLookup(lookup func() (buildidentity.Installed, error)) Option {
+	return func(b *Broker) { b.upgrades.installed = lookup }
 }
 
 func (b *Broker) installedAdapter() (buildidentity.Installed, error) {
@@ -38,6 +48,9 @@ func (b *Broker) prepareUpgrade(hello ipc.HelloMsg, stub *Stub, ack *ipc.HelloAc
 		if hello.Build == "" || hello.UpgradeDisabled {
 			return ack.Build
 		}
+		return ""
+	}
+	if installed.Build == "" {
 		return ""
 	}
 	if hello.Build == "" {
@@ -77,7 +90,7 @@ func (b *Broker) upgradeStale(s *Stub) bool {
 		return false
 	}
 	installed, err := b.installedAdapter()
-	return err == nil && installed.Build != s.Build
+	return err == nil && installed.Build != "" && installed.Build != s.Build
 }
 
 func upgradeNoticePath() string {

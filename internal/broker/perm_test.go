@@ -80,7 +80,7 @@ func (f *permFakeChannel) answersSnapshot() []answeredCallback {
 func brokerWithPermChannel(t *testing.T, mf *mappings.MappingsFile, fc *permFakeChannel) *Broker {
 	t.Helper()
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	b := New(mf)
+	b := newTestBroker(t, mf)
 	b.chMu.Lock()
 	b.channels[fc.Name()] = &channelRegistration{Channel: fc}
 	b.chMu.Unlock()

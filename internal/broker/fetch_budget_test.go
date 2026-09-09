@@ -328,7 +328,7 @@ func TestMultiRouteFetchNeverTrashesSiblingMessage(t *testing.T) {
 	t.Setenv("C3_QUEUE_DIR", dir)
 	telegram := &fakeChannel{}
 	web := &webFakeChannel{fakeChannel: &fakeChannel{}}
-	b := New(multiMappings())
+	b := newTestBroker(t, multiMappings())
 	t.Cleanup(b.Shutdown)
 	registerTestChannel(b, telegram)
 	registerTestChannel(b, web)

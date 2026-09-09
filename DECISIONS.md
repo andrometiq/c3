@@ -46,6 +46,12 @@ partial group result from silently consuming messages. The live-matrix collector
 now checks the trailer contract; fresh host fetch fixtures still require a
 maintainer-run collection, not inferred transcript evidence.
 
+**Verification scope after upgrade integration:** Test broker constructors inject
+installed-adapter discovery and isolate PATH. Private fixture sockets and
+synthetic transcripts exercise in-process delivery and reconnect behavior; they
+do not establish installed-binary or live-host acceptance. The versioned corpus
+checks receipt predicates directly; bounded visitor polling has separate tests.
+
 ## D035: Inbox as a broker-owned transport (phase 3)
 
 **Date:** 2026-09-09

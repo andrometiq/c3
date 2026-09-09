@@ -78,7 +78,7 @@ func TestVoiceEndToEndRestartReparksPendingOutageRow(t *testing.T) {
 	queueDir := t.TempDir()
 	t.Setenv("C3_QUEUE_DIR", queueDir)
 	mf := &mappings.MappingsFile{SchemaVersion: 1}
-	b1 := New(mf)
+	b1 := newTestBroker(t, mf)
 	t.Cleanup(b1.Shutdown)
 	setFastVoiceDebounce(b1)
 	g1 := newGateChannel(100, nil)
@@ -103,7 +103,7 @@ func TestVoiceEndToEndRestartReparksPendingOutageRow(t *testing.T) {
 	})
 	b1.Shutdown()
 
-	b2 := New(mf)
+	b2 := newTestBroker(t, mf)
 	defer b2.Shutdown()
 	var recoveredAttempts atomic.Int64
 	b2.Plugins.OnVoiceReceived(func(context.Context, c3types.VoicePayload) (string, error) {
@@ -133,7 +133,7 @@ func TestVoiceEndToEndShutdownMidSTTRestartsWithoutLossOrDuplicate(t *testing.T)
 	queueDir := t.TempDir()
 	t.Setenv("C3_QUEUE_DIR", queueDir)
 	mf := &mappings.MappingsFile{SchemaVersion: 1}
-	b1 := New(mf)
+	b1 := newTestBroker(t, mf)
 	t.Cleanup(b1.Shutdown)
 	setFastVoiceDebounce(b1)
 	registerGateChannel(b1, newGateChannel(100, nil))
@@ -157,7 +157,7 @@ func TestVoiceEndToEndShutdownMidSTTRestartsWithoutLossOrDuplicate(t *testing.T)
 	}
 	b1.Shutdown()
 
-	b2 := New(mf)
+	b2 := newTestBroker(t, mf)
 	defer b2.Shutdown()
 	b2.Plugins.OnVoiceReceived(func(context.Context, c3types.VoicePayload) (string, error) {
 		return "survived restart", nil

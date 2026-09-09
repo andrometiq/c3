@@ -21,7 +21,7 @@ import (
 
 // degradeQueueDir points C3_QUEUE_DIR at a path whose parent is a regular FILE,
 // so queue.NewStore's os.MkdirAll fails with ENOTDIR. That is a real instance of
-// the trigger New() catches (unwritable dir / wrong permissions / occupied
+// the trigger newTestBroker(t, ) catches (unwritable dir / wrong permissions / occupied
 // path). Nothing is faked by assigning b.Queue = nil, so every test below runs
 // the production degrade end to end.
 func degradeQueueDir(t *testing.T) {
@@ -205,7 +205,7 @@ func TestHealthyQueue_HeldNoticeStillSaysNothingLost(t *testing.T) {
 func TestRegisterChannel_AnnouncesDegradedQueueAtStartup(t *testing.T) {
 	degradeQueueDir(t)
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	b := New(mfWithTelegram())
+	b := newTestBroker(t, mfWithTelegram())
 	defer b.Shutdown()
 	if b.Queue != nil {
 		t.Fatalf("setup did not degrade: a queue opened at %q", queue.QueueDir())
@@ -254,7 +254,7 @@ func TestRegisterChannel_AnnouncesDegradedQueueAtStartup(t *testing.T) {
 func TestRegisterChannel_HealthyStartupAnnouncesNothing(t *testing.T) {
 	t.Setenv("C3_QUEUE_DIR", t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	b := New(mfWithTelegram())
+	b := newTestBroker(t, mfWithTelegram())
 	defer b.Shutdown()
 	fc := &fakeChannel{}
 	if err := b.RegisterChannel(fc); err != nil {
@@ -275,7 +275,7 @@ func TestRegisterChannel_DegradedWithNoOperatorDMSendsNothing(t *testing.T) {
 	cc.DMChatID = 0
 	mf.Channels["telegram"] = cc
 
-	b := New(mf)
+	b := newTestBroker(t, mf)
 	defer b.Shutdown()
 	fc := &fakeChannel{}
 	if err := b.RegisterChannel(fc); err != nil {
@@ -321,7 +321,7 @@ func TestStatus_ReportsDegradedQueue(t *testing.T) {
 // persistent warning disappears even though Queue is nil.
 func TestHealthList_DegradedQueueStateCannotDisappear(t *testing.T) {
 	degradeQueueDir(t)
-	b := New(mfWithTelegram())
+	b := newTestBroker(t, mfWithTelegram())
 	defer b.Shutdown()
 	if b.Queue != nil {
 		t.Fatal("setup did not trigger queue.NewStore startup failure; health_list test would be vacuous")
@@ -334,7 +334,7 @@ func TestHealthList_DegradedQueueStateCannotDisappear(t *testing.T) {
 
 func TestHealthList_HealthyQueueDoesNotCryWolf(t *testing.T) {
 	t.Setenv("C3_QUEUE_DIR", t.TempDir())
-	b := New(mfWithTelegram())
+	b := newTestBroker(t, mfWithTelegram())
 	defer b.Shutdown()
 	if b.Queue == nil {
 		t.Fatal("setup unexpectedly disabled the durable queue; healthy control would be vacuous")

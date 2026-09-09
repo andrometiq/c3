@@ -107,7 +107,7 @@ func TestHandleToolCall_WorkerStall_ReturnsError(t *testing.T) {
 func runHandlerWithPeer(t *testing.T, mf *mappings.MappingsFile) (*ipc.Conn, func()) {
 	t.Helper()
 	a, b := net.Pipe()
-	br := New(mf)
+	br := newTestBroker(t, mf)
 	go br.HandleConn(a)
 	return ipc.NewConn(b), func() {
 		_ = a.Close()

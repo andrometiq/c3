@@ -15,7 +15,7 @@ func TestBrokerHost_ConfigUnmarshal(t *testing.T) {
 			"telegram": {BotToken: "tok", DefaultGroup: "main"},
 		},
 	}
-	b := New(mf)
+	b := newTestBroker(t, mf)
 	defer b.Shutdown()
 
 	host := NewBrokerHost(b, "telegram")
@@ -33,7 +33,7 @@ func TestBrokerHost_ConfigUnmarshal(t *testing.T) {
 }
 
 func TestBrokerHost_ConfigMissingChannel(t *testing.T) {
-	b := New(&mappings.MappingsFile{SchemaVersion: 1})
+	b := newTestBroker(t, &mappings.MappingsFile{SchemaVersion: 1})
 	defer b.Shutdown()
 
 	host := NewBrokerHost(b, "telegram")
@@ -45,7 +45,7 @@ func TestBrokerHost_ConfigMissingChannel(t *testing.T) {
 }
 
 func TestBrokerHost_EmitSubmitsToWorker(t *testing.T) {
-	b := New(&mappings.MappingsFile{SchemaVersion: 1})
+	b := newTestBroker(t, &mappings.MappingsFile{SchemaVersion: 1})
 	defer b.Shutdown()
 
 	host := NewBrokerHost(b, "telegram")

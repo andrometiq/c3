@@ -45,7 +45,7 @@ func assertWrapperLiveness(t *testing.T, hf healthFile) {
 func TestWriteHealthFile_EmptySnapshot(t *testing.T) {
 	hf := filepath.Join(t.TempDir(), "health.json")
 	t.Setenv("C3_HEALTH_FILE", hf)
-	b := newTestBroker()
+	b := newHealthTestBroker(t)
 	b.WriteHealthFile()
 	got := readHealthFile(t, hf)
 	assertWrapperLiveness(t, got)
@@ -62,7 +62,7 @@ func TestWriteHealthFile_EmptySnapshot(t *testing.T) {
 func TestWriteHealthFile_BrokerPIDAndWrittenUnix(t *testing.T) {
 	hf := filepath.Join(t.TempDir(), "health.json")
 	t.Setenv("C3_HEALTH_FILE", hf)
-	b := newTestBroker()
+	b := newHealthTestBroker(t)
 	b.WriteHealthFile()
 	got := readHealthFile(t, hf)
 	assertWrapperLiveness(t, got)
@@ -71,7 +71,7 @@ func TestWriteHealthFile_BrokerPIDAndWrittenUnix(t *testing.T) {
 func TestWriteHealthFile_DownEntry(t *testing.T) {
 	hf := filepath.Join(t.TempDir(), "health.json")
 	t.Setenv("C3_HEALTH_FILE", hf)
-	b := newTestBroker()
+	b := newHealthTestBroker(t)
 	b.setLastHealth(c3types.HealthEvent{
 		Channel: "telegram", State: c3types.HealthStateDown,
 		Since: time.Unix(1718722680, 0), Consec: 3, Reason: "dial failures",
@@ -91,7 +91,7 @@ func TestWriteHealthFile_DownEntry(t *testing.T) {
 func TestWriteHealthFile_ConcurrentEdgesProduceValidJSON(t *testing.T) {
 	hf := filepath.Join(t.TempDir(), "health.json")
 	t.Setenv("C3_HEALTH_FILE", hf)
-	b := newTestBroker()
+	b := newHealthTestBroker(t)
 	b.setLastHealth(c3types.HealthEvent{Channel: "telegram", State: c3types.HealthStateDown, Since: time.Now(), Consec: 3})
 	var wg sync.WaitGroup
 	for i := 0; i < 20; i++ {
@@ -117,7 +117,7 @@ func TestWriteHealthFile_ConcurrentEdgesProduceValidJSON(t *testing.T) {
 func TestStartHealthRefresh_StopsOnShutdown(t *testing.T) {
 	hf := filepath.Join(t.TempDir(), "health.json")
 	t.Setenv("C3_HEALTH_FILE", hf)
-	b := newTestBroker()
+	b := newHealthTestBroker(t)
 	b.StartHealthRefresh()
 	// Cancel the broker context; the refresh goroutine must observe Done and
 	// return. We can't directly observe goroutine exit, but Shutdown() must not

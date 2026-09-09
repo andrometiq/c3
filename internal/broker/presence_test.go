@@ -52,7 +52,7 @@ func (c *presenceChannel) snapshot() []presenceCall {
 func newPresenceBroker(t *testing.T) (*Broker, *presenceChannel) {
 	t.Helper()
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	b := New(mfWithTelegram())
+	b := newTestBroker(t, mfWithTelegram())
 	notifier := &presenceChannel{fakeChannel: &fakeChannel{}}
 	if err := b.RegisterChannel(notifier); err != nil {
 		b.Shutdown()
@@ -146,7 +146,7 @@ func TestPresenceNotifierConnDropPublishesRelease(t *testing.T) {
 
 func TestPresenceNotifierRegistrationReplaysExistingClaim(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	b := New(mfWithTelegram())
+	b := newTestBroker(t, mfWithTelegram())
 	defer b.Shutdown()
 	topicID := int64(281)
 	stub := &Stub{CLI: "codex", PID: 73, CWD: "/workspace/existing", ConnID: 9}
