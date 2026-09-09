@@ -33,8 +33,8 @@ func TestNegotiatedInboxBrokerAdapterLifecycle(t *testing.T) {
 			client, server := net.Pipe()
 			t.Cleanup(func() { client.Close() })
 			go b.HandleConn(server)
-			a := newAdapter()
-			seedLiveTranscript(t, a)
+			a, _, _ := liveFixture(t, ipc.RenderCapable)
+			a.deliveryHostInitialized.Store(true)
 			a.conn = ipc.NewConn(client)
 			a.initialRenderRoute = ipc.RenderRoute{State: ipc.RenderQueueOnly, Reason: "no dev-channels flag on host"}
 			if first == "channel" {
@@ -80,7 +80,11 @@ func TestNegotiatedInboxBrokerAdapterLifecycle(t *testing.T) {
 				var f ipc.DeliverMsg
 				json.Unmarshal(raw, &f)
 				tokens = append(tokens, f.Token)
-				a.handleDeliver(ctx, raw) // nil notifyTx forces a definitive channel failure.
+				if f.Transport == "channel" {
+					// Fail an established notify connection without changing readiness.
+					a.notifyTx.Disconnect()
+				}
+				a.handleDeliver(ctx, raw)
 				if f.Transport == "inbox" {
 					break
 				}

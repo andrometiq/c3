@@ -38,6 +38,13 @@ at most once per fact change and once per 10 seconds, after any legacy push's
 ack or expiry. This preserves frozen modes without stranding fresh sessions
 whose transcript did not exist at startup.
 
+**Host readiness (item G):** Both live transports remain ineligible until
+`notifications/initialized` has arrived and the notify transport exists. The
+startup hello cannot offer delivery; the bounded re-hello offers after readiness.
+A missing notify transport or failed write reports a failed attempt immediately,
+independently of receipt polling, so startup backlog cannot silently spend an
+attempt deadline before the host is listening.
+
 **Why:** The broker owns durable row delivery, including fallback identity,
 admission and deadlines. Keeping transport execution and receipt parsing in the
 adapter preserves host-specific validation without creating a second scheduler.

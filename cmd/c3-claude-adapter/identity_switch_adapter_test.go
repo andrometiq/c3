@@ -278,6 +278,9 @@ func reconnectSwitchMappings() *mappings.MappingsFile {
 
 func wireReconnectTestBroker(t *testing.T, a *adapter, b *c3broker.Broker) {
 	t.Helper()
+	// These fixtures reconnect an already initialized MCP host.
+	a.notifyTx = newNotifyTransport(&scriptedTransport{conn: &scriptedConn{}})
+	a.deliveryHostInitialized.Store(true)
 	seedLiveTranscript(t, a)
 	a.connectBrokerFn = func() error {
 		adapterSide, brokerSide := net.Pipe()

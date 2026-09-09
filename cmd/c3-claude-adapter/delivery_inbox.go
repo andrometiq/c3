@@ -58,7 +58,13 @@ func (a *adapter) writeDeliveries(ctx context.Context) {
 				continue
 			}
 			wc, cancel := context.WithDeadline(ctx, req.observer.deadline)
-			reason := ""
+			reason := a.deliveryHostReason()
+			if reason != "" {
+				// Readiness may change while awaiting write admission.
+				cancel()
+				a.finishDeliveryWrite(req.token, req.observer, reason)
+				continue
+			}
 			if req.observer.cross {
 				block, err := crossSessionChannelBlock(req.frame)
 				if err == nil {
@@ -78,12 +84,16 @@ func (a *adapter) writeDeliveries(ctx context.Context) {
 
 func (a *adapter) finishDeliveryWrite(token string, observer *deliveryObserver, reason string) {
 	a.liveMu.Lock()
-	defer a.liveMu.Unlock()
 	if a.deliveryObservers[token] != observer {
+		a.liveMu.Unlock()
 		return
 	}
 	observer.written = true
 	if reason != "" {
 		observer.result, observer.reason = "failed", reason
+	}
+	a.liveMu.Unlock()
+	if reason != "" {
+		a.reportDeliveryResult(token, observer)
 	}
 }

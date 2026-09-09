@@ -19,10 +19,15 @@ type deliveryObserver struct {
 	reason     string
 	cross      bool
 	written    bool
+	reporting  bool
 }
 
 // P1/P2: offer when "channel OR inbox is eligible"; both need a readable transcript.
 func (a *adapter) deliveryFacts() ipc.DeliveryLive {
+	if reason := a.deliveryHostReason(); reason != "" {
+		unavailable := ipc.DeliveryEligibility{Reason: reason}
+		return ipc.DeliveryLive{Channel: unavailable, Inbox: unavailable}
+	}
 	route := a.initialRenderRoute
 	if a.deliveryHostRoute != nil {
 		route = a.deliveryHostRoute()
@@ -99,6 +104,10 @@ func (a *adapter) handleDeliver(ctx context.Context, raw []byte) {
 	}
 	path := a.livePath()
 	offset, available := transcriptOffset(path)
+	failure := a.deliveryHostReason()
+	if failure == "" && !available {
+		failure = "session transcript unavailable"
+	}
 	a.liveMu.Lock()
 	if (msg.Transport == "inbox" && !a.deliveryInboxAccepted) || (msg.Transport == "channel" && !a.deliveryChannelAccepted) {
 		a.liveMu.Unlock()
@@ -118,9 +127,9 @@ func (a *adapter) handleDeliver(ctx context.Context, raw []byte) {
 	a.liveAttempt++
 	attempt := fmt.Sprintf("%s:%d", msg.Transport, a.liveAttempt)
 	observer := &deliveryObserver{path: path, offset: offset, deadline: deadline, attempt: attempt, cross: msg.Transport == "inbox"}
-	if !available {
+	if failure != "" {
 		observer.result = "failed"
-		observer.reason = "session transcript unavailable"
+		observer.reason = failure
 	}
 	if a.deliveryObservers == nil {
 		a.deliveryObservers = map[string]*deliveryObserver{}
@@ -128,7 +137,8 @@ func (a *adapter) handleDeliver(ctx context.Context, raw []byte) {
 	a.deliveryObservers[msg.Token] = observer
 	a.liveMu.Unlock()
 	a.startDeliveryLoops(ctx)
-	if !available {
+	if failure != "" {
+		a.reportDeliveryResult(msg.Token, observer)
 		return
 	}
 	meta := frame["meta"].(map[string]any)
@@ -178,7 +188,6 @@ func (a *adapter) pollDeliveries() {
 	type result struct {
 		token    string
 		observer *deliveryObserver
-		frame    ipc.AttemptResultMsg
 	}
 	var results []result
 	for token, o := range a.deliveryObservers {
@@ -201,7 +210,7 @@ func (a *adapter) pollDeliveries() {
 			}
 		}
 		if o.result != "" && conn != nil {
-			results = append(results, result{token, o, ipc.AttemptResultMsg{Op: ipc.OpAttemptResult, Token: token, Outcome: o.result, Reason: o.reason}})
+			results = append(results, result{token, o})
 		}
 	}
 	a.liveMu.Unlock()
@@ -209,16 +218,7 @@ func (a *adapter) pollDeliveries() {
 		writeLiveFrame(conn, ipc.DeliveryReportMsg{Op: ipc.OpDeliveryReport, Live: facts})
 	}
 	for _, r := range results {
-		wc, cancel := context.WithTimeout(context.Background(), time.Second)
-		err := conn.WriteJSONContext(wc, r.frame)
-		cancel()
-		if err == nil {
-			a.liveMu.Lock()
-			if a.deliveryObservers[r.token] == r.observer {
-				delete(a.deliveryObservers, r.token)
-			}
-			a.liveMu.Unlock()
-		}
+		a.reportDeliveryResult(r.token, r.observer)
 	}
 }
 func (a *adapter) handleDeliveryState(raw []byte) {

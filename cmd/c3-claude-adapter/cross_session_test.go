@@ -463,6 +463,7 @@ func TestCrossSessionTimeoutAndFailureStopPushes(t *testing.T) {
 
 func TestCrossSessionChannelFirstOnReconnect(t *testing.T) {
 	a, output, frames := liveFixture(t, ipc.RenderProbing)
+	a.deliveryHostInitialized.Store(true) // Reconnect of an already initialized host.
 	tx, pushes := fakeInbox(t, nil, "")
 	a.crossSession = tx
 	a.initialRenderRoute = ipc.RenderRoute{State: ipc.RenderProbing, Reason: "channels flag present, awaiting confirmation"}

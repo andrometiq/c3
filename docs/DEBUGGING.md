@@ -62,3 +62,11 @@ The legacy suite continues to assert `attempt shadow suite divergences=0`.
 connection gained an eligible transcript or inbox. This automatic re-hello is
 limited to once per fact change and once per 10 seconds, after any active legacy
 push's ack or expiry; the existing reconnect path transfers its claims.
+
+Host readiness is a capability fact: `notifications/initialized` must arrive
+and the notify transport must exist before either live transport is eligible.
+The startup hello carries no delivery offer even if a transcript already exists;
+the bounded eligibility re-hello makes the offer after the MCP handshake.
+Definite notify failures immediately send `attempt_result` with `outcome:"failed"`
+and a generic reason (`notify transport unavailable` or `channel notify write failed`),
+without waiting for receipt polling or the 15-second deadline.

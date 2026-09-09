@@ -82,6 +82,7 @@ func inboxAdapter(t *testing.T, stall bool) (*adapter, *safeBuffer, <-chan []byt
 	a, out, frames := liveFixture(t, ipc.RenderQueueOnly)
 	tx, pushes := deliveryInbox(t, stall)
 	a.crossSession = tx
+	a.deliveryHostInitialized.Store(true)
 	a.initialRenderRoute = ipc.RenderRoute{State: ipc.RenderQueueOnly, Reason: "no dev-channels flag on host"}
 	a.acceptDelivery(a.deliveryOffer(), &ipc.DeliveryAcceptance{Version: 1, Modes: []string{"channel", "inbox"}})
 	if !a.deliveryAccepted.Load() {

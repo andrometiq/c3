@@ -257,6 +257,7 @@ type adapter struct {
 	deliveryLoopOnce        sync.Once
 	deliveryLastFacts       ipc.DeliveryLive
 	deliveryRehello         deliveryRehelloState // liveMu
+	deliveryHostInitialized atomic.Bool
 
 	// notifyTx wraps the stdio transport to permit emitting custom
 	// `notifications/claude/channel` frames. Set in run() before Server.Run.
@@ -513,6 +514,11 @@ func (a *adapter) hello() error {
 		if len(offer) == 0 {
 			route = ipc.RenderRoute{State: ipc.RenderQueueOnly, Reason: "session transcript unavailable"}
 		}
+	}
+	if reason := a.deliveryHostReason(); reason != "" {
+		// G: the startup connection is legacy until re-hello; it must not
+		// advertise a usable legacy push route before the MCP handshake either.
+		route = ipc.RenderRoute{State: ipc.RenderQueueOnly, Reason: reason}
 	}
 	if err := conn.WriteJSON(ipc.HelloMsg{
 		Delivery: offer, Op: ipc.OpHello, CLI: "claude", PID: os.Getpid(), CWD: cwd,
@@ -1710,6 +1716,9 @@ func (a *adapter) buildMCPServer() *mcp.Server {
 	srv.AddReceivingMiddleware(func(next mcp.MethodHandler) mcp.MethodHandler {
 		return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
 			a.dispatched.Store(true)
+			if method == "notifications/initialized" {
+				a.deliveryHostInitialized.Store(true)
+			}
 			if method != "ping" {
 				log.Printf("mcp recv: method=%s", method)
 			}

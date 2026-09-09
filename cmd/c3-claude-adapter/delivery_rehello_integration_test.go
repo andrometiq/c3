@@ -45,6 +45,7 @@ func TestDeliveryRehelloFreshSessionNegotiates(t *testing.T) {
 				t.Fatal(err)
 			}
 			a, out, _ := liveFixture(t, ipc.RenderCapable)
+			a.deliveryHostInitialized.Store(true) // This fixture isolates transcript/socket availability.
 			path := a.livePath()
 			a.initialRenderRoute = ipc.RenderRoute{State: ipc.RenderCapable}
 			var pushes <-chan inboxPush

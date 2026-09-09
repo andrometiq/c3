@@ -19,6 +19,7 @@ func TestNegotiatedHelloEligibility(t *testing.T) {
 		t.Run(state, func(t *testing.T) {
 			a, _, _ := liveFixture(t, state)
 			a.initialRenderRoute = ipc.RenderRoute{State: state}
+			a.deliveryHostInitialized.Store(true)
 			offer := a.deliveryOffer()
 			eligible := state == ipc.RenderCapable || state == ipc.RenderProbing
 			if (len(offer) > 0) != eligible {
@@ -34,6 +35,7 @@ func TestNegotiatedHelloEligibility(t *testing.T) {
 func negotiatedAdapter(t *testing.T) (*adapter, *safeBuffer, <-chan []byte, context.Context) {
 	a, output, frames := liveFixture(t, ipc.RenderCapable)
 	a.initialRenderRoute = ipc.RenderRoute{State: ipc.RenderCapable}
+	a.deliveryHostInitialized.Store(true)
 	a.acceptDelivery(a.deliveryOffer(), &ipc.DeliveryAcceptance{Version: 1, Modes: []string{"channel"}})
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -99,13 +101,14 @@ func TestNegotiatedDefinitiveFailure(t *testing.T) {
 	a.handleDeliver(ctx, raw)
 	var msg ipc.AttemptResultMsg
 	raw = nextLiveFrame(t, frames)
-	if json.Unmarshal(raw, &msg) != nil || msg.Outcome != "failed" || msg.Reason != "channel notify write failed" {
+	if json.Unmarshal(raw, &msg) != nil || msg.Outcome != "failed" || msg.Reason != "notify transport unavailable" {
 		t.Fatalf("failure=%s", raw)
 	}
 }
 func TestNegotiatedAcceptanceAbsentKeepsLegacy(t *testing.T) {
 	a, _, _ := liveFixture(t, ipc.RenderCapable)
 	a.initialRenderRoute = ipc.RenderRoute{State: ipc.RenderCapable}
+	a.deliveryHostInitialized.Store(true)
 	a.acceptDelivery(a.deliveryOffer(), nil)
 	if a.deliveryAccepted.Load() {
 		t.Fatal("accepted without broker agreement")
@@ -115,8 +118,8 @@ func TestNegotiatedAcceptanceAbsentKeepsLegacy(t *testing.T) {
 func TestNegotiatedDocsContract(t *testing.T) {
 	// P9: "phase 2 ... P8 per-route display for negotiated sessions; legacy sessions untouched".
 	for path, claims := range map[string][]string{
-		"../../docs/ADAPTERS.md":  {"Provisional-negotiated", "no `fetch_receipt` mode is accepted", "lease` is refused on presence only for negotiated", "Legacy sessions retain", "c3_attempt=\"inbox:N\"", "validateCrossSessionPeer", "peer variants fail", "channel OR inbox is eligible", "at least one mode it offered", "once per 10 seconds"},
-		"../../docs/DEBUGGING.md": {"attempt retirement released: storage retry limit reached", "attempt shadow suite divergences=0", "no phase-5 flap timer", "attempt reserved transport=inbox", "attempt finished transport=inbox outcome=confirmed"},
+		"../../docs/ADAPTERS.md":  {"Provisional-negotiated", "no `fetch_receipt` mode is accepted", "lease` is refused on presence only for negotiated", "Legacy sessions retain", "c3_attempt=\"inbox:N\"", "validateCrossSessionPeer", "peer variants fail", "channel OR inbox is eligible", "at least one mode it offered", "once per 10 seconds", "notifications/initialized` received AND notify transport present", "startup hello carries no offer"},
+		"../../docs/DEBUGGING.md": {"attempt retirement released: storage retry limit reached", "attempt shadow suite divergences=0", "no phase-5 flap timer", "attempt reserved transport=inbox", "attempt finished transport=inbox outcome=confirmed", "Definite notify failures immediately send"},
 		"../../DECISIONS.md":      {"D034: Negotiated channel delivery (phase 2)", "no goroutine per attempt", "D035: Inbox as a broker-owned transport (phase 3)", "supersedes the delivery parts of D031"},
 	} {
 		body, err := os.ReadFile(path)

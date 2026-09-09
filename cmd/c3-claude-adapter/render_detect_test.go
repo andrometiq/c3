@@ -301,6 +301,8 @@ func TestHello_ReportsCannotRenderChannels(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			a := newAdapter()
+			a.deliveryHostInitialized.Store(true)
+			a.notifyTx = newNotifyTransport(&scriptedTransport{conn: &scriptedConn{}})
 			a.renderRoute = ipc.RenderRoute{State: tc.state, Reason: "test reason"}
 
 			pipeA, pipeB := net.Pipe()

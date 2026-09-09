@@ -236,6 +236,7 @@ sessions can use inbox first. After both transports are exhausted, retries wait
 for reconnect, attach, changed eligibility, another confirmed route, or a new
 message arriving at least 60 seconds after exhaustion. If the transcript or
 inbox becomes available after startup, C3 reconnects to offer delivery automatically.
+The first offer waits until the host finishes its MCP initialization.
 The installer can
 also offer a small `claude` shim so the flag is automatic for interactive
 launches. **The wrapper is opt-in, default no:** setup changes `~/.local/bin/claude`

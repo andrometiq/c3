@@ -353,7 +353,10 @@ Sent by either side. **Not correlated to any request** — you cannot match it t
 ### Provisional-negotiated — channel and inbox delivery (phase 3)
 
 This optional protocol-v1 extension has one delivery owner: the broker. The
-Claude adapter offers it when channel OR inbox is eligible. Channel requires a
+Claude adapter offers it when channel OR inbox is eligible. Both require host
+readiness: `notifications/initialized` received AND notify transport present.
+The startup hello carries no offer and reports a queue-only legacy route;
+item-F re-hello offers delivery once the host is ready. Channel requires a
 positively detected host, a C3 channel flag, and a readable transcript. Inbox
 requires a readable transcript and a validated owning-session socket: private
 runtime directory, the inherited owning inbox path, user ownership, and kernel
@@ -433,7 +436,8 @@ before the C3 channel block. The strict opening tag must carry
 closed unless that same prefix is present; unprefixed intake fixtures do not
 confirm inbox. Existing channel intake recognition remains unchanged. Writes
 alone never confirm delivery. Notify/inbox errors and unavailable transcripts
-report `failed` with a generic reason. The adapter never retries, falls back, or changes delivery state on this
+report `failed` with a generic reason immediately, independently of receipt
+polling, including a missing notify transport or a failed notify write. The adapter never retries, falls back, or changes delivery state on this
 path. `delivery_report` reports eligibility facts only when they change
 semantically, including when the owning socket appears or disappears; it cannot
 change accepted modes or receipt milestones.
