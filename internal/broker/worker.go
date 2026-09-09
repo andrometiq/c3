@@ -203,6 +203,7 @@ type OutboundResult struct {
 // debounceWindow time, whichever comes first, then forward as a single
 // merged Inbound (concatenated text, latest message_id, sum of attachments).
 type RouteWorker struct {
+	attemptWriteCancel context.CancelFunc
 	attemptCtx         context.Context
 	attemptDisplay     ipc.RenderRoute
 	attemptDisplayConn uint64
@@ -381,8 +382,8 @@ func (w *RouteWorker) run(ctx context.Context) {
 	// panic (recoverGoroutine below runs first, then this).
 	defer w.shutdown()
 	defer func() {
-		if w.cancel != nil {
-			w.cancel()
+		if w.attemptWriteCancel != nil {
+			w.attemptWriteCancel()
 		}
 	}()
 	// Backstop: a panic in the run-loop machinery (outside the per-method guards

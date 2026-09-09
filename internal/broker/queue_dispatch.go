@@ -43,12 +43,16 @@ const maxFetchIDBytes = 1024
 // single-owner worker access. Limit caps the combined batch; All drains all.
 func (b *Broker) handleFetchQueue(conn *ipc.Conn, stub *Stub, raw []byte) {
 	var req ipc.FetchQueueReq
-	var fields map[string]json.RawMessage
-	if json.Unmarshal(raw, &fields) == nil {
-		if _, lease := fields["lease"]; lease {
-			_ = json.Unmarshal(raw, &req)
-			_ = conn.WriteJSON(ipc.FetchQueueResp{Op: ipc.OpFetchQueueResult, ID: req.ID, Err: "lease is not accepted in protocol v1 channel mode"})
-			return
+	// G2 refusal is scoped to negotiated consume declarations. Other peers
+	// retain the baseline decoder's treatment of unknown fields.
+	if stub.negotiated() && stub.delivery.offer.Fetch == "consume" {
+		var fields map[string]json.RawMessage
+		if json.Unmarshal(raw, &fields) == nil {
+			if _, lease := fields["lease"]; lease {
+				_ = json.Unmarshal(raw, &req)
+				_ = conn.WriteJSON(ipc.FetchQueueResp{Op: ipc.OpFetchQueueResult, ID: req.ID, Err: "lease is not accepted in protocol v1 channel mode"})
+				return
+			}
 		}
 	}
 	if err := json.Unmarshal(raw, &req); err != nil {

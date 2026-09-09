@@ -9,6 +9,8 @@ import (
 	"github.com/Andrometiq/c3/internal/ipc"
 )
 
+const maxAttemptRemovalTries = 3
+
 func (w *RouteWorker) releaseAttemptSlot(s *Stub, token string) {
 	if !s.negotiated() {
 		return
@@ -115,9 +117,10 @@ func (w *RouteWorker) retireAttempt() {
 		}
 		_, err := w.broker.Queue.RemoveRecordIDs(queueRouteKey(w.key), memberIDs(a.Members))
 		if err != nil {
-			w.updateAttempt(a.Token, func(a *attemptRecord) { a.RemovalTries++ })
+			tries := a.RemovalTries + 1
+			w.updateAttempt(a.Token, func(a *attemptRecord) { a.RemovalTries = tries })
 			log.Print("attempt retirement retry: storage write failed; evidence retained")
-			if a.RemovalTries >= 2 {
+			if tries >= maxAttemptRemovalTries {
 				log.Print("attempt retirement released: storage retry limit reached")
 				w.finishAttempt(a.Token, "failed", "storage failure")
 			}

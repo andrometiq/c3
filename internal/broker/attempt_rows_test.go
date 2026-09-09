@@ -141,37 +141,58 @@ func TestNegotiatedMixedLegacyPaths(t *testing.T) {
 	}
 }
 func TestNegotiatedFetchLeaseRefusal(t *testing.T) {
-	// G2: "fetch: consume with ack:true, lease:true is refused without mutation".
-	b, w, s, _, _ := negotiatedFixture(t)
-	negotiatedAppend(t, w, 1, "held")
-	for _, declared := range []string{"consume", "receipt"} {
+	// Follow-up C/G2: refuse lease only for negotiated fetch:"consume";
+	// legacy and channel-only receipt peers retain unknown-field behavior.
+	for _, declared := range []string{"consume", "receipt", "legacy"} {
 		for _, lease := range []string{"true", "false", "null"} {
-			s.delivery.offer.Fetch = declared
-			a, c := net.Pipe()
-			peer, conn := ipc.NewConn(a), ipc.NewConn(c)
-			done := make(chan struct{})
-			go func() {
-				b.handleFetchQueue(conn, s, []byte(`{"op":"fetch_queue","id":"q","ack":true,"lease":`+lease+`}`))
-				close(done)
-			}()
-			raw, err := peer.ReadFrame()
-			if err != nil {
-				t.Fatal(err)
-			}
-			a.Close()
-			c.Close()
-			<-done
-			var response ipc.FetchQueueResp
-			json.Unmarshal(raw, &response)
-			if response.ID != "q" || response.Err == "" {
-				t.Fatalf("refusal: %s", raw)
-			}
-			if n, _ := b.Queue.Pending(queueRouteKey(w.key)); n != 1 {
-				t.Fatal("lease refusal mutated")
-			}
+			t.Run(declared+"/"+lease, func(t *testing.T) {
+				t.Setenv("C3_QUEUE_DIR", t.TempDir())
+				b := brokerWithChannel(t, mfWithTelegram(), &fakeChannel{})
+				t.Cleanup(b.Shutdown)
+				key := MakeRouteKey("telegram", -100, nil)
+				s := &Stub{CLI: "claude", PID: os.Getpid(), CWD: "/work", ConnID: 1}
+				if declared != "legacy" {
+					b.configureDelivery(s, []byte(strings.Replace(channelOffer, `"fetch":"receipt"`, `"fetch":"`+declared+`"`, 1)))
+				}
+				b.Routes.Claim(key, s)
+				s.AddRoute(key)
+				s.MarkRouteConfirmed(key)
+				if _, err := b.Queue.AppendTracked(queueRouteKey(key), inboundOn(-100, nil, 1, "held")); err != nil {
+					t.Fatal(err)
+				}
+				a, c := net.Pipe()
+				t.Cleanup(func() { a.Close(); c.Close() })
+				peer, conn := ipc.NewConn(a), ipc.NewConn(c)
+				done := make(chan struct{})
+				go func() {
+					b.handleFetchQueue(conn, s, []byte(`{"op":"fetch_queue","id":"q","ack":true,"all":true,"lease":`+lease+`}`))
+					close(done)
+				}()
+				raw, err := peer.ReadFrame()
+				if err != nil {
+					t.Fatal(err)
+				}
+				<-done
+				var response ipc.FetchQueueResp
+				if err := json.Unmarshal(raw, &response); err != nil {
+					t.Fatal(err)
+				}
+				if response.ID != "q" {
+					t.Fatalf("correlation changed: %s", raw)
+				}
+				pending, _ := b.Queue.Pending(queueRouteKey(key))
+				if declared == "consume" {
+					if response.Err == "" || len(response.Messages) != 0 || pending != 1 {
+						t.Fatalf("consume lease was not refused without mutation: %s; pending=%d", raw, pending)
+					}
+				} else if response.Err != "" || len(response.Messages) != 1 || response.Messages[0].Text != "held" || pending != 0 {
+					t.Fatalf("unknown lease field changed baseline consume: %s; pending=%d", raw, pending)
+				}
+			})
 		}
 	}
 }
+
 func TestNegotiatedHelloWireAndProtocolGate(t *testing.T) {
 	// P1/P3: negotiation precedes the protocol refusal switch.
 	for _, offer := range []string{channelOffer, `42`, `{"version":9}`, `{"live":null}`} {

@@ -132,6 +132,33 @@ func TestNegotiatedLifecycle(t *testing.T) {
 			}
 		})
 	}
+	t.Run("late_confirmed_still_open", func(t *testing.T) {
+		// Follow-up B/P6: a late confirmation on a still-open record is a uniform no-op.
+		b, w, s, frames, ctx := negotiatedFixture(t)
+		id := negotiatedAppend(t, w, 1, "late")
+		w.scheduleAttempt(ctx, false)
+		f := nextDeliver(t, frames)
+		deadline := time.Now().Add(-time.Second)
+		w.updateAttempt(f.Token, func(a *attemptRecord) { a.Deadline = deadline })
+		if a := w.liveAttempt(); a == nil || a.Outcome != "open" {
+			t.Fatal("test requires a still-open record after its deadline")
+		}
+		logs := captureProtoLog(t)
+		w.handleAttemptResult(resultFor(s, f, "confirmed"))
+		a := b.attempts.lookup(f.Token, time.Now())[0]
+		if a.Outcome != "open" || a.Evidence || len(a.Retired) != 0 || a.Deadline != deadline {
+			t.Fatalf("late result changed the still-open attempt: %+v", a)
+		}
+		rows, err := b.Queue.PeekTracked(queueRouteKey(w.key), -1)
+		if err != nil || len(rows) != 1 || rows[0].RecordID != id {
+			t.Fatalf("late result changed durable rows: %+v, %v", rows, err)
+		}
+		const refusal = "attempt result ignored: authority, deadline or open membership mismatch\n"
+		if got := logs.String(); strings.Count(got, refusal) != 1 {
+			t.Fatalf("want one uniform refusal line, got %q", got)
+		}
+	})
+
 }
 func TestNegotiatedAuthorityMisses(t *testing.T) {
 	// P3: "A copied token on another connection consumes nothing even if that connection now holds the route."
@@ -310,17 +337,27 @@ func TestNegotiatedRetirementStorageFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	w.handleAttemptResult(resultFor(s, f, "confirmed"))
-	if a := w.liveAttempt(); a == nil || !a.Evidence || len(a.Retired) != 0 {
-		t.Fatalf("evidence not retained: %+v", a)
+	for tries := 1; tries <= 3; tries++ {
+		if tries > 1 {
+			w.retireAttempt()
+		}
+		a := b.attempts.lookup(f.Token, time.Now())[0]
+		wantOutcome := "open"
+		if tries == 3 {
+			wantOutcome = "failed"
+		}
+		if a.RemovalTries != tries || a.Outcome != wantOutcome || !a.Evidence || len(a.Retired) != 0 {
+			t.Fatalf("removal try %d: want %s with evidence and no retirement, got %+v", tries, wantOutcome, a)
+		}
+		if n, _ := b.Queue.Pending(queueRouteKey(w.key)); n != 1 {
+			t.Fatal("failed retirement removed row")
+		}
 	}
 	w.retireAttempt()
-	w.retireAttempt()
-	if w.liveAttempt() != nil {
-		t.Fatal("retry limit did not release")
+	if a := b.attempts.lookup(f.Token, time.Now())[0]; a.RemovalTries != 3 || a.Reason != "storage failure" {
+		t.Fatalf("retirement retried after the three-try limit: %+v", a)
 	}
-	if n, _ := b.Queue.Pending(queueRouteKey(w.key)); n != 1 {
-		t.Fatal("failed retirement removed row")
-	}
+
 }
 func TestNegotiatedOfferAcceptance(t *testing.T) {
 	// P1: "A degraded broker (Queue == nil) never accepts"; malformed offers stay legacy.

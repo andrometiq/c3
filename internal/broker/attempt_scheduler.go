@@ -65,6 +65,9 @@ func (w *RouteWorker) startAttemptWriter(ctx context.Context) {
 	if w.attemptWrites != nil {
 		return
 	}
+	// Only the writer belongs to the run loop's lifetime. Legacy chained
+	// voice echoes keep the worker context until Stop or parent cancellation.
+	ctx, w.attemptWriteCancel = context.WithCancel(ctx)
 	w.attemptWrites = make(chan attemptWrite, 2)
 	w.attemptWritten = make(chan attemptWriteResult, 1)
 	go func() {

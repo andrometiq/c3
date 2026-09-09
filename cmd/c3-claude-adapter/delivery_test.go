@@ -112,7 +112,7 @@ func TestNegotiatedAcceptanceAbsentKeepsLegacy(t *testing.T) {
 func TestNegotiatedDocsContract(t *testing.T) {
 	// P9: "phase 2 ... P8 per-route display for negotiated sessions; legacy sessions untouched".
 	for path, claims := range map[string][]string{
-		"../../docs/ADAPTERS.md":  {"Provisional-negotiated", "no `fetch_receipt` mode is accepted", "lease` is refused on presence", "Legacy sessions retain"},
+		"../../docs/ADAPTERS.md":  {"Provisional-negotiated", "no `fetch_receipt` mode is accepted", "lease` is refused on presence only for negotiated", "Legacy sessions retain"},
 		"../../docs/DEBUGGING.md": {"attempt retirement released: storage retry limit reached", "attempt shadow suite divergences=0", "no phase-5 flap timer"},
 		"../../DECISIONS.md":      {"D034: Negotiated channel delivery (phase 2)", "no goroutine per attempt"},
 	} {

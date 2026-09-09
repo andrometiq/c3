@@ -417,7 +417,7 @@ excluded only from live scheduling. Enrichment invalidates the old member
 revision immediately. Drain/eviction remove only affected members; an empty
 attempt releases admission and proves nothing. Drain snapshots precede new
 reservations. Imported rows persist `origin:"drain"` and stay nudge-only.
-Confirmed retirement retries a failed storage write three times, retaining
+Confirmed retirement makes at most three storage removal attempts, retaining
 evidence until success or release; release can produce a duplicate.
 
 Process death releases attempts immediately. A socket reconnect by the same
@@ -429,8 +429,10 @@ its observers; delivery is never resent to restore observation.
 `fetch_queue` retains consume-on-return (`ack:true`) and nonmutating peek
 (`ack:false`) semantics, including its response shape and multi-route selection.
 Rows in open negotiated live attempts are excluded from fetch, attach backlog
-and Held counts. `lease` is refused on presence, without mutation, including
-`fetch:"consume"` with `ack:true, lease:true`. There is no `fetch_confirm` or
+and Held counts. `lease` is refused on presence only for negotiated
+`fetch:"consume"` peers, without mutation. Legacy peers and channel-only
+`fetch:"receipt"` peers retain the baseline unknown-field behavior: `lease` is
+ignored and never enables a reservation. There is no `fetch_confirm` or
 receipt-fetch reservation on this baseline.
 
 The broker derives each negotiated route's display: `waiting`,
