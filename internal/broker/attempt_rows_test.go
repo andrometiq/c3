@@ -11,6 +11,7 @@ import (
 
 	"github.com/Andrometiq/c3/internal/c3types"
 	"github.com/Andrometiq/c3/internal/ipc"
+	"github.com/Andrometiq/c3/internal/queue"
 )
 
 func TestNegotiatedVoiceRevisionInvalidatesOneMember(t *testing.T) {
@@ -72,7 +73,7 @@ func TestNegotiatedEvictionClosesEmptyAttempt(t *testing.T) {
 	// P4: "an attempt left empty closes, releases admission and worker liveness".
 	b, w, s, frames, ctx := negotiatedFixture(t)
 	in := inboundOn(-100, nil, 1, "expired retention")
-	in.Timestamp = time.Now().Add(-15 * 24 * time.Hour)
+	in.Timestamp = time.Now().Add(-(queue.MaxAge + time.Hour))
 	b.Queue.AppendTracked(queueRouteKey(w.key), in)
 	w.scheduleAttempt(ctx, false)
 	f := nextDeliver(t, frames)
@@ -364,7 +365,7 @@ func TestNegotiatedRetirementClearsEarlierLegacyRecovery(t *testing.T) {
 			b, w, s, frames, ctx := negotiatedFixture(t)
 			in := inboundOn(-100, nil, 1, "legacy recovery")
 			if seam == "eviction" {
-				in.Timestamp = time.Now().Add(-15 * 24 * time.Hour)
+				in.Timestamp = time.Now().Add(-(queue.MaxAge + time.Hour))
 			}
 			id, err := b.Queue.AppendTracked(queueRouteKey(w.key), in)
 			if err != nil {
