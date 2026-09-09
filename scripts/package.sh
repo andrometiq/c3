@@ -45,6 +45,7 @@ DEST="$STAGE/$PKG"
 mkdir -p "$DEST"
 trap 'rm -rf "$STAGE"' 0 1 2 15
 
+BUILD_ID="$(git -C "$ROOT" describe --always --dirty 2>/dev/null || echo dev)"
 COMMIT="$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)"
 GOVER="$(cd "$ROOT" && go version | awk '{print $3}')"
 BUILT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -58,7 +59,7 @@ EXT=""
 echo "==> building $PKG"
 for b in $BINS; do
 	CGO_ENABLED=0 GOOS="$GOOS" GOARCH="$GOARCH" \
-		go -C "$ROOT" build -trimpath -ldflags "-s -w -X ${VERSIONPKG}=${VERSION}" \
+		go -C "$ROOT" build -trimpath -ldflags "-s -w -X ${VERSIONPKG}=${VERSION} -X github.com/Andrometiq/c3/internal/buildidentity.ID=${BUILD_ID}" \
 		-o "$DEST/$b$EXT" "./cmd/$b"
 done
 

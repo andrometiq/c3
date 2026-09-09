@@ -41,6 +41,12 @@ type Broker struct {
 	Routes       *Routes
 	Workers      *WorkerPool
 	Fallbacks    *fallbackTracker
+	upgrades     upgradeRegistry
+	attempts     attemptTable // negotiated authority and legacy delivery observations
+	Stubs        *StubRegistry
+	Routes       *Routes
+	Workers      *WorkerPool
+	Fallbacks    *fallbackTracker
 	// HeldNotices throttles the "held — nothing lost" auto-reply on edit-capable
 	// channels to one per route per short window (defaultHeldNoticeCooldown) so a
 	// burst of holds coalesces into a single notice instead of a flood (msg 6083).

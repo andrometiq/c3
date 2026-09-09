@@ -7,10 +7,11 @@
 //	-ldflags "-X github.com/Andrometiq/c3/internal/version.Version=v1.0.0"
 //
 // (see scripts/package.sh, which the release workflow and `make dist` share). A
-// plain `go build` / `go install` — including the /c3:build path — leaves it
+// plain `go build` / `go install` leaves it
 // EMPTY; such a "dev" build reports "dev" and NEVER auto-updates (it has no
 // release identity to compare against). Callers must go through Current()/IsDev()
 // so the empty case is handled uniformly rather than reading Version directly.
+// The separate buildidentity package identifies source builds for adapter upgrades.
 package version
 
 import (

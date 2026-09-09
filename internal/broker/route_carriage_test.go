@@ -326,7 +326,7 @@ func reconnectHello(t *testing.T, b *Broker, pid int, cwd string) *ipc.Conn {
 	t.Helper()
 	peer, done := peerPair(t, b)
 	t.Cleanup(done)
-	if err := peer.WriteJSON(ipc.HelloMsg{Op: ipc.OpHello, CLI: "claude", PID: pid, CWD: cwd}); err != nil {
+	if err := peer.WriteJSON(ipc.HelloMsg{Build: "test", Op: ipc.OpHello, CLI: "claude", PID: pid, CWD: cwd}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := peer.ReadFrame(); err != nil {

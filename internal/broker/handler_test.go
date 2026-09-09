@@ -128,7 +128,7 @@ func TestHandle_HelloAck_NoConfig(t *testing.T) {
 	peer, done := runHandlerWithPeer(t, mf)
 	defer done()
 
-	if err := peer.WriteJSON(ipc.HelloMsg{Op: ipc.OpHello, CLI: "claude", PID: 1, CWD: "/x"}); err != nil {
+	if err := peer.WriteJSON(ipc.HelloMsg{Build: "test", Op: ipc.OpHello, CLI: "claude", PID: 1, CWD: "/x"}); err != nil {
 		t.Fatal(err)
 	}
 	raw, err := peer.ReadFrame()
@@ -156,7 +156,7 @@ func TestHandle_HelloAck_NoMapping(t *testing.T) {
 	peer, done := runHandlerWithPeer(t, mf)
 	defer done()
 
-	_ = peer.WriteJSON(ipc.HelloMsg{Op: ipc.OpHello, CLI: "claude", PID: 1, CWD: "/unknown"})
+	_ = peer.WriteJSON(ipc.HelloMsg{Build: "test", Op: ipc.OpHello, CLI: "claude", PID: 1, CWD: "/unknown"})
 	raw, _ := peer.ReadFrame()
 	var ack ipc.HelloAckMsg
 	_ = json.Unmarshal(raw, &ack)
@@ -181,7 +181,7 @@ func TestHandle_ListTopics(t *testing.T) {
 	peer, done := runHandlerWithPeer(t, mf)
 	defer done()
 
-	_ = peer.WriteJSON(ipc.HelloMsg{Op: ipc.OpHello, CLI: "claude", PID: 1, CWD: "/x"})
+	_ = peer.WriteJSON(ipc.HelloMsg{Build: "test", Op: ipc.OpHello, CLI: "claude", PID: 1, CWD: "/x"})
 	_, _ = peer.ReadFrame() // consume hello_ack
 
 	_ = peer.WriteJSON(ipc.ListTopicsReq{Op: ipc.OpListTopics})
@@ -229,7 +229,7 @@ func TestConnDrop_ReleasesClaimWhenPIDDead(t *testing.T) {
 	peer := ipc.NewConn(b)
 	defer peer.Close()
 
-	if err := peer.WriteJSON(ipc.HelloMsg{Op: ipc.OpHello, CLI: "claude", PID: -1, CWD: "/x"}); err != nil {
+	if err := peer.WriteJSON(ipc.HelloMsg{Build: "test", Op: ipc.OpHello, CLI: "claude", PID: -1, CWD: "/x"}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := peer.ReadFrame(); err != nil {
@@ -265,7 +265,7 @@ func TestHandle_ByeClosesCleanly(t *testing.T) {
 	peer, done := runHandlerWithPeer(t, mf)
 	defer done()
 
-	_ = peer.WriteJSON(ipc.HelloMsg{Op: ipc.OpHello, CLI: "claude", PID: 1, CWD: "/x"})
+	_ = peer.WriteJSON(ipc.HelloMsg{Build: "test", Op: ipc.OpHello, CLI: "claude", PID: 1, CWD: "/x"})
 	_, _ = peer.ReadFrame()
 
 	_ = peer.WriteJSON(ipc.ByeReq{Op: ipc.OpBye})

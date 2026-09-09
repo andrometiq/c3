@@ -14,7 +14,7 @@ import (
 func recoverViaCLI(t *testing.T, b *Broker, cli string, pid int, stableID string) (*ipc.Conn, ipc.RecoverSessionResp) {
 	t.Helper()
 	peer, _ := peerPair(t, b)
-	if err := peer.WriteJSON(ipc.HelloMsg{Op: ipc.OpHello, CLI: cli, PID: pid, CWD: "/project"}); err != nil {
+	if err := peer.WriteJSON(ipc.HelloMsg{Build: "test", Op: ipc.OpHello, CLI: cli, PID: pid, CWD: "/project"}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := peer.ReadFrame(); err != nil {

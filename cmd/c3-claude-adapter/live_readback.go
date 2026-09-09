@@ -217,6 +217,9 @@ func (a *adapter) pushWithReadbackGeneration(ctx context.Context, in ipc.Inbound
 		}
 	}()
 	conn := a.currentConn()
+	if a.upgrade.quiescing.Load() {
+		return
+	}
 	if a.deliveryRehello.closing {
 		return
 	}

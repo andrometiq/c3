@@ -179,7 +179,7 @@ func mfWithTelegram() *mappings.MappingsFile {
 
 func helloAck(t *testing.T, peer *ipc.Conn, cwd string) {
 	t.Helper()
-	if err := peer.WriteJSON(ipc.HelloMsg{Op: ipc.OpHello, CLI: "claude", PID: 1, CWD: cwd}); err != nil {
+	if err := peer.WriteJSON(ipc.HelloMsg{Build: "test", Op: ipc.OpHello, CLI: "claude", PID: 1, CWD: cwd}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := peer.ReadFrame(); err != nil {
@@ -1066,7 +1066,7 @@ func TestPing_SendsReplyToAttachedRoute(t *testing.T) {
 	// First adapter — the "user session" — attaches to topic c3.
 	adapter, doneA := peerPair(t, b)
 	defer doneA()
-	if err := adapter.WriteJSON(ipc.HelloMsg{Op: ipc.OpHello, CLI: "claude", PID: 99, CWD: "/projects/c3"}); err != nil {
+	if err := adapter.WriteJSON(ipc.HelloMsg{Build: "test", Op: ipc.OpHello, CLI: "claude", PID: 99, CWD: "/projects/c3"}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := adapter.ReadFrame(); err != nil {
@@ -1093,7 +1093,7 @@ func TestPing_SendsReplyToAttachedRoute(t *testing.T) {
 	// SAME CWD as the user's adapter.
 	pinger, doneP := peerPair(t, b)
 	defer doneP()
-	if err := pinger.WriteJSON(ipc.HelloMsg{Op: ipc.OpHello, CLI: "c3-broker-cli", PID: 100, CWD: "/projects/c3"}); err != nil {
+	if err := pinger.WriteJSON(ipc.HelloMsg{Build: "test", Op: ipc.OpHello, CLI: "c3-broker-cli", PID: 100, CWD: "/projects/c3"}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := pinger.ReadFrame(); err != nil {
@@ -1150,7 +1150,7 @@ func TestPing_NoAttachedStubReturnsError(t *testing.T) {
 
 	pinger, done := peerPair(t, b)
 	defer done()
-	if err := pinger.WriteJSON(ipc.HelloMsg{Op: ipc.OpHello, CLI: "c3-broker-cli", PID: 1, CWD: "/nowhere"}); err != nil {
+	if err := pinger.WriteJSON(ipc.HelloMsg{Build: "test", Op: ipc.OpHello, CLI: "c3-broker-cli", PID: 1, CWD: "/nowhere"}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := pinger.ReadFrame(); err != nil {
@@ -1229,7 +1229,7 @@ func TestPing_MultipleStubsAtCWD_TargetsMostRecent(t *testing.T) {
 	// Now issue the ping from a transient client at the same cwd.
 	pinger, done := peerPair(t, b)
 	defer done()
-	if err := pinger.WriteJSON(ipc.HelloMsg{Op: ipc.OpHello, CLI: "c3-broker-cli", PID: 9999, CWD: cwd}); err != nil {
+	if err := pinger.WriteJSON(ipc.HelloMsg{Build: "test", Op: ipc.OpHello, CLI: "c3-broker-cli", PID: 9999, CWD: cwd}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := pinger.ReadFrame(); err != nil {

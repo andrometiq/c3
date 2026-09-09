@@ -732,3 +732,24 @@ stubs that connect to it over a local socket.
 
 **Why:** The daemon centralizes channel polling while the stubs distribute
 messages to concurrent CLI sessions.
+
+## D037: Seamless adapter upgrade by self-exec with MCP resume
+
+Claude Code does not automatically restart an exited stdio MCP server and does
+not initialize again after an in-place exec. Replacing a binary at an unchanged
+plugin command also does not force `/reload-plugins` to reconnect it.
+
+Use broker hello upgrade hints based on embedded build identity. On supported
+platforms, drain adapter requests and delivery observations, then exec the
+installed adapter with locally restored Go SDK session state. Keep stdin framing
+and stdout completion inside the exec gate. Pin the cached tool contract and
+require reconnect on incompatible releases. Preserve PID, descriptors, claims,
+and the existing readiness/re-hello path. Legacy receipt bookkeeping runs after
+releasing the route ownership lock, preventing a nested-read-lock deadlock when
+claim transfer starts immediately after ack. Updates end with a broker bounce to
+trigger discovery; older adapters get an explicit system notice.
+
+This is provisional: broker shutdown still cancels broker-side calls and loses
+in-memory ask/permission state. A full lossless update requires a separately
+specified broker drain/handoff protocol; the adapter exec gate alone cannot
+provide that guarantee.

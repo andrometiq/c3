@@ -353,7 +353,7 @@ func TestHandlePairModeStart_DM(t *testing.T) {
 	peer, done := runHandlerWithPeer(t, mf)
 	defer done()
 
-	if err := peer.WriteJSON(ipc.HelloMsg{Op: ipc.OpHello, CLI: "c3-broker-cli", PID: 1, CWD: "/x"}); err != nil {
+	if err := peer.WriteJSON(ipc.HelloMsg{Build: "test", Op: ipc.OpHello, CLI: "c3-broker-cli", PID: 1, CWD: "/x"}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := peer.ReadFrame(); err != nil {
@@ -394,7 +394,7 @@ func TestHandlePairModeStart_GroupRequiresChatID(t *testing.T) {
 	peer, done := runHandlerWithPeer(t, mf)
 	defer done()
 
-	if err := peer.WriteJSON(ipc.HelloMsg{Op: ipc.OpHello, CLI: "c3-broker-cli", PID: 1, CWD: "/x"}); err != nil {
+	if err := peer.WriteJSON(ipc.HelloMsg{Build: "test", Op: ipc.OpHello, CLI: "c3-broker-cli", PID: 1, CWD: "/x"}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := peer.ReadFrame(); err != nil {

@@ -1,12 +1,17 @@
 ---
-description: Rebuild C3's ten core binaries from source (the Codex launcher remains opt-in).
+description: Rebuild C3's core binaries and trigger open-session adapter upgrades.
 ---
 
-!cd "${CLAUDE_PLUGIN_ROOT}/../.." && go install ./cmd/c3-broker ./cmd/c3-claude-adapter ./cmd/c3-codex-adapter ./cmd/c3-grok-adapter ./cmd/c3-agy-adapter ./cmd/c3-cursor-adapter ./cmd/c3-dcode-adapter ./cmd/c3-desktop-adapter ./cmd/claude-shim ./cmd/migrate-legacy
-!command -v c3-broker >/dev/null && c3-broker --help 2>&1 | head -1
+!cd "${CLAUDE_PLUGIN_ROOT}/../.." && make install && c3-broker restart
 
-If the build succeeded, tell the user: "core binaries installed; the PATH-shadowing Codex launcher is deliberately excluded and remains opt-in via INSTALL.md §5. To load the new code, quit Claude Code (Ctrl-D or `/exit`) and relaunch with `claude --dangerously-load-development-channels=plugin:c3@c3` (append `--resume` to pick your session back up) — the next adapter spawn auto-spawns a fresh broker. A bare `claude` would leave inbound silently dead. Don't try to bounce the broker from inside Claude Code; it kills the MCP server. `/c3:reload-config` is for mappings.json edits only; it won't reload binaries."
+Display the output. The build embeds `git describe --always --dirty` as its build
+identity. The broker bounce triggers upgrade hints for every connected Claude
+adapter. Compatible adapters finish outstanding work and self-exec with MCP
+resume; older or incompatible adapters show a notice to run `/mcp` and reconnect
+c3 (or restart the session). The Codex launcher remains opt-in via INSTALL.md §5.
 
-Also remind the user (once): "voice-note transcription needs only system `python3` + ffmpeg (`ffprobe`); no Python packages, no venv. Install ffmpeg via your OS package manager if you haven't — long (>30s) notes route best with `ffprobe` present."
+A broker restart can cancel broker-side tool calls and permission prompts; the
+adapter's exec gate protects only the subsequent adapter replacement.
 
-If `go install` failed, surface the error verbatim and suggest checking Go version (`go version` ≥ 1.25, matching the `go` directive in `go.mod`) and that the plugin source dir contains a `go.mod`.
+If the build fails, surface the error verbatim. Check that Go meets `go.mod` and
+that the plugin source directory contains a `go.mod`.

@@ -141,7 +141,7 @@ func testNegotiatedSocketReconnect(t *testing.T, transport string) {
 			if transport == "inbox" {
 				offer = strings.ReplaceAll(strings.ReplaceAll(channelOffer, `"channel":{"eligible":true}`, `"channel":{"eligible":false}`), `"inbox":{"eligible":false}`, `"inbox":{"eligible":true}`)
 			}
-			hello := ipc.HelloMsg{Op: ipc.OpHello, CLI: "claude", PID: os.Getpid(), CWD: "/work", Delivery: json.RawMessage(offer)}
+			hello := ipc.HelloMsg{Build: "test", Op: ipc.OpHello, CLI: "claude", PID: os.Getpid(), CWD: "/work", Delivery: json.RawMessage(offer)}
 			first.WriteJSON(hello)
 			raw := nextWireOp(t, first, ipc.OpHelloAck)
 			var ack ipc.HelloAckMsg

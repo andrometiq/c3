@@ -266,6 +266,15 @@ deliberately:
   Transports with opaque string ids still need a durable mapping, and the interface may evolve
   when one lands — not silently underneath the pinned queue or IPC formats.
 
+## Updating C3
+
+Run `/c3:update` (or `/c3:build` for a source checkout). The final broker bounce
+triggers upgrade hints: compatible open Claude sessions upgrade themselves after
+adapter requests and deliveries settle. Older adapters show a notice to run
+`/mcp` and reconnect c3. Incompatible contracts and unsupported platforms also
+require reconnect. Broker-side calls can still be canceled by the bounce; see
+[Updating C3](docs/USAGE.md#updating-c3) for the current boundary.
+
 ## Releases
 
 Release tarballs are published on GitHub alongside a `SHA256SUMS` file. The updater

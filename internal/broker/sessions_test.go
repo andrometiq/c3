@@ -17,7 +17,7 @@ func pingerHelloAck(t *testing.T, peer *ipc.Conn, cli string, pid int, cwd strin
 	if cli == "" {
 		cli = "c3-broker-cli"
 	}
-	if err := peer.WriteJSON(ipc.HelloMsg{Op: ipc.OpHello, CLI: cli, PID: pid, CWD: cwd}); err != nil {
+	if err := peer.WriteJSON(ipc.HelloMsg{Build: "test", Op: ipc.OpHello, CLI: cli, PID: pid, CWD: cwd}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := peer.ReadFrame(); err != nil {

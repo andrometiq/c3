@@ -235,7 +235,7 @@ C3 doesn't auto-delete. From your phone (Telegram), long-press the topic in the 
 ## When things go wrong
 
 - **No CLI is attached, but messages keep arriving** — check `/status`. With a healthy queue they are held and the healthy notice is rate-limited to once per topic per 10 seconds; open a session, `attach`, and drain them with `fetch_queue`. If status says the durable queue is disabled, they are held at Telegram for replay after restart with a working queue, and the warning uses the slower 5-minute cooldown; anything delivered live will arrive again. See "Durable inbound queue & backlog" above.
-- **`attach` says the topic is held** — `topics` lists who. If it's a stale claim (the holder crashed), the broker now sweeps dead-pid holders on dispatch (2026-05-14 fix); just retry `attach`. If that doesn't free it, quit Claude Code and relaunch — the new session's broker auto-spawn starts clean. Don't bounce the broker from inside CC (killing the broker also kills this session's MCP server, requiring a manual `/mcp` reconnect). From an external terminal, `pkill c3-broker` works. For mappings.json edits, `/c3:reload-config` is non-disruptive.
+- **`attach` says the topic is held** — `topics` lists who. If it's a stale claim (the holder crashed), the broker now sweeps dead-pid holders on dispatch (2026-05-14 fix); just retry `attach`. If that doesn't free it, quit Claude Code and relaunch — the new session's broker auto-spawn starts clean. `c3-broker restart` bounces the broker; adapters reconnect automatically, but pending broker calls can be canceled. For mappings.json edits, `/c3:reload-config` is non-disruptive.
 - **Voice transcription is wrong or failed** — never re-record. The original audio is saved; the CLI can `download_attachment` to re-listen, or `retranscribe` to re-run STT (e.g. once a flaky provider recovers). On an outright STT failure the agent sees a self-documenting message telling it exactly how to recover. The STT plugin's confidence isn't surfaced in v1; treat the transcript as a hint when accuracy matters.
 - **Typing indicator** — the broker now auto-pulses a typing indicator on a route while the agent is working, once that session has replied at least once in the topic (the signal you're in an active Telegram conversation). It stops when the agent sends its reply, or after a safety timeout. A brand-new topic shows no typing until the agent's first reply, and default-CLI-mode sessions (that never reply to Telegram) never pulse it.
 - **`codex` doesn't seem to be using C3** — check `which codex` returns the C3 launcher (`$GOBIN/codex` after install). Long-running shells hash; open a new terminal or `hash -r`. The launcher logs to `/tmp/c3-codex-supervisor.log` — `tail` it during a `codex` invocation to see what it thinks it's doing.
@@ -287,12 +287,23 @@ On Windows, `--check` works but installation is refused: live `.exe` replacement
 can leave a mixed-version install. Fully quit C3 and the coding CLI, then
 re-extract the newer release tarball over the installed binaries.
 
-The swap is on disk only: the **running broker keeps its old code until it
-restarts**. From a separate terminal, `kill -TERM <pid>` (the command prints the
-pid) bounces it — adapters reconnect with backoff and re-spawn the new broker,
-replaying their attach, so live sessions recover on their own. Don't bounce the
-broker from inside Claude Code (that recycles this session's MCP adapter); quit
-and relaunch instead, and the next adapter spawn brings up the new binary.
+A successful update ends with a broker bounce; `/c3:build` does the same after
+`make install`. The bounce triggers hello upgrade hints for every connected
+Claude adapter. On Linux and macOS, compatible adapters wait up to 30 seconds
+for requests, permission relays, stdout writes, and push acknowledgements or
+attempt expiry, then self-exec with the same PID and stdio descriptors. They
+restore the initialized MCP state locally and re-offer delivery when ready.
+Three unsuccessful drain windows require manual reconnect. Older adapters,
+Windows, and changed MCP contracts receive one system notice to run `/mcp` and
+reconnect c3 (or restart the session). `/reload-plugins` does not restart an
+unchanged MCP command.
+
+**Current boundary:** the adapter gate protects the self-exec, not the preceding
+broker shutdown. The existing broker reconnect contract cancels pending broker
+tool calls; ask/permission registrations are in memory. A bounce can therefore
+interrupt those operations. Durable inbound rows and the existing attachment
+recovery path survive. Fallback notice deduplication survives socket reconnects and ordinary broker
+restarts through the broker state file `upgrade-notices.json`.
 
 **Automatic update (opt-in).** Set `"auto_update": true` in `mappings.json`
 (default off) and the broker installs a newer release **itself** when its ~6h

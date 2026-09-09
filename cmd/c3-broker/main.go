@@ -11,6 +11,7 @@
 //	c3-broker install-claude-shim — install Claude Code launcher wrapper
 //	c3-broker uninstall-claude-shim — remove the installed Claude Code wrapper
 //	c3-broker update [--check] — install the latest GitHub release (checksum-verified atomic swap)
+//	c3-broker restart — bounce the broker to trigger adapter upgrade hints
 //	c3-broker version — print this binary's build version
 //
 // Singleton-per-machine via flock on $XDG_RUNTIME_DIR/c3-broker.pid (or
@@ -224,6 +225,12 @@ func main() {
 			// designed to exit 0 even on bad input — a hook that errors would
 			// break the user's session. runSessionHook returns nil unconditionally.
 			_ = runSessionHook()
+			return
+		case "restart":
+			if err := bounceUpgradeBroker(); err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(exitFailure)
+			}
 			return
 		case "update":
 			if err := runUpdate(os.Args[2:]); err != nil {

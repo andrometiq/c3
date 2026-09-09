@@ -211,7 +211,7 @@ func TestNegotiatedHelloWireAndProtocolGate(t *testing.T) {
 			t.Cleanup(b.Shutdown)
 			peer, closePeer := peerPair(t, b)
 			t.Cleanup(closePeer)
-			if err := peer.WriteJSON(ipc.HelloMsg{Op: ipc.OpHello, CLI: "claude", PID: os.Getpid(), CWD: "/work", Delivery: json.RawMessage(offer), ProtocolVersion: 99}); err != nil {
+			if err := peer.WriteJSON(ipc.HelloMsg{Build: "test", Op: ipc.OpHello, CLI: "claude", PID: os.Getpid(), CWD: "/work", Delivery: json.RawMessage(offer), ProtocolVersion: 99}); err != nil {
 				t.Fatal(err)
 			}
 			raw, err := peer.ReadFrame()

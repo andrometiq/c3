@@ -141,6 +141,7 @@ func (c *interceptConn) Read(ctx context.Context) (jsonrpc.Message, error) {
 		if !ok || req.ID.IsValid() || req.Method != permissionRequestMethod {
 			return msg, nil
 		}
+		dispatched := false
 		if h, snapshotter := c.owner.permissionDispatch(); h != nil {
 			if id, tool, preview := parsePermissionRequest(req.Params); id != "" {
 				var snapshot permissionSnapshot
@@ -153,7 +154,18 @@ func (c *interceptConn) Read(ctx context.Context) (jsonrpc.Message, error) {
 				// stall freeze the whole session's inbound path. Per-request ordering is
 				// irrelevant (each relay is keyed by request_id), so a goroutine is safe
 				// and matches the fire-and-forget contract.
-				go h(id, tool, preview, snapshot)
+				dispatched = true
+				go func() {
+					h(id, tool, preview, snapshot)
+					if wire, ok := c.Connection.(*upgradeTransport); ok {
+						wire.notificationDone()
+					}
+				}()
+			}
+		}
+		if !dispatched {
+			if wire, ok := c.Connection.(*upgradeTransport); ok {
+				wire.notificationDone()
 			}
 		}
 		// Diverted — loop to read the next frame so the SDK never sees this one.

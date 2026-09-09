@@ -1061,3 +1061,43 @@ What actually works:
 - **Mock the host-CLI side** with a stdin/stdout pipe pair and assert on the JSON-RPC traffic. The Claude and Codex adapters both have tests demonstrating this pattern.
 - **Test against a real broker** for anything involving the durable queue. Queue consumption, `covered`/`pending` arithmetic, and the never-ack backlog behaviour are the things a fake broker will not catch, and they are exactly the things that corrupt user data when wrong.
 - **Write at least one asymmetric wire test.** A marshal-then-unmarshal round trip is invariant under a key rename by construction and will bless the exact change that breaks compatibility. Assert against key names written as literals, and against a byte-for-byte captured frame. This repo does that for its payload types and it is the only kind of test that can fail on a rename.
+
+## Seamless Claude adapter upgrade (Provisional)
+
+`hello.build` and `hello_ack.build` are optional strings identifying the running
+executables, separate from release versions and IPC protocol versions. Builds
+inject `git describe --always --dirty` through ldflags, falling back to `dev`.
+The broker resolves `c3-claude-adapter` through PATH, exactly as the plugin command
+does, and reads Go build settings from that file. It never infers identity from
+mtime or executes the candidate for inspection. An unreadable identity yields
+no hint. A differing compatible binary yields
+`hello_ack.upgrade = {"path":"…","build":"…"}`.
+
+Claude additionally sends `resume_contract` (the pinned MCP contract hash) and
+`upgrade_disabled` (unsupported platform or exhausted/failed upgrade). These
+additive fields are Provisional. A changed contract requires reconnect because
+the host retains capabilities, instructions, and tools. Changing semantics or
+cached instructions also requires a new contract epoch even with unchanged
+schemas. The SDK tools/list contract test pins names, schemas, and descriptions.
+
+On a hint the adapter reports unavailable delivery facts (legacy queue-only),
+waits for complete request responses and permission relays, legacy ack/expiry,
+and negotiated attempt completion/expiry. It also tracks consumed stdin bytes
+and stdout writes. After draining it self-execs with `--mcp-resume`, preserving
+PID and fds. Private environment state transfers the original SDK initialization
+parameters and local attachment identity; it is removed from the new process's
+environment immediately. `ServerSessionOptions.State` restores the SDK session.
+No instructions are resent and no startup watchdog runs in resume mode. Normal
+readiness/re-hello and same-PID/CWD claims transfer remain authoritative.
+
+Fallback uses the existing broker system event, with the exact text:
+`C3 was updated to <build>. This session still runs the previous adapter: run /mcp and reconnect c3 (or restart the session) to switch.`
+The adapter preamble requires verbatim relay. Deduplication is by logical
+connection identity and target build, persisted in the broker state directory
+as `upgrade-notices.json` so ordinary broker restarts do not repeat it. Pre-feature adapters always receive it, using the broker build when the installed
+identity is unreadable (including the `dev` fallback for uninjected builds).
+
+The preceding broker bounce still follows the reconnect cancellation contract
+above; lossless broker-side in-flight work across shutdown is not implemented.
+Concurrent installers replacing the checked path before exec are also outside
+this provisional handoff's atomicity boundary.

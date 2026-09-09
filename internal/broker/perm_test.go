@@ -985,7 +985,7 @@ func TestPermissionSettled_DispatchUngatedAndUnknownOpStillErrors(t *testing.T) 
 	defer b.Shutdown()
 	peer, done := peerPair(t, b)
 	defer done()
-	if err := peer.WriteJSON(ipc.HelloMsg{
+	if err := peer.WriteJSON(ipc.HelloMsg{Build: "test",
 		Op: ipc.OpHello, CLI: "claude", PID: os.Getpid(), CWD: "/work",
 		ProtocolVersion: ipc.CompatibleProtocolMax + 1,
 	}); err != nil {

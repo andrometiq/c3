@@ -72,7 +72,7 @@ func TestHello_ProtocolMismatch_WarnsAndKeepsSafeOpsLive(t *testing.T) {
 	defer done()
 
 	peerVersion := ipc.ProtocolVersion + 1
-	if err := peer.WriteJSON(ipc.HelloMsg{
+	if err := peer.WriteJSON(ipc.HelloMsg{Build: "test",
 		Op: ipc.OpHello, CLI: "claude", PID: 4242, CWD: "/x",
 		ProtocolVersion: peerVersion,
 	}); err != nil {
@@ -167,7 +167,7 @@ func TestProtocolMismatch_RefusesDestructiveAndOwnershipChangingOps(t *testing.T
 	peer, done := peerPair(t, b)
 	defer done()
 	peerVersion := ipc.CompatibleProtocolMax + 1
-	if err := peer.WriteJSON(ipc.HelloMsg{
+	if err := peer.WriteJSON(ipc.HelloMsg{Build: "test",
 		Op: ipc.OpHello, CLI: "claude", PID: pid, CWD: cwd,
 		ProtocolVersion: peerVersion,
 	}); err != nil {
@@ -362,7 +362,7 @@ func TestHello_MatchingProtocolVersion_NoWarning(t *testing.T) {
 	peer, done := runHandlerWithPeer(t, mappingsWithTopic())
 	defer done()
 
-	if err := peer.WriteJSON(ipc.HelloMsg{
+	if err := peer.WriteJSON(ipc.HelloMsg{Build: "test",
 		Op: ipc.OpHello, CLI: "codex", PID: 9, CWD: "/x",
 		ProtocolVersion: ipc.ProtocolVersion,
 	}); err != nil {

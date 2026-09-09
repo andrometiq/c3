@@ -119,7 +119,7 @@ func TestPresenceNotifierConnDropPublishesRelease(t *testing.T) {
 	defer b.Shutdown()
 	peer, closeConn := peerPair(t, b)
 	defer closeConn()
-	if err := peer.WriteJSON(ipc.HelloMsg{Op: ipc.OpHello, CLI: "claude", PID: -1, CWD: "/workspace/project"}); err != nil {
+	if err := peer.WriteJSON(ipc.HelloMsg{Build: "test", Op: ipc.OpHello, CLI: "claude", PID: -1, CWD: "/workspace/project"}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := peer.ReadFrame(); err != nil {

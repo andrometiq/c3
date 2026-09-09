@@ -1515,7 +1515,7 @@ func defaultInstallRun(ctx context.Context) installResult {
 		return installResult{skipped: true}
 	}
 	start := time.Now()
-	args := append([]string{"install"}, defaultInstallPackages...)
+	args := append([]string{"install", "-ldflags", sourceBuildFlags(ctx, srcDir)}, defaultInstallPackages...)
 	cmd := exec.CommandContext(ctx, "go", args...)
 	cmd.Dir = srcDir
 	cmd.Env = os.Environ()

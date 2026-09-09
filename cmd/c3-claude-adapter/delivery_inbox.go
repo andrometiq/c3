@@ -53,8 +53,13 @@ func (a *adapter) writeDeliveries(ctx context.Context) {
 		case req := <-a.deliveryWrites:
 			a.liveMu.Lock()
 			current := a.deliveryAccepted.Load() && a.deliveryObservers[req.token] == req.observer
+			if current && time.Now().Before(req.observer.deadline) {
+				a.upgrade.deliveryWrites.Add(1)
+			} else {
+				current = false
+			}
 			a.liveMu.Unlock()
-			if !current || !time.Now().Before(req.observer.deadline) {
+			if !current {
 				continue
 			}
 			wc, cancel := context.WithDeadline(ctx, req.observer.deadline)
@@ -63,6 +68,7 @@ func (a *adapter) writeDeliveries(ctx context.Context) {
 				// Readiness may change while awaiting write admission.
 				cancel()
 				a.finishDeliveryWrite(req.token, req.observer, reason)
+				a.upgrade.deliveryWrites.Add(-1)
 				continue
 			}
 			if req.observer.cross {
@@ -78,6 +84,7 @@ func (a *adapter) writeDeliveries(ctx context.Context) {
 			}
 			cancel()
 			a.finishDeliveryWrite(req.token, req.observer, reason)
+			a.upgrade.deliveryWrites.Add(-1)
 		}
 	}
 }

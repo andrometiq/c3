@@ -139,7 +139,7 @@ func TestHelloRenderStateCompatibility(t *testing.T) {
 			done := make(chan struct{})
 			go func() { b.HandleConn(server); close(done) }()
 			peer := ipc.NewConn(client)
-			if err := peer.WriteJSON(ipc.HelloMsg{Op: ipc.OpHello, CLI: "claude", CannotRenderChannels: tc.cannot, RenderState: tc.state, RenderReason: "test reason"}); err != nil {
+			if err := peer.WriteJSON(ipc.HelloMsg{Build: "test", Op: ipc.OpHello, CLI: "claude", CannotRenderChannels: tc.cannot, RenderState: tc.state, RenderReason: "test reason"}); err != nil {
 				t.Fatal(err)
 			}
 			raw, err := peer.ReadFrame()

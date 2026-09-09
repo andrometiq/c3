@@ -118,3 +118,20 @@ scripts/live-matrix/run.sh --cell '[ci]*-[ifs]*-*-text-single'
 
 The driver reports 12 matched cells, 10 feasible, 2 N/A and **16 Claude sessions**
 (including the six resume seeds). `--list` applies the same filter without launches.
+## Adapter upgrades
+The broker bounce at the end of `/c3:update` and `/c3:build` triggers a new hello.
+`c3-broker status` lists session builds and marks builds differing from the
+readable installed Claude adapter as `(stale)`. An unreadable binary never
+produces a guessed upgrade hint.
+Look for these metadata-only lines:
+- `upgrade hint sent conn=… from=<build> to=<build>`
+- `adapter upgrade: exec <path> (build …)`
+- `adapter resumed after upgrade (build …)`
+- `upgrade postponed: <reason>`
+- `upgrade fallback notice sent conn=…`
+A postponed upgrade leaves the process serving its existing MCP connection.
+After three drain windows, or on an incompatible contract or unsupported
+platform, reconnect c3 through `/mcp`. The new process restores SDK initialization
+locally; no initialize exchange or instructions resend is expected. Resume
+bypasses the 60-second startup watchdog, including when the host remains idle.
+The gate covers self-exec only; broker shutdown still cancels broker-side calls.

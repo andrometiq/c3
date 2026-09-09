@@ -21,6 +21,9 @@ import (
 // confirmed-dead holder, Routes.Claim will release the stale claim and
 // grant the new one.
 type Stub struct {
+	Build            string // immutable hello identity
+	UpgradeDisabled  bool
+	ResumeContract   string
 	deliveryReady    atomic.Bool
 	delivery         *negotiatedSession
 	claimGenerations map[RouteKey]uint64

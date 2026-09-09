@@ -43,7 +43,7 @@ func TestAttach_RefusesChannelThatIsConfiguredButNotRunning(t *testing.T) {
 	peer := ipc.NewConn(b)
 	defer peer.Close()
 
-	if err := peer.WriteJSON(ipc.HelloMsg{Op: ipc.OpHello, CLI: "claude", PID: 1, CWD: "/x"}); err != nil {
+	if err := peer.WriteJSON(ipc.HelloMsg{Build: "test", Op: ipc.OpHello, CLI: "claude", PID: 1, CWD: "/x"}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := peer.ReadFrame(); err != nil {
@@ -90,7 +90,7 @@ func TestAttachWebWithoutStanzaSaysNotConfigured(t *testing.T) {
 	go br.HandleConn(a)
 	peer := ipc.NewConn(b)
 	defer peer.Close()
-	if err := peer.WriteJSON(ipc.HelloMsg{Op: ipc.OpHello, CLI: "claude", PID: 1, CWD: "/x"}); err != nil {
+	if err := peer.WriteJSON(ipc.HelloMsg{Build: "test", Op: ipc.OpHello, CLI: "claude", PID: 1, CWD: "/x"}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := peer.ReadFrame(); err != nil {

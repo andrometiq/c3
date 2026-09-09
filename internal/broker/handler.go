@@ -192,6 +192,7 @@ func (b *Broker) HandleConn(nc net.Conn) {
 	defer b.Stubs.Unregister(stub.ConnID)
 
 	ack := b.buildHelloAck(hello, stub)
+	fallback := b.prepareUpgrade(hello, stub, &ack)
 	if stub.negotiated() {
 		ack.Delivery = &ipc.DeliveryAcceptance{Version: 1, Modes: []string{"channel", "inbox"}}
 	}
@@ -199,6 +200,9 @@ func (b *Broker) HandleConn(nc net.Conn) {
 		return
 	}
 
+	if fallback != "" {
+		b.sendUpgradeNotice(stub, fallback)
+	}
 	if stub.negotiated() {
 		stub.deliveryReady.Store(true)
 		b.rearmDelivery(stub)
@@ -1339,6 +1343,7 @@ func (b *Broker) handleListSessions(conn *ipc.Conn, raw []byte) {
 			cli = "?"
 		}
 		e := ipc.SessionEntry{
+			Build: s.Build, Stale: b.upgradeStale(s),
 			CLI:    cli,
 			PID:    s.PID,
 			CWD:    s.CWD,

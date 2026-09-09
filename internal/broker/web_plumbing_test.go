@@ -255,7 +255,7 @@ func TestPickerShowsWebSuggestion(t *testing.T) {
 func TestHelloAndObserveKeepTelegramPrimaryWithWebRegistered(t *testing.T) {
 	b, _, _ := brokerWithWeb(t, nil)
 	defer b.Shutdown()
-	ack := b.buildHelloAck(ipc.HelloMsg{CWD: "/unmapped"}, &Stub{ConnID: 1})
+	ack := b.buildHelloAck(ipc.HelloMsg{Build: "test", CWD: "/unmapped"}, &Stub{ConnID: 1})
 	if ack.Capabilities == nil || ack.Capabilities.Channel != "telegram" {
 		t.Fatalf("unmapped hello capabilities = %+v, want telegram", ack.Capabilities)
 	}

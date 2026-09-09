@@ -26,6 +26,10 @@ type deliveryObserver struct {
 
 // P1/P2: offer when "channel OR inbox is eligible"; both need a readable transcript.
 func (a *adapter) deliveryFacts() ipc.DeliveryLive {
+	if a.upgrade.quiescing.Load() {
+		unavailable := ipc.DeliveryEligibility{Reason: "adapter upgrade pending"}
+		return ipc.DeliveryLive{Channel: unavailable, Inbox: unavailable}
+	}
 	if reason := a.deliveryHostReason(); reason != "" {
 		unavailable := ipc.DeliveryEligibility{Reason: reason}
 		return ipc.DeliveryLive{Channel: unavailable, Inbox: unavailable}
@@ -111,6 +115,9 @@ func (a *adapter) handleDeliver(ctx context.Context, raw []byte) {
 		failure = "session transcript unavailable"
 	}
 	a.liveMu.Lock()
+	if a.upgrade.quiescing.Load() {
+		failure = "adapter upgrade pending"
+	}
 	if (msg.Transport == "inbox" && !a.deliveryInboxAccepted) || (msg.Transport == "channel" && !a.deliveryChannelAccepted) {
 		a.liveMu.Unlock()
 		return
@@ -175,6 +182,8 @@ func (a *adapter) observeDeliveries(ctx context.Context) {
 			return
 		case <-tick.C:
 		}
+		a.flushUpgradeNotice()
+		a.pollUpgrade(time.Now())
 		if !a.deliveryAccepted.Load() {
 			a.pollDeliveryRehello(a.deliveryFacts(), time.Now())
 			continue

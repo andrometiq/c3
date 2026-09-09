@@ -22,9 +22,8 @@ Usage:
   c3-broker update --check   Report the current vs latest version without
                              downloading or installing anything.
 
-The manual update swaps the binaries on disk but does NOT stop a running broker
-(the daemon keeps its old code until it restarts). After a successful install it
-prints how to roll the running broker onto the new version.
+A successful install bounces the broker. Reconnecting Claude adapters receive
+an upgrade hint and replace themselves when their MCP session can resume safely.
 
 Windows: --check works, but installation is refused because live .exe files
 cannot be replaced safely. Fully quit C3, then re-extract the release tarball.
@@ -40,7 +39,7 @@ const (
 // runUpdate implements `c3-broker update [--check]`. It operates on the version
 // of THIS binary (the one being run) and installs into the directory this binary
 // lives in — so `c3-broker update` from a shell updates the on-disk c3-broker
-// (and its five sibling binaries) but leaves any running daemon on its old code.
+// and its core sibling binaries, then bounces the running daemon.
 func runUpdate(args []string) error {
 	checkOnly := false
 	for _, a := range args {
@@ -90,43 +89,18 @@ func runUpdate(args []string) error {
 		fmt.Printf("c3 is already up to date (running %s; latest %s).\n", cur, res.LatestVersion)
 		return nil
 	}
+	if err := bounceUpgradeBroker(); err != nil {
+		return err
+	}
 	printPostInstall(res.LatestVersion)
 	return nil
 }
 
 // printPostInstall tells the user what happened and what to do next after a
-// successful binary swap. It never stops the running broker uninvited.
+// successful binary swap and broker bounce.
 func printPostInstall(newVersion string) {
-	var b strings.Builder
-	fmt.Fprintf(&b, "\nC3 binaries updated to %s.\n", newVersion)
-	if pid := runningBrokerPID(); pid > 0 {
-		fmt.Fprintf(&b, `
-The new binaries are on disk, but nothing running is using them yet: the broker
-(pid %d) and the adapter inside every open CLI session are still the old build.
-
-Roll the broker — adapters reconnect and respawn it from the new binary:
-
-    kill -TERM %d
-
-Then restart your Claude Code / Codex session(s): an adapter lives as long as its
-CLI session, so only a restart puts it on %s.
-
-Skipping the restart is safe — C3 never refuses a connection over version. An old
-adapter on the new broker just logs one "PROTOCOL VERSION MISMATCH" line and keeps
-working until that session restarts.
-`, pid, pid, newVersion)
-	} else {
-		fmt.Fprintf(&b, `
-No broker is running; the next CLI session spawns the new binary automatically.
-Restart any open Claude Code / Codex session too — its adapter stays on the old
-build until it does.
-`)
-	}
-	fmt.Fprintf(&b, `
-Plugin files (slash commands, hooks) update separately via Claude Code's
-marketplace — run `+"`/plugin`"+` and update the c3 marketplace if prompted.
-`)
-	fmt.Print(b.String())
+	fmt.Printf("C3 binaries updated to %s. The broker bounce triggers adapter upgrade hints. Compatible open Claude sessions upgrade themselves; older or incompatible adapters show a notice to run /mcp and reconnect c3.\n", newVersion)
+	fmt.Println("Plugin slash commands and hooks update separately through /plugin.")
 }
 
 // runningBrokerPID returns the pid of a live broker from the pid file, or 0 if

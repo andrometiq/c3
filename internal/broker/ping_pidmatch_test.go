@@ -24,7 +24,7 @@ func pingOverIPC(t *testing.T, b *Broker, pid int, cwd string) ipc.PingThisSessi
 	t.Helper()
 	pinger, done := peerPair(t, b)
 	t.Cleanup(done)
-	if err := pinger.WriteJSON(ipc.HelloMsg{Op: ipc.OpHello, CLI: "c3-broker-cli", PID: 9999, CWD: cwd}); err != nil {
+	if err := pinger.WriteJSON(ipc.HelloMsg{Build: "test", Op: ipc.OpHello, CLI: "c3-broker-cli", PID: 9999, CWD: cwd}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := pinger.ReadFrame(); err != nil {

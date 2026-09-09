@@ -112,7 +112,7 @@ func TestHelloAckRecoveryContract(t *testing.T) {
 			done := make(chan struct{})
 			go func() { b.HandleConn(server); close(done) }()
 			peer := ipc.NewConn(client)
-			if err := peer.WriteJSON(ipc.HelloMsg{Op: ipc.OpHello, CLI: "claude", PID: os.Getpid(), RenderState: state}); err != nil {
+			if err := peer.WriteJSON(ipc.HelloMsg{Build: "test", Op: ipc.OpHello, CLI: "claude", PID: os.Getpid(), RenderState: state}); err != nil {
 				t.Fatal(err)
 			}
 			if _, err := peer.ReadFrame(); err != nil {

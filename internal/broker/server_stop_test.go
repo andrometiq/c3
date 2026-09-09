@@ -39,7 +39,7 @@ func TestServer_StopUnblocksParkedConnection(t *testing.T) {
 
 	// Complete the hello handshake so the server-side HandleConn is now parked in
 	// its Stage-2 dispatch loop, blocked on ReadFrame — the exact wedge state.
-	if err := conn.WriteJSON(ipc.HelloMsg{Op: ipc.OpHello, CLI: "claude", PID: 1, CWD: "/x"}); err != nil {
+	if err := conn.WriteJSON(ipc.HelloMsg{Build: "test", Op: ipc.OpHello, CLI: "claude", PID: 1, CWD: "/x"}); err != nil {
 		t.Fatal(err)
 	}
 	c.SetReadDeadline(time.Now().Add(2 * time.Second))

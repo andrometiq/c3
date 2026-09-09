@@ -2040,6 +2040,8 @@ func (w *RouteWorker) handleConsume(_ context.Context, job *ConsumeJob) {
 		// Event / zero-covered ack: nothing to consume. Skip rather than consume 1.
 		return
 	}
+	var ackRemoval shadowRows
+	defer w.reconcileUpgradeAck(&ackRemoval)
 	consume := func() {
 		qrk := queueRouteKey(w.key)
 
@@ -2051,13 +2053,14 @@ func (w *RouteWorker) handleConsume(_ context.Context, job *ConsumeJob) {
 		// idempotent, so an id already evicted/consumed simply matches nothing.
 		if ids := w.takeCoveredByPush(job.MessageID, job.Token); len(ids) > 0 {
 			shadowBefore := w.shadowRows()
+			w.beforeUpgradeAckRemoval()
 			removed, err := w.broker.Queue.RemoveRecordIDs(qrk, ids)
 			if err != nil {
 				log.Printf("queue consume(live-ack, by-record) FAIL chan=%s chat=%d topic=%s msg=%d ids=%d: %v",
 					w.key.Channel, w.key.ChatID, TopicKeyStr(w.key), job.MessageID, len(ids), err)
 				return
 			}
-			w.shadowRemoval(shadowBefore, w.shadowConsumeToken, "live_ack")
+			ackRemoval = shadowBefore
 			if job.Owner != nil && job.Owner.ReceiptConfirming {
 				w.retirePendingRecords(ids)
 			}

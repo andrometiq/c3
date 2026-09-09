@@ -22,7 +22,7 @@ func (a *adapter) pollDeliveryRehello(facts ipc.DeliveryLive, now time.Time) {
 	a.liveMu.Lock()
 	conn := a.currentConn()
 	r := &a.deliveryRehello
-	if a.deliveryAccepted.Load() || conn == nil || r.closing {
+	if a.upgrade.quiescing.Load() || a.deliveryAccepted.Load() || conn == nil || r.closing {
 		a.liveMu.Unlock()
 		return
 	}

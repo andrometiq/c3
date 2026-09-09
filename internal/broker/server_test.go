@@ -29,7 +29,7 @@ func TestServer_AcceptsAndHandlesHello(t *testing.T) {
 	defer c.Close()
 	conn := ipc.NewConn(c)
 
-	if err := conn.WriteJSON(ipc.HelloMsg{Op: ipc.OpHello, CLI: "claude", PID: 1, CWD: "/x"}); err != nil {
+	if err := conn.WriteJSON(ipc.HelloMsg{Build: "test", Op: ipc.OpHello, CLI: "claude", PID: 1, CWD: "/x"}); err != nil {
 		t.Fatal(err)
 	}
 	c.SetReadDeadline(time.Now().Add(2 * time.Second))

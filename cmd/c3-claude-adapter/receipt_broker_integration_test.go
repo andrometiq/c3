@@ -42,7 +42,7 @@ func TestReceiptBrokerLifecycle(t *testing.T) {
 			handlerDone := make(chan struct{})
 			go func() { b.HandleConn(server); close(handlerDone) }()
 			conn := ipc.NewConn(client)
-			if err := conn.WriteJSON(ipc.HelloMsg{Op: ipc.OpHello, CLI: "claude", PID: holder.Process.Pid, RenderState: ipc.RenderCapable}); err != nil {
+			if err := conn.WriteJSON(ipc.HelloMsg{Build: "test", Op: ipc.OpHello, CLI: "claude", PID: holder.Process.Pid, RenderState: ipc.RenderCapable}); err != nil {
 				t.Fatal(err)
 			}
 			if _, err := conn.ReadFrame(); err != nil {

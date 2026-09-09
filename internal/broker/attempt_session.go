@@ -146,6 +146,7 @@ func (b *Broker) releaseDelivery(s *Stub) {
 // readers never observe a half-configured hello or race a reconnect adoption.
 func (b *Broker) registerDeliveryHello(hello ipc.HelloMsg, conn *ipc.Conn, old *Stub) *Stub {
 	return b.Stubs.Register(hello.CLI, hello.PID, hello.CWD, conn, func(s *Stub) {
+		s.Build, s.ResumeContract, s.UpgradeDisabled = hello.Build, hello.ResumeContract, hello.UpgradeDisabled
 		b.configureDelivery(s, hello.Delivery)
 		s.ReceiptConfirming = hello.RenderState != ""
 		s.SetRenderRoute(hello.RenderState, hello.RenderReason, hello.CannotRenderChannels)

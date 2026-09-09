@@ -76,6 +76,7 @@ func renderSessionsTable(sessions []ipc.SessionEntry) string {
 		}
 		rows = append(rows, []string{
 			s.CLI,
+			upgradeBuildLabel(s),
 			strconv.Itoa(s.PID),
 			cwd,
 			attached,
@@ -83,7 +84,7 @@ func renderSessionsTable(sessions []ipc.SessionEntry) string {
 		})
 	}
 
-	headers := []string{"CLI", "PID", "CWD", "Attached", "This?"}
+	headers := []string{"CLI", "Build", "PID", "CWD", "Attached", "This?"}
 	widths := make([]int, len(headers))
 	for i, h := range headers {
 		widths[i] = len(h)

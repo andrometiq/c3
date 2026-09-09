@@ -16,7 +16,7 @@ import (
 func recoverViaPeer(t *testing.T, b *Broker, cwd, stableID string) (*ipc.Conn, func(), ipc.RecoverSessionResp) {
 	t.Helper()
 	peer, done := peerPair(t, b)
-	if err := peer.WriteJSON(ipc.HelloMsg{Op: ipc.OpHello, CLI: "claude", PID: 1, CWD: cwd}); err != nil {
+	if err := peer.WriteJSON(ipc.HelloMsg{Build: "test", Op: ipc.OpHello, CLI: "claude", PID: 1, CWD: cwd}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := peer.ReadFrame(); err != nil { // hello ack
@@ -239,7 +239,7 @@ func TestHandleRecoverSession_DualPathRecordsCurrentRoutes(t *testing.T) {
 
 	peer, done := peerPair(t, b)
 	defer done()
-	if err := peer.WriteJSON(ipc.HelloMsg{Op: ipc.OpHello, CLI: "claude", PID: 1, CWD: "/x"}); err != nil {
+	if err := peer.WriteJSON(ipc.HelloMsg{Build: "test", Op: ipc.OpHello, CLI: "claude", PID: 1, CWD: "/x"}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := peer.ReadFrame(); err != nil { // hello ack
@@ -290,7 +290,7 @@ func TestHandleRecoverSession_BadRequest(t *testing.T) {
 
 	peer, done := peerPair(t, b)
 	defer done()
-	if err := peer.WriteJSON(ipc.HelloMsg{Op: ipc.OpHello, CLI: "claude", PID: 1, CWD: "/x"}); err != nil {
+	if err := peer.WriteJSON(ipc.HelloMsg{Build: "test", Op: ipc.OpHello, CLI: "claude", PID: 1, CWD: "/x"}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := peer.ReadFrame(); err != nil {

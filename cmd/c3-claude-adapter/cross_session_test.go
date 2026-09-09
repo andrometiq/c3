@@ -35,7 +35,7 @@ type inboxPush struct {
 // before closing. No Claude process, broker daemon, or personal files involved.
 func fakeInbox(t *testing.T, hold <-chan struct{}, response string) (*crossSessionTransport, <-chan inboxPush) {
 	t.Helper()
-	root, err := os.MkdirTemp("/tmp", "c3-inbox-")
+	root, err := os.MkdirTemp("", "c3-inbox-")
 	if err != nil {
 		t.Fatal(err)
 	}

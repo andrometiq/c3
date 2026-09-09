@@ -58,6 +58,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/Andrometiq/c3/internal/broker"
+	"github.com/Andrometiq/c3/internal/buildidentity"
 	"github.com/Andrometiq/c3/internal/c3types"
 	"github.com/Andrometiq/c3/internal/capability"
 	"github.com/Andrometiq/c3/internal/ipc"
@@ -118,6 +119,14 @@ func run() error {
 
 	a := newAdapter()
 	a.runCtx = ctx
+	transport, err := upgradeStdio(a)
+	if err != nil {
+		return err
+	}
+	resumeOptions, err := a.restoreUpgrade(os.Args[1:])
+	if err != nil {
+		return err
+	}
 	// Cursor Agent CLI also loads Claude Code plugins from ~/.claude/plugins, so
 	// this binary can be spawned next to c3-cursor-adapter. Refuse that host —
 	// Claude-channel pushes black-hole under Cursor, and dual MCP makes welcome
@@ -140,7 +149,7 @@ func run() error {
 	}
 
 	server := a.buildMCPServer()
-	a.notifyTx = newNotifyTransport(&mcp.StdioTransport{})
+	a.notifyTx = newNotifyTransport(transport)
 	// Wire the receive interceptor: a diverted permission_request is relayed to the
 	// broker (Allow/Deny keyboard) instead of being silently dropped by the SDK.
 	// Must be set BEFORE server.Run drives notifyTx.Connect.
@@ -149,9 +158,11 @@ func run() error {
 
 	go a.brokerReader(ctx)
 	go a.recoverSessionOnResume(ctx)
-	go a.idleStartupWatchdog(ctx, cancel)
+	if !a.upgrade.resumed {
+		go a.idleStartupWatchdog(ctx, cancel)
+	}
 
-	err := server.Run(ctx, a.notifyTx)
+	err = a.runMCP(ctx, server, resumeOptions)
 	switch {
 	case err == nil:
 		log.Printf("adapter: exit pid=%d reason=stdin-eof (clean)", os.Getpid())
@@ -246,6 +257,7 @@ type routeKey struct {
 }
 
 type adapter struct {
+	upgrade                 adapterUpgrade
 	deliveryWrites          chan deliveryWrite
 	deliveryWriterOnce      sync.Once
 	deliveryChannelAccepted bool // liveMu
@@ -521,6 +533,7 @@ func (a *adapter) hello() error {
 		route = ipc.RenderRoute{State: ipc.RenderQueueOnly, Reason: reason}
 	}
 	if err := conn.WriteJSON(ipc.HelloMsg{
+		Build: buildidentity.Current(), ResumeContract: upgradeContract(), UpgradeDisabled: !upgradeSupported || a.upgrade.disabled.Load(),
 		Delivery: offer, Op: ipc.OpHello, CLI: "claude", PID: os.Getpid(), CWD: cwd,
 		Capabilities: []string{"claude/channel"},
 		// Conservative fallback for old brokers: probing is also queue-only.
@@ -555,6 +568,7 @@ func (a *adapter) hello() error {
 	a.helloPending = false
 	a.connID = ack.ConnID
 	a.bmu.Unlock()
+	a.acceptUpgrade(ack.Upgrade)
 	wasNegotiated := a.deliveryAccepted.Load()
 	a.acceptDelivery(offer, ack.Delivery)
 	a.liveMu.Lock()
@@ -578,6 +592,9 @@ func (a *adapter) hello() error {
 // to the terminal conversation identity.
 func (a *adapter) brokerReader(ctx context.Context) {
 	for {
+		if ctx.Err() != nil {
+			return
+		}
 		conn := a.currentConn()
 		if conn == nil {
 			return
@@ -652,6 +669,7 @@ func (a *adapter) brokerReader(ctx context.Context) {
 // the reconnect window. Single attempt; recoverBroker is the retry-loop
 // wrapper.
 func (a *adapter) reconnectBroker() error {
+	a.upgrade.reconnecting.Store(true)
 	oldConn := a.prepareIdentityReconnect()
 	a.wakePendingWithErr("broker reconnect — request canceled")
 	if oldConn != nil {
@@ -704,6 +722,7 @@ func (a *adapter) recoverBroker(ctx context.Context) bool {
 			log.Printf("broker reconnected (attempt %d)", attempt)
 			a.clearBrokerDownAdvisory()
 			a.restoreSessionAfterReconnect(ctx)
+			a.upgrade.reconnecting.Store(false)
 			return true
 		}
 		log.Printf("broker reconnect attempt %d failed: %v (retry in %v)", attempt, err, backoff)
@@ -1168,6 +1187,9 @@ func (a *adapter) handleInbound(ctx context.Context, raw []byte) {
 	var in ipc.InboundMsg
 	if err := json.Unmarshal(raw, &in); err != nil {
 		log.Printf("handleInbound unmarshal: %v", err)
+		return
+	}
+	if a.holdUpgradeNotice(in) {
 		return
 	}
 	frame := buildClaudeChannelFrame(&in.Inbound)
@@ -1687,8 +1709,12 @@ func (a *adapter) dispatchTopicsList(raw []byte) {
 // depends on whether the broker reports no-config / no-mapping / auto-
 // attached state.
 func (a *adapter) buildMCPServer() *mcp.Server {
+	instructions := ""
+	if !a.upgrade.resumed {
+		instructions = a.buildInstructions()
+	}
 	opts := &mcp.ServerOptions{
-		Instructions: a.buildInstructions(),
+		Instructions: instructions,
 		Capabilities: &mcp.ServerCapabilities{
 			Tools: &mcp.ToolCapabilities{ListChanged: false},
 			// Experimental.claude/channel matches the fakechat reference
@@ -1707,6 +1733,9 @@ func (a *adapter) buildMCPServer() *mcp.Server {
 			},
 		},
 	}
+	if a.upgrade.resumed {
+		opts.Instructions = ""
+	}
 	srv := mcp.NewServer(&mcp.Implementation{
 		Name:    adapterName,
 		Version: adapterVersion,
@@ -1719,6 +1748,7 @@ func (a *adapter) buildMCPServer() *mcp.Server {
 	srv.AddReceivingMiddleware(func(next mcp.MethodHandler) mcp.MethodHandler {
 		return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
 			a.dispatched.Store(true)
+			defer a.upgradeNotificationDone(method)
 			if method == "notifications/initialized" {
 				a.deliveryHostInitialized.Store(true)
 			}
@@ -1782,7 +1812,7 @@ func (a *adapter) buildInstructions() string {
 	// returned in the MCP initialize RESULT (a normal JSON-RPC response the CLI
 	// always processes), NOT a channel push, so they render even in the broken
 	// session. The human separately sees the Telegram held-notice.
-	return a.liveRoutePreamble() + head + permissionContractNote + mode.Combined(caps)
+	return a.liveRoutePreamble() + head + "\n\nRelay C3 adapter update system notices to the user verbatim." + permissionContractNote + mode.Combined(caps)
 }
 
 // permissionContractNote is the security contract carried in the MCP instructions
@@ -3600,7 +3630,7 @@ func (a *adapter) dispatchPermissionVerdict(raw []byte) {
 	if err := json.Unmarshal(raw, &msg); err != nil {
 		return
 	}
-	a.removePendingPermission(msg.RequestID)
+	defer a.removePendingPermission(msg.RequestID)
 	if msg.RequestID == "" || a.notifyTx == nil {
 		return
 	}

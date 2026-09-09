@@ -16,8 +16,9 @@ import (
 )
 
 var (
-	statusFetchHealth = fetchHealthList
-	statusFetchClaims = fetchClaimsList
+	statusFetchHealth   = fetchHealthList
+	statusFetchClaims   = fetchClaimsList
+	statusFetchSessions = fetchUpgradeSessions
 )
 
 // runStatus prints a read-only health check.
@@ -223,6 +224,10 @@ func runStatus() error {
 		}
 	}
 
+	if sessions, err := statusFetchSessions(); err == nil {
+		fmt.Fprintln(&b)
+		b.WriteString(renderSessionsTable(sessions))
+	}
 	fmt.Print(b.String())
 	return nil
 }

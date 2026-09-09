@@ -260,7 +260,7 @@ func TestRecoverSession_ReconnectTransferWithoutIdentity_DoesNotRecordOldRouteUn
 	cwd := "/projects/claim-transfer"
 
 	first, closeFirst := peerPair(t, b)
-	if err := first.WriteJSON(ipc.HelloMsg{Op: ipc.OpHello, CLI: "claude", PID: pid, CWD: cwd}); err != nil {
+	if err := first.WriteJSON(ipc.HelloMsg{Build: "test", Op: ipc.OpHello, CLI: "claude", PID: pid, CWD: cwd}); err != nil {
 		t.Fatalf("first hello: %v", err)
 	}
 	if _, err := first.ReadFrame(); err != nil {
@@ -297,7 +297,7 @@ func TestRecoverSession_ReconnectTransferWithoutIdentity_DoesNotRecordOldRouteUn
 
 	second, closeSecond := peerPair(t, b)
 	defer closeSecond()
-	if err := second.WriteJSON(ipc.HelloMsg{Op: ipc.OpHello, CLI: "claude", PID: pid, CWD: cwd}); err != nil {
+	if err := second.WriteJSON(ipc.HelloMsg{Build: "test", Op: ipc.OpHello, CLI: "claude", PID: pid, CWD: cwd}); err != nil {
 		t.Fatalf("reconnect hello: %v", err)
 	}
 	if _, err := second.ReadFrame(); err != nil {
@@ -335,7 +335,7 @@ func anonymousCarriageThenRecover(t *testing.T, mf *mappings.MappingsFile, stabl
 	pid := os.Getpid()
 
 	first, closeFirst := peerPair(t, b)
-	if err := first.WriteJSON(ipc.HelloMsg{Op: ipc.OpHello, CLI: "claude", PID: pid, CWD: cwd}); err != nil {
+	if err := first.WriteJSON(ipc.HelloMsg{Build: "test", Op: ipc.OpHello, CLI: "claude", PID: pid, CWD: cwd}); err != nil {
 		t.Fatalf("first hello: %v", err)
 	}
 	if _, err := first.ReadFrame(); err != nil {
@@ -372,7 +372,7 @@ func anonymousCarriageThenRecover(t *testing.T, mf *mappings.MappingsFile, stabl
 
 	second, closeSecond := peerPair(t, b)
 	t.Cleanup(closeSecond)
-	if err := second.WriteJSON(ipc.HelloMsg{Op: ipc.OpHello, CLI: "claude", PID: pid, CWD: cwd}); err != nil {
+	if err := second.WriteJSON(ipc.HelloMsg{Build: "test", Op: ipc.OpHello, CLI: "claude", PID: pid, CWD: cwd}); err != nil {
 		t.Fatalf("reconnect hello: %v", err)
 	}
 	if _, err := second.ReadFrame(); err != nil {
@@ -449,7 +449,7 @@ func TestRecoverSession_ReconnectTransferWithoutIdentity_FirstIdentityRecordsRou
 	cwd := "/projects/anonymous-first-identity"
 
 	first, closeFirst := peerPair(t, b)
-	if err := first.WriteJSON(ipc.HelloMsg{Op: ipc.OpHello, CLI: "claude", PID: pid, CWD: cwd}); err != nil {
+	if err := first.WriteJSON(ipc.HelloMsg{Build: "test", Op: ipc.OpHello, CLI: "claude", PID: pid, CWD: cwd}); err != nil {
 		t.Fatalf("first hello: %v", err)
 	}
 	if _, err := first.ReadFrame(); err != nil {
@@ -486,7 +486,7 @@ func TestRecoverSession_ReconnectTransferWithoutIdentity_FirstIdentityRecordsRou
 
 	second, closeSecond := peerPair(t, b)
 	defer closeSecond()
-	if err := second.WriteJSON(ipc.HelloMsg{Op: ipc.OpHello, CLI: "claude", PID: pid, CWD: cwd}); err != nil {
+	if err := second.WriteJSON(ipc.HelloMsg{Build: "test", Op: ipc.OpHello, CLI: "claude", PID: pid, CWD: cwd}); err != nil {
 		t.Fatalf("reconnect hello: %v", err)
 	}
 	if _, err := second.ReadFrame(); err != nil {
