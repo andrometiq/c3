@@ -628,6 +628,18 @@ process-start, prompt-source, and user-type fields are observed metadata, not
 receipt requirements. Format drift or host refusal retains the durable row;
 it never licenses a blind ack.
 
+Channel intake during a tool call is **VERIFIED on Claude Code 2.1.266** in
+`cmd/c3-claude-adapter/testdata/claude-2.1.266-intake.jsonl`: the host immediately
+writes `type:queue-operation`, `operation:enqueue`, with a string `content`, then
+writes `type:attachment`, `attachment.type:queued_command`, with a string
+`attachment.prompt` and `attachment.origin.kind:channel` when the tool finishes.
+Both designated fields use the same strict channel-tag receipt parser; enqueue
+confirms host acceptance within the existing window, and `operation:remove`
+never confirms. Peer variants of these two types are inferred, not verified:
+they require the exact host prefix `Another Claude session sent a message:\n`
+immediately followed by a channel block with `source="plugin:c3:c3"`, matching
+delivery and attempt markers, and `</channel>`, or fail closed.
+
 ### Channel detection and shared receipts
 
 Linux reads `/proc`; macOS uses the existing `golang.org/x/sys/unix` dependency
@@ -656,14 +668,12 @@ keeping the legacy ack token empty. Claude's channel renderer is expected to
 copy metadata into `<channel ...>` attributes.
 
 **A successful notification write is not a receipt.** The adapter observes new
-complete records after the pre-push file offset. It requires `"type":"user"`,
-`"message":{"role":"user","content":...}`, with the matching
+complete records after the pre-push file offset. It accepts the intake records
+above or `"type":"user"`, `"message":{"role":"user","content":...}`, with the matching
 `c3_delivery_id` as a unique quoted attribute in the opening channel tag,
-with a closing `</channel>` (channel-route receipts also accept a self-closing tag); the decoded value must match
-exactly, and duplicate attributes or malformed tags cannot confirm delivery. `content`
-may be a string or an array of `{"type":"text","text":...}` blocks. A
-`{"type":"queue-operation","operation":"enqueue",...}` record alone is
-insufficient: enqueue is not proof of injection into the conversation.
+with a closing `</channel>` (existing user channel-route receipts also accept a self-closing tag); the decoded value must match
+exactly, and duplicate attributes or malformed tags cannot confirm delivery. User
+`message.content` may be a string or an array of `{"type":"text","text":...}` blocks.
 
 Each attempt adds `c3_attempt="<route>:<n>"`, where route is `channel` or
 `cross-session` and n is a monotonically increasing counter for this adapter's
@@ -672,7 +682,7 @@ acknowledgement token. Both attributes must match the outstanding attempt;
 a late channel receipt cannot confirm fallback, and vice versa.
 
 Channel-route receipts must start with the channel opener after whitespace.
-Cross-session receipts require `type:user`, `message.role:user`, `isMeta:true`,
+Cross-session user receipts require `type:user`, `message.role:user`, `isMeta:true`,
 `origin.kind:peer`, and `origin.from:c3`. String content (or the first text block)
 must start with the exact verified host line
 `Another Claude session sent a message:\n`, immediately followed by the complete

@@ -20,7 +20,7 @@ import (
 )
 
 // A stdout write is transport success, never a receipt. Give the host 15s to
-// append a complete user channel record, including delayed/partial writes.
+// append a complete host intake record, including delayed/partial writes.
 const liveReadbackWindow = 15 * time.Second
 const maxLiveReadbacks = 64
 
@@ -461,19 +461,48 @@ func deliveryReceipt(line []byte, marker string, cross bool, attempt string) boo
 	}
 
 	var entry struct {
-		Type    string          `json:"type"`
-		IsMeta  bool            `json:"isMeta"`
-		Origin  json.RawMessage `json:"origin"`
+		Type       string          `json:"type"`
+		IsMeta     bool            `json:"isMeta"`
+		Origin     json.RawMessage `json:"origin"`
+		Operation  string          `json:"operation"`
+		Content    json.RawMessage `json:"content"`
+		Attachment struct {
+			Type   string          `json:"type"`
+			Prompt json.RawMessage `json:"prompt"`
+			Origin struct {
+				Kind string `json:"kind"`
+			} `json:"origin"`
+		} `json:"attachment"`
 		Message struct {
 			Role    string          `json:"role"`
 			Content json.RawMessage `json:"content"`
 		} `json:"message"`
 	}
-	if json.Unmarshal(line, &entry) != nil || entry.Type != "user" || entry.Message.Role != "user" {
+	if json.Unmarshal(line, &entry) != nil {
+		return false
+	}
+	var content json.RawMessage
+	switch entry.Type {
+	case "user":
+		if entry.Message.Role != "user" {
+			return false
+		}
+		content = entry.Message.Content
+	case "queue-operation":
+		if entry.Operation != "enqueue" {
+			return false
+		}
+		content = entry.Content
+	case "attachment":
+		if entry.Attachment.Type != "queued_command" || (!cross && entry.Attachment.Origin.Kind != "channel") {
+			return false
+		}
+		content = entry.Attachment.Prompt
+	default:
 		return false
 	}
 	provenance := true
-	if cross {
+	if cross && entry.Type == "user" {
 		var origin struct {
 			Kind string `json:"kind"`
 			From string `json:"from"`
@@ -493,6 +522,8 @@ func deliveryReceipt(line []byte, marker string, cross bool, attempt string) boo
 			}
 			// Verified in Claude Code 2.1.263: exactly this host line precedes
 			// our block; host guidance may follow its closing </channel>.
+			// Peer variants of enqueue/queued_command are unverified; require
+			// this same exact prefix and C3 source below, or fail closed.
 			// Never search arbitrary text, comments, attributes, or later text blocks.
 			var ok bool
 			text, ok = strings.CutPrefix(text, "Another Claude session sent a message:\n")
@@ -552,19 +583,22 @@ func deliveryReceipt(line []byte, marker string, cross bool, attempt string) boo
 			}
 		}
 		if strings.HasSuffix(opener, "/>") {
-			return matched && !cross
+			return matched && !cross && entry.Type == "user"
 		}
 		return matched && strings.Contains(text[decoder.InputOffset():], "</channel>")
 	}
 	var text string
-	if json.Unmarshal(entry.Message.Content, &text) == nil {
+	if json.Unmarshal(content, &text) == nil {
 		return matches(text)
+	}
+	if entry.Type != "user" {
+		return false
 	}
 	var blocks []struct {
 		Type string `json:"type"`
 		Text string `json:"text"`
 	}
-	if json.Unmarshal(entry.Message.Content, &blocks) != nil {
+	if json.Unmarshal(content, &blocks) != nil {
 		return false
 	}
 	if cross {

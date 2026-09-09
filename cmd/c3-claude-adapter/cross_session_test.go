@@ -515,3 +515,52 @@ func TestCrossSessionChannelFirstOnReconnect(t *testing.T) {
 	default:
 	}
 }
+
+func TestLiveReadbackHostIntakePreventsCrossSessionFallback(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		index int
+	}{{"enqueue", 0}, {"attachment", 3}} {
+		t.Run(tc.name, func(t *testing.T) {
+			a, _, frames := liveFixture(t, ipc.RenderProbing)
+			a.liveTimeout = time.Second
+			tx, pushes := fakeInbox(t, nil, "")
+			a.crossSession = tx
+			pushLive(t, a, "intake-marker")
+			if err := os.WriteFile(a.livePath(), realHostIntakeReceipt(t, tc.index, "intake-marker"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			var state ipc.RenderStateMsg
+			if raw := nextLiveFrame(t, frames); json.Unmarshal(raw, &state) != nil || state.State != ipc.RenderCapable {
+				t.Fatalf("intake did not confirm channel: %s", raw)
+			}
+			var ack ipc.InboundDeliveredMsg
+			if raw := nextLiveFrame(t, frames); json.Unmarshal(raw, &ack) != nil || ack.Op != ipc.OpInboundDelivered || !ack.OK || ack.DeliveryToken != "intake-marker" || ack.Count != 2 {
+				t.Fatalf("intake ack: %s", raw)
+			}
+			// Later remove and absorbed attachment must not acknowledge again.
+			f, err := os.OpenFile(a.livePath(), os.O_APPEND|os.O_WRONLY, 0600)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = f.Write(append(realHostIntakeReceipt(t, 2, "intake-marker"), realHostIntakeReceipt(t, 3, "intake-marker")...))
+			f.Close()
+			if err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case push := <-pushes:
+				t.Fatalf("unexpected fallback: %+v", push)
+			case raw := <-frames:
+				t.Fatalf("duplicate ack or route flap: %s", raw)
+			case <-time.After(a.liveTimeout + 100*time.Millisecond):
+			}
+			a.liveMu.Lock()
+			attempts, cross := a.liveAttempt, a.liveCrossSession
+			a.liveMu.Unlock()
+			if attempts != 1 || cross || a.liveRoute().State != ipc.RenderCapable {
+				t.Fatal("channel intake started fallback or changed route")
+			}
+		})
+	}
+}

@@ -75,7 +75,7 @@ host can reject a mismatch. Each complete outbound JSON frame is capped at the
 existing 4 MiB inbound IPC limit before auth; oversize leaves the row queued.
 
 The peer record shape is **VERIFIED on Claude Code 2.1.263**, captured in
-`cmd/c3-claude-adapter/testdata/claude-2.1.263-peer.jsonl`. Cross-session receipts
+`cmd/c3-claude-adapter/testdata/claude-2.1.263-peer.jsonl`. Cross-session user receipts
 require `type:user`, `message.role:user`, `isMeta:true`, `origin.kind:peer`, and
 `origin.from:c3`. The verified record also carries `verifiedPeerPid` and
 `verifiedPeerProcStart` inside `origin`, plus `promptSource:system` and
@@ -88,6 +88,20 @@ a fixed paragraph beginning `This came from another Claude session —` after
 are rejected, as are quoted text, comments, attributes, and later content blocks.
 `C3_DEBUG=1` enables a debug preview of rejected candidates' first 120 characters
 with words/values/tokens/attempts masked, exposing only framing.
+
+Mid-turn channel intake is **VERIFIED on Claude Code 2.1.266** from a real
+transcript: `queue-operation` / `enqueue` stores the block in string `content`
+immediately, and `attachment` / `queued_command` later stores it in string
+`attachment.prompt` with `attachment.origin.kind:channel`. Both are receipts
+through the existing strict opening-tag parser, exact delivery/attempt markers,
+and closing `</channel>`; queue `remove` records never confirm. This recognizes
+host acceptance during long tool calls before the unchanged 15-second window
+expires, preventing unnecessary fallback and a leftover fetchable row. Peer
+variants of these new types are inferred, not verified, and fail closed unless
+the designated field starts with `Another Claude session sent a message:\n`
+followed immediately by the C3 channel block with `source="plugin:c3:c3"`.
+The verified user peer provenance rule, fetch receipts, fallback order, and
+route state machine are unchanged.
 
 **Why:** A flagless host can accept peer user turns even when it drops channel
 notifications. This recovers an inbound route without confusing transport success

@@ -78,7 +78,7 @@ func TestLiveReadbackReceiptBeforeAck(t *testing.T) {
 				t.Fatalf("write success acked before readback: %s", raw)
 			default:
 			}
-			// Enqueue alone is not a receipt. The subsequent complete user message is.
+			// Enqueue without the attempt marker is not a receipt.
 			f, err := os.OpenFile(a.livePath(), os.O_APPEND|os.O_WRONLY, 0600)
 			if err != nil {
 				t.Fatal(err)
@@ -90,7 +90,7 @@ func TestLiveReadbackReceiptBeforeAck(t *testing.T) {
 			}
 			select {
 			case raw := <-frames:
-				t.Fatalf("enqueue acked: %s", raw)
+				t.Fatalf("enqueue without attempt acked: %s", raw)
 			case <-time.After(120 * time.Millisecond):
 			}
 			appendChannelReceipt(t, a.livePath(), "receipt-1")
@@ -159,7 +159,7 @@ func TestChannelReceiptShapeAndPartialTail(t *testing.T) {
 		{"blocks", map[string]any{"type": "user", "message": map[string]any{"role": "user", "content": []any{map[string]any{"type": "text", "text": channel}}}}, true},
 		{"assistant", map[string]any{"type": "assistant", "message": map[string]any{"role": "assistant", "content": channel}}, false},
 		{"tool result", map[string]any{"type": "user", "message": map[string]any{"role": "user", "content": []any{map[string]any{"type": "tool_result", "text": channel}}}}, false},
-		{"enqueue", map[string]any{"type": "queue-operation", "operation": "enqueue", "content": channel}, false},
+		{"enqueue", map[string]any{"type": "queue-operation", "operation": "enqueue", "content": channel}, true},
 		{"wrong role", map[string]any{"type": "user", "message": map[string]any{"role": "assistant", "content": channel}}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

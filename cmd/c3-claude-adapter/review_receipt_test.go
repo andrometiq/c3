@@ -242,3 +242,149 @@ func TestLiveReceiptCancelsOnRouteOrSessionChange(t *testing.T) {
 		})
 	}
 }
+
+// Captured mid-tool-call intake, independent of the adapter's frame builder.
+// Indices: channel enqueue, fallback enqueue, channel remove, channel attachment.
+func realHostIntakeReceipt(t *testing.T, index int, marker string) []byte {
+	t.Helper()
+	raw, err := os.ReadFile("testdata/claude-2.1.266-intake.jsonl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	line := strings.Split(strings.TrimSpace(string(raw)), "\n")[index]
+	return []byte(strings.ReplaceAll(line, "DELIVERYTOKEN-1", marker) + "\n")
+}
+
+func TestRealHostIntakeReceipt(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		index   int
+		attempt string
+		cross   bool
+		want    bool
+	}{
+		{"enqueue", 0, "channel:1", false, true},
+		{"attachment", 3, "channel:1", false, true},
+		{"remove", 2, "channel:1", false, false},
+		{"remove other attempt", 2, "cross-session:3", false, false},
+		{"fallback cannot confirm channel", 1, "channel:1", false, false},
+		{"channel cannot confirm fallback", 0, "cross-session:3", false, false},
+		{"channel cannot confirm peer", 0, "cross-session:3", true, false},
+		{"fallback missing host prefix", 1, "cross-session:3", true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			raw := realHostIntakeReceipt(t, tc.index, "intake-marker")
+			if got := deliveryReceipt(raw, "intake-marker", tc.cross, tc.attempt); got != tc.want {
+				t.Fatalf("receipt=%v want=%v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestIntakeReceiptStrictFieldsAndParsing(t *testing.T) {
+	for _, index := range []int{0, 3} {
+		name := "enqueue"
+		if index == 3 {
+			name = "attachment"
+		}
+		t.Run(name, func(t *testing.T) {
+			for _, tc := range []struct {
+				name        string
+				edit        func(map[string]any, map[string]any, string)
+				cross, want bool
+			}{
+				{"valid", func(r, field map[string]any, key string) {}, false, true},
+				{"wrong marker", func(r, field map[string]any, key string) {
+					field[key] = strings.ReplaceAll(field[key].(string), "intake-marker", "other-marker")
+				}, false, false},
+				{"missing attempt", func(r, field map[string]any, key string) {
+					field[key] = strings.ReplaceAll(field[key].(string), ` c3_attempt="channel:1"`, "")
+				}, false, false},
+				{"duplicate attribute", func(r, field map[string]any, key string) {
+					field[key] = strings.Replace(field[key].(string), "<channel ", `<channel c3_delivery_id="intake-marker" `, 1)
+				}, false, false},
+				{"quote boundary", func(r, field map[string]any, key string) {
+					field[key] = strings.Replace(field[key].(string), `" c3_delivery_id=`, `"c3_delivery_id=`, 1)
+				}, false, false},
+				{"missing close", func(r, field map[string]any, key string) {
+					field[key] = strings.ReplaceAll(field[key].(string), "</channel>", "")
+				}, false, false},
+				{"self close", func(r, field map[string]any, key string) {
+					field[key] = strings.SplitN(field[key].(string), ">", 2)[0] + "/>"
+				}, false, false},
+				{"quoted block", func(r, field map[string]any, key string) { field[key] = "quoted: " + field[key].(string) }, false, false},
+				{"text array", func(r, field map[string]any, key string) {
+					field[key] = []any{map[string]any{"type": "text", "text": field[key]}}
+				}, false, false},
+				{"wrong designated field", func(r, field map[string]any, key string) {
+					r["message"] = map[string]any{"role": "user", "content": field[key]}
+					delete(field, key)
+				}, false, false},
+				{"wrong subtype", func(r, field map[string]any, key string) {
+					if index == 0 {
+						r["operation"] = "remove"
+					} else {
+						field["type"] = "other"
+					}
+				}, false, false},
+				{"missing subtype", func(r, field map[string]any, key string) {
+					if index == 0 {
+						delete(r, "operation")
+					} else {
+						delete(field, "type")
+					}
+				}, false, false},
+				{"channel origin required", func(r, field map[string]any, key string) {
+					if index == 3 {
+						field["origin"] = map[string]any{"kind": "peer"}
+					} else {
+						r["operation"] = "remove"
+					}
+				}, false, false},
+				// These peer variants are inferred, not captured host fixtures.
+				{"peer exact prefix", func(r, field map[string]any, key string) {
+					field[key] = "Another Claude session sent a message:\n" + field[key].(string)
+				}, true, true},
+				{"peer no prefix", func(r, field map[string]any, key string) {}, true, false},
+				{"peer prefix spacing", func(r, field map[string]any, key string) {
+					field[key] = "Another Claude session sent a message:\n " + field[key].(string)
+				}, true, false},
+				{"peer wrong source", func(r, field map[string]any, key string) {
+					field[key] = "Another Claude session sent a message:\n" + strings.ReplaceAll(field[key].(string), "plugin:c3:c3", "plugin:other:other")
+				}, true, false},
+				{"peer remove or wrong subtype", func(r, field map[string]any, key string) {
+					field[key] = "Another Claude session sent a message:\n" + field[key].(string)
+					if index == 0 {
+						r["operation"] = "remove"
+					} else {
+						field["type"] = "other"
+					}
+				}, true, false},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					var record map[string]any
+					if err := json.Unmarshal(realHostIntakeReceipt(t, index, "intake-marker"), &record); err != nil {
+						t.Fatal(err)
+					}
+					field, key := record, "content"
+					if index == 3 {
+						field, key = record["attachment"].(map[string]any), "prompt"
+					}
+					tc.edit(record, field, key)
+					attempt := "channel:1"
+					if tc.cross {
+						attempt = "cross-session:3"
+						field[key] = strings.ReplaceAll(field[key].(string), "channel:1", attempt)
+					}
+					raw, err := json.Marshal(record)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if got := deliveryReceipt(raw, "intake-marker", tc.cross, attempt); got != tc.want {
+						t.Fatalf("receipt=%v want=%v", got, tc.want)
+					}
+				})
+			}
+		})
+	}
+}

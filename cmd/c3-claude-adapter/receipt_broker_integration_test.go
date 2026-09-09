@@ -20,7 +20,7 @@ import (
 // No host or daemon runs here: a real in-process broker owns persistence and
 // acknowledgement, while the supplied host record stands in for transcript IO.
 func TestReceiptBrokerLifecycle(t *testing.T) {
-	for _, variant := range []string{"receipt", "same route attach", "failed attach", "crash before receipt", "timeout fetch then death", "death before fetch"} {
+	for _, variant := range []string{"receipt", "enqueue receipt", "same route attach", "failed attach", "crash before receipt", "timeout fetch then death", "death before fetch"} {
 		t.Run(variant, func(t *testing.T) {
 			t.Setenv("CLAUDE_CODE_SESSION_ID", "")
 			t.Setenv("C3_QUEUE_DIR", t.TempDir())
@@ -66,6 +66,10 @@ func TestReceiptBrokerLifecycle(t *testing.T) {
 			a.conn = conn
 			a.initialRenderRoute = ipc.RenderRoute{State: ipc.RenderCapable}
 			a.liveTimeout = 2 * time.Second
+			if variant == "enqueue receipt" {
+				// A configured fallback would start another attempt on timeout.
+				a.crossSession = &crossSessionTransport{}
+			}
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			a.runCtx = ctx
@@ -155,14 +159,18 @@ func TestReceiptBrokerLifecycle(t *testing.T) {
 				}
 			}
 			switch variant {
-			case "receipt", "same route attach", "failed attach":
+			case "receipt", "enqueue receipt", "same route attach", "failed attach":
 				// Insert the marker actually emitted by the adapter into the independent
 				// fixture; no call to buildClaudeChannelFrame manufactures the receipt.
 				f, err := os.OpenFile(a.livePath(), os.O_APPEND|os.O_WRONLY, 0600)
 				if err != nil {
 					t.Fatal(err)
 				}
-				_, err = f.Write(realHostReceipt(t, marker))
+				receipt := realHostReceipt(t, marker)
+				if variant == "enqueue receipt" {
+					receipt = realHostIntakeReceipt(t, 0, marker)
+				}
+				_, err = f.Write(receipt)
 				f.Close()
 				if err != nil {
 					t.Fatal(err)
@@ -174,6 +182,27 @@ func TestReceiptBrokerLifecycle(t *testing.T) {
 				rows, err := b.Queue.PeekTracked(qrk, -1)
 				if err != nil || len(rows) != 1 || rows[0].RecordID != olderID {
 					t.Fatalf("ack removed wrong row: %+v %v", rows, err)
+				}
+				if variant == "enqueue receipt" {
+					deadline := time.Now().Add(3 * time.Second)
+					for {
+						a.liveMu.Lock()
+						active, attempts, cross := a.liveActive, a.liveAttempt, a.liveCrossSession
+						a.liveMu.Unlock()
+						if attempts != 1 || cross {
+							t.Fatal("enqueue started cross-session fallback")
+						}
+						if active == 0 {
+							break
+						}
+						if time.Now().After(deadline) {
+							t.Fatal("receipt watcher did not finish")
+						}
+						time.Sleep(10 * time.Millisecond)
+					}
+					if a.liveRoute().State != ipc.RenderCapable || len(snapshot()) != 1 {
+						t.Fatal("enqueue did not consume exactly its row")
+					}
 				}
 			case "timeout fetch then death":
 				deadline := time.Now().Add(3 * time.Second)
