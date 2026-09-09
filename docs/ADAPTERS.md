@@ -432,9 +432,13 @@ receipt requires `isMeta:true`, `origin.kind:"peer"`, `origin.from:"c3"`, and th
 exact host prefix line `Another Claude session sent a message:\n` immediately
 before the C3 channel block. The strict opening tag must carry
 `source="plugin:c3:c3"`, this token, and this attempt. Claude 2.1.266
-`queue-operation/enqueue` and `attachment/queued_command` peer variants fail
-closed unless that same prefix is present; unprefixed intake fixtures do not
-confirm inbox. Existing channel intake recognition remains unchanged. Writes
+peer intake is VERIFIED in `testdata/claude-2.1.266-peer-intake.jsonl`:
+`queue-operation/enqueue.content` and `attachment/queued_command.prompt` start
+at the bare C3 tag, with no host prefix; attachments additionally require nested
+`isMeta:true` and `origin.kind:"peer"` / `origin.from:"c3"`. Enqueue has no origin
+fields: its host intake envelope plus exact source/token/attempt bind the receipt.
+Prefixed intake variants were inferred and are rejected. Existing channel intake
+recognition remains unchanged. Writes
 alone never confirm delivery. Notify/inbox errors and unavailable transcripts
 report `failed` with a generic reason immediately, independently of receipt
 polling, including a missing notify transport or a failed notify write. The adapter never retries, falls back, or changes delivery state on this
@@ -782,10 +786,12 @@ writes `type:attachment`, `attachment.type:queued_command`, with a string
 `attachment.prompt` and `attachment.origin.kind:channel` when the tool finishes.
 Both designated fields use the same strict channel-tag receipt parser; enqueue
 confirms host acceptance within the existing window, and `operation:remove`
-never confirms. Peer variants of these two types are inferred, not verified:
-they require the exact host prefix `Another Claude session sent a message:\n`
-immediately followed by a channel block with `source="plugin:c3:c3"`, matching
-delivery and attempt markers, and `</channel>`, or fail closed.
+never confirms. Peer intake is also **VERIFIED on Claude Code 2.1.266** in
+`cmd/c3-claude-adapter/testdata/claude-2.1.266-peer-intake.jsonl`: both designated
+fields contain bare channel blocks, and the attachment has nested
+`isMeta:true`, `origin.kind:peer`, `origin.from:c3`. These shapes use the strict
+source/token/attempt and closing-tag checks described above; the previously
+inferred prefixed intake variants are rejected.
 
 ### Channel detection and shared receipts
 

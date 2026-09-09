@@ -5,7 +5,9 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -19,8 +21,12 @@ import (
 func TestNegotiatedInboxBrokerAdapterLifecycle(t *testing.T) {
 	// P3/P6: broker fallback gets a new token, adapter sends the existing inbox
 	// frames, and only attempt_result from the peer receipt retires the real row.
-	for _, first := range []string{"channel", "inbox"} {
-		t.Run(first, func(t *testing.T) {
+	for _, tc := range []struct {
+		first string
+		index int
+	}{{"channel", 0}, {"inbox", 0}, {"channel", 2}, {"inbox", 2}} {
+		first := tc.first
+		t.Run(fmt.Sprintf("%s/record-%d", first, tc.index), func(t *testing.T) {
 			for _, name := range []string{"C3_QUEUE_DIR", "XDG_CONFIG_HOME", "XDG_STATE_HOME"} {
 				t.Setenv(name, t.TempDir())
 			}
@@ -96,7 +102,29 @@ func TestNegotiatedInboxBrokerAdapterLifecycle(t *testing.T) {
 			if n, _ := b.Queue.Pending(route); n != 1 {
 				t.Fatal("write retired row")
 			}
-			appendPeerReceipt(t, a.livePath(), p.User.Message.Content)
+			// Preserve the captured host envelope, inserting the actual wire block.
+			var record map[string]any
+			if err := json.Unmarshal(realHostPeerIntakeReceipt(t, tc.index, "unused", "unused"), &record); err != nil {
+				t.Fatal(err)
+			}
+			if tc.index == 0 {
+				record["content"] = p.User.Message.Content
+			} else {
+				record["attachment"].(map[string]any)["prompt"] = p.User.Message.Content
+			}
+			receipt, err := json.Marshal(record)
+			if err != nil {
+				t.Fatal(err)
+			}
+			f, err := os.OpenFile(a.livePath(), os.O_APPEND|os.O_WRONLY, 0600)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = f.Write(append(receipt, '\n'))
+			f.Close()
+			if err != nil {
+				t.Fatal(err)
+			}
 			deadline := time.Now().Add(2 * time.Second)
 			for time.Now().Before(deadline) {
 				client.SetReadDeadline(deadline)

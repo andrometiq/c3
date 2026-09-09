@@ -151,7 +151,7 @@ func TestNegotiatedInboxFlaglessAndBackground(t *testing.T) {
 }
 
 func TestNegotiatedInboxFixturesFailClosed(t *testing.T) {
-	// P3/R2: "peer provenance" and "enqueue/queued_command variants keep the fail-closed prefix rule".
+	// R2: each verified host shape keeps its framing and provenance checks.
 	peer, err := os.ReadFile("testdata/claude-2.1.263-peer.jsonl")
 	if err != nil {
 		t.Fatal(err)
@@ -166,25 +166,14 @@ func TestNegotiatedInboxFixturesFailClosed(t *testing.T) {
 		want bool
 	}{
 		"2.1.263-peer":                     {strings.ReplaceAll(strings.ReplaceAll(string(peer), "cross-session:1", "inbox:1"), "DELIVERYTOKEN-3", "fixture"), true},
-		"2.1.266-enqueue-no-prefix":        {strings.ReplaceAll(strings.ReplaceAll(lines[1], "cross-session:3", "inbox:1"), "DELIVERYTOKEN-1", "fixture"), false},
+		"2.1.266-enqueue-no-prefix":        {strings.ReplaceAll(strings.ReplaceAll(lines[1], "cross-session:3", "inbox:1"), "DELIVERYTOKEN-1", "fixture"), true},
 		"2.1.266-queued-command-no-prefix": {strings.ReplaceAll(strings.ReplaceAll(lines[3], "channel:1", "inbox:1"), "DELIVERYTOKEN-1", "fixture"), false},
 	}
-	for _, name := range []string{"2.1.266-enqueue-no-prefix", "2.1.266-queued-command-no-prefix"} {
-		tc := cases[name]
-		var entry map[string]any
-		json.Unmarshal([]byte(tc.line), &entry)
-		if entry["type"] == "queue-operation" {
-			entry["content"] = "Another Claude session sent a message:\n" + entry["content"].(string)
-		} else {
-			att := entry["attachment"].(map[string]any)
-			att["prompt"] = "Another Claude session sent a message:\n" + att["prompt"].(string)
-			att["origin"] = map[string]any{"kind": "peer", "from": "c3"}
-		}
-		raw, _ := json.Marshal(entry)
-		cases[strings.ReplaceAll(name, "no-prefix", "prefixed")] = struct {
+	for name, index := range map[string]int{"peer-enqueue": 0, "peer-queued-command": 2} {
+		cases[name] = struct {
 			line string
 			want bool
-		}{string(raw), true}
+		}{string(realHostPeerIntakeReceipt(t, index, "fixture", "inbox:1")), true}
 	}
 	valid := cases["2.1.263-peer"].line
 	for name, pair := range map[string][2]string{"not-meta": {`"isMeta":true`, `"isMeta":false`}, "wrong-kind": {`"kind":"peer"`, `"kind":"channel"`}, "wrong-from": {`"from":"c3"`, `"from":"other"`}, "wrong-prefix": {"Another Claude session sent a message:", "Peer input:"}, "old-channel-attempt": {"inbox:1", "channel:1"}} {

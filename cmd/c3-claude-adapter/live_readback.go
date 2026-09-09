@@ -497,8 +497,10 @@ func deliveryReceipt(line []byte, marker string, cross bool, attempt string) boo
 		Attachment struct {
 			Type   string          `json:"type"`
 			Prompt json.RawMessage `json:"prompt"`
+			IsMeta bool            `json:"isMeta"`
 			Origin struct {
 				Kind string `json:"kind"`
+				From string `json:"from"`
 			} `json:"origin"`
 		} `json:"attachment"`
 		Message struct {
@@ -536,6 +538,8 @@ func deliveryReceipt(line []byte, marker string, cross bool, attempt string) boo
 			From string `json:"from"`
 		}
 		provenance = entry.IsMeta && json.Unmarshal(entry.Origin, &origin) == nil && origin.Kind == "peer" && origin.From == "c3"
+	} else if cross && entry.Type == "attachment" {
+		provenance = entry.Attachment.IsMeta && entry.Attachment.Origin.Kind == "peer" && entry.Attachment.Origin.From == "c3"
 	}
 	matches := func(text string) (accepted bool) {
 		if cross {
@@ -548,15 +552,17 @@ func deliveryReceipt(line []byte, marker string, cross bool, attempt string) boo
 			if !provenance {
 				return false
 			}
-			// Verified in Claude Code 2.1.263: exactly this host line precedes
-			// our block; host guidance may follow its closing </channel>.
-			// Peer variants of enqueue/queued_command are unverified; require
-			// this same exact prefix and C3 source below, or fail closed.
+			// Verified 2.1.263 user turns have this exact prefix. Verified
+			// 2.1.266 enqueue content and queued_command prompt start at the
+			// bare tag. Enqueue has no origin fields: its host intake envelope
+			// and the exact C3 source/token/attempt below bind the receipt.
 			// Never search arbitrary text, comments, attributes, or later text blocks.
-			var ok bool
-			text, ok = strings.CutPrefix(text, "Another Claude session sent a message:\n")
-			if !ok {
-				return false
+			if entry.Type == "user" {
+				var ok bool
+				text, ok = strings.CutPrefix(text, "Another Claude session sent a message:\n")
+				if !ok {
+					return false
+				}
 			}
 		} else {
 			text = strings.TrimSpace(text)

@@ -25,8 +25,14 @@ and uses the existing rearm events.
 The adapter executes exactly the requested transport through a bounded writer
 and shared observation loop, with no goroutine per attempt. Inbox writes keep
 the 2-second bound and validate the connected peer before authentication.
-Receipts carry `c3_attempt="inbox:N"` and the new token; the strict peer prefix
-and provenance rules apply to the versioned host fixtures. Capability reports
+Receipts carry `c3_attempt="inbox:N"` and the new token. VERIFIED real transcripts
+show prefixed peer user turns on 2.1.263 and bare `enqueue.content` /
+`queued_command.prompt` blocks on 2.1.266 (versioned peer fixtures); user turns
+retain the exact host prefix and peer provenance, while attachments require
+nested `isMeta:true` and `origin.kind:peer/from:c3`. Enqueue has no origin fields;
+its host intake envelope and exact C3 source/token/attempt bind the receipt.
+Prefixed intake variants were inferred and are rejected; all shapes retain
+strict tag framing. Capability reports
 include socket availability changes. Per-route display names channel or inbox;
 fetch cannot change that history.
 

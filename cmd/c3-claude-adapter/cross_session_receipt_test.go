@@ -9,6 +9,102 @@ import (
 	"testing"
 )
 
+func realHostPeerIntakeReceipt(t *testing.T, index int, marker, attempt string) []byte {
+	t.Helper()
+	raw, err := os.ReadFile("testdata/claude-2.1.266-peer-intake.jsonl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	line := strings.Split(strings.TrimSpace(string(raw)), "\n")[index]
+	return []byte(strings.NewReplacer("DELIVERYTOKEN-5", marker, "inbox:2", attempt).Replace(line) + "\n")
+}
+
+func TestCrossSessionRealHostPeerIntakeReceipt(t *testing.T) {
+	for _, index := range []int{0, 2} {
+		name := "enqueue"
+		if index == 2 {
+			name = "queued-command"
+		}
+		t.Run(name, func(t *testing.T) {
+			for _, tc := range []struct {
+				name, old, replacement string
+				want                   bool
+			}{
+				{"verified bare block", "", "", true},
+				{"wrong token", "DELIVERYTOKEN-5", "other-token", false},
+				{"wrong attempt", "inbox:2", "inbox:3", false},
+				{"missing token", ` c3_delivery_id="DELIVERYTOKEN-5"`, "", false},
+				{"missing attempt", ` c3_attempt="inbox:2"`, "", false},
+				{"wrong source", "plugin:c3:c3", "plugin:other:other", false},
+				{"missing source provenance", ` source="plugin:c3:c3"`, "", false},
+				{"duplicate token", `<channel `, `<channel c3_delivery_id="DELIVERYTOKEN-5" `, false},
+				{"quote boundary", `" c3_delivery_id=`, `"c3_delivery_id=`, false},
+				{"missing close", "</channel>", "", false},
+				{"self closing", ">\nexample", "/>\nexample", false},
+				{"leading space", "<channel", " <channel", false},
+				{"quoted block", "<channel", "quoted: <channel", false},
+				{"inferred host prefix", "<channel", "Another Claude session sent a message:\n<channel", false},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					var record map[string]any
+					if err := json.Unmarshal(realHostPeerIntakeReceipt(t, index, "DELIVERYTOKEN-5", "inbox:2"), &record); err != nil {
+						t.Fatal(err)
+					}
+					field, key := record, "content"
+					if index == 2 {
+						field, key = record["attachment"].(map[string]any), "prompt"
+					}
+					if tc.old != "" {
+						text := field[key].(string)
+						if !strings.Contains(text, tc.old) {
+							t.Fatal("fixture mutation did not match")
+						}
+						field[key] = strings.Replace(text, tc.old, tc.replacement, 1)
+					}
+					raw, err := json.Marshal(record)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if got := deliveryReceipt(raw, "DELIVERYTOKEN-5", true, "inbox:2"); got != tc.want {
+						t.Fatalf("receipt=%v want=%v", got, tc.want)
+					}
+					path := t.TempDir() + "/transcript.jsonl"
+					if err := os.WriteFile(path, append(raw, '\n'), 0600); err != nil {
+						t.Fatal(err)
+					}
+					if _, got := scanReceipt(path, 0, "DELIVERYTOKEN-5", new(bool), true, "inbox:2"); got != tc.want {
+						t.Fatalf("readback=%v want=%v", got, tc.want)
+					}
+				})
+			}
+		})
+	}
+	if deliveryReceipt(realHostPeerIntakeReceipt(t, 1, "DELIVERYTOKEN-5", "inbox:2"), "DELIVERYTOKEN-5", true, "inbox:2") {
+		t.Fatal("remove confirmed delivery")
+	}
+	for _, tc := range []struct{ name, old, replacement string }{
+		{"missing origin", `"origin":`, `"otherOrigin":`},
+		{"missing meta", `"isMeta":true`, `"otherMeta":true`},
+		{"not meta", `"isMeta":true`, `"isMeta":false`},
+		{"wrong kind", `"kind":"peer"`, `"kind":"channel"`},
+		{"missing from", `"from":"c3",`, ""},
+		{"wrong from", `"from":"c3"`, `"from":"other"`},
+		{"wrong subtype", `"type":"queued_command"`, `"type":"other"`},
+		{"missing prompt despite rendered", `"prompt":`, `"otherPrompt":`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			raw := string(realHostPeerIntakeReceipt(t, 2, "DELIVERYTOKEN-5", "inbox:2"))
+			if !strings.Contains(raw, tc.old) {
+				t.Fatal("fixture mutation did not match")
+			}
+			raw = strings.Replace(raw, tc.old, tc.replacement, 1)
+			if deliveryReceipt([]byte(raw), "DELIVERYTOKEN-5", true, "inbox:2") {
+				t.Fatal("missing or invalid attachment provenance accepted")
+			}
+		})
+	}
+}
+
 func TestCrossSessionRealHostPeerReceipt(t *testing.T) {
 	raw, err := os.ReadFile("testdata/claude-2.1.263-peer.jsonl")
 	if err != nil {
@@ -27,6 +123,7 @@ func TestCrossSessionRealHostPeerReceipt(t *testing.T) {
 		{"wrong kind", `"kind":"peer"`, `"kind":"channel"`, false},
 		{"wrong type", `"type":"user"`, `"type":"assistant"`, false},
 		{"wrong role", `"role":"user"`, `"role":"assistant"`, false},
+		{"missing host prefix", `Another Claude session sent a message:\n`, "", false},
 		{"optional pid absent", `"verifiedPeerPid":12345,`, "", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

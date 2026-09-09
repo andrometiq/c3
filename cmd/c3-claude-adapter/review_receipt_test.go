@@ -270,7 +270,7 @@ func TestRealHostIntakeReceipt(t *testing.T) {
 		{"fallback cannot confirm channel", 1, "channel:1", false, false},
 		{"channel cannot confirm fallback", 0, "cross-session:3", false, false},
 		{"channel cannot confirm peer", 0, "cross-session:3", true, false},
-		{"fallback missing host prefix", 1, "cross-session:3", true, false},
+		{"verified fallback enqueue", 1, "cross-session:3", true, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			raw := realHostIntakeReceipt(t, tc.index, "intake-marker")
@@ -341,11 +341,11 @@ func TestIntakeReceiptStrictFieldsAndParsing(t *testing.T) {
 						r["operation"] = "remove"
 					}
 				}, false, false},
-				// These peer variants are inferred, not captured host fixtures.
+				// Prefixed intake is inferred, not a verified host shape.
 				{"peer exact prefix", func(r, field map[string]any, key string) {
 					field[key] = "Another Claude session sent a message:\n" + field[key].(string)
-				}, true, true},
-				{"peer no prefix", func(r, field map[string]any, key string) {}, true, false},
+				}, true, false},
+				{"peer bare tag requires shape provenance", func(r, field map[string]any, key string) {}, true, index == 0},
 				{"peer prefix spacing", func(r, field map[string]any, key string) {
 					field[key] = "Another Claude session sent a message:\n " + field[key].(string)
 				}, true, false},
