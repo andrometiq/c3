@@ -37,6 +37,7 @@ import (
 type Broker struct {
 	testInjector *testInjectChannel // startup-only opt-in; nil in every normal deployment
 	notices      routeNotices
+	recorded     recordedRows
 	attempts     attemptTable // negotiated authority and legacy delivery observations
 	Stubs        *StubRegistry
 	Routes       *Routes

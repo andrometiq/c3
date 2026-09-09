@@ -283,6 +283,7 @@ func TestStatusNoticeSameQueuedRowsAndHistoryGolden(t *testing.T) {
 			if err != nil || count != 1 {
 				t.Fatal(count, err)
 			}
+			resumeStatusWorker(t, b)
 			got := b.statusForTopic(w.key.Channel, w.key.ChatID, nil)
 			route := "Live route: queue-only (host unavailable)."
 			if negotiated {
@@ -336,7 +337,25 @@ func TestNoticeHeldWorkerEvents(t *testing.T) {
 				case "termination":
 					b.Workers.Submit(key, Job{Kind: JobConsume, Consume: &ConsumeJob{Owner: s, Token: "unknown", Count: 1}})
 				case "ownership":
-					b.withRouteSet(s, ipc.AttachedMsg{OK: true, Channel: key.Channel, ChatID: key.ChatID})
+					next := &Stub{CLI: s.CLI, PID: s.PID, CWD: "/replacement", ConnID: 2, Conn: struct{}{}}
+					if negotiated {
+						b.configureDelivery(next, []byte(channelOffer))
+						b.handleDeliveryReport(next, []byte(`{"op":"delivery_report","accepted":["channel","inbox"]}`))
+						receiptHolder(next)
+					} else {
+						next.SetRenderRoute(ipc.RenderQueueOnly, "host unavailable", true)
+					}
+					b.Routes.Release(key, s.ConnID)
+					s.RemoveRoute(key)
+					if _, ok := b.Routes.Claim(key, next); !ok {
+						t.Fatal("replacement claim failed")
+					}
+					next.AddRoute(key)
+					next.MarkRouteConfirmed(key)
+					b.withRouteSet(next, ipc.AttachedMsg{OK: true, Channel: key.Channel, ChatID: key.ChatID})
+					if current, _ := b.Routes.Holder(key); current != next || current == s {
+						t.Fatal("ownership scenario did not change holder")
+					}
 				case "capability":
 					if negotiated {
 						b.handleDeliveryReport(s, []byte(`{"op":"delivery_report","live":{"channel":{"eligible":false,"reason":"changed"},"inbox":{"eligible":false,"reason":"changed"}}}`))

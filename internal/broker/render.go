@@ -26,6 +26,7 @@ type routeNotice struct {
 	since         time.Time
 	announced     string
 	heldRows      string
+	heldVersion   uint64
 	held, pending bool
 	changed       chan struct{}
 }
@@ -71,7 +72,7 @@ func (b *Broker) noticeRoute(key RouteKey) ipc.RenderRoute {
 	// Such an offer is still live, even if no further transport is eligible.
 	if r.State == "pull_only" || r.State == ipc.RenderQueueOnly {
 		for _, a := range b.attempts.snapshot(time.Now()) {
-			if a.Route == key && a.Outcome == "open" && a.Transport != "fetch" {
+			if a.Route == key && b.noticeAttemptOpen(a) && a.Transport != "fetch" {
 				if a.Negotiated {
 					r.State = "waiting"
 				} else {
@@ -113,6 +114,7 @@ func (b *Broker) updateNoticeLocked(key RouteKey, held bool) bool {
 			if signature != r.heldRows {
 				r.held = len(rows) > 0
 				r.heldRows = signature
+				r.heldVersion++
 				select {
 				case r.changed <- struct{}{}:
 				default:
@@ -136,10 +138,17 @@ func (b *Broker) sendRenderNotice(key RouteKey) {
 			b.notices.mu.Unlock()
 			return
 		}
+		b.notices.mu.Lock()
+		version := b.notices.routes[key].heldVersion
+		b.notices.mu.Unlock()
 		rows, countErr := b.noticeSnapshot(key)
 		b.notices.mu.Lock()
 		b.updateNoticeLocked(key, false)
 		r := b.notices.routes[key]
+		if r.heldVersion != version {
+			b.notices.mu.Unlock()
+			continue
+		}
 		window := b.notices.window
 		if window == 0 {
 			window = routeNoticeWindow
@@ -147,15 +156,26 @@ func (b *Broker) sendRenderNotice(key RouteKey) {
 		routeChanged := r.announced != r.route.Semantic()
 		delay := max(0, time.Until(r.since.Add(window)))
 		text := ""
+		heldSignature := ""
 		route := r.route
 		if r.held {
 			count := len(rows)
-			if countErr != nil || count == 0 || b.Queue == nil {
+			if countErr != nil {
+				// Preserve the pending Held through an unreadable snapshot. The next
+				// evaluation can retry the same identities without a new inbound.
+				r.pending = false
+				b.notices.mu.Unlock()
+				return
+			}
+			if count == 0 || b.Queue == nil {
 				r.held = false
+				if r.heldRows != "" {
+					r.heldRows = ""
+					r.heldVersion++
+				}
 			} else if b.HeldNotices == nil || b.HeldNotices.ShouldSend(key) {
 				text = heldReplyText(key.Channel, count) + "\n" + route.Text()
-				r.heldRows = noticeRowSignature(rows)
-				r.held = false
+				heldSignature = noticeRowSignature(rows)
 			} else {
 				heldDelay := b.HeldNotices.remaining(key)
 				if !routeChanged || heldDelay < delay {
@@ -201,6 +221,10 @@ func (b *Broker) sendRenderNotice(key RouteKey) {
 		if err == nil {
 			// Held includes the calm route line, so it also counts as an announcement.
 			r.announced = route.Semantic()
+			if heldSignature != "" && (r.heldVersion == version || r.heldRows == heldSignature) {
+				r.held = false
+				r.heldRows = heldSignature
+			}
 		} else {
 			log.Printf("delivery notice failed route=%s: %v", routeKeyStr(key), err)
 			r.pending = false
@@ -221,19 +245,22 @@ func noticeRowSignature(rows []queue.TrackedInbound) string {
 
 // Recount on the existing worker, after its scheduler, so a delayed sender
 // cannot inspect an enqueue halfway between persistence and reservation.
-// An idle route (or a direct unit fixture) has no concurrent queue mutation.
+// Idle routes acquire a worker too; a stopped pool permits offline inspection.
 func (b *Broker) noticeSnapshot(key RouteKey) ([]queue.TrackedInbound, error) {
-	var w *RouteWorker
-	if b.Workers != nil {
-		b.Workers.mu.Lock()
-		w = b.Workers.workers[key]
-		b.Workers.mu.Unlock()
+	if b.Workers == nil {
+		return nil, errWorkerStopped
 	}
-	if w == nil || workerExited(w) {
+	b.Workers.mu.Lock()
+	w := b.Workers.workers[key]
+	stopped := b.Workers.stopped
+	b.Workers.mu.Unlock()
+	if stopped && (w == nil || workerExited(w)) {
+		// Offline/direct lifecycle fixtures have no concurrent worker. A running
+		// broker always creates or reuses the owner, even for an idle route.
 		return b.queuedRows(key)
 	}
 	done := make(chan BacklogResult, 1)
-	if !w.Submit(Job{Kind: JobBacklog, Backlog: &BacklogJob{Notice: true, ResultCh: done}}) {
+	if !b.Workers.Submit(key, Job{Kind: JobBacklog, Backlog: &BacklogJob{Notice: true, ResultCh: done}}) {
 		return nil, errWorkerStopped
 	}
 	timer := time.NewTimer(workerJobTimeout)
@@ -241,8 +268,6 @@ func (b *Broker) noticeSnapshot(key RouteKey) ([]queue.TrackedInbound, error) {
 	select {
 	case result := <-done:
 		return result.NoticeRows, result.Err
-	case <-w.Done():
-		return nil, errWorkerStopped
 	case <-b.ctx.Done():
 		return nil, b.ctx.Err()
 	case <-timer.C:

@@ -72,6 +72,7 @@ type ResolveVoiceJob struct {
 // (a separate Pending-then-Peek off-goroutine could report count>0 with an empty
 // or stale preview). PeekN bounds the preview; the result returns via ResultCh.
 type BacklogJob struct {
+	Status   bool
 	Notice   bool
 	PeekN    int
 	ResultCh chan<- BacklogResult
@@ -80,6 +81,7 @@ type BacklogJob struct {
 // BacklogResult carries the route's total queued count + oldest-first preview
 // (up to PeekN) back to the attach handler.
 type BacklogResult struct {
+	Status     queue.Status
 	NoticeRows []queue.TrackedInbound
 	Total      int
 	Preview    []c3types.Inbound
@@ -1960,6 +1962,11 @@ func (w *RouteWorker) handleBacklog(ctx context.Context, job *BacklogJob) {
 		job.ResultCh <- BacklogResult{}
 		return
 	}
+	if job.Status {
+		rows, err := w.broker.queuedRows(w.key)
+		job.ResultCh <- BacklogResult{Status: queuedStatus(rows), Err: err}
+		return
+	}
 	if job.Notice {
 		w.scheduleAttempt(ctx, false)
 		rows, err := w.broker.queuedRows(w.key)
@@ -2021,6 +2028,7 @@ func (w *RouteWorker) handleConsume(_ context.Context, job *ConsumeJob) {
 		// idempotent, so an id already evicted/consumed simply matches nothing.
 		if ids := w.takeCoveredByPush(job.MessageID, job.Token); len(ids) > 0 {
 			shadowBefore := w.shadowRows()
+			w.rememberLegacyReceipt(ids)
 			w.updateAttempt(w.shadowConsumeToken, func(a *attemptRecord) { a.Evidence = true })
 			w.beforeUpgradeAckRemoval()
 			removed, err := w.broker.Queue.RemoveRecordIDs(qrk, ids)
@@ -2210,6 +2218,7 @@ func (w *RouteWorker) handleResolveVoiceTarget(ctx context.Context, scheduler *V
 		return true
 	}
 	if resolved {
+		w.broker.recorded.forget(w.key, []string{recordID})
 		w.reconcileAttempt()
 		scheduler.markResolveApplied(job.Key, target.recordID)
 		durableApplied = true

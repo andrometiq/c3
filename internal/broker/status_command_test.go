@@ -23,7 +23,7 @@ func TestHandleCommand_StatusInTopic(t *testing.T) {
 
 	host := NewBrokerHost(b, "telegram")
 	in := &c3types.Inbound{Channel: "telegram", ChatID: -1001234567890, TopicID: &tid, Text: "/status"}
-	reply, handled := host.HandleCommand(in)
+	reply, handled := statusCommandReply(t, host, fc, in)
 	if !handled {
 		t.Fatal("/status in a topic should be handled")
 	}
@@ -45,7 +45,7 @@ func TestHandleCommand_GlobalInDM(t *testing.T) {
 
 	host := NewBrokerHost(b, "telegram")
 	in := &c3types.Inbound{Channel: "telegram", ChatID: 555, TopicID: nil, Text: "/status"} // DM
-	reply, handled := host.HandleCommand(in)
+	reply, handled := statusCommandReply(t, host, fc, in)
 	if !handled {
 		t.Fatal("/status in DM should be handled")
 	}

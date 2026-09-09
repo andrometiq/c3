@@ -586,8 +586,10 @@ the age; acceptance is not proof of display. Fetch does not establish live proof
 Claims include `holder_build` and optional `accepted_by`; route display updates
 also carry optional `accepted_by`. Status and Held exclude exact surviving
 members of open attempts/fetch groups and rows with observed receipt evidence,
-including when retirement storage retries fail. A changed content revision is
-queued again. Tokens appear in operator logs, never in status or ordinary notices.
+including when retirement storage retries fail. Receipt identity/revision markers
+survive attempt-history eviction and worker replacement for the broker lifetime;
+retirement/removal or a changed content revision releases the marker. Restart
+replay remains possible. A changed content revision is queued again. Tokens appear in operator logs, never in status or ordinary notices.
 
 ### Provisional — 12 ops
 

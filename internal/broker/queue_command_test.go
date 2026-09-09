@@ -131,14 +131,14 @@ func TestAuthz_NonOperator_SilentDropForDrainAndPeek(t *testing.T) {
 // Bare /queue and /status stay group-cleared: a non-operator in an allowlisted
 // group gets a real (index-only) answer.
 func TestAuthz_NonOperator_GroupClearedBareQueueAndStatus(t *testing.T) {
-	b, _, host := cmdTestBroker(t)
+	b, fc, host := cmdTestBroker(t)
 	seedTexts(t, b, rC3(), 2, "body")
 
 	reply, handled := host.HandleCommand(inGroupC3("/queue", cmdNonOperator))
 	if !handled || !strings.Contains(reply, "Pooled queues") {
 		t.Fatalf("bare /queue must stay group-cleared; got handled=%v reply=%q", handled, reply)
 	}
-	reply, handled = host.HandleCommand(inGroupC3("/status", cmdNonOperator))
+	reply, handled = statusCommandReply(t, host, fc, inGroupC3("/status", cmdNonOperator))
 	if !handled || !strings.Contains(reply, "queued") {
 		t.Fatalf("/status must stay group-cleared; got handled=%v reply=%q", handled, reply)
 	}
@@ -150,7 +150,7 @@ func TestAuthz_Operator_AllThreeCommands(t *testing.T) {
 	b, fc, host := cmdTestBroker(t)
 	seedTexts(t, b, rC3(), 3, "body")
 
-	if reply, handled := host.HandleCommand(inGroupC3("/status", cmdOperator)); !handled || reply == "" {
+	if reply, handled := statusCommandReply(t, host, fc, inGroupC3("/status", cmdOperator)); !handled || reply == "" {
 		t.Fatalf("/status: handled=%v reply=%q", handled, reply)
 	}
 	if reply, handled := host.HandleCommand(inGroupC3("/queue", cmdOperator)); !handled || !strings.Contains(reply, "[1] c3") {

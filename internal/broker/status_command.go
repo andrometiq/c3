@@ -2,6 +2,7 @@ package broker
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"sort"
 	"strings"
@@ -20,9 +21,8 @@ import (
 //
 // Contract with the channel (telegram poll.go intercept):
 //   - Runs AFTER the allowlist gate (I-SEC) — strangers never reach here.
-//   - Runs ON the channel's poll goroutine, so nothing here may block on a
-//     worker round-trip (A1): /drain and /queue <q> parse + resolve
-//     synchronously, return ("", true), and post their reply from a spawned
+//   - No worker round-trip blocks the poll goroutine (A1): /status,
+//     /drain and /queue <q> return ("", true) and post their reply from a spawned
 //     goroutine via the channel's SendReply.
 //   - ("", true) means handled with NOTHING to send — the channel skips the
 //     send (and still marks the update done). That covers both the async path
@@ -55,10 +55,21 @@ func (h *BrokerHost) HandleCommand(in *c3types.Inbound) (string, bool) {
 		if rest != "" {
 			return "", false // /status takes no arguments (unchanged behavior)
 		}
-		if in.TopicID != nil {
-			return h.broker.statusForTopic(in.Channel, in.ChatID, in.TopicID), true
-		}
-		return h.broker.statusGlobal(), true
+		args := c3types.ReplyArgs{Channel: in.Channel, ChatID: in.ChatID, TopicID: topicPointer(MakeRouteKey(in.Channel, in.ChatID, in.TopicID))}
+		go func() {
+			defer recoverGoroutine("broker.statusCommand")
+			if args.TopicID != nil {
+				args.Text = h.broker.statusForTopic(args.Channel, args.ChatID, args.TopicID)
+			} else {
+				args.Text = h.broker.statusGlobal()
+			}
+			if ch, err := h.broker.Channel(args.Channel); err == nil {
+				if _, err := ch.SendReply(args); err != nil {
+					log.Printf("status reply failed: %v", err)
+				}
+			}
+		}()
+		return "", true
 	case strings.EqualFold(cmd, "/queue"):
 		return h.broker.queueCommand(in, rest)
 	case strings.EqualFold(cmd, "/drain"):
@@ -75,11 +86,11 @@ func (b *Broker) statusForTopic(channelName string, chatID int64, topicID *int64
 	name := b.topicDisplayName(channelName, chatID, topicID)
 	pending, oldest := 0, time.Time{}
 	if b.Queue != nil {
-		rows, err := b.queuedRows(key)
+		st, err := b.statusSnapshot(key)
 		if err == nil {
-			pending = len(rows)
-			if len(rows) > 0 {
-				oldest = rows[0].Inbound.Timestamp
+			pending = st.Pending
+			if st.OldestUnix > 0 {
+				oldest = time.Unix(st.OldestUnix, 0)
 			}
 		} else {
 			pending = -1
@@ -142,13 +153,13 @@ func (b *Broker) statusGlobal() string {
 		rows := make([]row, 0, len(all))
 		for k := range all {
 			key := MakeRouteKey(k.Channel, k.ChatID, k.TopicID)
-			queued, err := b.queuedRows(key)
+			st, err := b.statusSnapshot(key)
 			if err != nil {
 				rows = append(rows, row{b.topicDisplayName(k.Channel, k.ChatID, k.TopicID), -1, 0})
 				continue
 			}
-			if len(queued) > 0 {
-				rows = append(rows, row{b.topicDisplayName(k.Channel, k.ChatID, k.TopicID), len(queued), queued[0].Inbound.Timestamp.Unix()})
+			if st.Pending > 0 {
+				rows = append(rows, row{b.topicDisplayName(k.Channel, k.ChatID, k.TopicID), st.Pending, st.OldestUnix})
 			}
 		}
 		if len(rows) > 0 {

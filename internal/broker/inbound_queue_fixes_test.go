@@ -494,9 +494,8 @@ func TestForwardOrFallbackCovering_AppendFallbackPersistsDiscreteSources(t *test
 	}
 }
 
-// I7: per-topic /status reads the in-memory index (StatusFor), not the queue
-// files. Appending bumps the index; statusForTopic reflects it without any
-// off-goroutine file read.
+// I7: per-topic /status uses the owning worker, without an off-worker file
+// read. With no active attempt exclusions, its count agrees with StatusFor.
 func TestStatusForTopic_UsesIndexNotFiles(t *testing.T) {
 	t.Setenv("C3_QUEUE_DIR", t.TempDir())
 	b := brokerWithChannel(t, mfWithTelegram(), &fakeChannel{})

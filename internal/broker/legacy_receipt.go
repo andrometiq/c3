@@ -36,15 +36,16 @@ func (b *Broker) queuedRows(key RouteKey) ([]queue.TrackedInbound, error) {
 	}
 	hidden := map[string][]string{}
 	for _, a := range b.attempts.snapshot(time.Now()) {
-		if a.Route == key && (noticeAttemptOpen(a) || a.Evidence || a.Outcome == "confirmed") {
+		if a.Route == key && (b.noticeAttemptOpen(a) || a.Evidence || a.Outcome == "confirmed") {
 			for _, m := range a.Members {
 				hidden[m.ID] = append(hidden[m.ID], m.Revision)
 			}
 		}
 	}
+	recorded := b.recorded.surviving(key, rows)
 	out := rows[:0]
 	for _, row := range rows {
-		excluded := false
+		excluded := recorded[row.RecordID]
 		for _, revision := range hidden[row.RecordID] {
 			if revision == "" || revision == rowRevision(row) {
 				excluded = true
@@ -61,8 +62,16 @@ func (b *Broker) queuedRows(key RouteKey) ([]queue.TrackedInbound, error) {
 // The legacy table's 15-second shadow deadline is not a host termination.
 // Legacy adapters can still be trying their own inbox fallback on the same
 // token. Keep that observation excluded until a terminal queue-only report,
-// receipt, release or identity reconciliation; never change legacy delivery.
-func noticeAttemptOpen(a attemptRecord) bool {
+// receipt, release or identity reconciliation. Only the current route holder
+// can keep a legacy observation in flight; topic switches never hide backlog.
+func (b *Broker) noticeAttemptOpen(a attemptRecord) bool {
+	if a.Negotiated {
+		return a.Outcome == "open"
+	}
+	holder, _ := b.Routes.Holder(a.Route)
+	if holder == nil || holder != a.Holder.Stub || holder.ConnID != a.Holder.ConnID || !holder.IsAlive() {
+		return false
+	}
 	if a.Outcome == "open" {
 		return true
 	}

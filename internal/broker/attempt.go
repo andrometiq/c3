@@ -234,7 +234,7 @@ func (t *attemptTable) release(holder *Stub, reason string, now time.Time) {
 	defer t.mu.Unlock()
 	t.expireLocked(now)
 	for _, a := range t.entries {
-		if !a.Negotiated && a.Holder.Stub == holder && a.Outcome == "open" {
+		if !a.Negotiated && a.Holder.Stub == holder && (a.Outcome == "open" || (a.Outcome == "expired" && a.Reason == "unobserved")) {
 			a.Outcome, a.Reason = "released", reason
 		}
 	}

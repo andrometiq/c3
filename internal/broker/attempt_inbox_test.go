@@ -256,6 +256,7 @@ func TestNegotiatedInboxTopicStatus(t *testing.T) {
 	w.scheduleAttempt(ctx, false)
 	f := nextAttemptDelivery(t, w, frames)
 	w.handleAttemptResult(resultFor(s, f, "confirmed"))
+	resumeStatusWorker(t, b)
 	if got := b.statusForTopic(w.key.Channel, w.key.ChatID, nil); !strings.Contains(got, "live: inbox, confirmed") {
 		t.Fatal(got)
 	}

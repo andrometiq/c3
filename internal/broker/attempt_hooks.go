@@ -46,6 +46,7 @@ func (w *RouteWorker) shadowRemoval(before shadowRows, token, cause string) {
 			removed = append(removed, id)
 		}
 	}
+	w.broker.recorded.forget(w.key, removed)
 	now := time.Now()
 	if token != "" {
 		w.broker.attempts.confirm(token, w.key, removed, cause, now)
@@ -74,6 +75,7 @@ func (w *RouteWorker) shadowLegacyFetch(holder *Stub, msgs []c3types.Inbound) {
 	if len(ids) == 0 {
 		return
 	}
+	w.broker.recorded.forget(w.key, ids)
 	// retireConsumedRecords already paired the actual returned rows and IDs.
 	now := time.Now()
 	token := w.broker.mintDeliveryToken()

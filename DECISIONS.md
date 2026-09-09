@@ -827,3 +827,12 @@ Operator delivery, receipt and retirement logs use correlation tokens; notices
 and status never reveal tokens. Telegram and shell status show per-route state,
 history and session build. This replaces Held-by-route-change and raw-count notice
 behavior without changing delivery authority, retention limits or drain policy.
+
+Phase-5 review corrections: legacy observations hide rows only while their
+captured holder still owns the route. Held retry state survives send and snapshot
+failures; only successful sends acknowledge it. Operator status reads use a
+read-only worker job, with asynchronous Telegram replies to preserve polling;
+oldest remains the minimum timestamp. Receipt identity/revision markers live
+independently of bounded attempt history for each surviving recorded row. They
+survive worker exits, and are removed on retirement, removal or revision change;
+restart replay remains covered by the existing contract.

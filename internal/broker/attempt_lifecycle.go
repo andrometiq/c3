@@ -130,6 +130,7 @@ func (w *RouteWorker) handleAttemptResult(job *attemptResultJob) {
 		}
 		accepted = true
 		if job.Msg.Outcome == "confirmed" {
+			w.broker.recorded.remember(w.key, a.Members)
 			w.updateAttempt(a.Token, func(a *attemptRecord) { a.Evidence = true })
 			log.Printf("attempt confirmed token=%s route=%s ms=%d", a.Token, routeKeyStr(w.key), time.Since(a.Started).Milliseconds())
 		} else {
@@ -193,6 +194,7 @@ func (w *RouteWorker) retireAttemptToken(token string) {
 		// Retire recovery left by an earlier legacy holder only after the
 		// durable removal succeeds. Reconcile its shadow identities as well.
 		ids := memberIDs(a.Members)
+		w.broker.recorded.forget(w.key, ids)
 		w.retirePendingRecords(ids)
 		w.broker.attempts.drop(w.key, ids, "negotiated_confirm", a.Token, time.Now())
 		s := a.Holder.Stub

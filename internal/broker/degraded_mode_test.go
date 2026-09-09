@@ -303,7 +303,7 @@ func TestStatus_ReportsDegradedQueue(t *testing.T) {
 	host := NewBrokerHost(b, "telegram")
 	tid := int64(281)
 
-	topicReply, handled := host.HandleCommand(&c3types.Inbound{Channel: "telegram", ChatID: -100, TopicID: &tid, Text: "/status"})
+	topicReply, handled := statusCommandReply(t, host, fc, &c3types.Inbound{Channel: "telegram", ChatID: -100, TopicID: &tid, Text: "/status"})
 	if !handled {
 		t.Fatal("/status in a topic should be handled")
 	}
@@ -311,7 +311,7 @@ func TestStatus_ReportsDegradedQueue(t *testing.T) {
 		t.Fatalf("/status in a topic reads as a healthy broker with an empty queue, when in fact nothing CAN be queued locally and inbound awaits Telegram replay. Reply was:\n%s", topicReply)
 	}
 
-	dmReply, handled := host.HandleCommand(&c3types.Inbound{Channel: "telegram", ChatID: 42, Text: "/status"})
+	dmReply, handled := statusCommandReply(t, host, fc, &c3types.Inbound{Channel: "telegram", ChatID: 42, Text: "/status"})
 	if !handled {
 		t.Fatal("/status in DM should be handled")
 	}
@@ -413,8 +413,8 @@ func TestStatus_HealthyQueueHasNoDegradedWarning(t *testing.T) {
 	host := NewBrokerHost(b, "telegram")
 	tid := int64(281)
 
-	topicReply, _ := host.HandleCommand(&c3types.Inbound{Channel: "telegram", ChatID: -100, TopicID: &tid, Text: "/status"})
-	dmReply, _ := host.HandleCommand(&c3types.Inbound{Channel: "telegram", ChatID: 42, Text: "/status"})
+	topicReply, _ := statusCommandReply(t, host, fc, &c3types.Inbound{Channel: "telegram", ChatID: -100, TopicID: &tid, Text: "/status"})
+	dmReply, _ := statusCommandReply(t, host, fc, &c3types.Inbound{Channel: "telegram", ChatID: 42, Text: "/status"})
 	for _, got := range []string{topicReply, dmReply} {
 		if strings.Contains(got, queueDisabledWarning) {
 			t.Fatalf("a healthy broker's /status warns that its durable queue is DISABLED. Reply was:\n%s", got)
