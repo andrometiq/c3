@@ -555,7 +555,7 @@ live transport proof or confirmation age.
 The broker derives each negotiated route's display: `waiting`,
 `live: channel, confirmed <age>`, `live: inbox, confirmed <age>`, or
 `pull-only (<reason>)`. Either eligible transport allows waiting before the first
-confirmation on that route. Exhaustion says
+confirmation on that route or while awaiting proof on an eligible replacement transport. Exhaustion says
 `pull-only (no receipt on channel or inbox; retries on reconnect, attach or new messages after 60 s)`
 and preserves the prior confirmation as history. Ineligible routes show pull-only
 immediately. Restart resets proof; fetch never changes it. The existing
@@ -566,9 +566,28 @@ snapshot. Claims/session status also includes optional `confirmed_at` and `confi
 so inbox history stays accurate after exhaustion.
 Held notices recount at send time and exclude attempting rows. Scheduling
 precedes Held evaluation after enqueue, attempt termination, ownership or
-capability changes, enrichment and drain import. The 60-second notice flap timer
-is deferred; the existing notice cooldown still applies. Legacy sessions retain
-their four-state wording.
+capability changes, enrichment and drain import. Route changes use a
+60-second stable-state timer comparing only state and reason,
+never age or queued count. Returning to the last announced state cancels the line.
+Held has a separate 10-second per-route cooldown; its one route line also records
+that state as announced. One sender holds the pending reservation through send
+completion, then checks the latest state. Legacy sessions retain their four-state
+wording (`channel`, `cross-session`, `probing`, `queue-only`).
+
+| Negotiated route state | Meaning and history |
+|---|---|
+| `live: channel, confirmed <age>` | This route has a native live receipt. |
+| `live: inbox, confirmed <age>` | This route has an inbox receipt. |
+| `waiting` | An eligible live transport awaits this route's first confirmation, or a live attempt is still open. Prior proof can appear as `was <transport>, confirmed <age>`. |
+| `pull-only (<reason>)` | No eligible live transport or the cycle exhausted; prior proof stays as `was <transport>, confirmed <age>`. Never shown while a live attempt is open. |
+
+For `receipts:accept`, replace `confirmed` with `accepted by <host>` and retain
+the age; acceptance is not proof of display. Fetch does not establish live proof.
+Claims include `holder_build` and optional `accepted_by`; route display updates
+also carry optional `accepted_by`. Status and Held exclude exact surviving
+members of open attempts/fetch groups and rows with observed receipt evidence,
+including when retirement storage retries fail. A changed content revision is
+queued again. Tokens appear in operator logs, never in status or ordinary notices.
 
 ### Provisional — 12 ops
 

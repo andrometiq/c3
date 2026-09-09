@@ -75,11 +75,9 @@ type Stub struct {
 	confirmed map[RouteKey]bool
 	// Delivery eligibility, probe reservation, and notice history are owned by
 	// stubMu. Empty state preserves the legacy adapter default (capable).
-	ReceiptConfirming   bool // immutable hello capability; legacy ack keeps recovery
-	renderRoute         ipc.RenderRoute
-	renderProbeSent     bool
-	renderNoticeRoutes  map[RouteKey]string
-	renderNoticePending map[RouteKey]bool
+	ReceiptConfirming bool // immutable hello capability; legacy ack keeps recovery
+	renderRoute       ipc.RenderRoute
+	renderProbeSent   bool
 	// peerProtocolVersion is the normalized IPC dialect observed on hello.
 	// Sensitive dispatch reads this stored connection identity rather than
 	// re-decoding or assuming the current build's dialect.
@@ -630,53 +628,6 @@ func (s *Stub) RenderRoute() ipc.RenderRoute {
 		return ipc.RenderRoute{State: ipc.RenderCapable}
 	}
 	return s.renderRoute
-}
-
-// scheduleRenderNotice reserves one sending loop per route through completion.
-func (s *Stub) scheduleRenderNotice(key RouteKey) bool {
-	route := s.RenderRouteFor(key)
-	s.stubMu.Lock()
-	defer s.stubMu.Unlock()
-	state := route.Semantic()
-	if s.renderNoticePending[key] || s.renderNoticeRoutes[key] == state {
-		return false
-	}
-	if s.renderNoticePending == nil {
-		s.renderNoticePending = map[RouteKey]bool{}
-	}
-	s.renderNoticePending[key] = true
-	return true
-}
-
-// nextRenderNotice rechecks after the cooldown: an intervening transition back
-// to the last sent state needs no notice. Clearing pending under the same lock
-// lets a later state change reserve a new loop without losing an update.
-func (s *Stub) nextRenderNotice(key RouteKey) (ipc.RenderRoute, bool) {
-	route := s.RenderRouteFor(key)
-	s.stubMu.Lock()
-	defer s.stubMu.Unlock()
-	if s.renderNoticeRoutes[key] == route.Semantic() {
-		delete(s.renderNoticePending, key)
-		return ipc.RenderRoute{}, false
-	}
-	return route, true
-}
-
-func (s *Stub) finishRenderNotice(key RouteKey, route ipc.RenderRoute, sent bool) bool {
-	current := s.RenderRouteFor(key)
-	s.stubMu.Lock()
-	defer s.stubMu.Unlock()
-	if sent {
-		if s.renderNoticeRoutes == nil {
-			s.renderNoticeRoutes = map[RouteKey]string{}
-		}
-		s.renderNoticeRoutes[key] = route.Semantic()
-		if current.Semantic() != route.Semantic() {
-			return true // keep the reservation while sending the latest state
-		}
-	}
-	delete(s.renderNoticePending, key)
-	return false
 }
 
 // Reserve the first probe across all routes held by this session. Later human

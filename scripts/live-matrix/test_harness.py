@@ -7,7 +7,7 @@ import unittest
 import xml.etree.ElementTree as ET
 from unittest.mock import patch
 
-from collect import classify_fetch, fetch_trailer, classify, count_receives, sanitize, verdict
+from collect import notice_evidence, route_line_limit, classify_fetch, fetch_trailer, classify, count_receives, sanitize, verdict
 from driver import false_held, offered_before_ready, write_report
 from host import read_jsonl
 from matrix import Cell, cells, selection, selection_summary
@@ -86,7 +86,7 @@ class MatrixTests(unittest.TestCase):
         self.assertIsInstance(clean["origin"]["verifiedPeerPid"], int)
 
     def evidence(self):
-        return {"injected": True, "rows_final": 0, "received": {"1": 1}, "attempts": [
+        return {"no_false_held": True, "route_line_count": 1, "injected": True, "rows_final": 0, "received": {"1": 1}, "attempts": [
             {"phase": "reserved", "token": "one", "transport": "channel", "members": "1"},
             {"phase": "confirmed", "token": "one", "transport": "channel", "retired": "1", "elapsed_ms": "100"}]}
 
@@ -103,6 +103,31 @@ class MatrixTests(unittest.TestCase):
         evidence = self.evidence()
         evidence["attempts"].append({"phase": "reserved", "token": "two", "transport": "inbox", "members": "1"})
         self.assertIn("fallback/wrong transport attempted", verdict(cell, evidence))
+
+    def test_notice_assertions_for_every_matrix_cell(self):
+        for cell in cells():
+            evidence = self.evidence()
+            evidence["attempts"] = [dict(e, transport=cell.transport) for e in evidence["attempts"]]
+            evidence["no_false_held"] = False
+            self.assertIn("no false Held assertion failed or missing", verdict(cell, evidence), cell.name)
+            evidence["no_false_held"] = True
+            evidence["route_line_count"] = 0
+            self.assertIn("route line count assertion failed or missing", verdict(cell, evidence), cell.name)
+            evidence["route_line_count"] = route_line_limit(cell) + 1
+            self.assertIn("route line count assertion failed or missing", verdict(cell, evidence), cell.name)
+            for field in ("no_false_held", "route_line_count"):
+                missing = dict(evidence)
+                del missing[field]
+                self.assertTrue(any(field.replace("_", " ") in reason.lower() for reason in verdict(cell, missing)), cell.name)
+
+    def test_notice_collector_after_confirmation(self):
+        log = "TEST ATTEMPT token=x phase=reserved members=1 transport=channel\n"
+        log += "attempt confirmed token=x route=-100/1 ms=2\n"
+        log += 'TEST SINK reply text="📨 Held — nothing lost. 1 message queued. Send /status to check.\\nLive route: channel."\n'
+        evidence = notice_evidence(log, 1)
+        self.assertFalse(evidence["no_false_held"])
+        self.assertEqual(evidence["route_line_count"], 1)
+        self.assertTrue(notice_evidence('TEST SINK text="Live route: live: inbox, confirmed 1s ago."', 1)["no_false_held"])
 
     def test_fetch_rejects_consume_before_tool_result(self):
         cell = Cell("fetch", "idle", "resumed", "text", "single")

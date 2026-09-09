@@ -462,6 +462,8 @@ type ClaimsListMsg struct {
 // when the route corresponds to a known topic in mappings.json (lookup is
 // best-effort; empty when the route is a DM or a yet-unregistered topic).
 type ClaimEntry struct {
+	HolderBuild        string    `json:"holder_build,omitempty"`
+	AcceptedBy         string    `json:"accepted_by,omitempty"`
 	ConfirmedTransport string    `json:"confirmed_transport,omitempty"`
 	ConfirmedAt        time.Time `json:"confirmed_at,omitzero"`
 	RenderState        string    `json:"render_state,omitempty"`

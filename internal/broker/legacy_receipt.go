@@ -1,6 +1,8 @@
 package broker
 
 import (
+	"github.com/Andrometiq/c3/internal/ipc"
+	"github.com/Andrometiq/c3/internal/queue"
 	"log"
 	"time"
 )
@@ -10,25 +12,59 @@ import (
 // messages still attempting. Intersect with actual surviving ids, rather than
 // subtracting a stale batch size after a drain, eviction or partial retirement.
 func (b *Broker) noticePending(key RouteKey, owner *Stub) (int, error) {
-	rows, err := b.Queue.PeekTracked(queueRouteKey(key), -1)
+	if b.Queue == nil {
+		return 0, nil
+	}
+	rows, err := b.queuedRows(key)
 	if err != nil {
 		count := b.Queue.StatusFor(queueRouteKey(key)).Pending
 		log.Printf("Held count read failed route=%s: %v; using cached pending=%d", routeKeyStr(key), err, count)
 		return count, err
 	}
-	hidden := map[string]bool{}
+	return len(rows), nil
+}
+
+// Use exact surviving revisions for every notice and /status. Receipt evidence
+// remains evidence even if durable retirement failed and released the attempt.
+func (b *Broker) queuedRows(key RouteKey) ([]queue.TrackedInbound, error) {
+	if b.Queue == nil {
+		return nil, nil
+	}
+	rows, err := b.Queue.PeekTracked(queueRouteKey(key), -1)
+	if err != nil {
+		return nil, err
+	}
+	hidden := map[string][]string{}
 	for _, a := range b.attempts.snapshot(time.Now()) {
-		if a.Route == key && a.Holder.Stub == owner && a.Outcome == "open" {
-			for _, member := range a.Members {
-				hidden[member.ID] = true
+		if a.Route == key && (noticeAttemptOpen(a) || a.Evidence || a.Outcome == "confirmed") {
+			for _, m := range a.Members {
+				hidden[m.ID] = append(hidden[m.ID], m.Revision)
 			}
 		}
 	}
-	count := 0
+	out := rows[:0]
 	for _, row := range rows {
-		if !hidden[row.RecordID] {
-			count++
+		excluded := false
+		for _, revision := range hidden[row.RecordID] {
+			if revision == "" || revision == rowRevision(row) {
+				excluded = true
+				break
+			}
+		}
+		if !excluded {
+			out = append(out, row)
 		}
 	}
-	return count, nil
+	return out, nil
+}
+
+// The legacy table's 15-second shadow deadline is not a host termination.
+// Legacy adapters can still be trying their own inbox fallback on the same
+// token. Keep that observation excluded until a terminal queue-only report,
+// receipt, release or identity reconciliation; never change legacy delivery.
+func noticeAttemptOpen(a attemptRecord) bool {
+	if a.Outcome == "open" {
+		return true
+	}
+	return !a.Negotiated && a.Outcome == "expired" && a.Reason == "unobserved" && a.Holder.Stub != nil && a.Holder.Stub.IsAlive() && a.Holder.Stub.RenderRoute().State != ipc.RenderQueueOnly
 }

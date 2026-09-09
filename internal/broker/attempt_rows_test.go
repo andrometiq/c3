@@ -101,6 +101,9 @@ func TestNegotiatedOversizeNoticeRetiresAfterReceipt(t *testing.T) {
 	}
 	w.scheduleAttempt(ctx, false)
 	f := nextDeliver(t, frames)
+	if !strings.Contains(f.Inbound.Text, "original is still queued") || strings.Contains(f.Inbound.Text, "has been moved") {
+		t.Fatal("replacement notice claimed premature set-aside", f.Inbound.Text)
+	}
 	if len(f.Inbound.Text) >= ipc.MaxFrameSize {
 		t.Fatal("oversize original was pushed")
 	}

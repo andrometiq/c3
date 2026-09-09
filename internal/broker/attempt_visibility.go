@@ -45,7 +45,7 @@ func (w *RouteWorker) evaluateAttemptHeld(s *Stub) {
 	if !s.negotiated() {
 		return
 	}
-	rows, err := w.visibleAttemptRows(-1)
+	rows, err := w.broker.queuedRows(w.key)
 	if err != nil {
 		return
 	}
@@ -54,7 +54,7 @@ func (w *RouteWorker) evaluateAttemptHeld(s *Stub) {
 	d.route(w.key).Held = len(rows)
 	d.mu.Unlock()
 	w.publishAttemptState(s)
-	w.broker.notifyRenderRoute(s)
+	w.broker.evaluateNotices(w.key, true)
 }
 func (s *Stub) deliveryRoute(key RouteKey) ipc.RenderRoute {
 	d := s.delivery
@@ -63,23 +63,38 @@ func (s *Stub) deliveryRoute(key RouteKey) ipc.RenderRoute {
 	state := d.route(key)
 	live := s.acceptedLive()
 	r := ipc.RenderRoute{State: "waiting", Held: state.Held}
+	if d.offer.Receipts == "accept" {
+		r.AcceptedBy = surfaceLabel(s.CLI)
+	}
 	if !state.Confirmed.IsZero() {
 		r.State = "live_" + state.Transport
 		r.Transport = state.Transport
 		r.Confirmed = state.Confirmed
 	}
-	if (!live.Channel.Eligible && !live.Inbox.Eligible) ||
-		(state.Transport == "channel" && !live.Channel.Eligible) ||
-		(state.Transport == "inbox" && !live.Inbox.Eligible) {
+	if !live.Channel.Eligible && !live.Inbox.Eligible {
 		r.State = "pull_only"
 		r.Reason = live.Channel.Reason
 		if state.Transport == "inbox" {
 			r.Reason = live.Inbox.Reason
 		}
+		if r.Reason == "" {
+			r.Reason = live.Inbox.Reason
+		}
+		if r.Reason == "" {
+			r.Reason = "no eligible live transport"
+		}
+	} else if (state.Transport == "channel" && !live.Channel.Eligible) || (state.Transport == "inbox" && !live.Inbox.Eligible) {
+		r.State = "waiting"
 	}
 	if !state.Exhausted.IsZero() {
 		r.State = "pull_only"
 		r.Reason = "no receipt on channel or inbox; retries on reconnect, attach or new messages after 60 s"
+		if state.ExhaustionReason != "" {
+			r.Reason = state.ExhaustionReason
+		}
+	}
+	if state.CycleToken != "" && r.State == "pull_only" {
+		r.State, r.Reason = "waiting", ""
 	}
 	return r
 }

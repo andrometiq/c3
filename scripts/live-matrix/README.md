@@ -122,3 +122,11 @@ building or launching; add `--list` to print only the matching cells and counts.
 With injection enabled, any same-UID process that can access the private socket
 can invoke the hook. This is the broker socket's existing trust model; the flag
 is an opt-in, not an additional caller-authentication boundary.
+
+Phase-5 collection requires `no_false_held` and `route_line_count` evidence for
+every cell. Counts start at injection and include the route line in Held. At least one
+line is required, with allowance for actual holds during voice enrichment and
+live startup. The driver observes for 80 seconds by default (at least 75),
+covering the receipt budget and 60-second stability timer. Missing evidence,
+zero lines or excess lines fails the cell. Collector
+unit tests use local fixtures only and never launch the live harness.

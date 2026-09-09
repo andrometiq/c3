@@ -72,6 +72,7 @@ type ResolveVoiceJob struct {
 // (a separate Pending-then-Peek off-goroutine could report count>0 with an empty
 // or stale preview). PeekN bounds the preview; the result returns via ResultCh.
 type BacklogJob struct {
+	Notice   bool
 	PeekN    int
 	ResultCh chan<- BacklogResult
 }
@@ -79,9 +80,10 @@ type BacklogJob struct {
 // BacklogResult carries the route's total queued count + oldest-first preview
 // (up to PeekN) back to the attach handler.
 type BacklogResult struct {
-	Total   int
-	Preview []c3types.Inbound
-	Err     error
+	NoticeRows []queue.TrackedInbound
+	Total      int
+	Preview    []c3types.Inbound
+	Err        error
 }
 
 // FetchJob asks the worker to Peek/Consume the route's durable queue. Limit<0
@@ -497,6 +499,7 @@ func (w *RouteWorker) run(ctx context.Context) {
 				w.scheduleAttempt(ctx, false)
 			case JobAttemptAdopt:
 				w.adoptAttempt(job.AttemptAdopt)
+				w.scheduleAttempt(ctx, false)
 
 			case JobInbound:
 				if job.Inbound == nil {
@@ -529,6 +532,7 @@ func (w *RouteWorker) run(ctx context.Context) {
 				w.handleFetch(ctx, job.Fetch)
 			case JobConsume:
 				w.handleConsume(ctx, job.Consume)
+				w.scheduleAttempt(ctx, false)
 			case JobBacklog:
 				w.handleBacklog(ctx, job.Backlog)
 			case JobDrainPeek:
@@ -548,6 +552,7 @@ func (w *RouteWorker) run(ctx context.Context) {
 					for _, a := range w.openAttempts() {
 						w.finishAttempt(a.Token, "released", "holder released")
 					}
+					w.broker.evaluateNotices(w.key, true)
 				}
 				return
 			}
@@ -620,6 +625,8 @@ func (w *RouteWorker) flushInbounds(ctx context.Context, batch []*c3types.Inboun
 			if s.negotiated() {
 				w.enableAttemptTimer()
 				w.scheduleAttempt(ctx, true)
+			} else {
+				w.broker.evaluateNotices(w.key, true)
 			}
 		}
 	}()
@@ -1130,6 +1137,11 @@ func (w *RouteWorker) forwardOrFallback(ctx context.Context, in *c3types.Inbound
 // idsKnown says the caller enumerated the appended lines exactly, so
 // len(coveredIDs) — including ZERO — is authoritative for this push.
 func (w *RouteWorker) forwardOrFallbackCovering(ctx context.Context, in *c3types.Inbound, sources []*c3types.Inbound, covered int, coveredIDs []string, idsKnown bool) {
+	defer func() {
+		if !in.IsEvent() {
+			w.broker.evaluateNotices(w.key, true)
+		}
+	}()
 	holder, claimed := w.broker.Routes.Holder(w.key)
 	if holder.negotiated() && !in.IsEvent() {
 		w.enableAttemptTimer()
@@ -1350,87 +1362,20 @@ func (w *RouteWorker) forwardOrFallbackCovering(ctx context.Context, in *c3types
 			}
 		}
 	}
-	// No live claim: the message is already durably queued (flushInbounds — or
-	// the append-if-absent above — stored it). Surface a "held, nothing lost"
-	// auto-reply carrying the RUNNING queued count.
-	//
-	// On a channel that can EDIT messages, send a FRESH held-notice on every hold
-	// (never edit in place). Each newly-queued message must re-notify the operator:
-	// a silent in-place edit bumps the visible count but fires no notification, so
-	// there is no signal that a new message actually landed in the queue. A channel
-	// that cannot edit keeps the original cooldown-gated single reply (unchanged;
-	// it serves hypothetical bare channels).
-	ch, err := w.broker.Channel(in.Channel)
-	if err != nil {
-		log.Printf("hold FAIL chan=%s chat=%d topic=%s msg=%d: channel lookup: %v — %s",
-			w.key.Channel, w.key.ChatID, TopicKeyStr(w.key), in.MessageID, err, fallbackSummary(in))
-		return
-	}
-	count := 1
+	// Ordinary Held is evaluated only after the delivery path has finished.
 	if w.broker.Queue != nil {
-		if n, _ := w.broker.Queue.Pending(queueRouteKey(w.key)); n > 0 {
-			count = n
+		return
+	}
+	// Degraded mode keeps its exceptional warning and five-minute cooldown.
+	if ch, err := w.broker.Channel(in.Channel); err == nil &&
+		(w.broker.Fallbacks == nil || w.broker.Fallbacks.ShouldSend(w.key)) {
+		_, err = ch.SendReply(c3types.ReplyArgs{Channel: in.Channel, ChatID: in.ChatID, TopicID: in.TopicID, Text: heldDegradedText()})
+		if err != nil {
+			log.Printf("hold degraded notice failed: %v", err)
 		}
 	}
-	// With no local queue, Telegram retains the unacknowledged inbound.
-	// Explain replay on restart instead of claiming a locally queued count.
-	degraded := w.broker.Queue == nil
-	text := heldReplyText(in.Channel, count)
-	held := fmt.Sprintf("no claim, queued (count=%d)", count)
-	if degraded {
-		// No count: nothing was stored in the local queue.
-		text, held = heldDegradedText(), "no claim, "+degradedHoldLogPhrase+", nothing stored"
-	}
-	args := c3types.ReplyArgs{Channel: in.Channel, ChatID: in.ChatID, TopicID: in.TopicID, Text: text}
+	log.Printf("hold chan=%s chat=%d topic=%s msg=%d: %s, nothing stored — %s", w.key.Channel, w.key.ChatID, TopicKeyStr(w.key), in.MessageID, degradedHoldLogPhrase, fallbackSummary(in))
 
-	// Cadence, degraded mode only: take the LONG (5-minute Fallbacks) cooldown
-	// instead of the 10s held-notice debounce, on edit-capable channels too. The
-	// 10s window exists so each newly-queued message re-notifies that it landed
-	// safely — a per-message receipt, worth repeating because the count changes.
-	// The degraded warning is a MODE statement ("nothing arriving here is being
-	// saved"), identical every time and carrying no count, so firing it six times
-	// a minute through a burst is exactly how an operator learns to ignore an
-	// alert. Once per route per 5 minutes is a warning that still reads as one.
-	if !degraded && ch.Capabilities().EditMessages {
-		// Debounce (msg 6083): coalesce a burst of holds into ONE notice per route
-		// per HeldNotices window. The message is already durably queued above; only
-		// the re-notification is throttled. Without this a flood — the Windows
-		// offset-loop, or many messages arriving fast — fired a fresh held-notice
-		// per message. Leading-edge: the first hold in a window alerts immediately
-		// (with the current queued count); further holds within the window are
-		// silent; a hold after a quiet gap re-alerts — preserving #36's per-message
-		// re-alert intent, just rate-limited so it can't flood.
-		if w.broker.HeldNotices != nil && !w.broker.HeldNotices.ShouldSend(w.key) {
-			log.Printf("hold chan=%s chat=%d topic=%s msg=%d: no claim, queued + held-reply COALESCED (count=%d, within %s debounce) — %s",
-				w.key.Channel, w.key.ChatID, TopicKeyStr(w.key), in.MessageID, count, defaultHeldNoticeCooldown, fallbackSummary(in))
-			return
-		}
-		// Send a FRESH held-notice (never edit in place); the leading-edge throttle
-		// above prevents a per-message flood. Prior notices are left in place.
-		if _, serr := ch.SendReply(args); serr != nil {
-			log.Printf("hold FAIL chan=%s chat=%d topic=%s msg=%d: send held-reply: %v — %s",
-				w.key.Channel, w.key.ChatID, TopicKeyStr(w.key), in.MessageID, serr, fallbackSummary(in))
-			return
-		}
-		log.Printf("hold chan=%s chat=%d topic=%s msg=%d: no claim, queued + held-reply SENT (count=%d) — %s",
-			w.key.Channel, w.key.ChatID, TopicKeyStr(w.key), in.MessageID, count, fallbackSummary(in))
-		return
-	}
-
-	// Channel cannot edit messages (or we are degraded): the original
-	// cooldown-gated single reply, so the topic isn't spammed on every hold.
-	if !w.broker.Fallbacks.ShouldSend(w.key) {
-		log.Printf("hold chan=%s chat=%d topic=%s msg=%d: %s; notice in cooldown — %s",
-			w.key.Channel, w.key.ChatID, TopicKeyStr(w.key), in.MessageID, held, fallbackSummary(in))
-		return
-	}
-	if _, err := ch.SendReply(args); err != nil {
-		log.Printf("hold FAIL chan=%s chat=%d topic=%s msg=%d: send held-reply: %v — %s",
-			w.key.Channel, w.key.ChatID, TopicKeyStr(w.key), in.MessageID, err, fallbackSummary(in))
-		return
-	}
-	log.Printf("hold chan=%s chat=%d topic=%s msg=%d: %s + notice sent — %s",
-		w.key.Channel, w.key.ChatID, TopicKeyStr(w.key), in.MessageID, held, fallbackSummary(in))
 }
 
 // fallbackSummary returns a one-liner of message content for use in
@@ -1543,7 +1488,8 @@ func (w *RouteWorker) evictIfOverCap(qrk queue.RouteKey) {
 	if dropped == 0 {
 		return
 	}
-	log.Printf("queue CAP chan=%s chat=%d topic=%s: dropped %d oldest held message(s) over cap", w.key.Channel, w.key.ChatID, TopicKeyStr(w.key), dropped)
+	log.Printf("queue eviction chan=%s chat=%d topic=%s: expired=%d over_count=%d", w.key.Channel, w.key.ChatID, TopicKeyStr(w.key), aged, overCount)
+	remaining, countErr := w.broker.noticePending(w.key, nil)
 	if ch, cerr := w.broker.Channel(w.key.Channel); cerr == nil {
 		var topicID *int64
 		if w.key.HasTopic {
@@ -1552,7 +1498,7 @@ func (w *RouteWorker) evictIfOverCap(qrk queue.RouteKey) {
 		}
 		_, _ = ch.SendReply(c3types.ReplyArgs{
 			Channel: w.key.Channel, ChatID: w.key.ChatID, TopicID: topicID,
-			Text: fmt.Sprintf("⚠️ queue full — dropped %d oldest held message(s); attach a session soon.", dropped),
+			Text: evictionNotice(aged, overCount, remaining, countErr, w.broker.Queue.RetentionDir() != ""),
 		})
 	}
 }
@@ -1671,7 +1617,7 @@ const oversizeNoticeText = "⚠️ [C3] This message could not be delivered: its
 // synthesized channel event, and an event payload is the other way a record gets
 // large.
 func oversizeNotice(in c3types.Inbound, encoded int, retainedAt string, movedAside bool) c3types.Inbound {
-	where := "It is still queued (this fetch did not consume anything)."
+	where := "The original is still queued; this notice does not contain its content."
 	if movedAside {
 		where = "It has been moved out of the queue so the messages behind it could be delivered."
 		if retainedAt != "" {
@@ -2014,6 +1960,12 @@ func (w *RouteWorker) handleBacklog(ctx context.Context, job *BacklogJob) {
 		job.ResultCh <- BacklogResult{}
 		return
 	}
+	if job.Notice {
+		w.scheduleAttempt(ctx, false)
+		rows, err := w.broker.queuedRows(w.key)
+		job.ResultCh <- BacklogResult{NoticeRows: rows, Err: err}
+		return
+	}
 	if w.routeNegotiated() {
 		w.enableAttemptTimer()
 		w.scheduleAttempt(ctx, false)
@@ -2069,6 +2021,7 @@ func (w *RouteWorker) handleConsume(_ context.Context, job *ConsumeJob) {
 		// idempotent, so an id already evicted/consumed simply matches nothing.
 		if ids := w.takeCoveredByPush(job.MessageID, job.Token); len(ids) > 0 {
 			shadowBefore := w.shadowRows()
+			w.updateAttempt(w.shadowConsumeToken, func(a *attemptRecord) { a.Evidence = true })
 			w.beforeUpgradeAckRemoval()
 			removed, err := w.broker.Queue.RemoveRecordIDs(qrk, ids)
 			if err != nil {
@@ -2641,16 +2594,15 @@ func (w *RouteWorker) flushPendingAck(reason string) {
 }
 
 // unprocessedNoticeText is the operator notice for flushPendingAck: N inbounds
-// were delivered to a holder that died before handling them and have been put
+// lack a processing confirmation when the holder dies and have been put
 // back on the durable queue, recoverable on the next attach / fetch_queue.
 func unprocessedNoticeText(n int, reason string) string {
 	noun := "message"
 	if n != 1 {
 		noun = "messages"
 	}
-	return fmt.Sprintf("⚠️ %s before answering %d %s it had received. "+
-		"They're back in the queue — they'll resurface when a session re-attaches "+
-		"(or run fetch_queue). Nothing lost.", reason, n, noun)
+	return fmt.Sprintf("⚠️ %s. C3 restored %d %s whose processing was not confirmed. "+
+		"Fetch them from the queue; delivery may repeat.", reason, n, noun)
 }
 
 // pulseTyping fires one SendTyping for the route. Resolves the channel + the

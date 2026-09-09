@@ -64,12 +64,13 @@ The agent's reply comes back to that same topic. If the session is down when you
 next message, C3 stores it and tells you so:
 
 ```text
-📨 Held — nothing lost.
-1 message queued.
-
-
-Send /status to check.
+📨 Held — nothing lost. 1 message queued. Send /status to check.
+Live route: queue-only (no session attached).
 ```
+
+Held counts only rows waiting for delivery, excluding open live attempts and fetch groups.
+A route change gets one calm line after it stays unchanged for 60 seconds; a brief
+channel timeout followed by confirmed inbox delivery produces no false Held notice.
 
 Attach a session to that topic and the queued message is waiting for it. You don't re-record
 the voice note.

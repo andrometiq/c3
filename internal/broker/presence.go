@@ -18,7 +18,8 @@ func (b *Broker) enqueuePresenceChange(change routePresenceChange) {
 		_, interested = registered.Channel.(channel.PresenceNotifier)
 	}
 	b.chMu.RUnlock()
-	if !interested {
+	// Releases also wake queued delivery, including channels without presence.
+	if !interested && change.stub != nil {
 		return
 	}
 	b.presenceMu.Lock()
@@ -64,6 +65,9 @@ func (b *Broker) dispatchPresenceChanges() {
 				b.presencePending[0] = routePresenceChange{}
 				b.presencePending = b.presencePending[1:]
 				b.presenceMu.Unlock()
+				if change.stub == nil {
+					b.wakeDelivery(change.key)
+				}
 				b.notifyRouteHolder(change)
 			}
 		case <-b.ctx.Done():

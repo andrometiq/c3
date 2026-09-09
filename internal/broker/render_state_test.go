@@ -39,6 +39,7 @@ func TestRenderNoticeSerializesCompletionAndCoalescesLatest(t *testing.T) {
 			b.channels["telegram"] = &channelRegistration{Channel: fc}
 			b.chMu.Unlock()
 			defer b.Shutdown()
+			b.notices.window = 20 * time.Millisecond
 			released := false
 			defer func() {
 				if !released {
@@ -57,9 +58,9 @@ func TestRenderNoticeSerializesCompletionAndCoalescesLatest(t *testing.T) {
 				t.Helper()
 				deadline := time.Now().Add(time.Second)
 				for time.Now().Before(deadline) {
-					stub.stubMu.Lock()
-					pending := stub.renderNoticePending[key]
-					stub.stubMu.Unlock()
+					b.notices.mu.Lock()
+					pending := b.notices.routes[key] != nil && b.notices.routes[key].pending
+					b.notices.mu.Unlock()
 					if !pending {
 						return
 					}
@@ -134,6 +135,7 @@ func TestHelloRenderStateCompatibility(t *testing.T) {
 			t.Setenv("C3_QUEUE_DIR", t.TempDir())
 			b := brokerWithChannel(t, mfWithTelegram(), &fakeChannel{})
 			defer b.Shutdown()
+			b.notices.window = 20 * time.Millisecond
 			client, server := net.Pipe()
 			defer client.Close()
 			done := make(chan struct{})
@@ -179,6 +181,7 @@ func TestProbeHoldsLaterInboundAndTimeoutNotifiesOnce(t *testing.T) {
 	fc := &fakeChannel{}
 	b := brokerWithChannel(t, mfWithTelegram(), fc)
 	defer b.Shutdown()
+	b.notices.window = 20 * time.Millisecond
 	tid := int64(914)
 	key := MakeRouteKey("telegram", -1001234567890, &tid)
 	stub, pushed := liveHolder(t, b, key)
@@ -205,6 +208,7 @@ func TestProbeHoldsLaterInboundAndTimeoutNotifiesOnce(t *testing.T) {
 	if b.HeldNotices.cooldown != defaultHeldNoticeCooldown {
 		t.Fatal("non-production cooldown")
 	}
+	b.HeldNotices.cooldown = 100 * time.Millisecond
 	b.HeldNotices.ShouldSend(key) // occupy the real ten-second Held window
 	before := len(fc.sendRepliesSnapshot())
 	raw, _ := json.Marshal(ipc.RenderStateMsg{Op: ipc.OpRenderState, RenderRoute: ipc.RenderRoute{State: ipc.RenderQueueOnly, Reason: "live push not confirmed"}})
@@ -220,7 +224,7 @@ func TestProbeHoldsLaterInboundAndTimeoutNotifiesOnce(t *testing.T) {
 		time.Sleep(time.Millisecond)
 	}
 	replies := fc.sendRepliesSnapshot()
-	if len(replies) != before+1 || (!strings.Contains(replies[len(replies)-1].Text, "Held — nothing lost") || !strings.Contains(replies[len(replies)-1].Text, "live push not confirmed")) {
+	if len(replies) != before+1 || (strings.Contains(replies[len(replies)-1].Text, "Held —") || !strings.Contains(replies[len(replies)-1].Text, "live push not confirmed")) {
 		t.Fatalf("timeout notices: %+v", replies)
 	}
 	if stub.CanRenderPush() {
@@ -235,6 +239,7 @@ func TestPendingAckSurvivesOutboundAndClearsOnlyConfirmedToken(t *testing.T) {
 	t.Setenv("C3_QUEUE_DIR", t.TempDir())
 	b := brokerWithChannel(t, mfWithTelegram(), &fakeChannel{})
 	defer b.Shutdown()
+	b.notices.window = 20 * time.Millisecond
 	tid := int64(914)
 	key := MakeRouteKey("telegram", -1001234567890, &tid)
 	w := newRouteWorker(context.Background(), key, time.Hour, b)
@@ -281,6 +286,7 @@ func TestAttachRouteNoticeCoalesces(t *testing.T) {
 	fc := &fakeChannel{}
 	b := brokerWithChannel(t, mfWithTelegram(), fc)
 	defer b.Shutdown()
+	b.notices.window = 20 * time.Millisecond
 	tid := int64(914)
 	key := MakeRouteKey("telegram", -1001234567890, &tid)
 	stub, _ := liveHolder(t, b, key)
@@ -304,6 +310,7 @@ func TestRenderPromotionSchedulesLatestNotice(t *testing.T) {
 	fc := &fakeChannel{}
 	b := brokerWithChannel(t, mfWithTelegram(), fc)
 	defer b.Shutdown()
+	b.notices.window = 20 * time.Millisecond
 	tid := int64(914)
 	key := MakeRouteKey("telegram", -1001234567890, &tid)
 	stub, _ := liveHolder(t, b, key)

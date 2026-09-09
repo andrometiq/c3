@@ -24,10 +24,11 @@ type attemptAdoptJob struct {
 	Done      chan struct{}
 }
 type attemptWrite struct {
-	Conn     *ipc.Conn
-	Frame    any
-	Deadline time.Time
-	Token    string
+	Conn      *ipc.Conn
+	Frame     any
+	Deadline  time.Time
+	Token     string
+	Delivered string
 }
 type attemptWriteResult struct {
 	Token string
@@ -84,6 +85,9 @@ func (w *RouteWorker) startAttemptWriter(ctx context.Context) {
 				wc, cancel := context.WithDeadline(ctx, deadline)
 				err := req.Conn.WriteJSONContext(wc, req.Frame)
 				cancel()
+				if err == nil && req.Delivered != "" {
+					log.Print(req.Delivered)
+				}
 				if req.Token == "" {
 					continue
 				}
@@ -110,6 +114,7 @@ func (w *RouteWorker) scheduleAttempt(ctx context.Context, inbound bool) {
 		return
 	}
 	w.attemptCtx = ctx
+	defer w.broker.evaluateNotices(w.key, true)
 	w.reconcileAttempt()
 	if a := w.liveAttempt(); a != nil {
 		w.evaluateAttemptHeld(a.Holder.Stub)
@@ -121,7 +126,16 @@ func (w *RouteWorker) scheduleAttempt(ctx context.Context, inbound bool) {
 	}
 	d := s.delivery
 	var identityErr error
+	// Identity preparation is a mutation too; a notice snapshot must not
+	// backfill a route frozen by a drain before reaching reservation admission.
+	w.broker.drains.mu.Lock()
+	_, frozen := w.broker.drains.inFlight[queueRouteKey(w.key).File()]
+	if frozen {
+		w.broker.drains.mu.Unlock()
+		return
+	}
 	authorized, _ := w.broker.Routes.withConfirmedHolder(w.key, s, func() { identityErr = w.broker.Queue.EnsureIdentities(queueRouteKey(w.key)) })
+	w.broker.drains.mu.Unlock()
 	if !authorized || identityErr != nil {
 		return
 	}
@@ -179,7 +193,7 @@ func (w *RouteWorker) scheduleAttempt(ctx context.Context, inbound bool) {
 		data, e := json.Marshal(frame)
 		if e != nil || len(data)+1 > ipc.MaxFrameSize {
 			if len(batch) == 0 && e == nil {
-				notice := oversizeNotice(in, len(data), w.broker.Queue.RetentionDir(), true)
+				notice := oversizeNotice(in, len(data), "", false)
 				batch = []*c3types.Inbound{&notice}
 				members = []attemptMember{{ID: row.RecordID, Revision: rowRevision(row)}}
 			}
@@ -190,14 +204,14 @@ func (w *RouteWorker) scheduleAttempt(ctx context.Context, inbound bool) {
 	}
 	if len(batch) == 0 {
 		w.releaseAttemptSlot(s, token)
-		w.exhaustAttempt(s)
+		w.exhaustAttempt(s, "")
 		return
 	}
 	frame.Inbound = *mergeBatch(batch)
 	encoded, encodeErr := json.Marshal(frame)
 	if encodeErr != nil || len(encoded)+1 > ipc.MaxFrameSize {
 		w.releaseAttemptSlot(s, token)
-		w.exhaustAttempt(s)
+		w.exhaustAttempt(s, "")
 		return
 	}
 	d.mu.Lock()
@@ -239,7 +253,7 @@ func (w *RouteWorker) scheduleAttempt(ctx context.Context, inbound bool) {
 	log.Printf("attempt reserved transport=%s members=%d budget_ms=15000", transport, len(members))
 	w.startAttemptWriter(ctx)
 	select {
-	case w.attemptWrites <- attemptWrite{Conn: conn, Frame: attemptFrame{frame, now.Add(15 * time.Second)}, Deadline: now.Add(15 * time.Second), Token: token}:
+	case w.attemptWrites <- attemptWrite{Conn: conn, Frame: attemptFrame{frame, now.Add(15 * time.Second)}, Deadline: now.Add(15 * time.Second), Token: token, Delivered: deliveredLog(w.key, frame.Inbound.MessageID, s, transport, token)}:
 	default:
 		w.finishAttempt(token, "failed", "write admission full")
 	}

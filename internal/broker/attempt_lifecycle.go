@@ -6,6 +6,7 @@ import (
 	"slices"
 	"time"
 
+	"github.com/Andrometiq/c3/internal/c3types"
 	"github.com/Andrometiq/c3/internal/ipc"
 )
 
@@ -26,30 +27,44 @@ func (w *RouteWorker) releaseAttemptSlot(s *Stub, token string) {
 		w.broker.wakeDelivery(key)
 	}
 }
-func (w *RouteWorker) exhaustAttempt(s *Stub) {
+func (w *RouteWorker) exhaustAttempt(s *Stub, reason string) {
 	if !s.negotiated() {
 		return
 	}
 	d := s.delivery
 	d.mu.Lock()
 	d.route(w.key).Exhausted = time.Now()
+	d.route(w.key).ExhaustionReason = ""
+	if reason == "storage failure" {
+		d.route(w.key).ExhaustionReason = "receipt recorded; queue retirement failed; retries on reconnect, attach or new messages after 60 s"
+	}
 	d.route(w.key).clearCycle()
 	d.mu.Unlock()
-	log.Print("attempt exhausted: no receipt on channel or inbox; route paused")
+	if reason == "storage failure" {
+		log.Print("attempt exhausted: receipt recorded; queue retirement failed; route paused")
+	} else {
+		log.Print("attempt exhausted: no receipt on channel or inbox; route paused")
+	}
 }
 func (w *RouteWorker) finishAttempt(token, outcome, reason string) {
-	var owner *Stub
-	var transport string
-	var members []attemptMember
+	var finished *attemptRecord
 	w.updateAttempt(token, func(a *attemptRecord) {
 		if a.Outcome == "open" {
-			a.Outcome = outcome
-			a.Reason = reason
-			owner = a.Holder.Stub
-			transport = a.Transport
-			members = slices.Clone(a.Members)
+			a.Outcome, a.Reason = outcome, reason
+			snapshot := cloneAttempt(a)
+			finished = &snapshot
 		}
 	})
+	if finished != nil {
+		w.afterAttemptFinished(*finished)
+	}
+}
+
+// The terminal record is already published. Logging and scheduling follow it;
+// neither may leave observers seeing retired rows in an open attempt.
+func (w *RouteWorker) afterAttemptFinished(a attemptRecord) {
+	owner, transport, members := a.Holder.Stub, a.Transport, a.Members
+	token, outcome, reason := a.Token, a.Outcome, a.Reason
 	if owner == nil {
 		return
 	}
@@ -58,6 +73,7 @@ func (w *RouteWorker) finishAttempt(token, outcome, reason string) {
 	if transport == "fetch" {
 		return
 	}
+
 	d := owner.delivery
 	d.mu.Lock()
 	state := d.route(w.key)
@@ -72,7 +88,7 @@ func (w *RouteWorker) finishAttempt(token, outcome, reason string) {
 		return
 	} // P6: "A cycle holds the slot until it terminates".
 	if outcome == "failed" || outcome == "expired" {
-		w.exhaustAttempt(owner)
+		w.exhaustAttempt(owner, reason)
 	}
 	w.releaseAttemptSlot(owner, token)
 }
@@ -115,6 +131,7 @@ func (w *RouteWorker) handleAttemptResult(job *attemptResultJob) {
 		accepted = true
 		if job.Msg.Outcome == "confirmed" {
 			w.updateAttempt(a.Token, func(a *attemptRecord) { a.Evidence = true })
+			log.Printf("attempt confirmed token=%s route=%s ms=%d", a.Token, routeKeyStr(w.key), time.Since(a.Started).Milliseconds())
 		} else {
 			w.finishAttempt(a.Token, "failed", job.Msg.Reason)
 		}
@@ -140,12 +157,28 @@ func (w *RouteWorker) retireAttemptToken(token string) {
 			return
 		}
 		err := w.reconcileAttempt()
+		var removed []c3types.Inbound
 		if err == nil {
 			a = w.attempt(token)
 			if a == nil {
 				return
 			}
-			_, err = w.broker.Queue.RemoveRecordIDs(queueRouteKey(w.key), memberIDs(a.Members))
+			// Hold the attempt-table lock across durable removal and terminal
+			// publication. Once the queue index reports retirement, an attempt
+			// lookup must wait for the matching confirmed outcome and identities.
+			w.updateAttempt(a.Token, func(record *attemptRecord) {
+				removed, err = w.broker.Queue.RemoveRecordIDs(queueRouteKey(w.key), memberIDs(record.Members))
+				if err != nil {
+					return
+				}
+				record.Retired = memberIDs(record.Members)
+				record.Outcome, record.Reason = "confirmed", "transcript"
+				if record.Transport == "fetch" {
+					record.Reason = "tool result"
+				}
+				snapshot := cloneAttempt(record)
+				a = &snapshot
+			})
 		}
 		if err != nil {
 			tries := a.RemovalTries + 1
@@ -162,10 +195,10 @@ func (w *RouteWorker) retireAttemptToken(token string) {
 		ids := memberIDs(a.Members)
 		w.retirePendingRecords(ids)
 		w.broker.attempts.drop(w.key, ids, "negotiated_confirm", a.Token, time.Now())
-		w.updateAttempt(a.Token, func(a *attemptRecord) { a.Retired = memberIDs(a.Members) })
 		s := a.Holder.Stub
 		if a.Transport == "fetch" {
-			w.finishAttempt(a.Token, "confirmed", "tool result")
+			w.afterAttemptFinished(*a)
+			log.Printf("attempt retired n=%d token=%s", len(removed), a.Token)
 			if a.FetchGroup != nil && a.FetchGroup.rearmed.CompareAndSwap(false, true) {
 				w.broker.rearmDelivery(s)
 			}
@@ -177,7 +210,8 @@ func (w *RouteWorker) retireAttemptToken(token string) {
 		d.route(w.key).Confirmed = time.Now()
 		d.route(w.key).Transport = a.Transport
 		d.mu.Unlock()
-		w.finishAttempt(a.Token, "confirmed", "transcript")
+		w.afterAttemptFinished(*a)
+		log.Printf("attempt retired n=%d token=%s", len(removed), a.Token)
 		w.broker.rearmDelivery(s)
 	})
 }

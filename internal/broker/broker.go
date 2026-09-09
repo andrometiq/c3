@@ -36,13 +36,14 @@ import (
 // (BLOCKER, code-review 2026-05-15).
 type Broker struct {
 	testInjector *testInjectChannel // startup-only opt-in; nil in every normal deployment
-	attempts     attemptTable       // negotiated authority and legacy delivery observations
+	notices      routeNotices
+	attempts     attemptTable // negotiated authority and legacy delivery observations
 	Stubs        *StubRegistry
 	Routes       *Routes
 	Workers      *WorkerPool
 	Fallbacks    *fallbackTracker
 	upgrades     upgradeRegistry
-	// HeldNotices throttles the "held — nothing lost" auto-reply on edit-capable
+	// HeldNotices throttles the "held — nothing lost" auto-reply on all
 	// channels to one per route per short window (defaultHeldNoticeCooldown) so a
 	// burst of holds coalesces into a single notice instead of a flood (msg 6083).
 	HeldNotices *fallbackTracker

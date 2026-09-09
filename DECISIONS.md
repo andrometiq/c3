@@ -802,3 +802,28 @@ This is provisional: broker shutdown still cancels broker-side calls and loses
 in-memory ask/permission state. A full lossless update requires a separately
 specified broker drain/handoff protocol; the adapter exec gate alone cannot
 provide that guarantee.
+
+## D038: Notices derive from delivery state (phase 5)
+
+Ordinary delivery status has two emitters: Held after scheduling at enqueue,
+attempt termination, ownership/capability change, enrichment and drain import;
+and one route line after a semantic state/reason holds for 60 seconds. Held uses
+a 10-second per-route cooldown and recomputes queued identities at send time.
+Open attempts and fetch groups never count as queued. Observed receipt evidence
+also excludes a row when storage retirement needs retries. Voice revisions remain
+distinct. Persistence, eviction, oversize, legacy recovery and drain warnings stay
+independent exceptional paths; age expiry and count overflow have separate copy.
+
+One broker-owned sender per route keeps its pending flag through send completion,
+then compares the newest state with the last one actually sent. Returning to that
+state cancels a pending change; age and held count never restart the route timer.
+A Held message includes one calm route line, which counts as an announcement.
+History survives reconnects at the route sender; negotiated proof still obeys the
+attempt model's ownership rules. Legacy sessions keep their four-state wording.
+Negotiated routes expose live channel/inbox proof, waiting or pull-only with prior
+transport/age history. Host acceptance is labelled acceptance, never display.
+
+Operator delivery, receipt and retirement logs use correlation tokens; notices
+and status never reveal tokens. Telegram and shell status show per-route state,
+history and session build. This replaces Held-by-route-change and raw-count notice
+behavior without changing delivery authority, retention limits or drain policy.

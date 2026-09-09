@@ -31,7 +31,7 @@ func captureLog(t *testing.T, fn func()) string {
 }
 
 // Item E (caps never silent): an over-cap eviction must fire BOTH the broker.log
-// "queue CAP" line AND a best-effort Telegram SendReply notice — the "caps never
+// "queue eviction" line AND a best-effort Telegram SendReply notice — the "caps never
 // silent" guarantee. We trigger the cheap AGE branch of EvictOverCap (one stale
 // message) rather than appending the 1000-line count cap.
 func TestEvictIfOverCap_LogsAndNotifies(t *testing.T) {
@@ -54,13 +54,13 @@ func TestEvictIfOverCap_LogsAndNotifies(t *testing.T) {
 
 	out := captureLog(t, func() { w.evictIfOverCap(qrk) })
 
-	if !strings.Contains(out, "queue CAP") {
+	if !strings.Contains(out, "queue eviction") {
 		t.Fatalf("over-cap eviction must log a 'queue CAP' line; log was:\n%s", out)
 	}
 	replies := fc.sendRepliesSnapshot()
 	found := false
 	for _, r := range replies {
-		if strings.Contains(r.Text, "queue full") && strings.Contains(r.Text, "dropped") {
+		if strings.Contains(r.Text, "expired after 90 days") && strings.Contains(r.Text, "1 message(s) remain held") && !strings.Contains(r.Text, "queue full") {
 			found = true
 		}
 	}

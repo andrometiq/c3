@@ -31,6 +31,7 @@ func TestForwardOrFallback_NoSession_QueuesAndHeldReply(t *testing.T) {
 	if n, _ := b.Queue.Pending(qrk); n != 1 {
 		t.Fatalf("no-session inbound should be queued; pending=%d, want 1", n)
 	}
+	waitNoticeReplies(t, fc, 1)
 	if got := len(fc.sendRepliesSnapshot()); got != 1 {
 		t.Fatalf("expected one held-count auto-reply, got %d sends", got)
 	}
@@ -40,6 +41,7 @@ func TestForwardOrFallback_NoSession_QueuesAndHeldReply(t *testing.T) {
 	if n, _ := b.Queue.Pending(qrk); n != 2 {
 		t.Fatalf("second inbound should also queue; pending=%d, want 2", n)
 	}
+	waitNoticeReplies(t, fc, 1)
 	if got := len(fc.sendRepliesSnapshot()); got != 1 {
 		t.Fatalf("second inbound within cooldown must NOT send a second reply; got %d sends", got)
 	}
@@ -75,6 +77,7 @@ func TestForwardOrFallback_NoSession_EditCapable_DebouncesHeldNotices(t *testing
 	}
 	// The burst coalesces to exactly ONE held-notice (the second is within the
 	// debounce window) — never an in-place edit.
+	waitNoticeReplies(t, fc, 1)
 	sends := fc.sendRepliesSnapshot()
 	if len(sends) != 1 {
 		t.Fatalf("a back-to-back burst must coalesce to ONE held-notice; got %d sends", len(sends))
@@ -93,6 +96,7 @@ func TestForwardOrFallback_NoSession_EditCapable_DebouncesHeldNotices(t *testing
 	b.HeldNotices.mu.Unlock()
 	in3 := &c3types.Inbound{Channel: "telegram", ChatID: -1001234567890, TopicID: &tid, MessageID: 3, Text: "hi", Timestamp: time.Now()}
 	w.forwardOrFallback(context.Background(), in3, 1)
+	waitNoticeReplies(t, fc, 2)
 	if got := len(fc.sendRepliesSnapshot()); got != 2 {
 		t.Fatalf("a hold after the debounce window must re-alert; got %d sends, want 2", got)
 	}

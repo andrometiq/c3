@@ -66,6 +66,7 @@ func TestNegotiatedAttemptResultDispatchedToWorker(t *testing.T) {
 	t.Setenv("C3_QUEUE_DIR", t.TempDir())
 	b := brokerWithChannel(t, mfWithTelegram(), &fakeChannel{})
 	t.Cleanup(b.Shutdown)
+	b.notices.window = 20 * time.Millisecond
 	key := MakeRouteKey("telegram", -100, nil)
 	s, frames := negotiatedHolder(t, b, key, 1)
 	b.Workers.Submit(key, Job{Kind: JobInbound, Inbound: inboundOn(-100, nil, 1, "receipt")})
@@ -88,6 +89,7 @@ func TestNegotiatedProcessDeathReleasesImmediately(t *testing.T) {
 	t.Setenv("C3_QUEUE_DIR", t.TempDir())
 	b := brokerWithChannel(t, mfWithTelegram(), &fakeChannel{})
 	t.Cleanup(b.Shutdown)
+	b.notices.window = 20 * time.Millisecond
 	key := MakeRouteKey("telegram", -100, nil)
 	s, frames := negotiatedHolder(t, b, key, 1)
 	b.Workers.Submit(key, Job{Kind: JobInbound, Inbound: inboundOn(-100, nil, 1, "death")})
@@ -140,6 +142,7 @@ func testNegotiatedSocketReconnect(t *testing.T, transport string) {
 			t.Setenv("C3_QUEUE_DIR", t.TempDir())
 			b := brokerWithChannel(t, mfWithTelegram(), &fakeChannel{})
 			t.Cleanup(b.Shutdown)
+			b.notices.window = 20 * time.Millisecond
 			first, closeFirst := peerPair(t, b)
 			t.Cleanup(closeFirst)
 			offer := channelOffer
@@ -207,6 +210,7 @@ func TestNegotiatedHeldRecountsAfterScheduling(t *testing.T) {
 	fc := &fakeChannel{}
 	b := brokerWithChannel(t, mfWithTelegram(), fc)
 	t.Cleanup(b.Shutdown)
+	b.notices.window = 20 * time.Millisecond
 	b.HeldNotices = newFallbackTracker(100 * time.Millisecond)
 	key := MakeRouteKey("telegram", -100, nil)
 	s, frames := negotiatedHolder(t, b, key, 1)

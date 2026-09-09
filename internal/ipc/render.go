@@ -1,7 +1,6 @@
 package ipc
 
 import (
-	"strconv"
 	"time"
 )
 
@@ -14,11 +13,12 @@ const (
 
 // RenderRoute describes host delivery, independently of broker connectivity.
 type RenderRoute struct {
-	Transport string    `json:"confirmed_transport,omitempty"`
-	Confirmed time.Time `json:"confirmed_at,omitzero"`
-	Held      int       `json:"-"`
-	State     string    `json:"render_state"`
-	Reason    string    `json:"render_reason,omitempty"`
+	AcceptedBy string    `json:"accepted_by,omitempty"`
+	Transport  string    `json:"confirmed_transport,omitempty"`
+	Confirmed  time.Time `json:"confirmed_at,omitzero"`
+	Held       int       `json:"-"`
+	State      string    `json:"render_state"`
+	Reason     string    `json:"render_reason,omitempty"`
 }
 
 type RenderStateMsg struct {
@@ -29,7 +29,7 @@ type RenderStateMsg struct {
 	RenderRoute
 }
 
-func (r RenderRoute) Semantic() string { return r.State + ":" + r.Reason + ":" + strconv.Itoa(r.Held) }
+func (r RenderRoute) Semantic() string { return r.State + ":" + r.Reason }
 func (r RenderRoute) Text() string {
 	if r.State == "waiting" || r.State == "live_channel" || r.State == "live_inbox" || r.State == "pull_only" {
 		text := r.State
@@ -50,14 +50,18 @@ func (r RenderRoute) Text() string {
 			if age < 0 {
 				age = 0
 			}
-			if r.State == "pull_only" {
+			if r.State == "pull_only" || r.State == "waiting" {
 				transport := r.Transport
 				if transport == "" {
 					transport = "channel"
 				}
 				text += ", was " + transport
 			}
-			text += ", confirmed " + age.String() + " ago"
+			milestone := "confirmed"
+			if r.AcceptedBy != "" {
+				milestone = "accepted by " + r.AcceptedBy
+			}
+			text += ", " + milestone + " " + age.String() + " ago"
 		}
 		return "Live route: " + text + "."
 	}

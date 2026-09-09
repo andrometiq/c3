@@ -106,7 +106,7 @@ func TestVoiceWorkerMultiVoiceCompletesOnceInEitherOrder(t *testing.T) {
 				}
 				if len(tc.wantNotice) > 0 {
 					g.waitReplyContaining(t, tc.wantNotice[len(tc.wantNotice)-1])
-					replies := g.sendRepliesSnapshot()
+					replies := exceptionalReplies(g.sendRepliesSnapshot())
 					if len(replies) != 1 {
 						t.Fatalf("joined refusal notice count=%d, want 1: %+v", len(replies), replies)
 					}
@@ -115,7 +115,7 @@ func TestVoiceWorkerMultiVoiceCompletesOnceInEitherOrder(t *testing.T) {
 							t.Fatalf("joined refusal notice missing %q: %q", want, replies[0].Text)
 						}
 					}
-				} else if got := len(g.sendRepliesSnapshot()); got != 0 {
+				} else if got := len(exceptionalReplies(g.sendRepliesSnapshot())); got != 0 {
 					t.Fatalf("transcript-only result sent %d refusal notice(s), want 0", got)
 				}
 				select {
@@ -147,7 +147,7 @@ func TestVoiceWorkerEmptyFileIDReachesAgentAndHuman(t *testing.T) {
 		t.Fatalf("agent did not receive malformed voice failure: %q", push.Inbound.Text)
 	}
 	g.waitReplyContaining(t, "Couldn't transcribe")
-	if got := len(g.sendRepliesSnapshot()); got != 1 {
+	if got := len(exceptionalReplies(g.sendRepliesSnapshot())); got != 1 {
 		t.Fatalf("malformed voice human notice count=%d, want 1", got)
 	}
 }

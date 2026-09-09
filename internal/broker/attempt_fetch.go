@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"slices"
 	"sync/atomic"
 	"time"
@@ -124,12 +125,14 @@ func (w *RouteWorker) handleAttemptFetch(ctx context.Context, job *FetchJob) {
 			result.Remaining -= len(members)
 			w.enableAttemptTimer()
 			w.logTestAttempt(job.ReceiptGroup.token, "reserved")
+			log.Printf("attempt reserved transport=fetch members=%d budget_ms=60000", len(members))
 		})
 		if !authorized {
 			result.SkipReason = reason
 		}
 	}()
-	w.attemptCtx = ctx
-	w.evaluateAttemptHeld(job.Owner)
+	if result.Err == nil && result.SkipReason == "" && len(result.Members) > 0 {
+		w.scheduleAttempt(ctx, false)
+	}
 	job.ResultCh <- result
 }

@@ -71,6 +71,7 @@ func TestForwardOrFallback_RenderIncapableHolder_HeldNotPushed(t *testing.T) {
 		t.Error("render-incapable claim must be preserved (outbound still works)")
 	}
 	// Held-notice sent to the topic exactly once (the human learns messages queue).
+	waitNoticeReplies(t, fc, 1)
 	if got := len(fc.sendRepliesSnapshot()); got != 1 {
 		t.Errorf("expected 1 held-notice SendReply, got %d", got)
 	}

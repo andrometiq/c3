@@ -69,29 +69,27 @@ func (h *BrokerHost) HandleCommand(in *c3types.Inbound) (string, bool) {
 
 // statusForTopic renders the per-topic status line.
 //
-// I7: reads the mutex-guarded in-memory status index (StatusFor) — NOT the queue
-// files via Pending — so a /status answered on a poll goroutine never races the
-// route worker's concurrent Append/Consume/rewrite (the global StatusAll path was
-// already index-based; this brings the per-topic path to the same single-owner
-// discipline).
+// Counts use the same surviving queued identities as Held.
 func (b *Broker) statusForTopic(channelName string, chatID int64, topicID *int64) string {
 	key := MakeRouteKey(channelName, chatID, topicID)
 	name := b.topicDisplayName(channelName, chatID, topicID)
 	pending, oldest := 0, time.Time{}
 	if b.Queue != nil {
-		st := b.Queue.StatusFor(queueRouteKey(key))
-		pending = st.Pending
-		if holder, _ := b.Routes.Holder(key); holder.negotiated() {
-			pending, _ = b.backlogSummary(key)
+		rows, err := b.queuedRows(key)
+		if err == nil {
+			pending = len(rows)
+			if len(rows) > 0 {
+				oldest = rows[0].Inbound.Timestamp
+			}
+		} else {
+			pending = -1
 		}
-		if st.OldestUnix > 0 {
-			oldest = time.Unix(st.OldestUnix, 0)
-		}
+
 	}
 	attached := "nothing attached"
 	if h, held := b.Routes.Holder(key); held {
 		if h.IsAlive() {
-			attached = surfaceLabel(h.CLI) + " attached · " + h.RenderRouteFor(key).Text()
+			attached = surfaceLabel(h.CLI) + " attached · build " + sessionBuild(h) + " · " + b.noticeRoute(key).Text()
 		} else {
 			// Dead reference: the holder's adapter is gone (disconnected AND its
 			// PID is no longer in the OS process table). Verify liveness at READ
@@ -103,7 +101,11 @@ func (b *Broker) statusForTopic(channelName string, chatID int64, topicID *int64
 			b.Routes.Release(key, h.ConnID)
 		}
 	}
-	line := fmt.Sprintf("📊 %s · %d queued%s · %s · broker up", name, pending, oldestSuffix(oldest), attached)
+	count := fmt.Sprintf("%d queued%s", pending, oldestSuffix(oldest))
+	if pending < 0 {
+		count = "queue count unavailable"
+	}
+	line := fmt.Sprintf("📊 %s · %s · %s · broker up", name, count, attached)
 	// Degraded mode: "0 queued · broker up" reads as healthy when it actually
 	// means nothing CAN be queued. The held-notice already tells the operator to
 	// "Send /status to check" — this is what they must find when they do. Own
@@ -132,21 +134,46 @@ func (b *Broker) statusGlobal() string {
 	}
 	all := b.Queue.StatusAll()
 	if len(all) > 0 {
-		sb.WriteString(" Active queues:")
 		type row struct {
 			name    string
 			pending int
 			oldest  int64
 		}
 		rows := make([]row, 0, len(all))
-		for k, st := range all {
-			rows = append(rows, row{b.topicDisplayName(k.Channel, k.ChatID, k.TopicID), st.Pending, st.OldestUnix})
+		for k := range all {
+			key := MakeRouteKey(k.Channel, k.ChatID, k.TopicID)
+			queued, err := b.queuedRows(key)
+			if err != nil {
+				rows = append(rows, row{b.topicDisplayName(k.Channel, k.ChatID, k.TopicID), -1, 0})
+				continue
+			}
+			if len(queued) > 0 {
+				rows = append(rows, row{b.topicDisplayName(k.Channel, k.ChatID, k.TopicID), len(queued), queued[0].Inbound.Timestamp.Unix()})
+			}
+		}
+		if len(rows) > 0 {
+			sb.WriteString(" Active queues:")
 		}
 		sort.Slice(rows, func(i, j int) bool { return rows[i].name < rows[j].name })
 		for _, r := range rows {
-			fmt.Fprintf(&sb, "\n• %s — %d%s", r.name, r.pending, oldestSuffix(time.Unix(r.oldest, 0)))
+			if r.pending < 0 {
+				fmt.Fprintf(&sb, "\n• %s — queue count unavailable", r.name)
+			} else {
+				fmt.Fprintf(&sb, "\n• %s — %d%s", r.name, r.pending, oldestSuffix(time.Unix(r.oldest, 0)))
+			}
 		}
 	}
+	var routeLines []string
+	for _, claim := range b.Routes.Snapshot() {
+		if claim.Stub.IsAlive() {
+			routeLines = append(routeLines, fmt.Sprintf("\n• %s · %s · build %s · %s", b.topicDisplayName(claim.Key.Channel, claim.Key.ChatID, topicPointer(claim.Key)), surfaceLabel(claim.Stub.CLI), sessionBuild(claim.Stub), b.noticeRoute(claim.Key).Text()))
+		}
+	}
+	sort.Strings(routeLines)
+	for _, line := range routeLines {
+		sb.WriteString(line)
+	}
+
 	attached, idle := b.sessionCounts()
 	fmt.Fprintf(&sb, "\n%d attached · %d idle", attached, idle)
 	return sb.String()
@@ -240,4 +267,18 @@ func ageBand(t time.Time) string {
 	default:
 		return fmt.Sprintf("%dd", int(d.Hours()/24))
 	}
+}
+
+func sessionBuild(s *Stub) string {
+	if s.Build == "" {
+		return "unknown"
+	}
+	return s.Build
+}
+func topicPointer(key RouteKey) *int64 {
+	if key.HasTopic {
+		id := key.TopicID
+		return &id
+	}
+	return nil
 }

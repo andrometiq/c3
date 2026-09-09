@@ -3,17 +3,52 @@
 ## Attempt shadow (phase 1)
 
 For legacy connections the broker keeps a memory-only shadow of tracked delivery
-attempts; that shadow does not decide delivery, retirement, status, or adapter
-behaviour. Negotiated entries in the same table have authority, as described below. A disagreement
+attempts; that shadow does not decide delivery, retirement or adapter
+behaviour. Phase 5 uses its identities to exclude in-flight rows from notices and status. Negotiated entries in the same table have authority, as described below. A disagreement
 between an attempt's surviving member IDs and an authorised retirement logs
 `attempt shadow DIVERGED token=… route=… expected=[…] removed=[…] reason=…` once
 per retained token. The table keeps at most 128 entries per route and 4,096 globally,
 evicting oldest terminal entries first and skipping new observations if only active
 entries fill a cap. Channel observations expire lazily after 15 seconds with reason
-`unobserved`; inbox fallback cannot be distinguished on this baseline. Legacy fetch
+`unobserved`; this is not a legacy host termination. Notice counts keep an
+unobserved live push excluded while its holder still reports a live/probing
+route, including a legacy inbox fallback on the same token. A terminal queue-only
+report, receipt, release or identity reconciliation resolves that uncertainty. Legacy fetch
 opens and immediately confirms a `fetch` attempt labelled `legacy_consume`; fetch
-receipts use negotiated group entries in phase 4. The legacy shadow itself adds no wire or display behavior.
+receipts use negotiated group entries in phase 4. The legacy shadow adds no wire behavior.
 
+
+## Delivery notices and operator logs (phase 5)
+
+A negotiated delivery logs these metadata-only lines (no message content):
+
+```text
+delivered chan=telegram topic=281 msg=42 to cli=claude conn=7 transport=channel token=TOKEN
+attempt confirmed token=TOKEN route=-100/281 ms=100
+attempt retired n=1 token=TOKEN
+```
+
+`transport` is `channel`, `inbox` or `fetch`. `delivered` means the frame was
+written to the adapter, not that the host recorded it; `attempt confirmed` records
+the validated receipt, and `attempt retired` follows successful durable removal.
+Existing `attempt reserved transport=… members=… budget_ms=…`,
+`attempt finished transport=… outcome=…` and `attempt exhausted: …` lines remain.
+A fetch group uses the same token on each route; its confirmation and retirement
+lines are per route. Storage failures log retries without claiming retirement. After exhausted storage
+retries the route says `receipt recorded; queue retirement failed`, rather than
+claiming no receipt.
+
+Held counts only queued rows after scheduling, excluding open attempts, fetch
+groups and observed receipts. A channel timeout → inbox fallback → confirmation
+should produce no Held and one calm route line after 60 seconds of stability.
+State and reason changes restart that timer; confirmation age does not.
+Age eviction logs `queue eviction chan=… chat=… topic=…: expired=N over_count=M`;
+only count overflow says `queue full`. Both notices state the remaining held count.
+Use `/status` or `c3-broker status` to inspect route history and the session build.
+
+After `c3:update`/`c3:build`, check the session build: supported sessions self-upgrade.
+If a session still reports the old build, reconnect c3 with `/mcp` in that open
+session or restart it. `/reload-plugins` does not restart its MCP server process.
 
 ## Negotiated channel and inbox delivery (phase 3)
 
@@ -28,7 +63,7 @@ shows the same state.
 - `waiting`: channel or inbox is eligible, with no confirmation on this route yet.
 - `live: channel, confirmed <age>` or `live: inbox, confirmed <age>`: the host
   transcript confirmed the named transport.
-- `pull-only (<reason>)`: the confirmed transport is ineligible or a cycle exhausted. Exhaustion
+- `pull-only (<reason>)`: no live transport is eligible or a cycle exhausted. Exhaustion
   says `no receipt on channel or inbox; retries on reconnect, attach or new messages after 60 s`.
   Previous transport confirmation remains visible as history.
 

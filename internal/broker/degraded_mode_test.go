@@ -85,6 +85,7 @@ func TestDegradedMode_HeldNoticeWarnsInsteadOfSayingNothingLost(t *testing.T) {
 
 			w.flushInbounds(context.Background(), heldInbound(7))
 
+			waitNoticeReplies(t, fc, 1)
 			replies := fc.sendRepliesSnapshot()
 			if len(replies) != 1 {
 				t.Fatalf("degraded intake produced %d auto-replies; want exactly 1 replay warning", len(replies))
@@ -117,6 +118,7 @@ func TestDegradedMode_LiveWriteFailureWarnsAboutReplay(t *testing.T) {
 	defer w.Stop()
 	w.flushInbounds(context.Background(), heldInbound(77))
 
+	waitNoticeReplies(t, fc, 1)
 	replies := fc.sendRepliesSnapshot()
 	if len(replies) != 1 || !strings.Contains(replies[0].Text, queueDisabledWarning) {
 		t.Fatalf("live write failure with no durable queue produced no operator-visible replay warning: %+v", replies)
@@ -164,6 +166,7 @@ func TestHealthyQueue_HeldNoticeKeepsThePerMessageDebounce(t *testing.T) {
 
 	w.flushInbounds(context.Background(), heldInbound(9))
 
+	waitNoticeReplies(t, fc, 1)
 	if n := len(fc.sendRepliesSnapshot()); n != 1 {
 		t.Fatalf("healthy-mode held-notice sent %d replies, want 1: it must stay on the 10s HeldNotices debounce so each safely-queued message still re-notifies, not inherit the degraded warning's 5-minute cooldown", n)
 	}
@@ -185,6 +188,7 @@ func TestHealthyQueue_HeldNoticeStillSaysNothingLost(t *testing.T) {
 	if n, _ := b.Queue.Pending(queueRouteKey(key)); n != 1 {
 		t.Fatalf("a working queue holds %d messages after one hold, want 1 — the reassurance below would be unearned", n)
 	}
+	waitNoticeReplies(t, fc, 1)
 	replies := fc.sendRepliesSnapshot()
 	if len(replies) != 1 {
 		t.Fatalf("held-notice count = %d, want 1", len(replies))
@@ -237,6 +241,7 @@ func TestRegisterChannel_AnnouncesDegradedQueueAtStartup(t *testing.T) {
 		t.Fatalf("RegisterChannel: %v", err)
 	}
 
+	waitNoticeReplies(t, fc, 1)
 	replies := fc.sendRepliesSnapshot()
 	if len(replies) != 1 {
 		t.Fatalf("startup sent %d Telegram notices, want exactly 1 to the operator's DM: the human who has to fix the queue directory is not at a CLI", len(replies))
@@ -380,7 +385,9 @@ func TestDocsQuoteTheRealNotices(t *testing.T) {
 		// them looking for a line C3 never writes. Quote it, don't describe it.
 		{"../../docs/USAGE.md", []string{
 			"⚠️ Held at Telegram — local queue unavailable.",
-			"📨 Held — nothing lost.",
+			heldReplyText("telegram", 1),
+			evictionNotice(1, 0, 1, nil, true),
+			evictionNotice(0, 1, 1000, nil, true),
 			degradedHoldLogPhrase,
 		}},
 	} {

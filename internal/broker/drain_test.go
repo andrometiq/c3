@@ -328,7 +328,11 @@ func TestDrain_RewritesRoutingAndStampsProvenance(t *testing.T) {
 	w := newRouteWorker(context.Background(), drainDst(), time.Hour, b)
 	defer w.Stop()
 	rec := m
+	b.HeldNotices.mu.Lock()
+	b.HeldNotices.lastByKey[drainDst()] = time.Now().Add(-time.Hour)
+	b.HeldNotices.mu.Unlock()
 	w.forwardOrFallback(context.Background(), &rec, 1)
+	waitNoticeReplies(t, fc, pre+1)
 	replies := fc.sendRepliesSnapshot()
 	if len(replies) != pre+1 {
 		t.Fatalf("want one held-notice from the moved record, got %d new sends", len(replies)-pre)

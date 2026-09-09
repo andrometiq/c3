@@ -35,6 +35,7 @@ func TestCodexRenderUpdateHoldsNextInboundAndRecoveryPushes(t *testing.T) {
 			defer w.Stop()
 			for i := 1; i <= 2; i++ {
 				w.forwardOrFallback(context.Background(), inbound(tid, i, "held"), 1)
+				waitNoticeReplies(t, fc, i)
 			}
 			if n, _ := b.Queue.Pending(queueRouteKey(key)); n != 2 {
 				t.Fatalf("held count %d", n)

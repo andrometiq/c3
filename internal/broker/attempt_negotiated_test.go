@@ -362,6 +362,13 @@ func TestNegotiatedRetirementStorageFailure(t *testing.T) {
 		if n, _ := b.Queue.Pending(queueRouteKey(w.key)); n != 1 {
 			t.Fatal("failed retirement removed row")
 		}
+		if n, err := b.noticePending(w.key, s); err != nil || n != 0 {
+			t.Fatal("receipt-observed row counted as Held", n, err)
+		}
+		if tries == 3 && strings.Contains(b.noticeRoute(w.key).Text(), "no receipt") {
+			t.Fatal("receipt-observed route claims no receipt")
+		}
+
 	}
 	w.retireAttempt()
 	if a := b.attempts.lookup(f.Token, time.Now())[0]; a.RemovalTries != 3 || a.Reason != "storage failure" {

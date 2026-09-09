@@ -10,7 +10,7 @@ import subprocess
 import tempfile
 import time
 
-from collect import attempt_events, collect, export_fixtures
+from collect import attempt_events, collect, export_fixtures, notice_evidence
 from host import Host, read_jsonl, wait_for
 from matrix import cells, selection, selection_summary
 
@@ -32,22 +32,7 @@ def offered_before_ready(host, root, after):
 
 
 def false_held(log, count):
-    active = {}
-    retired = 0
-    for line in log.splitlines():
-        events = attempt_events(line)
-        if events:
-            event = events[0]
-            if event["phase"] == "reserved":
-                active[event["token"]] = int(event["members"])
-            else:
-                active.pop(event["token"], None)
-                retired += int(event.get("retired", 0))
-        if "TEST SINK " in line and "Held" in line:
-            held = re.search(r'(\d+) messages? queued', line)
-            if held and int(held[1]) > max(0, count - retired - sum(active.values())):
-                return True
-    return False
+    return notice_evidence(log, count)["false_held"]
 
 
 def run_cell(args, cell, binaries, repo, version):
@@ -192,7 +177,7 @@ def main():
     parser.add_argument("--reconnect-keys", help="comma-separated tmux keys for /mcp menu on this host version")
     parser.add_argument("--setup-timeout", type=int, default=90)
     parser.add_argument("--sleep-seconds", type=int, default=35)
-    parser.add_argument("--observe-seconds", type=int, default=45)
+    parser.add_argument("--observe-seconds", type=int, default=80)
     args = parser.parse_args()
     repo = Path(__file__).resolve().parents[2]
     lane_temp = Path.home() / ".cache/c3-lanes"
@@ -207,8 +192,8 @@ def main():
         for cell in matched:
             print(cell.name + "\t" + ("N/A: " + cell.infeasible if cell.infeasible else "FEASIBLE"))
         return
-    if args.sleep_seconds <= 15 or args.observe_seconds < args.sleep_seconds + 5:
-        parser.error("sleep must exceed 15 seconds; observation must exceed sleep by at least 5 seconds")
+    if args.sleep_seconds <= 15 or args.observe_seconds < max(75, args.sleep_seconds + 5):
+        parser.error("sleep must exceed 15 seconds; observation must be at least 75 seconds and exceed sleep by at least 5 seconds")
     if not args.claude:
         versions = [p for p in (Path.home() / ".local/share/claude/versions").glob("*") if re.fullmatch(r"\d+\.\d+\.\d+", p.name) and p.is_file()]
         if not versions:

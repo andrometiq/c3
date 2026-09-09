@@ -429,6 +429,7 @@ func TestForwardOrFallback_StaleClaim_ReleasesAndFallsThrough(t *testing.T) {
 		t.Error("stale dead-holder claim should have been released on dispatch")
 	}
 	// Fallback should have fired since claim was cleared.
+	waitNoticeReplies(t, fc, 1)
 	if got := len(fc.sendRepliesSnapshot()); got != 1 {
 		t.Errorf("expected fallback SendReply after releasing stale claim, got %d sends", got)
 	}
@@ -472,6 +473,7 @@ func TestForwardOrFallback_AliveButDisconnectedHolder_BouncesToFallback(t *testi
 	}
 	// The inbound is bounced to the Telegram fallback (not silently dropped) so
 	// the user knows to resend once the adapter reconnects.
+	waitNoticeReplies(t, fc, 1)
 	if got := len(fc.sendRepliesSnapshot()); got != 1 {
 		t.Errorf("expected fallback SendReply for alive-but-disconnected holder, got %d sends", got)
 	}

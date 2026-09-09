@@ -986,7 +986,9 @@ func (b *Broker) handleListClaims(conn *ipc.Conn) {
 			ConnID:    e.Stub.ConnID,
 			Connected: e.Stub.IsConnected(),
 		}
-		render := e.Stub.RenderRouteFor(e.Key)
+		render := b.noticeRoute(e.Key)
+		entry.HolderBuild = sessionBuild(e.Stub)
+		entry.AcceptedBy = render.AcceptedBy
 		entry.ConfirmedAt = render.Confirmed
 		entry.ConfirmedTransport = render.Transport
 		entry.RenderState, entry.RenderReason = render.State, render.Reason

@@ -55,21 +55,18 @@ const defaultHeldNoticeCooldown = 10 * time.Second
 const fallbackText = "No CLI is currently attached to this topic. Run `c3-broker status` to see attached terminals, or open a CLI in the project directory and `attach`."
 
 // heldReplyText is the "held, nothing lost" auto-reply sent when an inbound is
-// queued because no session is attached. It reassures and carries the running
-// count of queued messages. Cadence is the existing 5-min fallback cooldown.
+// still queued after scheduling. It reassures and carries the running
+// count of queued messages. Cadence is the per-route 10-second Held cooldown.
 //
 // ONLY valid while the durable queue is live. When it is not, the reassurance is
 // inaccurate about local storage — use
 // heldDegradedText() instead (worker.go picks between them on Broker.Queue).
 func heldReplyText(channelName string, n int) string {
-	if channelName == "web" {
-		return "📨 Held — no session is attached. Attach one from the CLI: `attach web`."
-	}
 	plural := "messages"
 	if n == 1 {
 		plural = "message"
 	}
-	return fmt.Sprintf("📨 Held — nothing lost.\n%d %s queued.\n\n\nSend /status to check.", n, plural)
+	return fmt.Sprintf("📨 Held — nothing lost. %d %s queued. Send /status to check.", n, plural)
 }
 
 // queueDisabledWarning is shared by startup, held notices, and status.

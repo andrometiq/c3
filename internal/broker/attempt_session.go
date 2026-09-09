@@ -11,6 +11,7 @@ import (
 
 type negotiatedRoute struct {
 	Exhausted                time.Time
+	ExhaustionReason         string
 	Confirmed                time.Time
 	Held                     int
 	Transport                string

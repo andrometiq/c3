@@ -191,6 +191,43 @@ def attempt_events(log):
     return events
 
 
+def notice_evidence(log, count):
+    active, observed = {}, {}
+    retired = 0
+    false_held = False
+    route_lines = 0
+    injected = "TEST INJECT accepted" not in log
+    for line in log.splitlines():
+        if "TEST INJECT accepted" in line:
+            injected = True
+        for event in attempt_events(line):
+            token = event["token"]
+            if event["phase"] == "reserved":
+                active[token] = int(event["members"])
+            else:
+                active.pop(token, None)
+                retired += int(event.get("retired", 0))
+                if int(event.get("retired", 0)):
+                    observed.pop(token, None)
+        if "attempt confirmed token=" in line:
+            token = re.search(r"token=([^ ]+)", line)
+            if token:
+                observed[token[1]] = active.get(token[1], 0)
+        if "TEST SINK " in line and injected:
+            if 'text="Live route:' in line or 'text="📨 Held —' in line:
+                route_lines += line.count("Live route:")
+            held = re.search(r'(\d+) messages? queued', line) if "Held" in line else None
+            if held and int(held[1]) > max(0, count - retired - sum(active.values()) - sum(n for token, n in observed.items() if token not in active)):
+                false_held = True
+    return dict(no_false_held=not false_held, false_held=false_held, route_line_count=route_lines)
+
+
+def route_line_limit(cell):
+    # One stable route line, with room for actual holds during voice
+    # enrichment and startup. The driver observes the full stability window.
+    return 1 + int(cell.kind == "voice") + int(cell.transport != "fetch" and cell.state == "startup")
+
+
 def verdict(cell, evidence):
     failures = list(evidence.get("setup_errors", []))
     if not evidence.get("injected"):
@@ -199,8 +236,11 @@ def verdict(cell, evidence):
         failures.append("durable rows remain")
     if evidence.get("attempt_before_ready"):
         failures.append("attempt reserved before host initialized")
-    if evidence.get("false_held"):
-        failures.append("Held notice counted an attempting row")
+    if evidence.get("no_false_held") is not True or evidence.get("false_held"):
+        failures.append("no false Held assertion failed or missing")
+    count = evidence.get("route_line_count")
+    if not isinstance(count, int) or not 1 <= count <= route_line_limit(cell):
+        failures.append("route line count assertion failed or missing")
     if cell.transport == "fetch":
         if any(e.get("phase") == "reserved" and e.get("transport") != "fetch" for e in evidence.get("attempts", [])):
             failures.append("live offer in fetch-only cell")
@@ -268,6 +308,8 @@ def collect(cell, host, root, output, evidence, collect_only=False):
         (output / name).write_text(sanitize(log, tokens))
     if host:
         (output / "events.jsonl").write_text("".join(json.dumps(sanitize(r, tokens)) + "\n" for r in host.events()))
+    evidence.update(notice_evidence(broker_log, cell.count))
+    evidence["route_line_limit"] = route_line_limit(cell)
     evidence["attempts"] = attempts
     evidence["received"] = count_receives(records, tokens, evidence.get("message_ids", []))
     fetch_results = [b for r in records if r.get("type") == "user"

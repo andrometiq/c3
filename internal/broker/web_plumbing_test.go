@@ -188,6 +188,7 @@ func TestAttachWebClaimsOperatorRouteAndSendsLoginLink(t *testing.T) {
 	if webChannel.mintCount() != 1 {
 		t.Fatalf("MintLoginLink calls=%d, want 1", webChannel.mintCount())
 	}
+
 	replies := telegramChannel.sendRepliesSnapshot()
 	if len(replies) != 1 {
 		t.Fatalf("Telegram DM calls=%d, want 1", len(replies))
@@ -425,6 +426,14 @@ func TestAttachWebReleasesTelegramAndTelegramInboundIsHeld(t *testing.T) {
 	worker := &RouteWorker{key: telegramKey, broker: b, dedup: newDeliveredDedup(8)}
 	in := &c3types.Inbound{Channel: "telegram", ChatID: 42, MessageID: 99, Text: "while away"}
 	worker.forwardOrFallback(context.Background(), in, 0)
+	waitForVoiceCondition(t, "Telegram Held", func() bool {
+		for _, r := range telegramChannel.sendRepliesSnapshot() {
+			if strings.Contains(r.Text, "Held — nothing lost") {
+				return true
+			}
+		}
+		return false
+	})
 	replies := telegramChannel.sendRepliesSnapshot()
 	held := false
 	for _, reply := range replies {
@@ -436,7 +445,7 @@ func TestAttachWebReleasesTelegramAndTelegramInboundIsHeld(t *testing.T) {
 }
 
 func TestWebHeldCopyAndKeyboardlessPermissionNotice(t *testing.T) {
-	if got := heldReplyText("web", 3); got != "📨 Held — no session is attached. Attach one from the CLI: `attach web`." {
+	if got := heldReplyText("web", 3); got != "📨 Held — nothing lost. 3 messages queued. Send /status to check." {
 		t.Fatalf("web held copy = %q", got)
 	}
 	b, _, webChannel := brokerWithWeb(t, nil)
@@ -446,8 +455,9 @@ func TestWebHeldCopyAndKeyboardlessPermissionNotice(t *testing.T) {
 	worker.forwardOrFallback(context.Background(), &c3types.Inbound{
 		Channel: "web", ChatID: 42, MessageID: 8, Text: "unclaimed",
 	}, 0)
+	waitNoticeReplies(t, webChannel, 1)
 	replies := webChannel.sendRepliesSnapshot()
-	if len(replies) != 1 || replies[0].Text != heldReplyText("web", 1) {
+	if len(replies) != 1 || !strings.HasPrefix(replies[0].Text, heldReplyText("web", 1)+"\nLive route: ") {
 		t.Fatalf("unclaimed web route notice = %+v", replies)
 	}
 

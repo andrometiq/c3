@@ -11,7 +11,7 @@ import (
 	"time"
 )
 
-func TestHeldNoticeQueueReadErrorKeepsCachedCount(t *testing.T) {
+func TestHeldNoticeQueueReadErrorNeverClaimsHeld(t *testing.T) {
 	for _, negotiated := range []bool{false, true} {
 		for _, cached := range []int{0, 1} {
 			t.Run(fmt.Sprintf("negotiated=%v/cached=%d", negotiated, cached), func(t *testing.T) { heldReadError(t, negotiated, cached) })
@@ -25,6 +25,7 @@ func heldReadError(t *testing.T, negotiated bool, cached int) {
 	log.SetOutput(logs)
 	t.Cleanup(func() { log.SetOutput(prior) })
 	b := injectionFixture(t, true)
+	b.Workers.Stop()
 	topic := int64(42)
 	key := MakeRouteKey(TestInjectChannel, TestInjectChatID, &topic)
 	var s *Stub
@@ -59,14 +60,13 @@ func heldReadError(t *testing.T, negotiated bool, cached int) {
 	if got, err := b.noticePending(key, s); got != cached || err == nil {
 		t.Fatalf("cached pending=%d, want %d", got, cached)
 	}
-	b.notifyRenderRoute(s)
-	want := "queue count unavailable"
-	if cached > 0 {
-		want = "1 message queued"
+	b.notices.window = time.Millisecond
+	b.evaluateNotices(key, true)
+	waitForVoiceCondition(t, "route notice despite unreadable queue", func() bool { return strings.Contains(logs.text(), "TEST SINK reply") })
+	if strings.Contains(logs.text(), "text=\"📨 Held") {
+		t.Fatal("unreadable queue claimed Held", logs.text())
 	}
-	waitForVoiceCondition(t, "Held despite unreadable queue", func() bool {
-		return strings.Contains(logs.text(), want)
-	})
+
 	if !strings.Contains(logs.text(), "Held count read failed") || !strings.Contains(logs.text(), fmt.Sprintf("using cached pending=%d", cached)) {
 		t.Fatal("read failure was not logged", logs.text())
 	}

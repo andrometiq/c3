@@ -80,7 +80,8 @@ How it works:
 - **Held on disk before the read offset moves.** A message that arrives while no session is attached to its topic is appended to a durable per-route queue under `$XDG_STATE_HOME/c3/queue/` (fallback `~/.local/state/c3/queue/`) and `fsync`'d to disk. The broker advances the Telegram read offset only *after* the message is durably persisted — so a broker crash mid-flight leaves the message with Telegram, which redelivers it on the next poll.
 - **Voice is enrichment, not an intake gate.** A voice message is persisted with an explicit transcription-in-progress placeholder before STT starts, and the read offset may advance at that point. STT has two bounded runners and never occupies the route worker. A pending row can be inspected or consumed with `fetch_queue`; if it was consumed before STT finishes, the result arrives as a separate transcript-update row instead of rewriting history. Transient download failures park with exponential backoff (30 seconds to 5 minutes), wake when channel health recovers, and become a terminal failure after 24 hours by default. Cached audio bypasses a known-DOWN fetch-health gate and can transcribe offline; an uncached manual retranscribe during DOWN returns immediately while automatic recovery remains parked. Set `plugins.stt.voice_retry_expiry` to a Go duration string such as `"12h"`, or a number of seconds, to change that expiry; a SIGHUP config reload applies the new value to parked work.
 - **Queue-disabled intake holds at Telegram.** If the queue cannot open at startup, the broker logs `durable inbound hold DISABLED for this run` and continues best-effort live delivery without advancing Telegram offsets. Inbound is replayed when the broker restarts with a working queue; anything delivered live in the meantime will arrive again. The earliest unpersisted update holds the global frontier across all topics, so later inbound can wait too. Two provider limits bound this: Telegram keeps an undelivered update for about 24 hours, and once roughly 100 updates are waiting, newer messages (bot commands included) stop reaching C3 until the broker restarts with a working queue.
-- **Held-count auto-reply.** The first held message in a topic gets one reassurance reply: *"📨 Held — nothing lost. N message(s) queued. Send /status to check."* On Telegram a fresh notice fires per held message (rate-limited to one per topic per 10 seconds, carrying the *running* count) so a new arrival is always signalled; messages inside that window are queued silently, with no reply per voice note.
+- **Held-count auto-reply.** After scheduling, rows still waiting get `📨 Held — nothing lost. 1 message queued. Send /status to check.` (or `2 messages queued`). The next line describes the current route, for example `Live route: queue-only (no session attached).` Held runs after enqueue, attempt termination, ownership/capability change, enrichment and drain import. It excludes open live attempts, open fetch groups and observed receipts; delayed sends recompute the count. Each route sends at most one Held notice per 10 seconds, coalescing arrivals while waiting. A stable unchanged backlog does not repeat the notice.
+- **Route changes.** One `Live route: …` line after the new state and reason stay unchanged for 60 seconds. Returning to the last announced state cancels the pending line; confirmation age alone never triggers it. A Held notice already includes the current route line. Send completion is serialized per route, including across reconnects.
 - **Backlog on attach.** When you `attach` to a topic with held messages, the session is told how many are queued (with a short per-message preview) and instructed to call `fetch_queue` to retrieve them. The agent decides whether to drain all at once or work through them in batches.
 - **Live messages are unaffected.** When a session is attached, messages still push through immediately; they're removed from the queue once the agent has actually taken them. The queue earns its keep only when there's no live consumer.
 
@@ -115,7 +116,7 @@ STT failures are usually a transient or down provider, not lost audio. When tran
 
 Type `/status` directly into a Telegram chat (it autocompletes in the `/` menu) to see queue depth and attach state. This is a *Telegram bot command*, distinct from the `/c3:status` CLI slash command — the broker answers it directly and never routes it to an agent.
 
-- **In a topic** → that topic's status, e.g. `📊 myproject · 3 queued (oldest 2h) · no CLI attached · broker up`.
+- **In a topic** → that topic's status, e.g. `📊 myproject · 3 queued (oldest 2h) · nothing attached · broker up`.
 - **In DM or General** → a global summary across all routes (empty queues omitted), e.g.:
   ```
   📊 Broker up (pid 12345). Active queues:
@@ -123,6 +124,11 @@ Type `/status` directly into a Telegram chat (it autocompletes in the `/` menu) 
   • docs — 1 (oldest 10m)
   1 attached · 1 idle
   ```
+
+Both `/status` and `c3-broker status` show the attached session build and each
+route's state. Queued counts use the same exclusions as Held, including in the
+global summary. Negotiated route history says `was inbox, confirmed <age>` after
+exhaustion; an `accept` milestone says `accepted by <host>`, never displayed.
 
 Two sibling bot commands manage the **pooled queues** (messages accumulating
 on unattached topics): `/queue` lists every non-empty queue (`[serial] name ·
@@ -133,7 +139,7 @@ between topics. Full grammar and the authorization matrix:
 
 ### Limits
 
-- Per-route cap: **1000 messages OR 90 days**, whichever comes first. On overflow the oldest held messages are dropped, logged to `broker.log`, **and** announced in the topic (*"⚠️ queue full — dropped N oldest held message(s); attach a session soon."*) — never a silent truncation.
+- Per-route cap: **1000 messages OR 90 days**, whichever comes first. Age expiry says `⚠️ 1 message(s) expired after 90 days (recoverable from trash for 90 days); 1 message(s) remain held.` Count overflow says `⚠️ queue full — dropped 1 oldest; 1000 message(s) remain held.` Both causes are listed when both apply. If trash retention is unavailable, the notice says so; no recovery is promised.
 - Per-record cap: **1 MiB encoded JSON**. The queue retains the full original in `.trash/` first, then stores a truncated record with an in-band marker so the route can continue rather than redelivering the same unwriteable record forever. If retention is disabled, the marker says that the removed text was not kept.
 - **24-hour Telegram bound (outside C3's control).** Telegram itself keeps undelivered updates for at most 24 hours. C3 can only queue what it has actually received, so a gap longer than 24 hours with **no broker polling anywhere** loses messages at Telegram's level before C3 ever sees them. Keeping a broker polling (the opt-in `systemd --user` unit helps) is the only guard against that window.
 

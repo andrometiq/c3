@@ -114,6 +114,11 @@ func (b *Broker) handleFetchQueue(conn *ipc.Conn, stub *Stub, raw []byte) {
 			stub.ConnID, len(resp.Messages), resp.Remaining, err, lost)
 		return
 	}
+	if stub.negotiated() && req.Ack {
+		for _, in := range resp.Messages {
+			log.Print(deliveredLog(MakeRouteKey(in.Channel, in.ChatID, in.TopicID), in.MessageID, stub, "fetch", resp.LeaseToken))
+		}
+	}
 	// A successful destructive pull is SILENT to the topic. The plumbing does not
 	// talk to the human: when the agent has drained the held messages it responds
 	// with real content, and that response is the only confirmation the human
@@ -337,6 +342,9 @@ func (b *Broker) handleInboundDelivered(stub *Stub, raw []byte) {
 	}
 	if !msg.OK {
 		b.attempts.fail(msg.DeliveryToken, stub, "nack", time.Now())
+		for _, key := range stub.Routes() {
+			b.wakeDelivery(key)
+		}
 		log.Printf("inbound_delivered NACK update=%d — leaving queued (backlog)", msg.UpdateID)
 		return
 	}

@@ -16,6 +16,7 @@ func TestCrossSessionRouteNoticeStatusAndReceipt(t *testing.T) {
 	fc := &fakeChannel{}
 	b := brokerWithChannel(t, mfWithTelegram(), fc)
 	defer b.Shutdown()
+	b.notices.window = 20 * time.Millisecond
 	key := drainSrc()
 	stub, _ := liveHolder(t, b, key)
 	stub.AddRoute(key)
