@@ -278,6 +278,19 @@ def verdict(cell, evidence):
     return failures
 
 
+def delivery_assertions(cell):
+    common = ["injection completed", "durable rows retired", "no attempt before initialization",
+              "no false Held", "route line count"]
+    if cell.transport == "fetch":
+        return common + ["no live offer in fetch-only cell", "rows retained until fetch receipt",
+                         "successful fetch tool result", "fetch confirmation within 60 seconds",
+                         "fetch retirement count", "complete fetch receipt trailer",
+                         "broker fetch receipt token", "each source fetched exactly once"]
+    return common + ["negotiated attempt observed", "no fallback or wrong transport",
+                     "each source attempted once", "receipt within 15 seconds",
+                     "retirement count", "each source received exactly once"]
+
+
 def collect(cell, host, root, output, evidence, collect_only=False):
     output.mkdir(parents=True, exist_ok=True)
     broker_log = (root / "broker/broker.log").read_text(errors="replace") if (root / "broker/broker.log").exists() else ""
@@ -320,10 +333,12 @@ def collect(cell, host, root, output, evidence, collect_only=False):
     evidence["fetch_source_occurrences"] = sum(json.dumps(b.get("content")).count("MATRIX_SAMPLE") for b in fetch_results)
     evidence["fetch_token"] = bool(expected)
     evidence["fetch_trailer_complete"] = any(classify_fetch(r, expected, fetch_calls)["accept"] for r in records) if expected else False
-    failures = verdict(cell, evidence)
-    status = "COLLECTED" if collect_only and not evidence.get("setup_errors") else ("FAIL" if failures else "PASS")
+    setup_errors = evidence.get("setup_errors", [])
+    failures = setup_errors[:1] if setup_errors else evidence.get("run_errors", []) + verdict(cell, evidence)
+    status = "COLLECTED" if collect_only and not setup_errors and not evidence.get("run_errors") else ("FAIL" if failures else "PASS")
     result = {"cell": cell.name, "status": status, "reasons": failures, "evidence": sanitize(evidence, tokens, receipt_ids=receipt_ids),
-              "todo_records": sum(e["accept"] is None for e in expectations)}
+              "todo_records": sum(e["accept"] is None for e in expectations),
+              "not_evaluated": delivery_assertions(cell) if setup_errors else []}
     # Counter keys must not leak raw message ids; preserve per-source order.
     result["evidence"]["received"] = {f"ID{i+1}": n for i, n in enumerate(evidence["received"].values())}
     result["evidence"]["message_ids"] = ["ID"] * len(evidence.get("message_ids", []))

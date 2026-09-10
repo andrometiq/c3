@@ -83,6 +83,13 @@ entries. If a host version changes the menu, the cell fails with its reason;
 No key sequence is silently guessed. Plugin startup, credentials, menu, readiness,
 or state setup failures are visible failures, never N/A.
 
+The isolated host pre-seeds workspace trust and first-run configuration; see
+the [installed-version gate audit](FIRST-RUN.md) for every verified key and the
+account/provider limits. Setup polling identifies blocking prompts immediately.
+A setup failure reports one cause and marks delivery assertions NOT EVALUATED.
+The development-channel warning has no saved acceptance setting in 2.1.266/267;
+only its exact, visibly selected local-development confirmation is acknowledged.
+
 `--keep-scratch` retains raw evidence **and copied credentials** in the private
 cache for local debugging; default cleanup removes them. Exported records replace
 all delivery tokens with TOKEN, textual identifiers with ID, numeric identifiers

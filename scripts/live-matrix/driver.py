@@ -11,7 +11,7 @@ import tempfile
 import time
 
 from collect import attempt_events, collect, export_fixtures, notice_evidence
-from host import Host, read_jsonl, wait_for
+from host import Host, HostSetupError, read_jsonl, wait_for
 from matrix import cells, selection, selection_summary
 
 
@@ -43,12 +43,13 @@ def run_cell(args, cell, binaries, repo, version):
         raise FileExistsError(f"refusing to overwrite {output}; choose --output or remove the old cell explicitly")
     host = None
     broker_process = None
+    setup_complete = False
     evidence = {"setup_errors": [], "injected": False, "rows_final": None}
     try:
         with (root / "broker-stderr.log").open("wb") as err:
             broker_process = subprocess.Popen([str(binaries / "c3-broker"), "test-serve", "--allow-test-inject", "--state", str(root / "broker")], stdout=err, stderr=err)
         wait_for(lambda: (root / "broker/c3.sock").is_socket(), 10, "scratch broker socket did not appear")
-        host = Host(root, args.claude, binaries / "c3-broker", binaries / "c3-claude-adapter", Path(__file__).parent.resolve(), cell, args.setup_timeout)
+        host = Host(root, args.claude, binaries / "c3-broker", binaries / "c3-claude-adapter", Path(__file__).parent.resolve(), cell, version, args.setup_timeout)
         if cell.session == "resumed":
             host.launch()
             host.wait_event("attached")
@@ -83,6 +84,7 @@ def run_cell(args, cell, binaries, repo, version):
             (host.control / "gate-fetch").touch()
         if gate:
             evidence["attempt_before_ready"] = offered_before_ready(host, root, final_launch)
+        setup_complete = True
         command = [str(binaries / "c3-broker"), "inject", "--socket", str(root / "broker/c3.sock"),
                    "--topic", "42", "--text", "MATRIX_SAMPLE: generic delivery sample.", "--count", str(cell.count)]
         if cell.kind == "voice":
@@ -121,7 +123,8 @@ def run_cell(args, cell, binaries, repo, version):
         evidence["rows_final"] = len(queue_rows(root))
         evidence["false_held"] = false_held(broker_text(root), cell.count)
     except Exception as exc:
-        evidence["setup_errors"].append(f"{type(exc).__name__}: {exc}")
+        field = "setup_errors" if not setup_complete or isinstance(exc, HostSetupError) else "run_errors"
+        evidence.setdefault(field, []).append(str(exc) if isinstance(exc, HostSetupError) else f"{type(exc).__name__}: {exc}")
     finally:
         # Collect before stopping: shutdown/holder death changes queue state.
         try:
@@ -154,6 +157,8 @@ def write_report(output, version, results):
             status, reason = "N/A", cell.infeasible
         elif result:
             status, reason = result["status"], "; ".join(result.get("reasons", [])) or "all receipt/retirement checks passed"
+            if result.get("not_evaluated"):
+                reason += "; NOT EVALUATED: " + ", ".join(result["not_evaluated"])
             if status == "COLLECTED":
                 reason = "shapes collected; no success assertion; " + reason
         else:
@@ -216,7 +221,7 @@ def main():
     with tempfile.TemporaryDirectory(prefix="c3mx-build-") as build:
         binaries = Path(build)
         for name in ("c3-broker", "c3-claude-adapter"):
-            subprocess.run(["go", "build", "-o", str(binaries / name), "./cmd/" + name], cwd=repo, check=True)
+            subprocess.run(["go", "build", "-p", "1", "-o", str(binaries / name), "./cmd/" + name], cwd=repo, check=True)
         write_report(args.output, version, results)
         for index, cell in enumerate(selected, 1):
             print(f"[{index}/{len(selected)}] {cell.name}", flush=True)
