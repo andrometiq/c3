@@ -42,9 +42,10 @@ type AttemptResultMsg struct {
 	Reason  string `json:"reason"`
 }
 type DeliveryReportMsg struct {
-	Op       Op           `json:"op"`
-	Live     DeliveryLive `json:"live"`
-	Accepted []string     `json:"accepted,omitzero"`
+	ReceiptShapeDrift string       `json:"receipt_shape_drift,omitempty"`
+	Op                Op           `json:"op"`
+	Live              DeliveryLive `json:"live"`
+	Accepted          []string     `json:"accepted,omitzero"`
 }
 
 func ParseDeliveryOffer(raw []byte) *DeliveryOffer {

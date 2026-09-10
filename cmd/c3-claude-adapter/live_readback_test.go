@@ -234,3 +234,9 @@ func scanChannelReceipt(path string, offset int64, marker string, discarding *bo
 func channelReceipt(line []byte, marker string) bool {
 	return deliveryReceipt(line, marker, false, "channel:1")
 }
+
+// Predicate-only scanner for fixture tests; production records diagnostic type
+// and transcript progress through receiptObservation.scan.
+func scanReceipt(path string, offset int64, marker string, discarding *bool, cross bool, attempt string) (int64, bool) {
+	return scanReceiptRecords(path, offset, discarding, func(line []byte) bool { return deliveryReceipt(line, marker, cross, attempt) })
+}

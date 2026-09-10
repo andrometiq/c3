@@ -93,6 +93,11 @@ func (b *Broker) handleDeliveryReport(s *Stub, raw []byte) {
 			b.rearmDelivery(s)
 		}
 	}
+	if s.negotiated() && msg.ReceiptShapeDrift != "" {
+		s.stubMu.Lock()
+		s.receiptShapeDrift = ipc.ReceiptHostVersion(msg.ReceiptShapeDrift)
+		s.stubMu.Unlock()
+	}
 	if !s.negotiated() || !ipc.ValidDeliveryLive(fields["live"]) {
 		return
 	}

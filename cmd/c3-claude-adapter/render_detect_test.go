@@ -143,9 +143,9 @@ func TestDetectRenderCapable(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := detectRenderCapable(tc.start, fakeTree(tc.cmdlines, tc.parents))
+			got := detectRenderRoute("linux", tc.start, fakeTree(tc.cmdlines, tc.parents)).State == ipc.RenderCapable
 			if got != tc.want {
-				t.Errorf("detectRenderCapable = %v, want %v", got, tc.want)
+				t.Errorf("channel eligible = %v, want %v", got, tc.want)
 			}
 		})
 	}

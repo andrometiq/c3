@@ -26,6 +26,9 @@ func (a *adapter) deliveryHostReason() string {
 // Retain evidence on IPC failure so a surviving observer can retry after reconnect.
 func (a *adapter) reportDeliveryResult(token string, observer *deliveryObserver) {
 	a.liveMu.Lock()
+	if a.deliveryObservers[token] == observer && observer.result != "" {
+		a.recordDeliveryReceiptOutcome(observer, false)
+	}
 	conn := a.currentConn()
 	if conn == nil || a.deliveryObservers[token] != observer || observer.result == "" || observer.reporting {
 		a.liveMu.Unlock()

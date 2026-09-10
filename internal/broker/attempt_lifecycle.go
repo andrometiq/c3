@@ -143,11 +143,6 @@ func (w *RouteWorker) handleAttemptResult(job *attemptResultJob) {
 	}
 	w.retireAttemptToken(job.Msg.Token)
 }
-func (w *RouteWorker) retireAttempt() {
-	if a := w.liveAttempt(); a != nil {
-		w.retireAttemptToken(a.Token)
-	}
-}
 func (w *RouteWorker) retireAttemptToken(token string) {
 	a := w.attempt(token)
 	if a == nil || !a.Evidence {

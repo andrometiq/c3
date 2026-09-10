@@ -134,6 +134,7 @@ func (b *Broker) registerDeliveryHello(hello ipc.HelloMsg, conn *ipc.Conn, old *
 	return b.Stubs.Register(hello.CLI, hello.PID, hello.CWD, conn, func(s *Stub) {
 		s.Build, s.ResumeContract, s.UpgradeDisabled = hello.Build, hello.ResumeContract, hello.UpgradeDisabled
 		b.configureDelivery(s, hello.Delivery)
+		s.receiptShapeDrift = hello.ReceiptShapeDrift
 		s.ReceiptConfirming = hello.RenderState != ""
 		s.SetRenderRoute(hello.RenderState, hello.RenderReason, hello.CannotRenderChannels)
 		s.deliveryPrevious = old

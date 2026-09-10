@@ -230,6 +230,11 @@ func runStatus() error {
 	if sessions, err := statusFetchSessions(); err == nil {
 		fmt.Fprintln(&b)
 		b.WriteString(renderSessionsTable(sessions))
+		for _, session := range sessions {
+			if hint := ipc.ReceiptShapeHint(session.ReceiptShapeDrift); hint != "" {
+				fmt.Fprintf(&b, "  %s (pid %d): %s\n", session.CLI, session.PID, hint)
+			}
+		}
 	}
 	fmt.Print(b.String())
 	return nil

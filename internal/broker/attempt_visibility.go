@@ -1,8 +1,6 @@
 package broker
 
 import (
-	"time"
-
 	"github.com/Andrometiq/c3/internal/ipc"
 	"github.com/Andrometiq/c3/internal/queue"
 )
@@ -31,15 +29,6 @@ func (w *RouteWorker) visibleAttemptRows(n int) ([]queue.TrackedInbound, error) 
 		}
 	}
 	return out, err
-}
-func (b *Broker) attemptingCount(key RouteKey) int {
-	n := 0
-	for _, a := range b.attempts.snapshot(time.Now()) {
-		if a.Negotiated && a.Route == key && a.Outcome == "open" {
-			n += len(a.Members)
-		}
-	}
-	return n
 }
 func (w *RouteWorker) evaluateAttemptHeld(s *Stub) {
 	if !s.negotiated() {

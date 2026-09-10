@@ -489,9 +489,9 @@ func TestFetchQueue_EscapingHeavyRequestIDIsEchoedAndPaidFor(t *testing.T) {
 }
 
 // The sizing arithmetic is the load-bearing part of the fix, so pin it directly:
-// what fetchFrameFit says fits must FIT, and one more must NOT — measured against
+// what fetchFrameFitReserved says fits must FIT, and one more must NOT — measured against
 // the same encoder that will write the frame. This is what makes the belt-check
-// inside fetchFrameFit unreachable rather than merely unlikely.
+// inside fetchFrameFitReserved unreachable rather than merely unlikely.
 func TestFetchFrameFit_IsExactAndCountsTheEncodedID(t *testing.T) {
 	// Fine-grained records so a boundary actually lands inside the id's cost.
 	msgs := make([]c3types.Inbound, 2400)
@@ -506,11 +506,11 @@ func TestFetchFrameFit_IsExactAndCountsTheEncodedID(t *testing.T) {
 	tiny := "t1"
 	escaped := strings.Repeat("\x01", 1000) // ~6 KiB encoded, 6x its len()
 
-	fitTiny, err := fetchFrameFit(tiny, len(msgs), msgs)
+	fitTiny, err := fetchFrameFitReserved(tiny, len(msgs), msgs, 0)
 	if err != nil {
 		t.Fatalf("unexpected envelope error: %v", err)
 	}
-	fitEsc, err := fetchFrameFit(escaped, len(msgs), msgs)
+	fitEsc, err := fetchFrameFitReserved(escaped, len(msgs), msgs, 0)
 	if err != nil {
 		t.Fatalf("unexpected envelope error: %v", err)
 	}
@@ -547,7 +547,7 @@ func TestFetchFrameFit_UnencodableHeadIsNotAnUnboundedFetch(t *testing.T) {
 		{Channel: "telegram", MessageID: 1, Text: strings.Repeat("x", ipc.MaxFrameSize+1024)},
 		{Channel: "telegram", MessageID: 2, Text: "small"},
 	}
-	fit, err := fetchFrameFit("t1", len(msgs), msgs)
+	fit, err := fetchFrameFitReserved("t1", len(msgs), msgs, 0)
 	if err != nil {
 		t.Fatalf("an oversize RECORD is not an envelope failure: %v", err)
 	}
@@ -557,7 +557,7 @@ func TestFetchFrameFit_UnencodableHeadIsNotAnUnboundedFetch(t *testing.T) {
 
 	// And an envelope that cannot fit is a DIFFERENT answer — an error, never a
 	// number the caller might read as a licence to consume.
-	if _, err := fetchFrameFit(strings.Repeat("i", ipc.MaxFrameSize), 0, msgs[1:]); err == nil {
+	if _, err := fetchFrameFitReserved(strings.Repeat("i", ipc.MaxFrameSize), 0, msgs[1:], 0); err == nil {
 		t.Fatal("an id that fills the whole frame must be reported as an error, not as a fit count")
 	}
 }

@@ -1354,6 +1354,9 @@ func (b *Broker) handleListSessions(conn *ipc.Conn, raw []byte) {
 			CWD:    s.CWD,
 			ConnID: s.ConnID,
 		}
+		s.stubMu.Lock()
+		e.ReceiptShapeDrift = s.receiptShapeDrift
+		s.stubMu.Unlock()
 		render := s.RenderRoute()
 		e.RenderState, e.RenderReason = render.State, render.Reason
 		e.ConfirmedAt = render.Confirmed

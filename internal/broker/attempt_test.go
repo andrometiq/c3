@@ -145,7 +145,7 @@ func TestShadowLifecycle(t *testing.T) {
 				if a.Deadline.Sub(a.Started) != 15*time.Second {
 					t.Fatal("channel budget")
 				}
-				b.attempts.expire(a.Deadline)
+				b.attempts.snapshot(a.Deadline)
 				requireShadow(t, b, token, "expired", "unobserved")
 				ack(token) // the shadow's hypothetical timeout cannot change today's ack
 				requireShadow(t, b, token, "confirmed", "live_ack")

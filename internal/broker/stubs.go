@@ -78,6 +78,7 @@ type Stub struct {
 	ReceiptConfirming bool // immutable hello capability; legacy ack keeps recovery
 	renderRoute       ipc.RenderRoute
 	renderProbeSent   bool
+	receiptShapeDrift string // stubMu; diagnostic only
 	// peerProtocolVersion is the normalized IPC dialect observed on hello.
 	// Sensitive dispatch reads this stored connection identity rather than
 	// re-decoding or assuming the current build's dialect.
@@ -347,6 +348,9 @@ func (s *Stub) RouteConfirmed(key RouteKey) bool {
 func (s *Stub) SetStableSessionID(id string) {
 	s.stubMu.Lock()
 	defer s.stubMu.Unlock()
+	if s.stableSessionID != "" && s.stableSessionID != id {
+		s.receiptShapeDrift = ""
+	}
 	s.stableSessionID = id
 }
 

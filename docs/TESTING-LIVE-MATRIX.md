@@ -113,3 +113,39 @@ truncation or oversized-record discard; the dedicated reader regression tests
 cover those behaviors.
 The coding lane runs collector unit tests only; a maintainer must run this matrix
 and review/export actual host fetch fixtures before claiming live acceptance.
+
+## Acceptance for a release
+
+This is a maintainer-run checklist, not a record of an executed acceptance run.
+Do not run the harness inside a coding lane. Use the exact candidate build and
+record its build id, Claude host version, REPORT.md and reviewed fixture evidence.
+
+- [ ] Run the bounded channel/inbox subset first (12 matched, 10 feasible, 2 N/A):
+
+  ```sh
+  scripts/live-matrix/run.sh --cell '[ci]*-[ifs]*-*-text-single'
+  ```
+
+- [ ] Run the full matrix with a fresh output directory:
+
+  ```sh
+  scripts/live-matrix/run.sh --output "$PWD/local-notes/live-matrix-release"
+  ```
+
+- [ ] Review the report's actual three-column shape; successful rows look like
+  this example, which is not an acceptance result:
+
+  | Cell | Result | Reason |
+  | --- | --- | --- |
+  | channel-idle-fresh-text-single | PASS | all receipt/retirement checks passed |
+  | inbox-foreground-resumed-text-single | PASS | all receipt/retirement checks passed |
+  | fetch-idle-resumed-text-single | PASS | all receipt/retirement checks passed |
+
+- [ ] Every feasible **transport × host-state × session** cell, expanded across
+  kind and burst, must PASS before a release is tagged: 126 PASS and 54 structural
+  N/A rows in the complete 180-row report. FAIL, COLLECTED and NOT RUN never count
+  as acceptance. Unavailable inboxes and failed host setup are FAIL, not N/A.
+- [ ] Review receipt timing, exact source/revision retirement, duplicate counts,
+  readiness ordering, `no_false_held` and `route_line_count` evidence. Collection
+  alone (`--collect-only --fixtures`) never establishes PASS. Capture and review
+  real versioned host fixtures for new shapes; never promote inferred shapes.

@@ -422,6 +422,7 @@ func TestUpgradeResumeRestoresStateAndIdleReadiness(t *testing.T) {
 		t.Skip("exec unsupported")
 	}
 	a, _ := upgradeReadyAdapter(t)
+	a.receiptDiagnostics = receiptDiagnostics{HostVersion: "2.1.266", FirstRecord: "queue-operation/enqueue", Consecutive: 3, Drift: true}
 	route := ipc.RouteRef{Channel: "telegram", ChatID: 17, Name: "project"}
 	a.setRouteState([]ipc.RouteRef{route}, &route)
 	var transferred string
@@ -441,6 +442,9 @@ func TestUpgradeResumeRestoresStateAndIdleReadiness(t *testing.T) {
 	opts, err := next.restoreUpgrade([]string{"--mcp-resume"})
 	if err != nil || opts.State.InitializeParams.ProtocolVersion != "2025-03-26" || !next.dispatched.Load() || !next.upgrade.resumed || next.outputRoute.Name != "project" {
 		t.Fatalf("resume: %+v %v", opts, err)
+	}
+	if next.receiptDiagnostics != a.receiptDiagnostics {
+		t.Fatal("self-exec lost receipt diagnostics")
 	}
 	if next.buildInstructions() == "" {
 		t.Fatal("unexpected empty normal instructions")

@@ -28,7 +28,7 @@ attach
 Type it (or have your CLI agent type it) when you want to bind this session to a Telegram topic. A bare `attach` resolves in a fixed order and **never guesses a topic you didn't choose**:
 
 1. **Already attached** — idempotent. The session confirms its current claim; nothing else happens.
-2. **This session has attached before** — silent resume of its **own** last topic. You see "Auto-attached to 'foo'" and inbound Telegram messages start flowing. (The choice is remembered against the session, not the directory, so it only ever re-claims your own route.)
+2. **This session has attached before** — silent resume of its **own** last topic. You see an auto-attach notice naming your topic and inbound Telegram messages start flowing. (The choice is remembered against the session, not the directory, so it only ever re-claims your own route.)
 3. **First-time session (no prior choice)** — a friendly picker. C3 shows a short ranked list — the current project's topic first (seeded from cwd), then recently-used topics, plus "create new" and "see the full list" — and asks you to choose. It **never** auto-picks. Your pick is an explicit `attach(topic_id=<n>)` (or `attach(name="<name>", create=true)` to create), which is then remembered so future resumes are silent.
 
 If the topic you target is already claimed by another live session, the broker tells you who's holding it; wait for it to detach or attach to a different topic.
@@ -83,7 +83,7 @@ How it works:
 - **Held-count auto-reply.** After scheduling, rows still waiting get `📨 Held — nothing lost. 1 message queued. Send /status to check.` (or `2 messages queued`). The next line describes the current route, for example `Live route: queue-only (no session attached).` Held runs after enqueue, attempt termination, ownership/capability change, enrichment and drain import. It excludes open live attempts, open fetch groups and observed receipts; delayed sends recompute the count. Each route sends at most one Held notice per 10 seconds, coalescing arrivals while waiting. A stable unchanged backlog does not repeat a successfully sent notice. Failed sends and unreadable snapshots keep their pending Held state for retry on the next evaluation, even when the queued rows are unchanged.
 - **Route changes.** One `Live route: …` line after the new state and reason stay unchanged for 60 seconds. Returning to the last announced state cancels the pending line; confirmation age alone never triggers it. A Held notice already includes the current route line. Send completion is serialized per route, including across reconnects.
 - **Backlog on attach.** When you `attach` to a topic with held messages, the session is told how many are queued (with a short per-message preview) and instructed to call `fetch_queue` to retrieve them. The agent decides whether to drain all at once or work through them in batches.
-- **Live messages are unaffected.** When a session is attached, messages still push through immediately; they're removed from the queue once the agent has actually taken them. The queue earns its keep only when there's no live consumer.
+- **Live delivery also uses the queue.** The broker reserves one attempt per row and selects channel, then eligible inbox fallback with a new token. Rows retire only at the declared receipt milestone. Eligible backlog schedules automatically after attach/reconnect. Fetch is explicit; it never proves a live route. Status shows `waiting`, `live: channel, confirmed <age>`, `live: inbox, confirmed <age>` or `pull-only (<reason>)`. Legacy adapters retain their previous acknowledgement contract. See [Inbound delivery](ADAPTERS.md#inbound-delivery).
 
 ### Degraded mode — when the durable queue is disabled
 
@@ -102,7 +102,7 @@ The fix is to make the queue directory (`$XDG_STATE_HOME/c3/queue/`, fallback `~
 Your CLI agent retrieves held messages with the `fetch_queue` MCP tool (both Claude Code and Codex have it):
 
 - `limit` — how many oldest messages to pull. Default **3**, max **50**, or the string `"all"` to drain everything. Small batches let the agent process carefully one group at a time. Every response, including a finite limit, is frame-budgeted and may return only a prefix (for example, three records) with `remaining > 0`; call again until `remaining` is zero.
-- `ack` — default **true**, which *consumes* the messages (walks the cursor forward; the queue files are deleted once fully drained). Pass `ack=false` to *peek* without consuming.
+- `ack` — default **true**. With negotiated Claude fetch receipts, the adapter reserves rows and the broker retires them only after a complete successful host tool result with the receipt trailer; unconfirmed reservations expire after 60 seconds. Other adapters and unnegotiated connections consume on return, which does not prove display. Pass `ack=false` to peek without reserving or consuming.
 
 Each returned record normally carries sender, kind, timestamp, text or voice transcript, quote-reply context, and attachments (each with `file_id`), plus `remaining`, the count still queued. Two bounded exceptions are deliberate: a record above the 1 MiB queue-record cap has truncated text with an in-band marker; a legacy record that cannot fit in any 4 MiB IPC response is moved aside and replaced in position by a broker-authored notice carrying the original identity but **no original content**. The full original is retained only when `.trash/` retention is available; otherwise the marker or notice says no copy was kept. Treat the notice as an operational warning, not as what the sender said. Adapter authors: the response correlation id is also capped at 1 KiB because it shares this frame.
 
@@ -116,13 +116,11 @@ STT failures are usually a transient or down provider, not lost audio. When tran
 
 Type `/status` directly into a Telegram chat (it autocompletes in the `/` menu) to see queue depth and attach state. This is a *Telegram bot command*, distinct from the `/c3:status` CLI slash command — the broker answers it directly and never routes it to an agent.
 
-- **In a topic** → that topic's status, e.g. `📊 myproject · 3 queued (oldest 2h) · nothing attached · broker up`.
-- **In DM or General** → a global summary across all routes (empty queues omitted), e.g.:
+- **In a topic** → that topic's status, e.g. `📊 general · 0 queued · nothing attached · broker up`.
+- **In DM or General** → a global summary across all routes (empty queues omitted), e.g. with no queued messages or sessions:
   ```
-  📊 Broker up (pid 12345). Active queues:
-  • myproject — 3 (oldest 2h)
-  • docs — 1 (oldest 10m)
-  1 attached · 1 idle
+  📊 Broker up (pid 12345).
+  0 attached · 0 idle
   ```
 
 Both `/status` and `c3-broker status` show the attached session build and each
@@ -300,12 +298,15 @@ A successful update ends with a broker bounce; `/c3:build` does the same after
 `make install`. The bounce triggers hello upgrade hints for every connected
 Claude adapter. On Linux and macOS, compatible adapters wait up to 30 seconds
 for requests, permission relays, stdout writes, and push acknowledgements or
-attempt expiry, then self-exec with the same PID and stdio descriptors. They
+live attempt expiry, then self-exec with the same PID and stdio descriptors. They
 restore the initialized MCP state locally and re-offer delivery when ready.
-Three unsuccessful drain windows require manual reconnect. Older adapters,
+Three unsuccessful drain windows require manual reconnect. Adapters older than v0.2.1-79,
 Windows, and changed MCP contracts receive one system notice to run `/mcp` and
 reconnect c3 (or restart the session). `/reload-plugins` does not restart an
-unchanged MCP command.
+unchanged MCP command. Fetch receipt reservations release on reconnect and stay
+durable for another pull; they can therefore duplicate on retry. The reconnect notice is:
+
+`C3 was updated to <build>. This session still runs the previous adapter: run /mcp and reconnect c3 (or restart the session) to switch.`
 
 **Current boundary:** the adapter gate protects the self-exec, not the preceding
 broker shutdown. The existing broker reconnect contract cancels pending broker
@@ -316,9 +317,7 @@ restarts through the broker state file `upgrade-notices.json`.
 
 **Automatic update (opt-in).** Set `"auto_update": true` in `mappings.json`
 (default off) and the broker installs a newer release **itself** when its ~6h
-check finds one, then does the most restartless restart available: it drains
-in-flight work, posts a one-time "c3 updated to vX — broker restarting, sessions
-reconnect automatically" notice to your attached topics and CLI sessions, and
+check finds one, then posts a one-time `c3 updated to vX — broker restarting, sessions reconnect automatically.` notice to your attached topics and CLI sessions, and
 exits cleanly. Because adapters already survive a broker bounce (exponential-
 backoff reconnect + replay-last-attach, and a reconnect auto-spawns the broker
 binary), the new broker comes up on its own and sessions reattach — no manual
@@ -351,11 +350,10 @@ This release changes how a session binds to a topic. Three user-visible changes:
   starts unattached and a bare `attach` opens the picker. A resumed Codex
   session still recovers its own remembered topic from its CLI-scoped stable
   identity. The old launch-time cwd guess is gone.
-- **Restart your running CLI sessions after updating.** An old in-process adapter
-  that replays a bare `attach` onto the freshly-restarted broker can land on the
-  new picker (a discarded proposal, not a claim) and stay detached until you run a
-  manual `/attach`. Inbound is held in the durable queue while detached, not
-  dropped — but a quick relaunch of each live session avoids the surprise.
+- **Compatibility with older attach behavior.** An older adapter replaying bare
+  `attach` may receive a picker and stay detached until an explicit attach. Current
+  compatible Claude adapters pick up updates in place; use `/mcp` reconnect when
+  the upgrade notice requests it. Inbound remains queued while detached.
 
 ## Privacy and safety
 

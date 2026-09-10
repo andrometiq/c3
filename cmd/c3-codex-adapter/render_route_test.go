@@ -180,7 +180,7 @@ func TestPullOnlyDocumentationContract(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, part := range []string{"one-time MCP log notification announces the switch to pull-only", "then holds new messages and notifies per message", "with `fetch_queue`"} {
+	for _, part := range []string{"one-time MCP log notification announces the switch to pull-only", "then holds new messages and coalesces Held notices", "with `fetch_queue`"} {
 		if !strings.Contains(string(doc), part) {
 			t.Errorf("adapter contract missing %q", part)
 		}

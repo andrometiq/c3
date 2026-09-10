@@ -276,8 +276,8 @@ func TestNoticeRecordedRowSurvivesAttemptHistoryEviction(t *testing.T) {
 				}
 				if negotiated {
 					w.handleAttemptResult(fetchResult(s, token))
-					w.retireAttempt()
-					w.retireAttempt()
+					w.retireAttemptToken(token)
+					w.retireAttemptToken(token)
 				} else {
 					w.handleConsume(context.Background(), &ConsumeJob{Owner: s, MessageID: 1, Token: token, Count: 1})
 					w.updateAttempt(token, func(a *attemptRecord) { a.Deadline = time.Now().Add(-time.Second) })

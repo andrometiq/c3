@@ -3,6 +3,45 @@
 Entries are newest first. This is the public architecture record: it records
 rulings and rationale, never private operational details.
 
+## D039: Inbound delivery lifecycle (redesign 2026-09-08/09) — supersedes the delivery parts of D031 and D033
+
+**Date:** 2026-09-09
+
+**Decision:** One broker-owned attempt per durable row, with exact identities and
+content revisions. Adapters execute the selected channel/inbox/fetch transport
+and report evidence; the broker owns deadlines, fallback, rearm and retirement.
+The model declares three live milestones: transcript intake, host acceptance
+(not proven display), and none (pull-only). Fetch declares receipt or consume
+separately. Current negotiated live modes require transcript evidence; accept
+hosts retain the legacy projection. Capability negotiation is bilateral and
+requires adapter confirmation of the broker's accepted subset before cutover.
+Protocol-v1 hellos without delivery retain their legacy behavior, including ack
+and fetch semantics; fetch_confirm remains a negotiated receipt-group alias.
+
+Notices derive from queued rows and per-route display state: Held excludes open
+attempts, and semantic route changes wait 60 seconds. Host record shapes are
+versioned captured fixtures with strict framing, never inferred receipt types.
+The first receipt logs its record type; three consecutive live expiries with
+transcript growth but no recognized matching records log a one-time drift hint,
+also visible in broker status. This diagnostic never changes delivery authority.
+Seamless compatible Claude updates use self-exec with MCP resume after a broker
+bounce; older adapters receive a one-time reconnect notice. Broker in-flight
+ask/permission handoff remains a separate follow-up, not a lossless-update claim.
+
+The implementation phases are [D034](#d034-negotiated-channel-delivery-phase-2),
+[D035](#d035-inbox-as-a-broker-owned-transport-phase-3),
+[D036](#d036-fetch-as-an-attempt-transport-phase-4),
+[D037](#d037-seamless-adapter-upgrade-by-self-exec-with-mcp-resume) and
+[D038](#d038-notices-derive-from-delivery-state-phase-5). The authoritative contract
+is [Inbound delivery](docs/ADAPTERS.md#inbound-delivery); the
+[release acceptance checklist](docs/TESTING-LIVE-MATRIX.md#acceptance-for-a-release)
+is documented for the maintainer and was not executed by this coding lane.
+
+**Why:** One delivery owner prevents competing ledgers and weak acknowledgements
+from losing rows. Failure retains surviving revisions; expiry/restart can
+duplicate delivery. The later 90-day queue-age ruling and D020's complete-record
+reader, endpoint/peer validation, drain safety and permission settlement remain.
+
 ## D036: Fetch as an attempt transport (phase 4)
 
 **Date:** 2026-09-09
@@ -152,6 +191,8 @@ rows are never silently discarded by failed attempts.
 
 ## D033: Inbound delivery contract pins
 
+**Delivery lifecycle superseded by D039; this entry remains the historical ruling.**
+
 Phase 1 lands a shadow attempt table; no behaviour change.
 
 **Date:** 2026-09-08
@@ -201,6 +242,8 @@ manual recovery with live submission; later exact-token acknowledgements do not
 consume earlier failed messages.
 
 ## D031: Cross-session messaging is a receipt-gated fallback only
+
+**Delivery lifecycle superseded by D039; this entry remains the historical ruling.**
 
 **Date:** 2026-09-08
 

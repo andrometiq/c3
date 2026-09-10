@@ -122,11 +122,24 @@ func TestNegotiatedAcceptanceAbsentKeepsLegacy(t *testing.T) {
 
 func TestNegotiatedDocsContract(t *testing.T) {
 	isolateAdapterTest(t)
+	body, err := os.ReadFile("../../docs/ADAPTERS.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(string(body), "## Inbound delivery\n") != 1 {
+		t.Fatal("expected one authoritative inbound contract")
+	}
+	for _, claim := range []string{"**Row**", "**Attempt**", "`transcript`", "`accept`", "`none`", "without `delivery` runs the legacy path unchanged", "receipt_shape_drift"} {
+		if !strings.Contains(string(body), claim) {
+			t.Errorf("contract missing %q", claim)
+		}
+	}
 	// P9: "phase 2 ... P8 per-route display for negotiated sessions; legacy sessions untouched".
 	for path, claims := range map[string][]string{
-		"../../docs/ADAPTERS.md":  {"Provisional-negotiated", "until `fetch_receipt` is confirmed", "`fetch_confirm{lease_token:<group>}`", "Legacy sessions retain", "c3_attempt=\"inbox:N\"", "validateCrossSessionPeer", "peer intake is VERIFIED", "channel OR inbox is eligible", "at least one mode it offered", "once per 10 seconds", "notifications/initialized` received AND notify transport present", "startup hello carries no offer", "D036"},
-		"../../docs/DEBUGGING.md": {"attempt retirement released: storage retry limit reached", "attempt shadow suite divergences=0", "no phase-5 flap timer", "attempt reserved transport=inbox", "attempt finished transport=inbox outcome=confirmed", "Definite notify failures immediately send"},
-		"../../DECISIONS.md":      {"D034: Negotiated channel delivery (phase 2)", "no goroutine per attempt", "D035: Inbox as a broker-owned transport (phase 3)", "supersedes the delivery parts of D031"},
+		"../../docs/ADAPTERS.md":            {"Provisional-negotiated", "until `fetch_receipt` is confirmed", "`fetch_confirm{lease_token:<group>}`", "Legacy sessions retain", "c3_attempt=\"inbox:N\"", "validateCrossSessionPeer", "peer intake is VERIFIED", "channel OR inbox is eligible", "at least one mode it offered", "once per 10 seconds", "notifications/initialized` received AND notify transport present", "startup hello carries no offer", "D039"},
+		"../../docs/DEBUGGING.md":           {"attempt retirement released: storage retry limit reached", "attempt shadow suite divergences=0", "60-second stable-state timer", "attempt reserved transport=inbox", "attempt finished transport=inbox outcome=confirmed", "Definite notify failures immediately send"},
+		"../../docs/TESTING-LIVE-MATRIX.md": {"## Acceptance for a release", "scripts/live-matrix/run.sh --cell '[ci]*-[ifs]*-*-text-single'", "| Cell | Result | Reason |", "126 PASS", "before a release is tagged", "COLLECTED and NOT RUN"},
+		"../../DECISIONS.md":                {"D034: Negotiated channel delivery (phase 2)", "no goroutine per attempt", "D035: Inbox as a broker-owned transport (phase 3)", "supersedes the delivery parts of D031"},
 	} {
 		body, err := os.ReadFile(path)
 		if err != nil {
@@ -222,7 +235,10 @@ func TestNegotiatedAcceptedModeSubset(t *testing.T) {
 		for _, modes := range [][]string{{"channel"}, {"inbox"}, {"channel", "inbox"}, {"channel", "future"}, {"inbox", "future"}, {"future"}, nil} {
 			a, _, _ := liveFixture(t, ipc.RenderCapable)
 			live := ipc.DeliveryLive{Channel: ipc.DeliveryEligibility{Eligible: offered != "inbox"}, Inbox: ipc.DeliveryEligibility{Eligible: offered != "channel"}}
-			offer := deliveryOfferFor(live)
+			offer, err := json.Marshal(ipc.DeliveryOffer{Version: 1, Live: live, Receipts: "transcript", Fetch: "receipt"})
+			if err != nil {
+				t.Fatal(err)
+			}
 			has := func(mode string) bool {
 				for _, m := range modes {
 					if m == mode {

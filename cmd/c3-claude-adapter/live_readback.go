@@ -342,6 +342,7 @@ func (a *adapter) awaitLiveReadback(ctx context.Context, conn *ipc.Conn, generat
 		a.liveMu.Unlock()
 	}()
 	discarding := false
+	observation := receiptObservation{size: offset}
 	transportOK, transportFailed, received := !cross, false, false
 	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
@@ -356,10 +357,10 @@ func (a *adapter) awaitLiveReadback(ctx context.Context, conn *ipc.Conn, generat
 			return
 		}
 		a.liveScanMu.Lock()
-		next, found := scanReceipt(path, offset, marker, &discarding, cross, attempt)
+		next := observation.scan(path, offset, marker, &discarding, cross, attempt)
 		a.liveScanMu.Unlock()
 		offset = next
-		received = received || found
+		received = received || observation.record != ""
 		select {
 		case ok := <-sent:
 			transportOK, transportFailed = ok, !ok
@@ -372,6 +373,8 @@ func (a *adapter) awaitLiveReadback(ctx context.Context, conn *ipc.Conn, generat
 			return
 		}
 		if received && transportOK && time.Now().Before(deadline) {
+			a.receiptDiagnostics.Consecutive = 0
+			a.receiptConfirmed(observation.record)
 			delete(a.livePending, marker)
 			// A late receipt for another push may consume that exact row, but cannot
 			// undo a timeout downgrade. Only attach/reconnect may re-enable pushes.
@@ -394,6 +397,7 @@ func (a *adapter) awaitLiveReadback(ctx context.Context, conn *ipc.Conn, generat
 			return
 		}
 		if transportFailed || !time.Now().Before(deadline) {
+			a.receiptUnconfirmed(observation, !transportFailed)
 			delete(a.livePending, marker)
 			retry := false
 			retryGeneration := generation
@@ -426,10 +430,6 @@ func (a *adapter) awaitLiveReadback(ctx context.Context, conn *ipc.Conn, generat
 		case <-ticker.C:
 		}
 	}
-}
-
-func scanReceipt(path string, offset int64, marker string, discarding *bool, cross bool, attempt string) (int64, bool) {
-	return scanReceiptRecords(path, offset, discarding, func(line []byte) bool { return deliveryReceipt(line, marker, cross, attempt) })
 }
 
 func deliveryReceipt(line []byte, marker string, cross bool, attempt string) bool {

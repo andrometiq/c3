@@ -71,6 +71,10 @@ func TestUpgradeFallbackNoticeOnceAcrossReconnect(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := "C3 was updated to new. This session still runs the previous adapter: run /mcp and reconnect c3 (or restart the session) to switch."
+	doc, err := os.ReadFile("../../docs/USAGE.md")
+	if err != nil || !strings.Contains(string(doc), strings.Replace(want, "to new.", "to <build>.", 1)) {
+		t.Fatal("usage no longer quotes the actual reconnect notice", err)
+	}
 	if event.Inbound.Event == nil || event.Inbound.Event.System.Message != want {
 		t.Fatal(string(raw))
 	}

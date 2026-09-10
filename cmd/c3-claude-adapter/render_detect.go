@@ -33,7 +33,7 @@ import (
 // channel push notifications.
 const devChannelsFlag = "--dangerously-load-development-channels"
 
-// procReaders abstracts the /proc reads so detectRenderCapable is unit-testable
+// procReaders abstracts the /proc reads so detectRenderRoute is unit-testable
 // against a synthetic process tree. On a real host these are backed by
 // /proc/<pid>/cmdline and /proc/<pid>/stat.
 type procReaders struct {
@@ -47,10 +47,6 @@ type procReaders struct {
 // can lose a message. Only the NEAREST positively identified host counts.
 func hostRenderRoute() ipc.RenderRoute {
 	return detectRenderRoute(runtime.GOOS, os.Getpid(), platformProcReaders())
-}
-
-func detectRenderCapable(startPID int, r procReaders) bool {
-	return detectRenderRoute("linux", startPID, r).State == ipc.RenderCapable
 }
 
 func detectRenderRoute(goos string, startPID int, r procReaders) ipc.RenderRoute {

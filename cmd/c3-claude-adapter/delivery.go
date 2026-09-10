@@ -5,23 +5,26 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"slices"
 	"time"
 
 	"github.com/Andrometiq/c3/internal/ipc"
 )
 
 type deliveryObserver struct {
-	injected   bool
-	path       string
-	offset     int64
-	deadline   time.Time
-	attempt    string
-	discarding bool
-	result     string
-	reason     string
-	cross      bool
-	written    bool
-	reporting  bool
+	receipt     receiptObservation
+	receiptDone bool
+	injected    bool
+	path        string
+	offset      int64
+	deadline    time.Time
+	attempt     string
+	discarding  bool
+	result      string
+	reason      string
+	cross       bool
+	written     bool
+	reporting   bool
 }
 
 // P1/P2: offer when "channel OR inbox is eligible"; both need a readable transcript.
@@ -67,13 +70,6 @@ func (a *adapter) deliveryOffer() json.RawMessage {
 		return nil
 	}
 	live := a.deliveryFacts()
-	data, _ := json.Marshal(ipc.DeliveryOffer{Version: 1, Live: live, Receipts: "transcript", Fetch: "receipt"})
-	return data
-}
-func deliveryOfferFor(live ipc.DeliveryLive) json.RawMessage {
-	if !live.Channel.Eligible && !live.Inbox.Eligible {
-		return nil
-	}
 	data, _ := json.Marshal(ipc.DeliveryOffer{Version: 1, Live: live, Receipts: "transcript", Fetch: "receipt"})
 	return data
 }
@@ -142,7 +138,7 @@ func (a *adapter) handleDeliver(ctx context.Context, raw []byte) {
 	}
 	a.liveAttempt++
 	attempt := fmt.Sprintf("%s:%d", msg.Transport, a.liveAttempt)
-	observer := &deliveryObserver{injected: msg.Inbound.TestInjected, path: path, offset: offset, deadline: deadline, attempt: attempt, cross: msg.Transport == "inbox"}
+	observer := &deliveryObserver{receipt: receiptObservation{size: offset}, injected: msg.Inbound.TestInjected, path: path, offset: offset, deadline: deadline, attempt: attempt, cross: msg.Transport == "inbox"}
 	if failure != "" {
 		observer.result = "failed"
 		observer.reason = failure
@@ -189,6 +185,7 @@ func (a *adapter) observeDeliveries(ctx context.Context) {
 			return
 		case <-tick.C:
 		}
+		a.publishReceiptDrift()
 		a.flushUpgradeNotice()
 		a.pollUpgrade(time.Now())
 		if !a.deliveryAccepted.Load() {
@@ -212,8 +209,19 @@ func (a *adapter) pollDeliveries() {
 		observer *deliveryObserver
 	}
 	var results []result
-	for token, o := range a.deliveryObservers {
+	// Process simultaneous expiries in reservation order, not map order.
+	var tokens []string
+	for token := range a.deliveryObservers {
+		tokens = append(tokens, token)
+	}
+	slices.SortFunc(tokens, func(x, y string) int { return a.deliveryObservers[x].deadline.Compare(a.deliveryObservers[y].deadline) })
+	for _, token := range tokens {
+		o := a.deliveryObservers[token]
 		if !time.Now().Before(o.deadline) {
+			a.liveScanMu.Lock()
+			o.offset = o.receipt.scan(o.path, o.offset, token, &o.discarding, o.cross, o.attempt)
+			a.liveScanMu.Unlock()
+			a.recordDeliveryReceiptOutcome(o, true)
 			delete(a.deliveryObservers, token)
 			continue
 		}
@@ -223,11 +231,12 @@ func (a *adapter) pollDeliveries() {
 				o.reason = "session transcript unavailable"
 			} else {
 				a.liveScanMu.Lock()
-				offset, found := scanReceipt(o.path, o.offset, token, &o.discarding, o.cross, o.attempt)
+				offset := o.receipt.scan(o.path, o.offset, token, &o.discarding, o.cross, o.attempt)
 				a.liveScanMu.Unlock()
 				o.offset = offset
-				if found {
+				if o.receipt.record != "" {
 					o.result = "confirmed"
+					a.recordDeliveryReceiptOutcome(o, false)
 				}
 			}
 		}

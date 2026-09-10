@@ -36,8 +36,16 @@ func (b *Broker) handleRenderState(stub *Stub, raw []byte) {
 		return
 	}
 	var msg ipc.RenderStateMsg
-	if err := json.Unmarshal(raw, &msg); err != nil || msg.State == "" {
+	if err := json.Unmarshal(raw, &msg); err != nil {
 		return
+	}
+	if msg.ReceiptShapeDrift != "" {
+		stub.stubMu.Lock()
+		stub.receiptShapeDrift = ipc.ReceiptHostVersion(msg.ReceiptShapeDrift)
+		stub.stubMu.Unlock()
+	}
+	if msg.State == "" {
+		return // diagnostic-only update; never rearm legacy probe admission
 	}
 	stub.SetRenderRoute(msg.State, msg.Reason, true)
 	for _, key := range stub.Routes() {

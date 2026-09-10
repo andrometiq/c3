@@ -1,6 +1,6 @@
 # Debugging
 
-## Attempt shadow (phase 1)
+## Legacy attempt diagnostics
 
 For legacy connections the broker keeps a memory-only shadow of tracked delivery
 attempts; that shadow does not decide delivery, retirement or adapter
@@ -18,7 +18,7 @@ opens and immediately confirms a `fetch` attempt labelled `legacy_consume`; fetc
 receipts use negotiated group entries in phase 4. The legacy shadow adds no wire behavior.
 
 
-## Delivery notices and operator logs (phase 5)
+## Delivery notices and operator logs
 
 A negotiated delivery logs these metadata-only lines (no message content):
 
@@ -50,7 +50,7 @@ After `c3:update`/`c3:build`, check the session build: supported sessions self-u
 If a session still reports the old build, reconnect c3 with `/mcp` in that open
 session or restart it. `/reload-plugins` does not restart its MCP server process.
 
-## Negotiated channel and inbox delivery (phase 3)
+## Inbound delivery
 
 A valid `delivery` offer, `hello_ack.delivery` acknowledgement and the adapter
 confirmation `delivery_report{accepted:[...]}` select the broker-owned attempt
@@ -72,7 +72,7 @@ inside open attempts. After channel expires, a new inbox attempt covers only the
 with a new token and fresh 15-second budget. After exhaustion, rows become visible again. Inbound
 at +30 seconds does not retry; inbound at or after +60 seconds rearms a cycle.
 Reconnect, explicit attach, changed capability facts, and a confirmation on a
-sibling route also rearm. There is no phase-5 flap timer yet.
+sibling route also rearm. Route notices use the 60-second stable-state timer described above.
 
 Diagnostic lines are deliberately generic:
 
@@ -108,6 +108,33 @@ Definite notify failures immediately send `attempt_result` with `outcome:"failed
 and a generic reason (`notify transport unavailable` or `channel notify write failed`),
 without waiting for receipt polling or the 15-second deadline.
 
+## Host receipt shape drift
+
+The first confirmed delivery in a session logs, for example:
+
+```text
+first delivery confirmed by record=queue-operation/enqueue (host 2.1.266)
+```
+
+Other recognized types are `user`, `attachment/queued_command` and
+`user/tool_result` for fetch. Host version comes from MCP initialization; an
+unavailable or invalid version is `unknown`. The adapter logs this hint once
+when three consecutive live attempts expire with zero recognized matching
+records while their transcript grew:
+
+```text
+receipt shapes may have changed (host 2.1.266): run scripts/live-matrix/run.sh --collect-only --fixtures
+```
+
+`c3-broker status` includes the same hint for the affected session. It is a
+possible host-format change, not proof of one. A recognized live receipt, no
+transcript growth or a definitive failure breaks the expiry streak; fetch
+expiries do not count. The alarm does not change delivery or loosen receipt
+validation. Reconnect and compatible self-exec preserve diagnostics. Follow the
+[release acceptance checklist](TESTING-LIVE-MATRIX.md#acceptance-for-a-release)
+and review captured fixtures before extending receipt shapes; collection is not
+an acceptance PASS.
+
 ## Live matrix
 
 The test injection hook is available only in a deliberately opted-in scratch
@@ -138,7 +165,9 @@ frames have `c3_test_injected="true"`, and the channel namespace is `test-inject
 Replies, Held/route notices, edits, and voice echoes go to `TEST SINK` log lines.
 No injected route resolves to Telegram. Treat log contents as local test data.
 
-The full specification is [TESTING-LIVE-MATRIX.md](TESTING-LIVE-MATRIX.md).
+The full specification and [Acceptance for a release](TESTING-LIVE-MATRIX.md#acceptance-for-a-release)
+checklist are in TESTING-LIVE-MATRIX.md. The authoritative protocol contract is
+[Inbound delivery](ADAPTERS.md#inbound-delivery).
 The maintainer runs `scripts/live-matrix/run.sh` outside the coding sandbox;
 see `scripts/live-matrix/README.md` for collection, fixtures, isolation and timing.
 
@@ -156,7 +185,7 @@ scripts/live-matrix/run.sh --cell '[ci]*-[ifs]*-*-text-single'
 The driver reports 12 matched cells, 10 feasible, 2 N/A and **16 Claude sessions**
 (including the six resume seeds). `--list` applies the same filter without launches.
 
-### Fetch receipt attempts (phase 4, D036)
+### Fetch receipt attempts
 
 Negotiation starts after `delivery_report{accepted:[...]}`, immediately following
 `hello_ack`. Until it arrives, legacy pushes continue. An unaccepted mode logs
@@ -175,9 +204,8 @@ alias for the same group evidence, bound to the original connection.
 
 Attach reports messages fetchable now; Held and backlog exclude open fetch
 attempts. Fetch confirmation never updates live transport proof or age. The
-shared visitor reader discards oversized records across bounded polls. The store
-now reports `aged` and `overCount` separately, while eviction notice wording is
-still the phase-5 follow-up.
+shared visitor reader discards oversized records across bounded polls. The store reports `aged` and `overCount` separately; eviction notices distinguish
+age expiry from count overflow.
 
 In-process fixture coverage includes `TestFetchGroupLifecycleIndependentRoutes`,
 `TestFetchGroupRevisionEvictionDrainAndExpiry`, `TestFetchReceiptMultiRouteIPCConfirm`,

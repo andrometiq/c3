@@ -26,7 +26,7 @@ func TestUpgradeBuildAndUpdatePaths(t *testing.T) {
 		"../../plugins/c3/commands/update.md": {"!c3-broker update", "bounces the broker"},
 		"update.go":                           {"bounceUpgradeBroker()"},
 		"setup.go":                            {"sourceBuildFlags(ctx, srcDir)", "restartBrokerForNewConfig()"},
-		"../../Makefile":                      {"git describe --always --dirty", buildidentity.Symbol},
+		"../../Makefile":                      {"git describe --always --dirty", buildidentity.Symbol, "VERSION_LDFLAGS :=", "go install -ldflags \"$(VERSION_LDFLAGS)\""},
 		"../../scripts/package.sh":            {"describe --always --dirty", buildidentity.Symbol},
 	} {
 		data, err := os.ReadFile(path)
@@ -52,7 +52,7 @@ func TestUpgradeStatusBuild(t *testing.T) {
 
 func TestUpgradeDocumentationAndLogs(t *testing.T) {
 	for path, wants := range map[string][]string{
-		"../../README.md":                  {"## Updating C3", "/c3:update", "upgrade themselves", "/mcp"},
+		"../../README.md":                  {"## Updating C3", "/c3:update", "upgrade themselves", "/mcp", "v0.2.1-79", "picked up in place"},
 		"../../docs/USAGE.md":              {"broker bounce", "self-exec", "permission"},
 		"../../docs/DEBUGGING.md":          {"upgrade hint sent conn=", "adapter upgrade: exec", "adapter resumed after upgrade", "upgrade postponed:", "upgrade fallback notice sent conn="},
 		"../../docs/ADAPTERS.md":           {"Provisional", "hello.build", "hello_ack.upgrade", "resume_contract"},

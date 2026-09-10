@@ -53,6 +53,7 @@ type adapterUpgrade struct {
 	read           func(string) (buildidentity.Installed, error)
 }
 type upgradeResumeState struct {
+	Receipts       receiptDiagnostics
 	Contract       string
 	MCP            mcp.ServerSessionState
 	Routes         []ipc.RouteRef
@@ -91,6 +92,10 @@ func (a *adapter) restoreUpgrade(args []string) (*mcp.ServerSessionOptions, erro
 	a.lastAttach, a.lastAttachStableID = state.Attach, state.AttachStableID
 	a.currentStableID, a.currentHandoffEntry = state.StableID, state.Handoff
 	a.initGuidanceChannel = state.Guidance
+	a.receiptDiagnostics = state.Receipts
+	if a.receiptDiagnostics.HostVersion == "" && state.MCP.InitializeParams.ClientInfo != nil {
+		a.receiptDiagnostics.HostVersion = ipc.ReceiptHostVersion(state.MCP.InitializeParams.ClientInfo.Version)
+	}
 	a.upgrade.resumed = true
 	a.dispatched.Store(true)
 	if a.upgrade.wire != nil {
@@ -225,7 +230,7 @@ func (a *adapter) tryUpgrade(hint *ipc.UpgradeHint) string {
 		return "installed binary or MCP contract changed"
 	}
 	a.amu.Lock()
-	state := upgradeResumeState{Contract: upgradeContract(), MCP: u.wire.state, Routes: a.routes, Output: a.outputRoute, Attach: a.lastAttach, AttachStableID: a.lastAttachStableID, Guidance: a.initGuidanceChannel}
+	state := upgradeResumeState{Receipts: a.receiptDiagnostics, Contract: upgradeContract(), MCP: u.wire.state, Routes: a.routes, Output: a.outputRoute, Attach: a.lastAttach, AttachStableID: a.lastAttachStableID, Guidance: a.initGuidanceChannel}
 	a.amu.Unlock()
 	a.idmu.Lock()
 	state.StableID, state.Handoff = a.currentStableID, a.currentHandoffEntry

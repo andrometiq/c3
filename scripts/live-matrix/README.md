@@ -46,9 +46,9 @@ The Go fixture test explicitly skips these unverified records. Do not turn a
 TODO into a positive just to make the test green. The verified 2.1.266 inbox mid-turn enqueue and queued_command records are now
 included in the corpus and recognized by the collector.
 
-This branch's fetch path **consumes on return** and has no receipt token. Fetch
-assertion cells should FAIL the requested stronger contract until receipt mode
-is implemented. The proxy holds the real MCP fetch result before Claude can
+Negotiated fetch reserves rows until the complete matching host tool-result
+receipt confirms the broker-authored group trailer. Unnegotiated fetch retains
+consume-on-return compatibility. The proxy holds the real MCP fetch result before Claude can
 record it and samples the queue. It never invents a token, receipt, transcript,
 or capability report to turn that failure into a pass.
 

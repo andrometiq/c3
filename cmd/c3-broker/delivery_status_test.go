@@ -44,3 +44,40 @@ func TestRunStatusNegotiatedInboxAndHistory(t *testing.T) {
 		}
 	}
 }
+
+func TestRunStatusReceiptShapeDrift(t *testing.T) {
+	for _, entry := range os.Environ() {
+		key, _, _ := strings.Cut(entry, "=")
+		if strings.HasPrefix(key, "C3_") || strings.HasPrefix(key, "CLAUDE_") {
+			t.Setenv(key, "")
+		}
+	}
+	for _, name := range []string{"XDG_RUNTIME_DIR", "XDG_STATE_HOME", "XDG_CONFIG_HOME"} {
+		t.Setenv(name, t.TempDir())
+	}
+	oldHealth, oldClaims, oldSessions := statusFetchHealth, statusFetchClaims, statusFetchSessions
+	t.Cleanup(func() { statusFetchHealth, statusFetchClaims, statusFetchSessions = oldHealth, oldClaims, oldSessions })
+	statusFetchHealth = func() (*ipc.HealthListMsg, error) { return &ipc.HealthListMsg{}, nil }
+	statusFetchClaims = func() (*ipc.ClaimsListMsg, error) { return &ipc.ClaimsListMsg{}, nil }
+	statusFetchSessions = func() ([]ipc.SessionEntry, error) {
+		return []ipc.SessionEntry{{CLI: "claude", PID: 123, ReceiptShapeDrift: "2.1.266"}}, nil
+	}
+	out := captureStdout(t, func() {
+		if err := runStatus(); err != nil {
+			t.Fatal(err)
+		}
+	})
+	want := "receipt shapes may have changed (host 2.1.266): run scripts/live-matrix/run.sh --collect-only --fixtures"
+	if strings.Count(out, want) != 1 {
+		t.Fatal(out)
+	}
+	statusFetchSessions = func() ([]ipc.SessionEntry, error) { return []ipc.SessionEntry{{CLI: "claude", PID: 123}}, nil }
+	out = captureStdout(t, func() {
+		if err := runStatus(); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if strings.Contains(out, "receipt shapes") {
+		t.Fatal("healthy session alarmed")
+	}
+}

@@ -22,10 +22,11 @@ type RenderRoute struct {
 }
 
 type RenderStateMsg struct {
-	Channel string `json:"channel,omitempty"`
-	ChatID  int64  `json:"chat_id,omitempty"`
-	TopicID *int64 `json:"topic_id,omitempty"`
-	Op      Op     `json:"op"`
+	ReceiptShapeDrift string `json:"receipt_shape_drift,omitempty"`
+	Channel           string `json:"channel,omitempty"`
+	ChatID            int64  `json:"chat_id,omitempty"`
+	TopicID           *int64 `json:"topic_id,omitempty"`
+	Op                Op     `json:"op"`
 	RenderRoute
 }
 

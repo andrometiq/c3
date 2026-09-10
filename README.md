@@ -47,7 +47,7 @@ C3 writes the voice note to its durable queue before transcription starts. STT
 runs in a bounded background scheduler, so a provider outage cannot hold the
 Telegram offset or block other messages on that topic. A pending placeholder is
 visible through `fetch_queue`; when transcription finishes, C3 resolves that row
-and delivers it once. Transient download failures retry automatically.
+and offers the final revision for delivery. Transient download failures retry automatically.
 
 When a tool call needs approval, the topic shows the literal command and a real inline
 keyboard:
@@ -168,8 +168,8 @@ It works fine with a single session. The architecture starts to matter once you 
 - **Topic routing and session resume.** Attach a session to a topic once; a resumed session
   silently re-attaches only to its own recorded topic. A fresh session asks before claiming
   anything.
-- **Inbound survives sleeping sessions.** With no render-capable session on a topic, messages
-  go to a durable on-disk queue for later readback instead of being lost.
+- **Inbound survives sleeping sessions.** Messages enter a durable on-disk queue;
+  broker-owned attempts retire negotiated deliveries only after host receipts.
 - **Rich two-way Telegram** — markdown, quote-replies, attachments, edits, reactions, polls,
   and inline buttons.
 - **Voice notes** — C3 persists an honest pending row first, then the bundled STT
@@ -228,7 +228,8 @@ Claude Code applies that preview guardrail to every locally-installed channel pl
 isn't a C3 hack. Without the flag, C3 can use the session's inherited owning-session
 inbox; only transcript-confirmed delivery consumes the queued message.
 That route has no Telegram permission relay or native question answering, and its
-peer transcript shape is verified on Claude Code 2.1.263. If neither route confirms,
+peer user-turn shape is verified on Claude Code 2.1.263; mid-turn peer intake is
+verified on 2.1.266. If neither route confirms,
 inbound stays available through `fetch_queue`. With negotiated fetch receipts,
 rows remain queued until the host records the complete tool result; unconfirmed
 reservations become fetchable again after 60 seconds. Status shows which route is live. Eligible Claude sessions negotiate
@@ -273,7 +274,8 @@ deliberately:
 
 Run `/c3:update` (or `/c3:build` for a source checkout). The final broker bounce
 triggers upgrade hints: compatible open Claude sessions upgrade themselves after
-adapter requests and deliveries settle. Older adapters show a notice to run
+adapter requests and live deliveries settle, so updates are picked up in place by open
+sessions. Sessions on adapters older than v0.2.1-79 show a one-time notice to run
 `/mcp` and reconnect c3. Incompatible contracts and unsupported platforms also
 require reconnect. Broker-side calls can still be canceled by the bounce; see
 [Updating C3](docs/USAGE.md#updating-c3) for the current boundary.

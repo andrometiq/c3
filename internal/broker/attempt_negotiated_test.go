@@ -212,7 +212,7 @@ func TestNegotiatedAuthorityMisses(t *testing.T) {
 func TestNegotiatedFetchBacklogHeldExclusion(t *testing.T) {
 	clearFetchTestEnvironment(t)
 	// G1/P8: "rows inside a negotiated live attempt are invisible to fetch" and counts.
-	b, w, s, frames, ctx := negotiatedFixture(t)
+	_, w, s, frames, ctx := negotiatedFixture(t)
 	negotiatedAppend(t, w, 1, "attempting")
 	w.scheduleAttempt(ctx, false)
 	nextDeliver(t, frames)
@@ -230,7 +230,7 @@ func TestNegotiatedFetchBacklogHeldExclusion(t *testing.T) {
 	if r := <-ch; r.Total != 0 {
 		t.Fatal(r)
 	}
-	if b.attemptingCount(w.key) != 1 {
+	if a := w.liveAttempt(); a == nil || len(a.Members) != 1 {
 		t.Fatal("attempt visibility lost")
 	}
 	w.evaluateAttemptHeld(s)
@@ -349,7 +349,7 @@ func TestNegotiatedRetirementStorageFailure(t *testing.T) {
 	w.handleAttemptResult(resultFor(s, f, "confirmed"))
 	for tries := 1; tries <= 3; tries++ {
 		if tries > 1 {
-			w.retireAttempt()
+			w.retireAttemptToken(f.Token)
 		}
 		a := b.attempts.lookup(f.Token, time.Now())[0]
 		wantOutcome := "open"
@@ -370,7 +370,7 @@ func TestNegotiatedRetirementStorageFailure(t *testing.T) {
 		}
 
 	}
-	w.retireAttempt()
+	w.retireAttemptToken(f.Token)
 	if a := b.attempts.lookup(f.Token, time.Now())[0]; a.RemovalTries != 3 || a.Reason != "storage failure" {
 		t.Fatalf("retirement retried after the three-try limit: %+v", a)
 	}

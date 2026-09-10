@@ -257,6 +257,8 @@ type routeKey struct {
 }
 
 type adapter struct {
+	receiptDiagnostics      receiptDiagnostics // liveMu
+	receiptDriftSent        *ipc.Conn          // liveMu
 	upgrade                 adapterUpgrade
 	deliveryWrites          chan deliveryWrite
 	deliveryWriterOnce      sync.Once
@@ -537,7 +539,8 @@ func (a *adapter) hello() error {
 	}
 	if err := conn.WriteJSON(ipc.HelloMsg{
 		Build: buildidentity.Current(), ResumeContract: upgradeContract(), UpgradeDisabled: !upgradeSupported || a.upgrade.disabled.Load(),
-		Delivery: offer, Op: ipc.OpHello, CLI: "claude", PID: os.Getpid(), CWD: cwd,
+		ReceiptShapeDrift: a.receiptDriftHost(),
+		Delivery:          offer, Op: ipc.OpHello, CLI: "claude", PID: os.Getpid(), CWD: cwd,
 		Capabilities: []string{"claude/channel"},
 		// Conservative fallback for old brokers: probing is also queue-only.
 		CannotRenderChannels: route.State != ipc.RenderCapable,
@@ -1756,6 +1759,13 @@ func (a *adapter) buildMCPServer() *mcp.Server {
 		return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
 			a.dispatched.Store(true)
 			defer a.upgradeNotificationDone(method)
+			if method == "initialize" {
+				if params, ok := req.GetParams().(*mcp.InitializeParams); ok && params.ClientInfo != nil {
+					a.liveMu.Lock()
+					a.receiptDiagnostics.HostVersion = ipc.ReceiptHostVersion(params.ClientInfo.Version)
+					a.liveMu.Unlock()
+				}
+			}
 			if method == "notifications/initialized" {
 				a.deliveryHostInitialized.Store(true)
 				if a.resumedInitialized(method) {
@@ -2662,12 +2672,19 @@ func (a *adapter) currentStableIdentity() (sessionhandoff.Entry, bool) {
 // RecoverSessionResp, whether or not a route was recovered.
 func (a *adapter) setCurrentStableIdentity(entry sessionhandoff.Entry) {
 	a.idmu.Lock()
-	changed := a.currentStableID != entry.StableSessionID
+	previous := a.currentStableID
+	changed := previous != entry.StableSessionID
 	a.currentStableID = entry.StableSessionID
 	a.currentHandoffEntry = entry
 	a.idmu.Unlock()
 	if changed {
 		a.cancelLiveReadbacks()
+	}
+	if changed && previous != "" {
+		a.liveMu.Lock()
+		a.receiptDiagnostics = receiptDiagnostics{HostVersion: a.receiptDiagnostics.HostVersion}
+		a.receiptDriftSent = nil
+		a.liveMu.Unlock()
 	}
 	a.observePermissionTranscriptPath(entry.TranscriptPath)
 }

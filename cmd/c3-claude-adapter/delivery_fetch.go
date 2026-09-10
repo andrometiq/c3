@@ -132,6 +132,7 @@ func (a *adapter) pollFetchReceipts() {
 			a.liveScanMu.Unlock()
 		}
 		if o.confirmed && !o.reporting && time.Now().Before(o.deadline) {
+			a.receiptConfirmed("user/tool_result")
 			o.reporting = true
 			reports = append(reports, o)
 		}

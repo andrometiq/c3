@@ -1505,7 +1505,7 @@ func (w *RouteWorker) evictIfOverCap(qrk queue.RouteKey) {
 	}
 }
 
-// fetchFrameFit answers the only question that may be asked BEFORE a destructive
+// fetchFrameFitReserved answers the only question that may be asked BEFORE a destructive
 // fetch: how many of these records can the response actually carry?
 //
 // It sizes the EXACT frame handleFetchQueue will write — the same struct, the
@@ -1529,13 +1529,9 @@ func (w *RouteWorker) evictIfOverCap(qrk queue.RouteKey) {
 //   - 0 with a non-empty msgs: the FIRST record alone cannot be encoded into any
 //     frame. That is a fact about that record, and the caller must deal with the
 //     record (see handleFetch's ruling) — not with the queue behind it.
-func fetchFrameFit(respID string, remainingHint int, msgs []c3types.Inbound) (int, error) {
-	return fetchFrameFitReserved(respID, remainingHint, msgs, 0)
-}
-
-// fetchFrameFitReserved applies fetchFrameFit's exact sizing with additional
-// response-envelope weight. Observe uses this because it returns the same
-// messages inside a larger response shape.
+//
+// frameReserve accounts for extra response-envelope weight, including observe's
+// larger response shape. Zero sizes the ordinary fetch response.
 func fetchFrameFitReserved(respID string, remainingHint int, msgs []c3types.Inbound, frameReserve int) (int, error) {
 	if frameReserve < 0 {
 		return 0, fmt.Errorf("fetch_queue: invalid negative frame reserve %d", frameReserve)

@@ -105,12 +105,6 @@ func (t *attemptTable) expireLocked(now time.Time) {
 	}
 }
 
-func (t *attemptTable) expire(now time.Time) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	t.expireLocked(now)
-}
-
 func (t *attemptTable) open(a attemptRecord, now time.Time) {
 	t.mu.Lock()
 	defer t.mu.Unlock()

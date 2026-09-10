@@ -287,15 +287,16 @@ type UpgradeHint struct {
 }
 
 type HelloMsg struct {
-	Build           string          `json:"build,omitempty"`
-	ResumeContract  string          `json:"resume_contract,omitempty"`
-	UpgradeDisabled bool            `json:"upgrade_disabled,omitempty"`
-	Delivery        json.RawMessage `json:"delivery,omitempty"`
-	Op              Op              `json:"op"` // = OpHello
-	CLI             string          `json:"cli"`
-	PID             int             `json:"pid"`
-	CWD             string          `json:"cwd"`
-	Capabilities    []string        `json:"capabilities,omitempty"`
+	ReceiptShapeDrift string          `json:"receipt_shape_drift,omitempty"`
+	Build             string          `json:"build,omitempty"`
+	ResumeContract    string          `json:"resume_contract,omitempty"`
+	UpgradeDisabled   bool            `json:"upgrade_disabled,omitempty"`
+	Delivery          json.RawMessage `json:"delivery,omitempty"`
+	Op                Op              `json:"op"` // = OpHello
+	CLI               string          `json:"cli"`
+	PID               int             `json:"pid"`
+	CWD               string          `json:"cwd"`
+	Capabilities      []string        `json:"capabilities,omitempty"`
 
 	// CannotRenderChannels is the legacy delivery gate. New adapters set it true
 	// for both queue_only and probing, so old brokers safely hold unproven routes.
@@ -915,6 +916,7 @@ type ListSessionsReplyMsg struct {
 // SessionEntry is one row of ListSessionsReplyMsg.Sessions. Mirrors
 // what the user would see in the rendered table.
 type SessionEntry struct {
+	ReceiptShapeDrift  string    `json:"receipt_shape_drift,omitempty"`
 	Build              string    `json:"build,omitempty"`
 	Stale              bool      `json:"stale,omitempty"`
 	ConfirmedTransport string    `json:"confirmed_transport,omitempty"`
