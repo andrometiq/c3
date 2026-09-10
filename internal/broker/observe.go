@@ -182,7 +182,7 @@ func (b *Broker) handleObserve(conn *ipc.Conn, stub *Stub, raw []byte) {
 	}
 	job := Job{Kind: JobFetch, Fetch: &FetchJob{
 		Limit: req.Limit, All: all, Ack: false, ResultCh: resultCh,
-		// fetchFrameFit measures a FetchQueueResp. Reserve this response's whole
+		// fetchFrameFitReserved measures a FetchQueueResp. Reserve this response's whole
 		// encoded base so its extra resolved-identity/holder fields cannot turn a
 		// proven-fit peek into an oversized ObserveResp. Deliberate over-reserve:
 		// the fetch envelope remains counted too, keeping future additive fields safe.

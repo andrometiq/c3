@@ -8,11 +8,11 @@ import (
 	"time"
 
 	"github.com/Andrometiq/c3/internal/broker"
+	"github.com/Andrometiq/c3/internal/buildidentity"
 	"github.com/Andrometiq/c3/internal/ipc"
 	"github.com/Andrometiq/c3/internal/mappings"
 	"github.com/Andrometiq/c3/internal/plugin/builtins/stt"
 	"github.com/Andrometiq/c3/internal/plugin/builtins/tts"
-	"github.com/Andrometiq/c3/internal/version"
 )
 
 var (
@@ -36,7 +36,7 @@ func runStatus() error {
 	// Build version of THIS c3-broker binary (the CLI tool). "dev" for an
 	// uninjected local build. The running daemon may differ after a swap-but-not-
 	// yet-restarted update; health.json carries the daemon's own version.
-	fmt.Fprintf(&b, "  version:   %s\n", version.Current())
+	fmt.Fprintf(&b, "  version:   %s\n", buildidentity.Current())
 
 	// Daemon liveness via pid file + flock probe.
 	pidFile, err := broker.PidFilePath()

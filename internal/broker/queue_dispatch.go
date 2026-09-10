@@ -62,7 +62,7 @@ func (b *Broker) handleFetchQueue(conn *ipc.Conn, stub *Stub, raw []byte) {
 	// The correlation id is echoed VERBATIM into the same frame as the messages,
 	// and docs/ADAPTERS.md tells adapter authors to generate it themselves without
 	// publishing any length bound — so it is caller-chosen weight inside a
-	// 4 MiB frame. The worker counts it against the batch budget (fetchFrameFit),
+	// 4 MiB frame. The worker counts it against the batch budget (fetchFrameFitReserved),
 	// which is enough to keep the response sendable; this bound handles the
 	// degenerate end of the same lever, where the id alone would leave no room for
 	// any message and every fetch would come back empty for a reason the caller
@@ -100,7 +100,7 @@ func (b *Broker) handleFetchQueue(conn *ipc.Conn, stub *Stub, raw []byte) {
 	// Do NOT discard this error. A refused write puts nothing on the wire, so the
 	// adapter sits until its own timeout with no explanation anywhere — the worst
 	// shape a failure can take. The batch is sized against this exact response
-	// before anything is consumed (RouteWorker.fetchFrameFit), so an oversize frame
+	// before anything is consumed (fetchFrameFitReserved), so an oversize frame
 	// can no longer reach here; what remains is transport failure (a dead peer),
 	// and on the Ack path those messages HAVE been consumed. Say so plainly —
 	// they are recoverable from the queue's retention window, but only by someone

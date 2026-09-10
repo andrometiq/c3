@@ -67,11 +67,17 @@ func TestReceiptDriftConsecutiveLiveExpiries(t *testing.T) {
 	}
 	expire(true, unknown)
 	expire(true, unknown)
+	hint := ipc.ReceiptShapeHint("2.1.266")
+	if strings.Contains(string(logs.Bytes()), hint) {
+		t.Fatal("drift hint logged after only two expiries")
+	}
 	// A successful fetch is not a live attempt and does not break this streak.
 	a.receiptConfirmed("user/tool_result")
 	expire(true, unknown)
+	if !a.receiptDiagnostics.Drift || strings.Count(string(logs.Bytes()), hint) != 1 {
+		t.Fatalf("third expiry did not immediately log the drift hint: %s", logs.Bytes())
+	}
 	expire(true, unknown)
-	hint := ipc.ReceiptShapeHint("2.1.266")
 	if strings.Count(string(logs.Bytes()), hint) != 1 || strings.Contains(string(logs.Bytes()), "private text") {
 		t.Fatalf("logs=%s", logs.Bytes())
 	}

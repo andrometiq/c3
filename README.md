@@ -273,11 +273,13 @@ deliberately:
 ## Updating C3
 
 Run `/c3:update` (or `/c3:build` for a source checkout). The final broker bounce
-triggers upgrade hints: compatible open Claude sessions upgrade themselves after
-adapter requests and live deliveries settle, so updates are picked up in place by open
-sessions. Sessions on adapters older than v0.2.1-79 show a one-time notice to run
-`/mcp` and reconnect c3. Incompatible contracts and unsupported platforms also
-require reconnect. Broker-side calls can still be canceled by the bounce; see
+compares running and installed build identities. Matching builds need no upgrade.
+When builds differ and self-exec is enabled with a compatible contract, open
+Claude sessions upgrade themselves after adapter requests and live deliveries
+settle, so updates are picked up in place. Sessions that cannot self-exec or lack
+a compatible contract receive a one-time notice to run `/mcp` and reconnect c3.
+Release version ordering does not select the upgrade path. Broker-side calls can
+still be canceled by the bounce; see
 [Updating C3](docs/USAGE.md#updating-c3) for the current boundary.
 
 ## Releases

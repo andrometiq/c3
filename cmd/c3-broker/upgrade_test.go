@@ -52,8 +52,8 @@ func TestUpgradeStatusBuild(t *testing.T) {
 
 func TestUpgradeDocumentationAndLogs(t *testing.T) {
 	for path, wants := range map[string][]string{
-		"../../README.md":                  {"## Updating C3", "/c3:update", "upgrade themselves", "/mcp", "v0.2.1-79", "picked up in place"},
-		"../../docs/USAGE.md":              {"broker bounce", "self-exec", "permission"},
+		"../../README.md":                  {"## Updating C3", "/c3:update", "upgrade themselves", "/mcp", "compatible contract", "build identities", "picked up in place"},
+		"../../docs/USAGE.md":              {"broker bounce", "self-exec", "permission", "compares build identities, not release version ordering", "without a compatible contract"},
 		"../../docs/DEBUGGING.md":          {"upgrade hint sent conn=", "adapter upgrade: exec", "adapter resumed after upgrade", "upgrade postponed:", "upgrade fallback notice sent conn="},
 		"../../docs/ADAPTERS.md":           {"Provisional", "hello.build", "hello_ack.upgrade", "resume_contract"},
 		"../../DECISIONS.md":               {"D037: Seamless adapter upgrade by self-exec with MCP resume"},

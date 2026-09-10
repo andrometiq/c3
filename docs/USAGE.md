@@ -300,8 +300,12 @@ Claude adapter. On Linux and macOS, compatible adapters wait up to 30 seconds
 for requests, permission relays, stdout writes, and push acknowledgements or
 live attempt expiry, then self-exec with the same PID and stdio descriptors. They
 restore the initialized MCP state locally and re-offer delivery when ready.
-Three unsuccessful drain windows require manual reconnect. Adapters older than v0.2.1-79,
-Windows, and changed MCP contracts receive one system notice to run `/mcp` and
+Three unsuccessful drain windows require manual reconnect. Upgrade selection
+compares build identities, not release version ordering: matching builds need no
+upgrade. For a different installed build, in-place pickup requires self-exec to
+be enabled and the advertised MCP contract to match. Adapters missing a build
+identity, with self-exec disabled (including Windows or exhausted retries), or
+without a compatible contract receive one system notice to run `/mcp` and
 reconnect c3 (or restart the session). `/reload-plugins` does not restart an
 unchanged MCP command. Fetch receipt reservations release on reconnect and stay
 durable for another pull; they can therefore duplicate on retry. The reconnect notice is:

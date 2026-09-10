@@ -59,6 +59,7 @@ func (o *receiptObservation) scan(path string, offset int64, token string, disca
 
 // liveMu held. Fetch confirmations log the first record too, but fetch expiry
 // does not participate in the consecutive LIVE attempt alarm.
+// Fetch confirmation deliberately preserves the live streak because its tool-result trailer does not prove live receipt shapes are still recognized.
 func (a *adapter) receiptConfirmed(record string) {
 	d := &a.receiptDiagnostics
 	if d.FirstRecord == "" && record != "" {
