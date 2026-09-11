@@ -652,3 +652,49 @@ func TestControlledRestartAdministrativeReplyPrecedesTeardown(t *testing.T) {
 	restartWait(t, handled)
 	restartWait(t, done)
 }
+
+func TestControlledRestartPermissionTapReportsActualCancellation(t *testing.T) {
+	clearFetchTestEnvironment(t)
+	b, fc := restartBroker(t, nil)
+	s, c := bindingSession(t, b, drainSrc(), "claude", os.Getpid(), t.TempDir())
+	frames := restartFrames(t, c)
+	registerRestartPerm(t, b, s)
+	if !b.resolvePerm(drainSrc(), restartTap()) {
+		t.Fatal("initial verdict refused")
+	}
+	restartFrame(t, frames)
+	b.Perms.register(&pendingPerm{requestID: "cancelled", route: drainSrc(), owner: s, messageID: 71})
+	b.Perms.register(&pendingPerm{requestID: "expired", route: drainSrc(), owner: s, createdAt: time.Now().Add(-2 * permExpiryTTL)})
+	b.sweepExpiredPerms()
+	b.BeginControlledRestart()
+	b.cancelRestartPrompts()
+	for _, tc := range []struct{ id, want string }{{"pending-perm", permAnswerGoneText}, {"unknown", permAnswerGoneText}, {"expired", permAnswerGoneText}, {"cancelled", restartPermTap}} {
+		tap := restartTap()
+		tap.Data = permDenyData(tc.id)
+		b.resolvePerm(drainSrc(), tap)
+		answers := fc.answersSnapshot()
+		if got := answers[len(answers)-1].Text; got != tc.want {
+			t.Fatalf("%s: %q, want %q", tc.id, got, tc.want)
+		}
+	}
+	assertNoRestartFrame(t, frames)
+	if restartPermRefused != "C3 is restarting; new permission relays are paused. This request may still be waiting at the laptop." {
+		t.Fatal(restartPermRefused)
+	}
+}
+
+func TestControlledRestartAbandonLeavesPromptsUncancelled(t *testing.T) {
+	clearFetchTestEnvironment(t)
+	b, fc := restartBroker(t, nil)
+	p := &pendingPerm{requestID: "pending", route: drainSrc()}
+	b.Perms.register(p)
+	b.BeginControlledRestart()
+	done := make(chan struct{})
+	go func() { b.DrainRequests(); close(done) }()
+	b.AbandonControlledRestart()
+	restartWait(t, done)
+	b.cancelRestartPrompts()
+	if !b.Perms.has("pending") || p.cancelled.Load() || len(fc.sendRepliesSnapshot()) != 0 {
+		t.Fatal("abandoned drain cancelled a relay")
+	}
+}

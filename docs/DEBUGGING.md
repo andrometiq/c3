@@ -239,7 +239,9 @@ The gate covers self-exec only; broker shutdown still cancels broker-side calls.
 
 A C3-controlled restart can wait 60 seconds for open questions and permission
 relays, then spend up to five seconds attempting cancellation notices. It holds
-the singleton until exit; the overall watchdog is 90 seconds. Repeated restart
+the singleton until exit; the broker watchdog is 90 seconds, armed at first
+intent even during blocked channel startup. The client exit wait is deliberately
+91 seconds so it outlives that watchdog. Repeated restart
 requests do not reset the clock. Notification failures log the kind, existing ID
 and original route, without prompt bodies. A missing notice does not mean the
 relay remains answerable: cancellation is local and there is no later retry.
@@ -253,5 +255,10 @@ The forced-exit log is:
 An unsupported old broker is left running and the restart command reports that a
 manual restart is needed; it does not fall back to SIGTERM. An exchange failure
 or old-process exit timeout prevents successor startup. External SIGTERM/SIGINT
-still take the immediate shutdown path with its 15-second watchdog. See
+preempt an ongoing controlled drain and take the immediate shutdown path with
+its 15-second watchdog. Configuration restart failure also makes `setup finish`
+fail without printing “Setup complete”. Post-cap permission taps report cancellation
+only for relays actually cancelled at the cap; already-resolved and unknown IDs
+retain the ordinary inactive feedback. New relay refusal says the request
+“may still be waiting at the laptop”; C3 cannot establish its current host state. See
 [Updating C3](USAGE.md#updating-c3) for the scope and limitations.

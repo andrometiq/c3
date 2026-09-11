@@ -15,18 +15,21 @@ const (
 	RestartPromptGrace               = 60 * time.Second
 	RestartCancellationNoticeTimeout = 5 * time.Second
 	restartAskRefused                = "C3 is restarting; new questions are paused — ask again after reconnect."
-	restartPermRefused               = "C3 is restarting; new permission relays are paused. This request is still waiting at the laptop."
+	restartPermRefused               = "C3 is restarting; new permission relays are paused. This request may still be waiting at the laptop."
 	restartAskCancelled              = "C3 is restarting; this request was cancelled — ask again."
 	restartPermCancelled             = "C3 is restarting; this permission relay was cancelled. The request may still be waiting at the laptop — cancel it there and ask again."
 	restartPermTap                   = "C3 is restarting; this permission relay was cancelled. Check the requesting session."
 )
 
 type promptDrain struct {
-	mu       sync.Mutex
-	draining atomic.Bool
-	sealed   atomic.Bool
-	first    time.Time
-	active   int
+	mu        sync.Mutex
+	draining  atomic.Bool
+	sealed    atomic.Bool
+	first     time.Time
+	active    int
+	ctx       context.Context
+	cancel    context.CancelFunc
+	abandoned bool
 }
 
 func (d *promptDrain) begin(registration bool) bool {
@@ -46,10 +49,30 @@ func (b *Broker) BeginControlledRestart() time.Time {
 	b.prompts.mu.Lock()
 	defer b.prompts.mu.Unlock()
 	if !b.prompts.draining.Load() {
+		b.prompts.ctx, b.prompts.cancel = context.WithCancel(context.Background())
 		b.prompts.first = time.Now()
 		b.prompts.draining.Store(true)
 	}
 	return b.prompts.first
+}
+
+// AbandonControlledRestart leaves prompt state to ordinary process teardown.
+func (b *Broker) AbandonControlledRestart() {
+	b.prompts.mu.Lock()
+	defer b.prompts.mu.Unlock()
+	b.prompts.abandoned = true
+	if b.prompts.cancel != nil {
+		b.prompts.cancel()
+	}
+}
+
+func (b *Broker) restartContext() context.Context {
+	b.prompts.mu.Lock()
+	defer b.prompts.mu.Unlock()
+	if b.prompts.ctx == nil {
+		return context.Background()
+	}
+	return b.prompts.ctx
 }
 
 func (b *Broker) DrainRequests() {
@@ -60,8 +83,13 @@ func (b *Broker) DrainRequests() {
 }
 
 func (b *Broker) drainRequestsUntil(deadline time.Time, now func() time.Time, ticks <-chan time.Time) {
+	ctx := b.restartContext()
 	for now().Before(deadline) {
 		b.prompts.mu.Lock()
+		if b.prompts.abandoned {
+			b.prompts.mu.Unlock()
+			return
+		}
 		b.Asks.mu.Lock()
 		b.Perms.mu.Lock()
 		empty := len(b.Asks.m)+len(b.Perms.m)+b.prompts.active == 0
@@ -74,7 +102,11 @@ func (b *Broker) drainRequestsUntil(deadline time.Time, now func() time.Time, ti
 		if empty {
 			return
 		}
-		<-ticks
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticks:
+		}
 	}
 	b.cancelRestartPrompts()
 }
@@ -94,6 +126,10 @@ func (b *Broker) cancelRestartPrompts() {
 func (b *Broker) cancelRestartPromptsWithin(budget time.Duration) {
 	var notices []restartNotice
 	b.prompts.mu.Lock()
+	if b.prompts.abandoned {
+		b.prompts.mu.Unlock()
+		return
+	}
 	b.prompts.sealed.Store(true)
 	b.Asks.mu.Lock()
 	for id, p := range b.Asks.m {
@@ -106,13 +142,17 @@ func (b *Broker) cancelRestartPromptsWithin(budget time.Duration) {
 	for id, p := range b.Perms.m {
 		if !p.settled {
 			p.cancelled.Store(true)
+			if b.Perms.cancelled == nil {
+				b.Perms.cancelled = make(map[string]RouteKey)
+			}
+			b.Perms.cancelled[id] = p.route
 			notices = append(notices, restartNotice{"permission", id, p.route, p.messageID, permPromptText(p.toolName, p.preview) + "\n\n" + restartPermCancelled, nil})
 		}
 		delete(b.Perms.m, id)
 	}
 	b.Perms.mu.Unlock()
 	b.prompts.mu.Unlock()
-	ctx, cancel := context.WithTimeout(context.Background(), budget)
+	ctx, cancel := context.WithTimeout(b.restartContext(), budget)
 	defer cancel()
 	jobs := make(chan restartNotice)
 	done := make(chan restartNotice, len(notices))
@@ -171,7 +211,7 @@ func (b *Broker) notifyRestart(ctx context.Context, n restartNotice) {
 }
 
 func (b *Broker) renderRestartNotice(n restartNotice) {
-	b.renderRestartNoticeContext(context.Background(), n)
+	b.renderRestartNoticeContext(b.restartContext(), n)
 }
 
 func (b *Broker) renderRestartNoticeContext(ctx context.Context, n restartNotice) {
@@ -281,7 +321,7 @@ func (r *permRegistry) takeCallback(id string, route RouteKey, messageID int64) 
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.drain != nil && r.drain.sealed.Load() {
-		return nil, restartPermTap
+		return nil, r.cancelledCallbackText(id, route)
 	}
 	p := r.m[id]
 	if p == nil || p.settled {
@@ -314,4 +354,18 @@ func (b *Broker) handleBrokerRestart(conn *ipc.Conn, stub *Stub) {
 	if err := conn.WriteJSON(reply); err != nil {
 		log.Printf("controlled restart reply failed: %v", err)
 	}
+}
+
+// Caller holds the registry lock. This bounded set records only this process's
+// cap cancellations; it is not persisted or used for recovery.
+func (r *permRegistry) cancelledCallbackText(id string, route RouteKey) string {
+	if original, ok := r.cancelled[id]; ok && original == route {
+		return restartPermTap
+	}
+	return permAnswerGoneText
+}
+func (r *permRegistry) afterRestartCallback(id string, route RouteKey) string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.cancelledCallbackText(id, route)
 }

@@ -26,6 +26,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sync"
 	"syscall"
 	"time"
 
@@ -473,13 +474,13 @@ func runDaemon() (err error) {
 
 	sigC := make(chan os.Signal, 1)
 	signal.Notify(sigC, append([]os.Signal{syscall.SIGTERM, syscall.SIGINT}, osutil.ReloadSignals()...)...)
-	restartC := make(chan struct{}, 1)
+	intent := newRestartIntent()
+	defer intent.stop()
 	requestRestart := func() {
-		br.BeginControlledRestart()
-		select {
-		case restartC <- struct{}{}:
-		default:
-		}
+		intent.request(br.BeginControlledRestart, controlledRestartWatchdog, func() {
+			log.Print(controlledRestartWatchdogText)
+			os.Exit(exitOK)
+		})
 	}
 	br.RestartRequested = requestRestart
 	br.StartUpdateChecker(requestRestart)
@@ -533,40 +534,38 @@ func runDaemon() (err error) {
 	}
 	fmt.Fprintf(os.Stderr, "c3-broker: listening on %s (pid %d)\n", sockPath, os.Getpid())
 
+	reload := func(_ os.Signal) {
+		// Config reload — re-read mappings.json from disk and swap
+		// the in-memory pointer. The /c3:reload-config slash command
+		// sends this. Replaces the old /c3:restart-broker bounce
+		// (which killed the adapter as a side effect — see
+		// 2026-05-14 RESUME notes).
+		newMF, err := mappings.Read(mfPath)
+		if err != nil {
+			log.Printf("SIGHUP: reload %s failed: %v — keeping existing config", mfPath, err)
+			return
+		}
+		if err := newMF.Validate(); err != nil {
+			log.Printf("SIGHUP: validate %s failed: %v — keeping existing config", mfPath, err)
+			return
+		}
+		br.SetMappings(newMF)
+		log.Printf("SIGHUP: reloaded mappings from %s (channels=%d, mappings=%d, plugins=%d)",
+			mfPath, len(newMF.Channels), len(newMF.Mappings), len(newMF.Plugins))
+	}
+	// Both paths share one teardown; signal preemption never runs it twice.
+	var teardownOnce sync.Once
+	teardown := func() { teardownOnce.Do(func() { srv.Stop(); br.Shutdown() }) }
 	for {
-		var sig os.Signal
-		select {
-		case <-restartC:
-			timeout := time.Until(br.BeginControlledRestart().Add(controlledRestartWatchdog))
-			if !runShutdown(func() { shutdownControlledBroker(br, srv.Stop) }, timeout) {
-				log.Print(controlledRestartWatchdogText)
-				os.Exit(exitOK)
+		sig := nextRestartEvent(sigC, intent.events, reload)
+		if sig == nil {
+			sig = awaitControlledShutdown(sigC, func() { br.DrainRequests(); teardown() }, func() { intent.stop(); br.AbandonControlledRestart() }, reload)
+			if sig == nil {
+				return nil
 			}
-			return nil
-		case sig = <-sigC:
 		}
-
-		if osutil.IsReloadSignal(sig) {
-			// Config reload — re-read mappings.json from disk and swap
-			// the in-memory pointer. The /c3:reload-config slash command
-			// sends this. Replaces the old /c3:restart-broker bounce
-			// (which killed the adapter as a side effect — see
-			// 2026-05-14 RESUME notes).
-			newMF, err := mappings.Read(mfPath)
-			if err != nil {
-				log.Printf("SIGHUP: reload %s failed: %v — keeping existing config", mfPath, err)
-				continue
-			}
-			if err := newMF.Validate(); err != nil {
-				log.Printf("SIGHUP: validate %s failed: %v — keeping existing config", mfPath, err)
-				continue
-			}
-			br.SetMappings(newMF)
-			log.Printf("SIGHUP: reloaded mappings from %s (channels=%d, mappings=%d, plugins=%d)",
-				mfPath, len(newMF.Channels), len(newMF.Mappings), len(newMF.Plugins))
-			continue
-		}
-		// SIGTERM / SIGINT — shut down.
+		intent.stop()
+		br.AbandonControlledRestart()
 		log.Printf("received signal=%v, shutting down", sig)
 		break
 	}
@@ -586,7 +585,7 @@ func runDaemon() (err error) {
 	// bounded forced exit is therefore strictly better than a wedged drain, which
 	// keeps the singleton flock and strands auto-update (the freshly installed
 	// binary cannot start while the old process holds the lock).
-	if !runShutdown(func() { srv.Stop(); br.Shutdown() }, shutdownWatchdog) {
+	if !runShutdown(teardown, shutdownWatchdog) {
 		log.Printf("c3-broker: graceful shutdown did not complete within %s — forcing exit(0). Loss-free by design: the durable queue + offset watermark redeliver the in-flight tail on restart (same guarantee as kill -9).", shutdownWatchdog)
 		os.Exit(exitOK)
 	}

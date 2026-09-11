@@ -9,6 +9,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Andrometiq/c3/internal/broker"
@@ -16,7 +17,11 @@ import (
 	"github.com/Andrometiq/c3/internal/osutil"
 )
 
-const controlledRestartWatchdog = 90 * time.Second
+const (
+	controlledRestartWatchdog        = 90 * time.Second
+	controlledRestartExchangeTimeout = 2 * time.Second
+	controlledRestartExitTimeout     = 91 * time.Second
+)
 const controlledRestartWatchdogText = "c3-broker: controlled restart exceeded 90s; forcing exit. Some request results or cancellation notices may not have been delivered. Check the requesting session."
 const unsupportedControlledRestart = "The running broker does not support controlled restart. It was left running; restart it manually to activate the installed build. Pending prompts are not protected during that manual restart."
 
@@ -77,7 +82,7 @@ func stopBrokerForControlledRestart() (bool, string) {
 	if err != nil {
 		return false, err.Error()
 	}
-	c, err := net.DialTimeout("unix", path, time.Until(started.Add(2*time.Second)))
+	c, err := net.DialTimeout("unix", path, time.Until(started.Add(controlledRestartExchangeTimeout)))
 	if err != nil {
 		// Only a missing socket establishes that there is no broker to stop.
 		if errors.Is(err, os.ErrNotExist) {
@@ -100,10 +105,10 @@ func stopBrokerForControlledRestart() (bool, string) {
 		c.Close()
 		return false, "controlled restart: malformed broker pid"
 	}
-	if err = requestControlledRestart(c, started.Add(2*time.Second)); err != nil {
+	if err = requestControlledRestart(c, started.Add(controlledRestartExchangeTimeout)); err != nil {
 		return false, err.Error()
 	}
-	if !waitBrokerExit(pid, started.Add(controlledRestartWatchdog+time.Second), osutil.ProcessSignalable) {
+	if !waitBrokerExit(pid, started.Add(controlledRestartExitTimeout), osutil.ProcessSignalable) {
 		return false, fmt.Sprintf("broker (pid %d) did not exit after the controlled restart watchdog; successor was not started", pid)
 	}
 	return true, ""
@@ -123,4 +128,68 @@ func shutdownControlledBroker(b *broker.Broker, stop func()) {
 	b.DrainRequests()
 	stop()
 	b.Shutdown()
+}
+
+// The timer is armed by intent, independently of startup and event dispatch.
+type restartIntent struct {
+	mu      sync.Mutex
+	timer   *time.Timer
+	stopped bool
+	events  chan struct{}
+}
+
+func newRestartIntent() *restartIntent { return &restartIntent{events: make(chan struct{}, 1)} }
+func (r *restartIntent) request(begin func() time.Time, budget time.Duration, expire func()) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.stopped || r.timer != nil {
+		return
+	}
+	first := begin()
+	r.timer = time.AfterFunc(time.Until(first.Add(budget)), expire)
+	r.events <- struct{}{}
+}
+func (r *restartIntent) stop() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.stopped = true
+	if r.timer != nil {
+		r.timer.Stop()
+	}
+}
+
+// Recheck signals after a competing event wins: select alone randomizes ties.
+func nextRestartEvent(signals <-chan os.Signal, event <-chan struct{}, reload func(os.Signal)) os.Signal {
+	ready := false
+	for {
+		var sig os.Signal
+		select {
+		case sig = <-signals:
+		default:
+			if ready {
+				return nil
+			}
+			select {
+			case sig = <-signals:
+			case <-event:
+				ready = true
+				continue
+			}
+		}
+		if osutil.IsReloadSignal(sig) {
+			reload(sig)
+			continue
+		}
+		return sig
+	}
+}
+
+func awaitControlledShutdown(signals <-chan os.Signal, shutdown func(), abandon func(), reload func(os.Signal)) os.Signal {
+	done := make(chan struct{})
+	go func() { shutdown(); close(done) }()
+	sig := nextRestartEvent(signals, done, reload)
+	if sig != nil {
+		abandon()
+	}
+	return sig
 }

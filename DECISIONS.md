@@ -10,7 +10,10 @@ rulings and rationale, never private operational details.
 **Decision:** C3-controlled restarts close prompt and push admission, wait up to
 60 seconds for live prompts and admitted operations, then cancel remaining C3
 requests. A shared five-second notification budget precedes ordinary teardown;
-the controlled watchdog is 90 seconds from the first intent. IPC and channels
+the controlled watchdog is armed at first intent, independently of startup and
+event dispatch, for 90 seconds. SIGTERM/SIGINT preempt any controlled drain,
+abandon it without cancelling pending prompts, and select ordinary teardown
+with its 15-second watchdog. Ready signals take priority over restart intent. IPC and channels
 remain available during the grace period. OS termination retains the 15-second
 master shutdown path, and SIGHUP remains reload-only.
 
@@ -26,14 +29,18 @@ Sixty seconds gives a person time to read and tap. The 90-second watchdog covers
 eight for workers, leaving four seconds for remaining teardown. Channel calls
 can still wedge, so the watchdog is necessary. The client handshake/request has
 a two-second total deadline and old-process exit waits until 91 seconds from
-initiation; failure prevents successor startup.
+initiation, deliberately outliving the broker watchdog; failure prevents successor
+startup and propagates through `setup finish` without reporting completion.
 
 Cancellation removes local authority before notification. Notices use the stored
 original route, clear buttons, preserve prompt context and render plain text.
 Failed edits get one reply attempt; deadline failures get no persistence or retry.
 C3 closes only its permission relay, not the host's underlying request. An already
 issued result is not described as cancelled, and socket success is not evidence
-of host acceptance. Ordinary stale-button and native-ID-reuse gaps remain.
+of host acceptance. Post-cap permission feedback uses only the bounded in-memory
+set of relays actually cancelled, so a previously issued verdict is never called
+cancelled. Refusal says a host request “may still be waiting”, since its current
+state is not established. Ordinary stale-button and native-ID-reuse gaps remain.
 
 Inbound durability, attachment recovery and adapter self-exec are separate
 contracts. See the [roadmap](ROADMAP.md) for wider work and

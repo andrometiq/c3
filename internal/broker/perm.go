@@ -118,9 +118,10 @@ type pendingPerm struct {
 // requestID. Mutex-guarded: register runs on the connection handler goroutine,
 // resolvePerm on a route worker goroutine.
 type permRegistry struct {
-	drain *promptDrain
-	mu    sync.Mutex
-	m     map[string]*pendingPerm
+	cancelled map[string]RouteKey
+	drain     *promptDrain
+	mu        sync.Mutex
+	m         map[string]*pendingPerm
 }
 
 type permTakeResult uint8
@@ -411,15 +412,12 @@ func (b *Broker) resolvePerm(route RouteKey, cb *c3types.CallbackEvent) bool {
 		return false
 	}
 	if !b.prompts.begin(false) {
-		b.answerPermCallback(route, cb.CallbackID, restartPermTap, false)
+		b.answerPermCallback(route, cb.CallbackID, b.Perms.afterRestartCallback(requestID, route), false)
 		return false
 	}
 	defer b.prompts.end()
 	p, reason := b.Perms.takeCallback(requestID, route, cb.MessageID)
 	if p == nil {
-		if b.prompts.sealed.Load() {
-			reason = restartPermTap
-		}
 		b.answerPermCallback(route, cb.CallbackID, reason, false)
 		return false
 	}

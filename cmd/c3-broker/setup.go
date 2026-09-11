@@ -358,7 +358,9 @@ func runSetupInteractive() error {
 	// SIGHUP is NOT enough after a token change — the telegram channel is
 	// initialized at broker start (see /c3:reload-config), so stop + respawn.
 	fmt.Println()
-	restartBrokerForNewConfig()
+	if err := restartBrokerForNewConfig(); err != nil {
+		return err
+	}
 
 	fmt.Println()
 	fmt.Println(postSetupWhatNow(host))
@@ -616,7 +618,9 @@ func runSetupFinish(args []string) error {
 	}
 
 	fmt.Println()
-	restartBrokerForNewConfig()
+	if err := restartBrokerForNewConfig(); err != nil {
+		return err
+	}
 
 	fmt.Println()
 	fmt.Println(postSetupWhatNow(host))
@@ -1429,14 +1433,14 @@ func ensureBrokerUp() {
 // ensure one is up) so the config setup just wrote is what's actually
 // live. A SIGHUP reload is NOT sufficient after a token change — the
 // telegram channel is initialized at broker start.
-func restartBrokerForNewConfig() {
+func restartBrokerForNewConfig() error {
 	if stopped, note := stopBrokerForControlledRestartFn(); stopped {
 		fmt.Println("Restarting the C3 broker with the new config...")
 	} else if note != "" {
-		fmt.Fprintln(os.Stderr, note)
-		return
+		return fmt.Errorf("configuration restart: %s", note)
 	}
 	ensureBrokerUpFn()
+	return nil
 }
 
 // ---------------------------------------------------------------------------

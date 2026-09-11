@@ -1199,15 +1199,19 @@ Delivery can fail or wedge; local cancellation remains authoritative even if no
 notice arrives. There is no persistence, resumption or later retry. An already
 issued answer/verdict is not labelled cancelled; a successful socket write does
 not prove host acceptance. The controlled shutdown watchdog forces exit after
-90 seconds from the first restart intent; duplicate intent does not extend it.
+90 seconds from the first restart intent, armed by the callback even if channel
+startup is blocked; duplicate intent does not extend it.
 The administrative client allows two seconds for its entire exchange and waits
-up to 91 seconds from initiation for the old process to exit. A failed exchange
-or exit timeout prevents it from starting a successor.
+up to 91 seconds from initiation for the old process to exit, deliberately
+outliving the broker’s 90-second watchdog. A failed exchange
+or exit timeout prevents it from starting a successor. Configuration restart
+failures also fail `setup finish`; it does not print “Setup complete”.
 
 An older running broker that does not support controlled restart is left running
 and the command fails visibly. Manual restart is needed to activate the installed
 build in that case, and pending prompts have no new protection during that manual
-restart. SIGTERM/SIGINT retain immediate IPC teardown and the 15-second watchdog;
+restart. SIGTERM/SIGINT preempt an ongoing controlled drain without cancelling
+its pending prompts, then take immediate IPC teardown and the 15-second watchdog;
 reboot, crash, OOM and external process termination receive no new prompt
 protection. SIGHUP remains a configuration reload.
 

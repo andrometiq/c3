@@ -283,7 +283,9 @@ pause new prompts and live pushes, then wait up to 60 seconds for open prompts.
 At the cap they cancel unanswered C3 requests and attempt notices on their original
 routes. Cancelling a permission relay cannot cancel the host request at the laptop.
 Notices can fail, with no later retry; local cancellation still takes effect.
-Controlled shutdown has a 90-second watchdog. OS termination and crashes retain
+Controlled shutdown has a 90-second watchdog armed at first intent; the client
+waits up to 91 seconds for exit so it outlives that watchdog. SIGTERM/SIGINT
+preempt a controlled drain and use ordinary shutdown. OS termination and crashes retain
 the existing behavior. Older brokers reject the new restart request visibly.
 See [Updating C3](docs/USAGE.md#updating-c3) for the full boundary.
 
