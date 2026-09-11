@@ -6,6 +6,7 @@ import (
 	"log"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/Andrometiq/c3/internal/c3types"
@@ -79,6 +80,7 @@ const permNoOperatorHint = "⚠️ No operator is DM-paired yet — Allow/Deny t
 // resolve/expiry edit can RETAIN the original request context (what was asked)
 // and append a timestamped verdict line, rather than collapsing the message.
 type pendingPerm struct {
+	cancelled atomic.Bool
 	requestID string
 	route     RouteKey
 	toolName  string
@@ -116,8 +118,9 @@ type pendingPerm struct {
 // requestID. Mutex-guarded: register runs on the connection handler goroutine,
 // resolvePerm on a route worker goroutine.
 type permRegistry struct {
-	mu sync.Mutex
-	m  map[string]*pendingPerm
+	drain *promptDrain
+	mu    sync.Mutex
+	m     map[string]*pendingPerm
 }
 
 type permTakeResult uint8
@@ -140,6 +143,9 @@ func newPermRegistry() *permRegistry {
 func (r *permRegistry) register(p *pendingPerm) (evicted *pendingPerm, ok bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.drain != nil && r.drain.sealed.Load() {
+		return nil, false
+	}
 	if _, exists := r.m[p.requestID]; exists {
 		return nil, false
 	}
@@ -177,6 +183,9 @@ func (r *permRegistry) evictOldestLocked() *pendingPerm {
 func (r *permRegistry) sweepExpired(now time.Time, ttl time.Duration) []*pendingPerm {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.drain != nil && r.drain.sealed.Load() {
+		return nil
+	}
 	var expired []*pendingPerm
 	for id, p := range r.m {
 		if now.Sub(p.createdAt) >= ttl {
@@ -228,6 +237,9 @@ func (r *permRegistry) has(requestID string) bool {
 func (r *permRegistry) take(requestID string) (*pendingPerm, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.drain != nil && r.drain.sealed.Load() {
+		return nil, false
+	}
 	p, ok := r.m[requestID]
 	if ok && p.settled {
 		return nil, false
@@ -244,6 +256,9 @@ func (r *permRegistry) take(requestID string) (*pendingPerm, bool) {
 func (r *permRegistry) takeOwned(requestID string, stub *Stub, outcome string) (*pendingPerm, permTakeResult) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.drain != nil && r.drain.sealed.Load() {
+		return nil, permTakeMiss
+	}
 	p, ok := r.m[requestID]
 	if !ok {
 		return nil, permTakeMiss
@@ -264,6 +279,10 @@ func (r *permRegistry) takeOwned(requestID string, stub *Stub, outcome string) (
 }
 
 func (b *Broker) handlePermissionSettled(_ *ipc.Conn, stub *Stub, raw []byte) {
+	if !b.prompts.begin(false) {
+		return
+	}
+	defer b.prompts.end()
 	var msg ipc.PermissionSettledMsg
 	if err := json.Unmarshal(raw, &msg); err != nil {
 		log.Printf("perm settled: malformed permission_settled: %v", err)
@@ -391,39 +410,17 @@ func (b *Broker) resolvePerm(route RouteKey, cb *c3types.CallbackEvent) bool {
 		b.answerPermCallback(route, cb.CallbackID, permAnswerNotAuthorizedText, true)
 		return false
 	}
-	p, ok := b.Perms.take(requestID)
-	if !ok {
-		// Unknown / already-resolved / expired.
-		b.answerPermCallback(route, cb.CallbackID, permAnswerGoneText, false)
+	if !b.prompts.begin(false) {
+		b.answerPermCallback(route, cb.CallbackID, restartPermTap, false)
 		return false
 	}
-	if p.route != route {
-		// Tap arrived on a different route than the prompt was sent to — re-register
-		// and fall through (mirrors resolveAskDone's defensive re-register).
-		// registerPerm, not the raw registry call: at the size cap a re-register
-		// evicts the oldest perm, and only registerPerm clears that entry's
-		// now-orphaned Allow/Deny keyboard.
-		b.registerPerm(p)
-		b.answerPermCallback(route, cb.CallbackID, permAnswerWrongRouteText, false)
-		return false
-	}
-	// MESSAGE-BINDING: the tap must come from the message the prompt was RENDERED
-	// on, not merely carry its request id. C3 does not mint that id — the CLI host
-	// supplies it and parsePermCallback validates nothing about it — while an
-	// agent can author a reply keyboard with arbitrary callback_data
-	// (buttonsFromArgs applies no namespace filter). So a "perm:allow:<id>" button
-	// planted on ANY other message in this topic, or a visibly-stale keyboard whose
-	// best-effort clear failed followed by a host id re-mint, would otherwise spend
-	// a live verdict — the operator authorising a tool use other than the one on
-	// screen. Positive mismatch ONLY: p.messageID is 0 between register and
-	// setMessageID (the deliberate fast-tap race, handler.go) and cb.MessageID is 0
-	// on a channel that carries none — neither is evidence of a mismatch.
-	// Re-register so a stray tap cannot consume the real operator's live prompt.
-	if p.messageID != 0 && cb.MessageID != 0 && p.messageID != cb.MessageID {
-		log.Printf("perm MSG-MISMATCH chan=%s chat=%d topic=%s id=%s want_msg=%d got_msg=%d actor=%d: tap not bound to the prompt message",
-			route.Channel, route.ChatID, TopicKeyStr(route), requestID, p.messageID, cb.MessageID, cb.Actor.UserID)
-		b.registerPerm(p)
-		b.answerPermCallback(route, cb.CallbackID, permAnswerWrongMessageText, false)
+	defer b.prompts.end()
+	p, reason := b.Perms.takeCallback(requestID, route, cb.MessageID)
+	if p == nil {
+		if b.prompts.sealed.Load() {
+			reason = restartPermTap
+		}
+		b.answerPermCallback(route, cb.CallbackID, reason, false)
 		return false
 	}
 	// OWNER-BINDING: the verdict goes to the session that ASKED for it, never to
@@ -618,6 +615,10 @@ func (b *Broker) sweepExpiredPerms() {
 	if b == nil || b.Perms == nil {
 		return
 	}
+	if !b.prompts.begin(false) {
+		return
+	}
+	defer b.prompts.end()
 	expired := b.Perms.sweepExpired(time.Now(), permExpiryTTL)
 	if len(expired) == 0 {
 		return

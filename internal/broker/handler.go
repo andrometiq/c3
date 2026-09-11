@@ -230,6 +230,8 @@ func (b *Broker) HandleConn(nc net.Conn) {
 			continue
 		}
 		switch op {
+		case ipc.OpBrokerRestart:
+			b.handleBrokerRestart(conn, stub)
 		case ipc.OpTestInject:
 			b.handleTestInject(conn, raw)
 		case ipc.OpAttach:
@@ -679,6 +681,11 @@ func (b *Broker) handleAskRegister(conn *ipc.Conn, stub *Stub, raw []byte) {
 		})
 		return
 	}
+	if !b.prompts.begin(true) {
+		_ = conn.WriteJSON(ipc.AskRegisteredMsg{Op: ipc.OpAskRegistered, AskID: req.AskID, Err: restartAskRefused})
+		return
+	}
+	defer b.prompts.end()
 	routes := orderedHeldRoutes(stub)
 	if len(routes) == 0 {
 		_ = conn.WriteJSON(ipc.AskRegisteredMsg{
@@ -746,7 +753,7 @@ func (b *Broker) handleAskRegister(conn *ipc.Conn, stub *Stub, raw []byte) {
 	if !b.registerAsk(p) {
 		_ = conn.WriteJSON(ipc.AskRegisteredMsg{
 			Op: ipc.OpAskRegistered, AskID: req.AskID, OK: false,
-			Err: "ask id collision — retry",
+			Err: b.askRegistrationError(),
 		})
 		return
 	}
@@ -766,14 +773,18 @@ func (b *Broker) handleAskRegister(conn *ipc.Conn, stub *Stub, raw []byte) {
 	if err != nil {
 		// Send failed (oversized keyboard / Telegram error) — drop the pending and
 		// return fast so the tool errors immediately, not after the answer timeout.
-		b.Asks.delete(req.AskID)
+		b.Asks.deletePending(p)
 		_ = conn.WriteJSON(ipc.AskRegisteredMsg{
 			Op: ipc.OpAskRegistered, AskID: req.AskID, OK: false,
 			Err: fmt.Sprintf("ask send failed: %v", err),
 		})
 		return
 	}
-	b.Asks.setMessageID(req.AskID, msgID)
+	if !b.Asks.publish(p, msgID) && p.cancelled.Load() {
+		b.renderRestartNotice(restartNotice{kind: "ask", id: p.askID, route: p.route, messageID: msgID, text: p.question + "\n\n" + restartAskCancelled})
+		_ = conn.WriteJSON(ipc.AskRegisteredMsg{Op: ipc.OpAskRegistered, AskID: req.AskID, Err: restartAskCancelled})
+		return
+	}
 	log.Printf("ask REGISTERED chan=%s chat=%d topic=%s ask=%s opts=%d msg=%d",
 		route.Channel, route.ChatID, TopicKeyStr(route), req.AskID, len(req.Options), msgID)
 	_ = conn.WriteJSON(ipc.AskRegisteredMsg{
@@ -798,6 +809,11 @@ func (b *Broker) handlePermissionRequest(_ *ipc.Conn, stub *Stub, raw []byte) {
 		log.Printf("perm: permission_request missing request id — dropping")
 		return
 	}
+	if !b.prompts.begin(true) {
+		b.refuseRestartPermission(stub, req.RequestID)
+		return
+	}
+	defer b.prompts.end()
 	routes := orderedHeldRoutes(stub)
 	if len(routes) == 0 {
 		// No claim to surface on, and no blocking tool to error — drop + log.
@@ -840,6 +856,10 @@ func (b *Broker) handlePermissionRequest(_ *ipc.Conn, stub *Stub, raw []byte) {
 	// in that window makes a DIFFERENT session (see pendingPerm.owner).
 	p := &pendingPerm{requestID: req.RequestID, route: *route, toolName: req.ToolName, preview: req.Preview, owner: stub}
 	if !b.registerPerm(p) {
+		if b.prompts.draining.Load() {
+			b.refuseRestartPermission(stub, req.RequestID)
+			return
+		}
 		log.Printf("perm DROP id=%s: request id collision or registry full", req.RequestID)
 		return
 	}
@@ -877,14 +897,22 @@ func (b *Broker) handlePermissionRequest(_ *ipc.Conn, stub *Stub, raw []byte) {
 	})
 	if err != nil {
 		// Send failed — drop the pending so a never-shown keyboard can't be resolved.
-		b.Perms.delete(req.RequestID)
+		b.Perms.deletePending(p)
 		log.Printf("perm DROP id=%s: send failed: %v", req.RequestID, err)
 		return
 	}
-	if settled, ok := b.Perms.setMessageID(req.RequestID, msgID); ok {
+	if p.cancelled.Load() {
+		b.renderRestartNotice(restartNotice{kind: "permission", id: p.requestID, route: p.route, messageID: msgID, text: permPromptText(p.toolName, p.preview) + "\n\n" + restartPermCancelled})
+		return
+	}
+	if settled, ok := b.Perms.publish(p, msgID); ok {
 		b.editPermMessage(settled.route, settled.requestID, settled.messageID, permSettledText(settled.toolName, settled.preview, settled.outcome, time.Now()), [][]c3types.Button{})
 		log.Printf("perm settled chan=%s chat=%d topic=%s id=%s tool=%s outcome=%s msg=%d",
 			settled.route.Channel, settled.route.ChatID, TopicKeyStr(settled.route), settled.requestID, settled.toolName, settled.outcome, settled.messageID)
+		return
+	}
+	if p.cancelled.Load() {
+		b.renderRestartNotice(restartNotice{kind: "permission", id: p.requestID, route: p.route, messageID: msgID, text: permPromptText(p.toolName, p.preview) + "\n\n" + restartPermCancelled})
 		return
 	}
 	log.Printf("perm REGISTERED chan=%s chat=%d topic=%s id=%s tool=%s msg=%d",

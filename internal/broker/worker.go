@@ -1016,7 +1016,7 @@ func (w *RouteWorker) flushEvent(ctx context.Context, ev *c3types.Inbound) {
 	if ev.Kind == c3types.InboundCallback && ev.Event != nil && ev.Event.Callback != nil {
 		cb := ev.Event.Callback
 		if strings.HasPrefix(cb.Data, askCallbackPrefix) {
-			if w.broker.resolveAsk(w.key, cb) {
+			if w.broker.resolveAsk(w.key, cb) || w.broker.prompts.draining.Load() {
 				return
 			}
 		}
@@ -1145,6 +1145,9 @@ func (w *RouteWorker) forwardOrFallbackCovering(ctx context.Context, in *c3types
 		}
 	}()
 	holder, claimed := w.broker.Routes.Holder(w.key)
+	if w.broker.prompts.draining.Load() {
+		holder, claimed = nil, false
+	}
 	if holder.negotiated() && !in.IsEvent() {
 		w.enableAttemptTimer()
 		w.scheduleAttempt(ctx, true)
@@ -1358,8 +1361,14 @@ func (w *RouteWorker) forwardOrFallbackCovering(ctx context.Context, in *c3types
 				if source == nil || source.IsEvent() || (w.dedup != nil && w.dedup.alreadySeen(source.MessageID)) {
 					continue
 				}
-				if err := w.broker.Queue.Append(queueRouteKey(w.key), source); err == nil && w.dedup != nil {
-					w.dedup.record(source.MessageID)
+				if err := w.broker.Queue.Append(queueRouteKey(w.key), source); err != nil {
+					w.markPersistFailed(source)
+					w.notePersistFailure(source)
+				} else {
+					w.markPersisted(source)
+					if w.dedup != nil {
+						w.dedup.record(source.MessageID)
+					}
 				}
 			}
 		}

@@ -254,7 +254,7 @@ func (b *Broker) broadcastSystemEvent(sysev *c3types.SystemEvent) {
 // carries user content. Callers on ownership paths must invoke it asynchronously
 // so a slow or dead peer cannot block a claim.
 func (b *Broker) sendSystemEventTo(stub *Stub, sysev *c3types.SystemEvent) bool {
-	if stub == nil || sysev == nil {
+	if stub == nil || sysev == nil || b.prompts.draining.Load() {
 		return false
 	}
 	conn, ok := stub.ConnValue().(*ipc.Conn)

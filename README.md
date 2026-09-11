@@ -278,9 +278,14 @@ When builds differ and self-exec is enabled with a compatible contract, open
 Claude sessions upgrade themselves after adapter requests and live deliveries
 settle, so updates are picked up in place. Sessions that cannot self-exec or lack
 a compatible contract receive a one-time notice to run `/mcp` and reconnect c3.
-Release version ordering does not select the upgrade path. Broker-side calls can
-still be canceled by the bounce; see
-[Updating C3](docs/USAGE.md#updating-c3) for the current boundary.
+Release version ordering does not select the upgrade path. C3-controlled restarts
+pause new prompts and live pushes, then wait up to 60 seconds for open prompts.
+At the cap they cancel unanswered C3 requests and attempt notices on their original
+routes. Cancelling a permission relay cannot cancel the host request at the laptop.
+Notices can fail, with no later retry; local cancellation still takes effect.
+Controlled shutdown has a 90-second watchdog. OS termination and crashes retain
+the existing behavior. Older brokers reject the new restart request visibly.
+See [Updating C3](docs/USAGE.md#updating-c3) for the full boundary.
 
 ## Releases
 

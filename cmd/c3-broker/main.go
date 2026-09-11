@@ -471,27 +471,18 @@ func runDaemon() (err error) {
 	// adapter's answer timeout (FIX-1). Exits on br.Shutdown() (ctx cancel).
 	br.StartAskReaper()
 
-	// Signal handling is registered BEFORE the update checker so the checker's
-	// self-restart callback can post into our own sigC (a portable stand-in for
-	// the old syscall.Kill-self). SIGTERM/SIGINT shut down; reload signals (SIGHUP
-	// on unix, none on Windows) trigger a config reload in the loop below.
 	sigC := make(chan os.Signal, 1)
 	signal.Notify(sigC, append([]os.Signal{syscall.SIGTERM, syscall.SIGINT}, osutil.ReloadSignals()...)...)
-
-	// Auto-update checker: always-on availability check (surfaces the status-line
-	// notice + log), and — when mappings.auto_update is enabled — self-updates and
-	// requests a graceful restart. The callback posts SIGTERM into our own sigC so
-	// the normal signal path below drains (srv.Stop + Shutdown) and exits 0; an
-	// adapter reconnect then auto-spawns the freshly-swapped broker binary. Posting
-	// to our own channel (rather than syscall.Kill) is fully portable — SIGTERM is a
-	// valid value on Windows even though the OS never delivers it. Dev builds (no
-	// injected version) disable the checker. Exits on ctx cancel.
-	br.StartUpdateChecker(func() {
+	restartC := make(chan struct{}, 1)
+	requestRestart := func() {
+		br.BeginControlledRestart()
 		select {
-		case sigC <- syscall.SIGTERM:
+		case restartC <- struct{}{}:
 		default:
 		}
-	})
+	}
+	br.RestartRequested = requestRestart
+	br.StartUpdateChecker(requestRestart)
 
 	registerConfiguredChannels(br, mf,
 		func() channel.Channel { return telegram.New() },
@@ -542,7 +533,19 @@ func runDaemon() (err error) {
 	}
 	fmt.Fprintf(os.Stderr, "c3-broker: listening on %s (pid %d)\n", sockPath, os.Getpid())
 
-	for sig := range sigC {
+	for {
+		var sig os.Signal
+		select {
+		case <-restartC:
+			timeout := time.Until(br.BeginControlledRestart().Add(controlledRestartWatchdog))
+			if !runShutdown(func() { shutdownControlledBroker(br, srv.Stop) }, timeout) {
+				log.Print(controlledRestartWatchdogText)
+				os.Exit(exitOK)
+			}
+			return nil
+		case sig = <-sigC:
+		}
+
 		if osutil.IsReloadSignal(sig) {
 			// Config reload — re-read mappings.json from disk and swap
 			// the in-memory pointer. The /c3:reload-config slash command

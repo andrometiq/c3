@@ -5,6 +5,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/Andrometiq/c3/internal/c3types"
@@ -51,6 +52,7 @@ const askCallbackPrefix = "ask:"
 //   - selected: per-option selection state, sized to len(options); only meaningful
 //     for a multi ask. Mutated in place (under the registry mutex) on each toggle.
 type pendingAsk struct {
+	cancelled atomic.Bool
 	askID     string
 	route     RouteKey
 	question  string
@@ -85,8 +87,9 @@ type pendingAsk struct {
 // register runs on the connection handler goroutine, resolveAsk on a route
 // worker goroutine.
 type askRegistry struct {
-	mu sync.Mutex
-	m  map[string]*pendingAsk
+	drain *promptDrain
+	mu    sync.Mutex
+	m     map[string]*pendingAsk
 }
 
 func newAskRegistry() *askRegistry {
@@ -103,6 +106,9 @@ func newAskRegistry() *askRegistry {
 func (r *askRegistry) register(p *pendingAsk) (evicted *pendingAsk, ok bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.drain != nil && r.drain.sealed.Load() {
+		return nil, false
+	}
 	if _, exists := r.m[p.askID]; exists {
 		return nil, false
 	}
@@ -137,6 +143,9 @@ func (r *askRegistry) evictOldestLocked() *pendingAsk {
 func (r *askRegistry) sweepExpired(now time.Time, ttl time.Duration) []*pendingAsk {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.drain != nil && r.drain.sealed.Load() {
+		return nil
+	}
 	var expired []*pendingAsk
 	for id, p := range r.m {
 		if now.Sub(p.createdAt) >= ttl {
@@ -191,6 +200,9 @@ func (r *askRegistry) bindingOf(askID string) (owner *Stub, messageID int64, ok 
 func (r *askRegistry) take(askID string) (*pendingAsk, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.drain != nil && r.drain.sealed.Load() {
+		return nil, false
+	}
 	p, ok := r.m[askID]
 	if ok {
 		delete(r.m, askID)
@@ -209,6 +221,7 @@ func (r *askRegistry) take(askID string) (*pendingAsk, bool) {
 //     (the ask stays registered). kb/question/messageID describe the keyboard edit
 //     (text stays the question; kb shows the updated ✓ prefixes + Done/Skip).
 type askTapResult struct {
+	pending   *pendingAsk
 	match     bool
 	resolved  bool
 	chosen    string
@@ -225,6 +238,9 @@ type askTapResult struct {
 func (r *askRegistry) tapIndex(askID string, route RouteKey, idx int) askTapResult {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.drain != nil && r.drain.sealed.Load() {
+		return askTapResult{}
+	}
 	p, ok := r.m[askID]
 	if !ok || p.route != route || idx < 0 || idx >= len(p.options) {
 		return askTapResult{}
@@ -234,7 +250,7 @@ func (r *askRegistry) tapIndex(askID string, route RouteKey, idx int) askTapResu
 			p.selected[idx] = !p.selected[idx]
 		}
 		return askTapResult{
-			match: true, resolved: false,
+			pending: p, match: true, resolved: false,
 			question: p.question, messageID: p.messageID, kb: askKeyboardFor(p),
 		}
 	}
@@ -389,6 +405,10 @@ func (b *Broker) resolveAsk(route RouteKey, cb *c3types.CallbackEvent) bool {
 	if action == askActionNone {
 		return false
 	}
+	if !b.prompts.begin(false) {
+		return true
+	}
+	defer b.prompts.end()
 	// One gate, one routes-table read: it returns the recipient every resolve path
 	// below must deliver to (see ownerRecipient / deliverAskResult).
 	recipient, bound := b.askTapRecipient(route, askID, cb)
@@ -469,6 +489,9 @@ func (b *Broker) resolveAskIndex(route RouteKey, recipient *Stub, askID string, 
 		// ask stays registered. The keyboard markup changed (✓ toggled) so Telegram
 		// accepts the edit even though the text is unchanged.
 		b.editAskMessage(route, askID, res.messageID, res.question, res.kb)
+		if res.pending.cancelled.Load() {
+			b.renderRestartNotice(restartNotice{kind: "ask", id: askID, route: route, messageID: res.messageID, text: res.question + "\n\n" + restartAskCancelled})
+		}
 		log.Printf("ask TOGGLE chan=%s chat=%d topic=%s ask=%s idx=%d",
 			route.Channel, route.ChatID, TopicKeyStr(route), askID, idx)
 		return true
@@ -485,17 +508,11 @@ func (b *Broker) resolveAskIndex(route RouteKey, recipient *Stub, askID string, 
 // Done button only renders for a multi ask; for any other ask the selection is
 // empty, which is the correct defensive outcome.)
 func (b *Broker) resolveAskDone(route RouteKey, recipient *Stub, askID string) bool {
-	p, ok := b.Asks.take(askID)
+	p, ok := b.Asks.takeRoute(askID, route)
 	if !ok {
 		return false
 	}
-	if p.route != route {
-		// registerAsk, not the raw registry call: at the size cap a re-register
-		// evicts the oldest ask, and only registerAsk clears that entry's
-		// now-orphaned keyboard.
-		b.registerAsk(p)
-		return false
-	}
+
 	selected := selectedOptions(p)
 	b.deliverAskResult(route, recipient, askID, ipc.AskAnswer{Selected: selected})
 	b.editAskMessage(route, askID, p.messageID, askDoneText(p.question, selected), [][]c3types.Button{})
@@ -506,15 +523,11 @@ func (b *Broker) resolveAskDone(route RouteKey, recipient *Stub, askID string) b
 
 // resolveAskSkip resolves an ask with AskAnswer{Skipped:true}.
 func (b *Broker) resolveAskSkip(route RouteKey, recipient *Stub, askID string) bool {
-	p, ok := b.Asks.take(askID)
+	p, ok := b.Asks.takeRoute(askID, route)
 	if !ok {
 		return false
 	}
-	if p.route != route {
-		// registerAsk, not the raw registry call — see resolveAskDone.
-		b.registerAsk(p)
-		return false
-	}
+
 	b.deliverAskResult(route, recipient, askID, ipc.AskAnswer{Skipped: true})
 	b.editAskMessage(route, askID, p.messageID, askSkippedText(p.question), [][]c3types.Button{})
 	log.Printf("ask RESOLVED(skip) chan=%s chat=%d topic=%s ask=%s",
@@ -623,6 +636,10 @@ func (b *Broker) sweepExpiredAsks() {
 	if b == nil || b.Asks == nil {
 		return
 	}
+	if !b.prompts.begin(false) {
+		return
+	}
+	defer b.prompts.end()
 	expired := b.Asks.sweepExpired(time.Now(), askExpiryTTL)
 	if len(expired) == 0 {
 		return

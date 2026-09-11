@@ -312,12 +312,39 @@ durable for another pull; they can therefore duplicate on retry. The reconnect n
 
 `C3 was updated to <build>. This session still runs the previous adapter: run /mcp and reconnect c3 (or restart the session) to switch.`
 
-**Current boundary:** the adapter gate protects the self-exec, not the preceding
-broker shutdown. The existing broker reconnect contract cancels pending broker
-tool calls; ask/permission registrations are in memory. A bounce can therefore
-interrupt those operations. Durable inbound rows and the existing attachment
-recovery path survive. Fallback notice deduplication survives socket reconnects and ordinary broker
-restarts through the broker state file `upgrade-notices.json`.
+**Controlled broker restart.** C3-controlled restarts (`c3-broker restart`, update/upgrade bounces, and
+configuration bounces) pause new questions, permission relays and live pushes.
+The running broker keeps IPC and channels available for up to 60 seconds so
+already-open prompts can be answered. Ordinary inbound remains queued under its
+existing storage contract, and existing delivery receipts still settle.
+At the cap, C3 removes unanswered prompts from its local registries, clears their
+keyboards and attempts a plain cancellation notice on each original route.
+Questions receive the existing `ask_result.err`; permission relays send no
+fabricated Allow/Deny verdict. C3 cannot cancel the host's underlying permission
+request: it may still be waiting at the laptop, where it must be cancelled before
+asking again.
+
+Cancellation notifications share a five-second budget, with at most sixteen
+workers. An edit failure gets one plain reply attempt on the original route.
+Delivery can fail or wedge; local cancellation remains authoritative even if no
+notice arrives. There is no persistence, resumption or later retry. An already
+issued answer/verdict is not labelled cancelled; a successful socket write does
+not prove host acceptance. The controlled shutdown watchdog forces exit after
+90 seconds from the first restart intent; duplicate intent does not extend it.
+The administrative client allows two seconds for its entire exchange and waits
+up to 91 seconds from initiation for the old process to exit. A failed exchange
+or exit timeout prevents it from starting a successor.
+
+An older running broker that does not support controlled restart is left running
+and the command fails visibly. Manual restart is needed to activate the installed
+build in that case, and pending prompts have no new protection during that manual
+restart. SIGTERM/SIGINT retain immediate IPC teardown and the 15-second watchdog;
+reboot, crash, OOM and external process termination receive no new prompt
+protection. SIGHUP remains a configuration reload.
+
+Ordinary broker calls can still be interrupted. Durable inbound, attachment
+recovery, adapter self-exec and `upgrade-notices.json` retain their existing
+contracts. Ordinary stale-button and native-ID-reuse gaps also remain unchanged.
 
 **Automatic update (opt-in).** Set `"auto_update": true` in `mappings.json`
 (default off) and the broker installs a newer release **itself** when its ~6h

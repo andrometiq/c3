@@ -11,10 +11,10 @@ import (
 )
 
 func TestUpgradeBounce(t *testing.T) {
-	oldStop, oldStart := stopBrokerFn, ensureBrokerUpFn
-	defer func() { stopBrokerFn, ensureBrokerUpFn = oldStop, oldStart }()
+	oldStop, oldStart := stopBrokerForControlledRestartFn, ensureBrokerUpFn
+	defer func() { stopBrokerForControlledRestartFn, ensureBrokerUpFn = oldStop, oldStart }()
 	var calls []string
-	stopBrokerFn = func() (bool, string) { calls = append(calls, "stop"); return true, "" }
+	stopBrokerForControlledRestartFn = func() (bool, string) { calls = append(calls, "stop"); return true, "" }
 	ensureBrokerUpFn = func() { calls = append(calls, "start") }
 	if err := bounceUpgradeBroker(); err != nil || strings.Join(calls, ",") != "stop,start" {
 		t.Fatalf("%v %v", calls, err)

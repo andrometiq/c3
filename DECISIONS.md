@@ -3,6 +3,42 @@
 Entries are newest first. This is the public architecture record: it records
 rulings and rationale, never private operational details.
 
+## D040: Controlled restart drains and cancels interactive requests
+
+**Date:** 2026-09-11
+
+**Decision:** C3-controlled restarts close prompt and push admission, wait up to
+60 seconds for live prompts and admitted operations, then cancel remaining C3
+requests. A shared five-second notification budget precedes ordinary teardown;
+the controlled watchdog is 90 seconds from the first intent. IPC and channels
+remain available during the grace period. OS termination retains the 15-second
+master shutdown path, and SIGHUP remains reload-only.
+
+This supersedes the abandoned persist-and-resume approach. There are no request
+checkpoints, incarnation identities, probes, acceptance receipts, negotiated
+interactive capabilities or successor recovery. Obsolete `.request.json` files
+remain ignored and untouched. The only wire addition is the administrative
+`broker_restart` / `broker_restart_reply` exchange. An unsupported old daemon
+fails visibly and is not signalled as a fallback.
+
+Sixty seconds gives a person time to read and tap. The 90-second watchdog covers
+60 seconds of grace, five for notices, five for IPC shutdown, eight for voice and
+eight for workers, leaving four seconds for remaining teardown. Channel calls
+can still wedge, so the watchdog is necessary. The client handshake/request has
+a two-second total deadline and old-process exit waits until 91 seconds from
+initiation; failure prevents successor startup.
+
+Cancellation removes local authority before notification. Notices use the stored
+original route, clear buttons, preserve prompt context and render plain text.
+Failed edits get one reply attempt; deadline failures get no persistence or retry.
+C3 closes only its permission relay, not the host's underlying request. An already
+issued result is not described as cancelled, and socket success is not evidence
+of host acceptance. Ordinary stale-button and native-ID-reuse gaps remain.
+
+Inbound durability, attachment recovery and adapter self-exec are separate
+contracts. See the [roadmap](ROADMAP.md) for wider work and
+[Updating C3](docs/USAGE.md#updating-c3) for the operational contract.
+
 ## D039: Inbound delivery lifecycle (redesign 2026-09-08/09) — supersedes the delivery parts of D031 and D033
 
 **Date:** 2026-09-09
@@ -25,7 +61,7 @@ The first receipt logs its record type; three consecutive live expiries with
 transcript growth but no recognized matching records log a one-time drift hint,
 also visible in broker status. This diagnostic never changes delivery authority.
 Seamless compatible Claude updates use self-exec with MCP resume after a broker
-bounce; older adapters receive a one-time reconnect notice. Broker in-flight
+bounce; older adapters receive a one-time reconnect notice. Controlled broker draining is specified in D040. Broker in-flight
 ask/permission handoff remains a separate follow-up, not a lossless-update claim.
 
 The implementation phases are [D034](#d034-negotiated-channel-delivery-phase-2),
@@ -844,7 +880,8 @@ trigger discovery; older adapters get an explicit system notice.
 This is provisional: broker shutdown still cancels broker-side calls and loses
 in-memory ask/permission state. A full lossless update requires a separately
 specified broker drain/handoff protocol; the adapter exec gate alone cannot
-provide that guarantee.
+provide that guarantee. D040 subsequently adds bounded draining and cancellation
+for C3-controlled restarts only; arbitrary shutdown still loses prompt state.
 
 ## D038: Notices derive from delivery state (phase 5)
 

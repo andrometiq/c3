@@ -445,7 +445,7 @@ func (b *Broker) drainAdvisory(spec DrainSpec, res *DrainResult) {
 	if landed == 0 {
 		return
 	}
-	if holder, held := b.Routes.Holder(spec.Target); held && holder.IsAlive() && holder.CanRenderPush() {
+	if holder, held := b.Routes.Holder(spec.Target); held && holder.IsAlive() && holder.CanRenderPush() && !b.prompts.draining.Load() {
 		if conn, ok := holder.ConnValue().(*ipc.Conn); ok && conn != nil {
 			sysev := &c3types.SystemEvent{
 				Source: spec.Target.Channel,

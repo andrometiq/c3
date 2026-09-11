@@ -11,10 +11,9 @@ import (
 	"github.com/Andrometiq/c3/internal/ipc"
 )
 
-// Reuse setup's singleton-aware stop/start path. No daemon is started in tests;
-// both lifecycle functions already have injectable seams.
+// A successor starts only after the controlled stop succeeds.
 func bounceUpgradeBroker() error {
-	stopped, note := stopBrokerFn()
+	stopped, note := stopBrokerForControlledRestartFn()
 	if !stopped && note != "" {
 		return fmt.Errorf("broker bounce: %s", note)
 	}

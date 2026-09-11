@@ -1430,10 +1430,11 @@ func ensureBrokerUp() {
 // live. A SIGHUP reload is NOT sufficient after a token change — the
 // telegram channel is initialized at broker start.
 func restartBrokerForNewConfig() {
-	if stopped, note := stopBrokerFn(); stopped {
+	if stopped, note := stopBrokerForControlledRestartFn(); stopped {
 		fmt.Println("Restarting the C3 broker with the new config...")
 	} else if note != "" {
 		fmt.Fprintln(os.Stderr, note)
+		return
 	}
 	ensureBrokerUpFn()
 }

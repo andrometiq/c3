@@ -234,3 +234,24 @@ platform, reconnect c3 through `/mcp`. The new process restores SDK initializati
 locally; no initialize exchange or instructions resend is expected. Resume
 bypasses the 60-second startup watchdog, including when the host remains idle.
 The gate covers self-exec only; broker shutdown still cancels broker-side calls.
+
+### Controlled restart waiting on prompts
+
+A C3-controlled restart can wait 60 seconds for open questions and permission
+relays, then spend up to five seconds attempting cancellation notices. It holds
+the singleton until exit; the overall watchdog is 90 seconds. Repeated restart
+requests do not reset the clock. Notification failures log the kind, existing ID
+and original route, without prompt bodies. A missing notice does not mean the
+relay remains answerable: cancellation is local and there is no later retry.
+Check the requesting session, especially for a permission still waiting at the
+laptop. Socket write success alone does not establish host acceptance.
+
+The forced-exit log is:
+
+`c3-broker: controlled restart exceeded 90s; forcing exit. Some request results or cancellation notices may not have been delivered. Check the requesting session.`
+
+An unsupported old broker is left running and the restart command reports that a
+manual restart is needed; it does not fall back to SIGTERM. An exchange failure
+or old-process exit timeout prevents successor startup. External SIGTERM/SIGINT
+still take the immediate shutdown path with its 15-second watchdog. See
+[Updating C3](USAGE.md#updating-c3) for the scope and limitations.

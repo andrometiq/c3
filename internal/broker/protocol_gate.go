@@ -27,6 +27,10 @@ func refuseIncompatibleStateChange(conn *ipc.Conn, stub *Stub, op ipc.Op, raw []
 	}
 
 	switch op {
+	case ipc.OpBrokerRestart:
+		refuse()
+		_ = conn.WriteJSON(ipc.BrokerRestartReply{Op: ipc.OpBrokerRestartReply, Err: reason})
+		return true
 	case ipc.OpAttach:
 		refuse()
 		_ = conn.WriteJSON(ipc.AttachedMsg{Op: ipc.OpAttached, OK: false, Err: reason})

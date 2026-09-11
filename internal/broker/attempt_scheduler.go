@@ -78,6 +78,9 @@ func (w *RouteWorker) startAttemptWriter(ctx context.Context) {
 			case <-ctx.Done():
 				return
 			case req := <-w.attemptWrites:
+				if w.broker.prompts.draining.Load() {
+					continue
+				}
 				deadline := time.Now().Add(time.Second)
 				if !req.Deadline.IsZero() {
 					deadline = minTime(req.Deadline, deadline)
@@ -110,7 +113,7 @@ func minTime(a, b time.Time) time.Time {
 // P6: "Cycle = one selected batch (bounded to the IPC frame)."
 // This function only reserves; every terminal decision runs on this worker too.
 func (w *RouteWorker) scheduleAttempt(ctx context.Context, inbound bool) {
-	if w.broker == nil || w.broker.Queue == nil {
+	if w.broker == nil || w.broker.Queue == nil || w.broker.prompts.draining.Load() {
 		return
 	}
 	w.attemptCtx = ctx
