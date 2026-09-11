@@ -101,6 +101,38 @@ The first is cleaner; the second is far easier to reason about when it misbehave
 - Live-verify auto-attach-on-resume end to end. It ships on by default (`auto_attach_on_resume` absent in mappings.json ⇒ enabled; set it to `false` to disable). A first real resumed-session walk-through (2026-08-25) exposed a silent failure under Claude Code ≥2.1.245: the host began exporting the STABLE session id as `CLAUDE_CODE_SESSION_ID` (previously the ephemeral per-MCP-spawn id), so the adapter polled a handoff key the SessionStart hook never wrote and recovery never fired. Fixed by writing the handoff under BOTH the instance-id and stable-id keys, so recovery fires whichever id the host exports. A full live re-verify on a build carrying that fix is still pending.
 - In-app conversation-switch detection (`checkForIdentitySwitch`) is structurally inert on Claude Code ≥2.1.245 and needs its own fix. The `/clear` chain hop is written at `<ephemeral>.json` (the hook keys on `CLAUDE_ENV_FILE`), but the adapter's probe key is the frozen stable id, whose `<stable>.json` alias is self-referential — so the hop is never seen. The dual-key handoff above restores the *resume* path only; "reattach works" must not be read as "switch detection works" on new hosts.
 
+## Far future — a stateless broker over a real database
+
+The broker holds live state in memory: open interactive requests (permission
+prompts and questions awaiting an answer), attempt bookkeeping, and route
+ownership. The durable inbound queue is on disk; this interactive state is not.
+So a restart loses whatever was waiting for a human, and making that survivable
+means writing crash-safe records, matching a later answer to a saved request, and
+keeping old and new peers agreeing about the identifiers involved.
+
+That is the beginning of a transaction log, and following it to its end means
+building a database by hand. The better destination is the opposite: let the
+broker hold no durable state at all. Interactive requests, attempts and ownership
+move into a real datastore with real transactions. Then the broker can be killed
+at any moment, restarted at any moment, and more than one can run at once,
+because none of them own anything that matters.
+
+What it would unlock: a restart, crash or OOM kill costs nothing, because nothing
+was in memory to lose; updates stop being a special event, with no drain, no
+deferral, no cancellation notice; and there is a path to horizontal capacity and
+to running the broker somewhere other than the user's own machine.
+
+What it costs: a hard dependency the project does not have today, a schema and a
+migration story, and a latency budget on paths that are currently a map lookup.
+Worth paying only once the single-machine, single-broker assumption is genuinely
+in the way.
+
+**Until then, avoid the middle ground.** Partial durability — persisting some
+interactive state and reviving it after a restart — carries much of the cost of a
+database and few of its guarantees. Where a restart would disrupt a human's
+in-flight answer, prefer deferring the restart, or cancelling the request
+honestly, over trying to resurrect it.
+
 ## Open design questions
 
 - Whether a typed free-text answer is also queued as a normal message, or consumed only as the answer.
