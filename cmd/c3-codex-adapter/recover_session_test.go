@@ -56,11 +56,17 @@ func fakeCodexAppServer(t *testing.T, gate <-chan struct{}, loaded []any) string
 				continue
 			}
 			result := map[string]any{"ok": true}
-			if method, _ := msg["method"].(string); method == "thread/loaded/list" {
+			method, _ := msg["method"].(string)
+			if method == "thread/loaded/list" {
 				if gate != nil {
 					<-gate
 				}
 				result = map[string]any{"data": loaded}
+			} else if method == "thread/read" {
+				params, _ := msg["params"].(map[string]any)
+				result = map[string]any{"thread": map[string]any{
+					"id": params["threadId"], "turns": []any{map[string]any{"id": "existing-turn"}},
+				}}
 			}
 			if err := c.WriteJSON(map[string]any{"id": id, "result": result}); err != nil {
 				return
@@ -332,7 +338,9 @@ func TestResolveCodexThreadID_WaitsForTheResumedThreadRollout(t *testing.T) {
 					}})
 					continue
 				}
-				_ = c.WriteJSON(map[string]any{"id": id, "result": map[string]any{"thread": map[string]any{"id": resumed}}})
+				_ = c.WriteJSON(map[string]any{"id": id, "result": map[string]any{"thread": map[string]any{
+					"id": resumed, "turns": []any{map[string]any{"id": "existing-turn"}},
+				}}})
 			default:
 				_ = c.WriteJSON(map[string]any{"id": id, "result": map[string]any{"ok": true}})
 			}
@@ -353,6 +361,65 @@ func TestResolveCodexThreadID_WaitsForTheResumedThreadRollout(t *testing.T) {
 	}
 	if listCalls < 2 {
 		t.Fatalf("loaded list queried %d time(s), want a retry after the transient thread", listCalls)
+	}
+}
+
+func TestResolveCodexThreadID_IgnoresValidEmptyStartupThreadBeforeResume(t *testing.T) {
+	const transient = "01a08f10-10f7-7ae3-a95b-a4225545546d"
+	const resumed = "01a07f43-54d8-7df3-ac4f-1cd8ae5be208"
+	listCalls := 0
+	upgrader := websocket.Upgrader{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer c.Close()
+		for {
+			var msg map[string]any
+			if err := c.ReadJSON(&msg); err != nil {
+				return
+			}
+			id, hasID := msg["id"]
+			if !hasID {
+				continue
+			}
+			method, _ := msg["method"].(string)
+			switch method {
+			case "thread/loaded/list":
+				listCalls++
+				loaded := []any{transient}
+				if listCalls > 1 {
+					loaded = append(loaded, resumed)
+				}
+				_ = c.WriteJSON(map[string]any{"id": id, "result": map[string]any{"data": loaded}})
+			case "thread/read":
+				params, _ := msg["params"].(map[string]any)
+				threadID, _ := params["threadId"].(string)
+				turns := []any{}
+				if threadID == resumed {
+					turns = []any{map[string]any{"id": "existing-turn"}}
+				}
+				_ = c.WriteJSON(map[string]any{"id": id, "result": map[string]any{"thread": map[string]any{
+					"id": threadID, "turns": turns,
+				}}})
+			default:
+				_ = c.WriteJSON(map[string]any{"id": id, "result": map[string]any{"ok": true}})
+			}
+		}
+	}))
+	defer srv.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	got, err := resolveCodexThreadID(ctx, codexForwardConfig{
+		WSURL: "ws" + srv.URL[len("http"):], Timeout: time.Second,
+	})
+	if err != nil {
+		t.Fatalf("resolve after valid empty startup thread: %v", err)
+	}
+	if got != resumed {
+		t.Fatalf("resolved %q, want resumed thread %q", got, resumed)
 	}
 }
 

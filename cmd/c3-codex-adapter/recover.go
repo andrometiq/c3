@@ -83,6 +83,11 @@ var (
 	// a blank string). Rendering one anyway would mint an identity that every
 	// session hitting the same malformation shares — see loadedThreadIDs.
 	errCodexLoadedListUnreadable = errors.New("the Codex app-server's loaded-thread list has an entry that is not a readable thread id")
+
+	// A thread/read response without a readable thread/turns shape cannot prove
+	// whether a candidate is the resumed conversation or the launcher's empty
+	// startup thread. Identity recovery must fail closed rather than cache it.
+	errCodexThreadUnreadable = errors.New("the Codex app-server returned unreadable thread history")
 )
 
 // resolveCodexThreadID answers "which Codex thread is this adapter's session?"
@@ -139,36 +144,61 @@ func resolveCodexThreadID(ctx context.Context, cfg codexForwardConfig) (string, 
 		if err != nil {
 			return "", err
 		}
-		switch len(loaded) {
-		case 1:
-			threadID := loaded[0]
-			_, readErr := client.request(ctx, "thread/read", map[string]any{
+		if len(loaded) == 0 {
+			return "", errCodexNoLoadedThread
+		}
+
+		// The remote TUI starts a fresh empty thread before it resumes the chosen
+		// conversation. Both are temporarily valid rollouts, so thread/read merely
+		// succeeding is not enough: that cached the empty startup thread in the
+		// 2026-09-11 incident. The resumed conversation is the unique loaded thread
+		// with history. If none has history yet, keep polling; if several do, fail
+		// closed rather than guessing between real conversations.
+		var withHistory []string
+		for _, threadID := range loaded {
+			readResp, readErr := client.request(ctx, "thread/read", map[string]any{
 				"threadId":     threadID,
-				"includeTurns": false,
+				"includeTurns": true,
 			})
-			if readErr == nil {
-				return threadID, nil
-			}
-			// During a resumed TUI launch Codex briefly advertises a generated
-			// thread reference before its rollout exists, then replaces it with
-			// the actual resumed thread. Caching that transient id makes every
-			// Telegram forward fail with the same "no rollout found" error. Wait
-			// only for this explicit transient state; all other failures remain
-			// fail-closed.
-			if !isCodexThreadAwaitingRollout(readErr) {
+			if readErr != nil {
+				if isCodexThreadAwaitingRollout(readErr) {
+					continue
+				}
 				return "", readErr
 			}
+			hasHistory, historyErr := codexThreadHasHistory(readResp)
+			if historyErr != nil {
+				return "", historyErr
+			}
+			if hasHistory {
+				withHistory = append(withHistory, threadID)
+			}
+		}
+		switch len(withHistory) {
+		case 1:
+			return withHistory[0], nil
+		case 0:
 			select {
 			case <-ctx.Done():
 				return "", ctx.Err()
 			case <-time.After(100 * time.Millisecond):
 			}
-		case 0:
-			return "", errCodexNoLoadedThread
 		default:
-			return "", fmt.Errorf("%w (loaded: %s)", errCodexThreadAmbiguous, strings.Join(loaded, ", "))
+			return "", fmt.Errorf("%w (loaded with history: %s)", errCodexThreadAmbiguous, strings.Join(withHistory, ", "))
 		}
 	}
+}
+
+func codexThreadHasHistory(resp map[string]any) (bool, error) {
+	thread, ok := resp["thread"].(map[string]any)
+	if !ok {
+		return false, errCodexThreadUnreadable
+	}
+	turns, ok := thread["turns"].([]any)
+	if !ok {
+		return false, errCodexThreadUnreadable
+	}
+	return len(turns) > 0, nil
 }
 
 func isCodexThreadAwaitingRollout(err error) bool {
