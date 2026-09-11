@@ -11,7 +11,7 @@ from unittest.mock import Mock, patch
 
 from collect import collect, notice_evidence, route_line_limit, classify_fetch, fetch_trailer, classify, count_receives, sanitize, verdict
 from driver import false_held, offered_before_ready, run_cell, write_report
-from host import Host, HostSetupError, diagnose_pane, read_jsonl
+from host import Host, HostSetupError, diagnose_pane, flatten, read_jsonl
 from matrix import Cell, cells, selection, selection_summary
 
 
@@ -371,6 +371,25 @@ class MatrixTests(unittest.TestCase):
             self.assertNotIn("| PASS |", report)
             self.assertEqual(report.count("| N/A |"), 54)
             self.assertEqual(report.count("| NOT RUN |"), 125)
+
+    def test_composer_sees_a_prompt_that_was_never_submitted(self):
+        # A swallowed Enter leaves the prompt in the input box; the caller used
+        # to report that as an unresponsive host 90 seconds later.
+        unsent = "\u2500\u2500\u2500\u2500\n\u276f\u00a0Reply MATRIX_READY. Do not call any tools.\n\u2500\u2500\u2500\u2500\n  manual mode on"
+        submitted = "\u276f Reply MATRIX_READY. Do not call any tools.\n\u25cf MATRIX_READY\n\u2500\u2500\u2500\u2500\n\u276f\n\u2500\u2500\u2500\u2500\n  manual mode on"
+        probe = flatten("Reply MATRIX_READY. Do not call any tools.")[:40]
+        host = Host.__new__(Host)
+        with patch.object(Host, "pane", lambda self: unsent):
+            self.assertIn(probe, flatten(host.composer()))
+        with patch.object(Host, "pane", lambda self: submitted):
+            self.assertNotIn(probe, flatten(host.composer()))
+
+    def test_composer_matches_a_prompt_wrapped_across_lines(self):
+        wrapped = "\u2500\u2500\u2500\u2500\n\u276f Call Bash once with command \"python3 -c\n'import pathlib'\" and run_in_background=true.\n\u2500\u2500\u2500\u2500\n  manual mode on"
+        probe = flatten('Call Bash once with command "python3 -c \'import pathlib\'" and run_in_background=true.')[:40]
+        host = Host.__new__(Host)
+        with patch.object(Host, "pane", lambda self: wrapped):
+            self.assertIn(probe, flatten(host.composer()))
 
     def test_imports_do_not_run_hosts(self):
         import importlib

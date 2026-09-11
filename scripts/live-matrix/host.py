@@ -54,6 +54,14 @@ def read_jsonl(path):
     return records
 
 
+RULE_CHARS = {"\u2500", "\u2501", "\u2594", "\u2581"}
+
+
+def flatten(text):
+    """Collapse wrapping and non-breaking spaces so pane text compares cleanly."""
+    return " ".join(text.replace("\u00a0", " ").split())
+
+
 def wait_for(check, timeout, description):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -164,8 +172,31 @@ class Host:
         return result.stdout
 
     def send(self, text):
+        # The composer swallows Enter while the TUI is busy, leaving the prompt
+        # unsent until the caller times out with a misleading "no response".
+        # Confirm the line left the input box, and press Enter again if not.
         self.tmux("send-keys", "-t", "matrix", "-l", "--", text)
-        self.tmux("send-keys", "-t", "matrix", "Enter")
+        probe = flatten(text)[:40]
+        for attempt in range(5):
+            self.tmux("send-keys", "-t", "matrix", "Enter")
+            for _ in range(6):
+                time.sleep(0.25)
+                if probe not in flatten(self.composer()):
+                    return
+        raise TimeoutError(f"composer kept {probe!r} after {attempt + 1} submissions")
+
+    def composer(self):
+        """The pane's input box: the region between the last two full-width rules.
+
+        A prompt still sitting here was typed but never submitted, which the
+        caller would otherwise report as an unresponsive host.
+        """
+        lines = self.pane().splitlines()
+        rules = [i for i, line in enumerate(lines)
+                 if line.strip() and set(line.strip()) <= RULE_CHARS]
+        if len(rules) < 2:
+            return ""
+        return "\n".join(lines[rules[-2] + 1:rules[-1]])
 
     def events(self, name=None, after=0):
         return [e for e in read_jsonl(self.control / "events.jsonl") if e["time"] >= after and (name is None or e["event"] == name)]
