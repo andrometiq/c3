@@ -294,6 +294,68 @@ func TestResolveCodexThreadID_APartlyUnreadableListIsNotNarrowedToTheReadablePar
 	}
 }
 
+func TestResolveCodexThreadID_WaitsForTheResumedThreadRollout(t *testing.T) {
+	t.Helper()
+	const transient = "01a08ef6-66f4-7863-8db0-6018a0241d78"
+	const resumed = "01a07f43-54d8-7df3-ac4f-1cd8ae5be208"
+	listCalls := 0
+	upgrader := websocket.Upgrader{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer c.Close()
+		for {
+			var msg map[string]any
+			if err := c.ReadJSON(&msg); err != nil {
+				return
+			}
+			id, hasID := msg["id"]
+			if !hasID {
+				continue
+			}
+			method, _ := msg["method"].(string)
+			switch method {
+			case "thread/loaded/list":
+				listCalls++
+				threadID := resumed
+				if listCalls == 1 {
+					threadID = transient
+				}
+				_ = c.WriteJSON(map[string]any{"id": id, "result": map[string]any{"data": []any{threadID}}})
+			case "thread/read":
+				params, _ := msg["params"].(map[string]any)
+				if params["threadId"] == transient {
+					_ = c.WriteJSON(map[string]any{"id": id, "error": map[string]any{
+						"code": float64(-32603), "message": "failed to read thread: invalid thread-store request: no rollout found for thread id " + transient,
+					}})
+					continue
+				}
+				_ = c.WriteJSON(map[string]any{"id": id, "result": map[string]any{"thread": map[string]any{"id": resumed}}})
+			default:
+				_ = c.WriteJSON(map[string]any{"id": id, "result": map[string]any{"ok": true}})
+			}
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	got, err := resolveCodexThreadID(ctx, codexForwardConfig{
+		WSURL: "ws" + srv.URL[len("http"):], Timeout: time.Second,
+	})
+	if err != nil {
+		t.Fatalf("resolve after transient no-rollout thread: %v", err)
+	}
+	if got != resumed {
+		t.Fatalf("resolved %q, want resumed thread %q", got, resumed)
+	}
+	if listCalls < 2 {
+		t.Fatalf("loaded list queried %d time(s), want a retry after the transient thread", listCalls)
+	}
+}
+
 // A `data` that is not a list at all is a MALFORMED answer, not an empty one.
 // Both refuse to recover, so the safety outcome is identical — what differs is
 // what the operator is sent to debug: "no loaded thread yet" points at a Codex

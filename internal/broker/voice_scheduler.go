@@ -511,11 +511,19 @@ func (s *VoiceScheduler) dispatchDue(now time.Time) []voiceScheduleKey {
 	if !s.accepting {
 		return nil
 	}
+	// Voice work may finish at different speeds, but a topic must observe the
+	// original Telegram message order. Only the oldest unresolved message on a
+	// route is eligible to enter the durable resolve/delivery step. Transcription
+	// remains concurrent; its terminal results wait here. All attachments
+	// belonging to that one message remain eligible together so a multi-voice
+	// message cannot deadlock its own voiceGroup. Different routes still resolve
+	// concurrently.
+	oldestByRoute := s.oldestMessageByRouteLocked()
 	for key, entry := range s.entries {
 		if entry.state == voiceWaiting && !entry.firstFailure.IsZero() && !now.Before(entry.firstFailure.Add(s.retryExpiry)) {
 			s.finishTerminalLocked(entry, s.retryExpiredOutcome(entry))
 		}
-		if entry.state == voiceResolveReady && s.groupsCompleteLocked(entry) && !now.Before(entry.nextAttempt) {
+		if key.messageID == oldestByRoute[key.route] && entry.state == voiceResolveReady && s.groupsCompleteLocked(entry) && !now.Before(entry.nextAttempt) {
 			resolves = append(resolves, key)
 		}
 	}
@@ -562,6 +570,17 @@ dispatchLoop:
 	return resolves
 }
 
+func (s *VoiceScheduler) oldestMessageByRouteLocked() map[RouteKey]int64 {
+	oldest := make(map[RouteKey]int64)
+	for key := range s.entries {
+		messageID, exists := oldest[key.route]
+		if !exists || key.messageID < messageID {
+			oldest[key.route] = key.messageID
+		}
+	}
+	return oldest
+}
+
 func voiceKeyLess(a, b voiceScheduleKey) bool {
 	if a.route.Channel != b.route.Channel {
 		return a.route.Channel < b.route.Channel
@@ -603,6 +622,7 @@ func (s *VoiceScheduler) nextDelay(now, nextSweep time.Time) time.Duration {
 	next := nextSweep
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	oldestByRoute := s.oldestMessageByRouteLocked()
 	for _, entry := range s.entries {
 		var candidate time.Time
 		switch entry.state {
@@ -615,7 +635,7 @@ func (s *VoiceScheduler) nextDelay(now, nextSweep time.Time) time.Duration {
 				candidate = entry.nextAttempt
 			}
 		case voiceResolveReady:
-			if s.groupsCompleteLocked(entry) {
+			if entry.key.messageID == oldestByRoute[entry.key.route] && s.groupsCompleteLocked(entry) {
 				candidate = entry.nextAttempt
 			}
 		}
@@ -872,6 +892,7 @@ func (s *VoiceScheduler) allTargetsAppliedLocked(entry *voiceEntry) bool {
 func (s *VoiceScheduler) completeResolve(key voiceScheduleKey) {
 	var hooks []chan<- voiceScheduleResult
 	var result voiceScheduleResult
+	completed := false
 	s.mu.Lock()
 	if entry := s.entries[key]; entry != nil {
 		if !s.allTargetsAppliedLocked(entry) {
@@ -892,6 +913,7 @@ func (s *VoiceScheduler) completeResolve(key voiceScheduleKey) {
 			result.Err = errors.New(detail)
 		}
 		delete(s.entries, key)
+		completed = true
 	}
 	s.mu.Unlock()
 	for _, hook := range hooks {
@@ -899,6 +921,11 @@ func (s *VoiceScheduler) completeResolve(key voiceScheduleKey) {
 		case hook <- result:
 		default:
 		}
+	}
+	if completed {
+		// Releasing the oldest message makes the next message on this route
+		// eligible immediately; do not wait for the periodic retry sweep.
+		s.Wake()
 	}
 }
 

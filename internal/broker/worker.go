@@ -260,15 +260,6 @@ type RouteWorker struct {
 	// the total outstanding records.
 	coveredOrder []coveredPushOrder
 
-	// highestTelegramMessageID is the greatest ordinary Telegram message ID this
-	// worker has begun processing. Telegram message IDs increase within a chat,
-	// so a lower first-seen voice ID after this watermark is definitively older
-	// content arriving late (for example, a held-offset redelivery after a newer
-	// end-of-batch marker). The worker still transcribes, persists, and delivers
-	// it; this watermark exists only to label that visible reordering honestly.
-	// Worker-run-goroutine-only, so it needs no lock.
-	highestTelegramMessageID int64
-
 	// prevEchoDone chains the per-topic voice-readback echoes so they post in
 	// strict arrival order (spec Phase 3 — the maintainer: "processed one by one"). The
 	// echo is dispatched off the critical path (a retrying send can back off for
@@ -498,31 +489,6 @@ func (w *RouteWorker) run(ctx context.Context) {
 	}
 }
 
-// observeTelegramOrder advances the per-route Telegram message watermark and
-// reports the newer message a late voice has overtaken. It does not suppress or
-// defer anything: recoverable late delivery is safer than loss, and the caller
-// uses the result only to make the reordered delivery explicit to both readers.
-//
-// Edits reuse an old message ID intentionally, so they advance the watermark
-// when newer but are never themselves called "late". Non-Telegram channels have
-// no message-ID monotonicity contract here and are left unchanged.
-func (w *RouteWorker) observeTelegramOrder(in *c3types.Inbound) (after int64, late bool) {
-	if in == nil || in.Channel != "telegram" || in.MessageID <= 0 {
-		return 0, false
-	}
-	after = w.highestTelegramMessageID
-	if in.MessageID > after {
-		w.highestTelegramMessageID = in.MessageID
-		return 0, false
-	}
-	return after, !in.Edited && in.MessageID < after
-}
-
-func lateVoiceOrderNotice(messageID, afterMessageID int64) string {
-	return fmt.Sprintf("⚠️ [late voice message: message_id=%d was spoken before message_id=%d but is being delivered after it]",
-		messageID, afterMessageID)
-}
-
 // sttFailureNotice is the human-facing line for a voice note that was fetched
 // but not transcribed. Unlike a fetch refusal there is nothing specific to
 // report — the provider's traceback is a log concern, not a chat one.
@@ -570,10 +536,6 @@ func (w *RouteWorker) flushInbounds(ctx context.Context, batch []*c3types.Inboun
 	voicePlans := make(map[*c3types.Inbound]voicePlan)
 	deliveryBatch := make([]*c3types.Inbound, 0, len(batch))
 	for _, in := range batch {
-		// Observe every ordinary message at flush time, before voice work can
-		// complete out of order. The existing watermark is only a presentation
-		// label; it never suppresses recoverable late content.
-		w.observeTelegramOrder(in)
 		voices := voiceAttachments(in)
 		if in.IsEvent() || len(voices) == 0 {
 			deliveryBatch = append(deliveryBatch, in)
@@ -2046,7 +2008,7 @@ func (w *RouteWorker) handleResolveVoiceTarget(ctx context.Context, scheduler *V
 		scheduler.markResolveApplied(job.Key, target.recordID)
 		durableApplied = true
 		w.finishVoiceGroup(ctx, in, target.group)
-		w.forwardOrFallbackCovering(ctx, w.voiceResolvePresentation(in), []*c3types.Inbound{in}, 0, nil, true)
+		w.forwardOrFallbackCovering(ctx, in, []*c3types.Inbound{in}, 0, nil, true)
 		w.runVoiceResolveTestHook("after_push")
 		return false
 	}
@@ -2084,7 +2046,7 @@ func (w *RouteWorker) handleResolveVoiceTarget(ctx context.Context, scheduler *V
 					w.dedup.record(final.Inbound.MessageID)
 				}
 				w.finishVoiceGroup(ctx, &final.Inbound, target.group)
-				w.forwardOrFallbackCovering(ctx, w.voiceResolvePresentation(&final.Inbound), []*c3types.Inbound{&final.Inbound}, 1, []string{recordID}, true)
+				w.forwardOrFallbackCovering(ctx, &final.Inbound, []*c3types.Inbound{&final.Inbound}, 1, []string{recordID}, true)
 				w.runVoiceResolveTestHook("after_push")
 			}
 		}
@@ -2110,7 +2072,7 @@ func (w *RouteWorker) handleResolveVoiceTarget(ctx context.Context, scheduler *V
 	}
 	w.evictIfOverCap(qrk)
 	w.finishVoiceGroup(ctx, revision, target.group)
-	w.forwardOrFallbackCovering(ctx, w.voiceResolvePresentation(revision), []*c3types.Inbound{revision}, 1, []string{revisionID}, true)
+	w.forwardOrFallbackCovering(ctx, revision, []*c3types.Inbound{revision}, 1, []string{revisionID}, true)
 	w.runVoiceResolveTestHook("after_push")
 	return false
 }
@@ -2122,15 +2084,6 @@ func (w *RouteWorker) finishVoiceGroup(ctx context.Context, in *c3types.Inbound,
 	group.echoOnce.Do(func() {
 		w.enqueueVoiceReadback(ctx, in, group.echoTranscript(), group.failNotice(), group.echo)
 	})
-}
-
-func (w *RouteWorker) voiceResolvePresentation(in *c3types.Inbound) *c3types.Inbound {
-	if in == nil || in.Channel != "telegram" || in.Edited || in.MessageID <= 0 || w.highestTelegramMessageID <= in.MessageID {
-		return in
-	}
-	cp := *in
-	cp.Text = lateVoiceOrderNotice(in.MessageID, w.highestTelegramMessageID) + "\n" + in.Text
-	return &cp
 }
 
 func (w *RouteWorker) runVoiceResolveTestHook(stage string) {

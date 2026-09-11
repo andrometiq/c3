@@ -130,22 +130,52 @@ func resolveCodexThreadID(ctx context.Context, cfg codexForwardConfig) (string, 
 	if err := client.notify("initialized", nil); err != nil {
 		return "", err
 	}
-	resp, err := client.request(ctx, "thread/loaded/list", map[string]any{"limit": 20})
-	if err != nil {
-		return "", err
+	for {
+		resp, err := client.request(ctx, "thread/loaded/list", map[string]any{"limit": 20})
+		if err != nil {
+			return "", err
+		}
+		loaded, err := loadedThreadIDs(resp["data"])
+		if err != nil {
+			return "", err
+		}
+		switch len(loaded) {
+		case 1:
+			threadID := loaded[0]
+			_, readErr := client.request(ctx, "thread/read", map[string]any{
+				"threadId":     threadID,
+				"includeTurns": false,
+			})
+			if readErr == nil {
+				return threadID, nil
+			}
+			// During a resumed TUI launch Codex briefly advertises a generated
+			// thread reference before its rollout exists, then replaces it with
+			// the actual resumed thread. Caching that transient id makes every
+			// Telegram forward fail with the same "no rollout found" error. Wait
+			// only for this explicit transient state; all other failures remain
+			// fail-closed.
+			if !isCodexThreadAwaitingRollout(readErr) {
+				return "", readErr
+			}
+			select {
+			case <-ctx.Done():
+				return "", ctx.Err()
+			case <-time.After(100 * time.Millisecond):
+			}
+		case 0:
+			return "", errCodexNoLoadedThread
+		default:
+			return "", fmt.Errorf("%w (loaded: %s)", errCodexThreadAmbiguous, strings.Join(loaded, ", "))
+		}
 	}
-	loaded, err := loadedThreadIDs(resp["data"])
-	if err != nil {
-		return "", err
-	}
-	switch len(loaded) {
-	case 1:
-		return loaded[0], nil
-	case 0:
-		return "", errCodexNoLoadedThread
-	default:
-		return "", fmt.Errorf("%w (loaded: %s)", errCodexThreadAmbiguous, strings.Join(loaded, ", "))
-	}
+}
+
+func isCodexThreadAwaitingRollout(err error) bool {
+	var rpcErr *codexRPCError
+	return errors.As(err, &rpcErr) &&
+		rpcErr.Code == -32603 &&
+		strings.Contains(strings.ToLower(rpcErr.Message), "no rollout found")
 }
 
 // loadedThreadIDs reads the identity candidates out of a `thread/loaded/list`
