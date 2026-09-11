@@ -44,11 +44,8 @@ func (f *fallbackTracker) ShouldSend(key RouteKey) bool {
 
 const defaultFallbackCooldown = 300 * time.Second
 
-// defaultHeldNoticeCooldown throttles the edit-capable "held — nothing lost"
-// auto-reply: at most one held-notice per route per this window, so a burst of
-// held messages coalesces into a single notice instead of a per-message flood
-// (msg 6083). Short (unlike the 5-min fallback) so a genuinely new message after
-// a quiet gap still re-alerts promptly.
+// defaultHeldNoticeCooldown preserves the web status-event cadence. Telegram
+// uses backlog episodes instead of elapsed time.
 const defaultHeldNoticeCooldown = 10 * time.Second
 
 // fallbackText is the boilerplate reply sent on a no-claim inbound.
@@ -56,7 +53,7 @@ const fallbackText = "No CLI is currently attached to this topic. Run `c3-broker
 
 // heldReplyText is the "held, nothing lost" auto-reply sent when an inbound is
 // still queued after scheduling. It reassures and carries the running
-// count of queued messages. Cadence is the per-route 10-second Held cooldown.
+// count of queued messages. Telegram announces once per backlog episode.
 //
 // ONLY valid while the durable queue is live. When it is not, the reassurance is
 // inaccurate about local storage — use
@@ -89,4 +86,39 @@ func (f *fallbackTracker) remaining(key RouteKey) time.Duration {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return max(time.Millisecond, time.Until(f.lastByKey[key].Add(f.cooldown)))
+}
+
+// Telegram announces each durable backlog episode once. Exceptional warnings
+// keep their separate cooldown; web keeps the ordinary notice cooldown.
+func (f *fallbackTracker) reserveHeld(key RouteKey) time.Time {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	last, hasSent := f.lastByKey[key]
+	if (key.Channel == "telegram" && hasSent) || (key.Channel != "telegram" && time.Since(last) < f.cooldown) {
+		return time.Time{}
+	}
+	stamp := time.Now()
+	f.lastByKey[key] = stamp
+	return stamp
+}
+
+// A failed send cannot cancel a newer episode's reservation.
+func (f *fallbackTracker) cancelHeld(key RouteKey, stamp time.Time) {
+	if key.Channel != "telegram" {
+		return
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if !stamp.IsZero() && f.lastByKey[key] == stamp {
+		delete(f.lastByKey, key)
+	}
+}
+
+func (f *fallbackTracker) clearEpisode(key RouteKey) {
+	if key.Channel != "telegram" {
+		return
+	}
+	f.mu.Lock()
+	delete(f.lastByKey, key)
+	f.mu.Unlock()
 }

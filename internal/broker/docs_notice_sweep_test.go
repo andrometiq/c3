@@ -5,8 +5,6 @@ import (
 	"os"
 	"strings"
 	"testing"
-
-	"github.com/Andrometiq/c3/internal/ipc"
 )
 
 // Keep the complete user-facing examples backed by renderers, including the
@@ -28,16 +26,14 @@ func TestDocsQuoteAllNoticeExamples(t *testing.T) {
 	usage := read("../../docs/USAGE.md")
 	keyboard := permKeyboard("abcde")
 	permission := permPromptText("Bash", "git push origin fix/flaky-test") + "\n\n[" + keyboard[0][0].Text + "] [" + keyboard[0][1].Text + "]"
-	route := (ipc.RenderRoute{State: ipc.RenderQueueOnly, Reason: "no session attached"}).Text()
 	global := strings.Replace(b.statusGlobal(), fmt.Sprintf("(pid %d)", os.Getpid()), "(pid 12345)", 1)
 	// The Markdown example's two-space indent is presentation, not output.
 	global = strings.ReplaceAll(global, "\n", "\n  ")
 	for _, tc := range []struct{ doc, text string }{
 		{readme, permission},
-		{readme, heldReplyText("telegram", 1) + "\n" + route},
+		{readme, heldReplyText("telegram", 1)},
 		{readme, heldDegradedText()},
 		{usage, heldReplyText("telegram", 1)},
-		{usage, route},
 		{usage, b.statusForTopic("telegram", -100, nil)},
 		{usage, global},
 		{usage, evictionNotice(1, 0, 1, nil, true)},

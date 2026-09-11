@@ -853,7 +853,24 @@ func (w *RouteWorker) enqueueVoiceReadback(ctx context.Context, in *c3types.Inbo
 		echo = w.reserveVoiceReadback()
 	}
 	inCopy := *in
+	if in.Channel == "telegram" {
+		w.broker.notices.mu.Lock()
+		isStarting := w.broker.updateNoticeLocked(w.key, false)
+		w.broker.notices.routes[w.key].readbacks++
+		if isStarting {
+			go w.broker.sendRenderNotice(w.key)
+		}
+		w.broker.notices.mu.Unlock()
+	}
 	go func() {
+		if inCopy.Channel == "telegram" {
+			defer func() {
+				w.broker.notices.mu.Lock()
+				w.broker.notices.routes[w.key].readbacks--
+				w.broker.notices.mu.Unlock()
+			}()
+		}
+
 		defer close(echo.mine)
 		defer recoverGoroutine("echoReadback")
 		select {
@@ -961,6 +978,29 @@ func (w *RouteWorker) echoReadback(in *c3types.Inbound, transcript, failNotice s
 		// echo to. Skip silently — the agent surface (in.Text) is already set.
 		return
 	}
+	heldCount := 0
+	if in.Channel == "telegram" && w.broker.Queue != nil {
+		rows, countErr := w.broker.noticeSnapshot(w.key)
+		if countErr != nil {
+			log.Printf("readback held count failed route=%s: %v", routeKeyStr(w.key), countErr)
+		} else if len(rows) > 0 {
+			heldCount = len(rows)
+		}
+	}
+	var reservation time.Time
+	if heldCount > 0 && w.broker.HeldNotices != nil {
+		reservation = w.broker.HeldNotices.reserveHeld(w.key)
+	}
+	hasSent := false
+	defer func() {
+		if !hasSent && w.broker.HeldNotices != nil {
+			w.broker.HeldNotices.cancelHeld(w.key, reservation)
+		}
+	}()
+	heldSuffix := ""
+	if heldCount > 0 {
+		heldSuffix = fmt.Sprintf("\n📨 %d held in queue.", heldCount)
+	}
 	// Failure notice and transcript readback are INDEPENDENT, not either/or. One
 	// message can carry several voice attachments (a rich message decodes its
 	// blocks in order), so one can transcribe while another fails — and the human
@@ -971,10 +1011,12 @@ func (w *RouteWorker) echoReadback(in *c3types.Inbound, transcript, failNotice s
 	if failNotice != "" {
 		if _, serr := ch.SendReply(c3types.ReplyArgs{
 			Channel: in.Channel, ChatID: in.ChatID, TopicID: in.TopicID, ReplyTo: &in.MessageID,
-			Text: c3types.WithTestInjectionMarker(in, failNotice),
+			Text: c3types.WithTestInjectionMarker(in, failNotice) + heldSuffix,
 		}); serr != nil {
 			log.Printf("readback notice chan=%s chat=%d topic=%s msg=%d: send failed (non-fatal): %v",
 				w.key.Channel, w.key.ChatID, TopicKeyStr(w.key), in.MessageID, serr)
+		} else {
+			hasSent = true
 		}
 	}
 	if transcript == "" || isSTTFailureMarker(transcript) {
@@ -986,9 +1028,17 @@ func (w *RouteWorker) echoReadback(in *c3types.Inbound, transcript, failNotice s
 	if !ok {
 		return
 	}
-	if _, serr := rb.SendReadback(c3types.ReadbackArgs{
+	args := c3types.ReadbackArgs{
 		ChatID: in.ChatID, ReplyTo: &in.MessageID, TopicID: in.TopicID, Transcript: c3types.WithTestInjectionMarker(in, transcript),
-	}); serr != nil {
+	}
+	var sendErr error
+	if heldSender, ok := ch.(channel.HeldReadbackSender); ok && in.Channel == "telegram" {
+		_, sendErr = heldSender.SendReadbackWithHeld(args, heldCount)
+	} else {
+		_, sendErr = rb.SendReadback(args)
+	}
+	hasSent = hasSent || sendErr == nil
+	if serr := sendErr; serr != nil {
 		log.Printf("readback chan=%s chat=%d topic=%s msg=%d: SendReadback failed (non-fatal): %v",
 			w.key.Channel, w.key.ChatID, TopicKeyStr(w.key), in.MessageID, serr)
 	}
@@ -1936,6 +1986,9 @@ func (w *RouteWorker) handleFetch(ctx context.Context, job *FetchJob) {
 		// Off the lease: a channel round-trip must not sit inside the destructive
 		// section, and the caller already has its result.
 		w.notifyOversizeSetAside(len(notices))
+		if w.key.Channel == "telegram" {
+			w.broker.evaluateNotices(w.key, true)
+		}
 	}
 }
 

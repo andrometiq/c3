@@ -329,7 +329,7 @@ func TestDrain_RewritesRoutingAndStampsProvenance(t *testing.T) {
 	defer w.Stop()
 	rec := m
 	b.HeldNotices.mu.Lock()
-	b.HeldNotices.lastByKey[drainDst()] = time.Now().Add(-time.Hour)
+	delete(b.HeldNotices.lastByKey, drainDst())
 	b.HeldNotices.mu.Unlock()
 	w.forwardOrFallback(context.Background(), &rec, 1)
 	waitNoticeReplies(t, fc, pre+1)
@@ -338,6 +338,9 @@ func TestDrain_RewritesRoutingAndStampsProvenance(t *testing.T) {
 		t.Fatalf("want one held-notice from the moved record, got %d new sends", len(replies)-pre)
 	}
 	last := replies[len(replies)-1]
+	if last.ReplyTo != nil {
+		t.Fatalf("drained row quoted foreign message: %d", *last.ReplyTo)
+	}
 	if last.ChatID != -200 || last.TopicID == nil || *last.TopicID != 412 {
 		t.Fatalf("held-notice from the moved record posted to %d/%v, want the TARGET -200/412", last.ChatID, last.TopicID)
 	}

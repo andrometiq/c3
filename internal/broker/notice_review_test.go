@@ -89,17 +89,15 @@ func TestNoticeHeldFailureRearmsUnchangedRows(t *testing.T) {
 			t.Run(fmt.Sprintf("%v/%s", negotiated, failure), func(t *testing.T) {
 				b, w, _, fc := noticeFixture(t, negotiated)
 				b.HeldNotices = newFallbackTracker(30 * time.Millisecond)
-				b.HeldNotices.ShouldSend(w.key)
 				negotiatedAppend(t, w, 1, "queued")
 				ch := &failHeldChannel{fakeChannel: fc, fail: true, attempted: make(chan struct{}, 1)}
 				b.chMu.Lock()
 				b.channels[w.key.Channel] = &channelRegistration{Channel: ch}
 				b.chMu.Unlock()
-				// The route was already announced, so a route-only retry cannot pass.
+				// Seed a pending Held candidate before injecting the read/send failure.
 				b.notices.mu.Lock()
 				b.updateNoticeLocked(w.key, true)
 				r := b.notices.routes[w.key]
-				r.announced = r.route.Semantic()
 				r.pending = false
 				b.notices.mu.Unlock()
 				path := filepath.Join(filepath.Dir(b.Queue.RetentionDir()), queueRouteKey(w.key).File()+".jsonl")
@@ -320,20 +318,6 @@ func resumeStatusWorker(t *testing.T, b *Broker) {
 	if !stopped {
 		t.Fatal("fixture already has a running pool")
 	}
-	// Finish any sender from the manually driven lifecycle before replacing
-	// the fixture pool. Advance only its test clock; no notice is discarded.
-	b.notices.mu.Lock()
-	for key, r := range b.notices.routes {
-		if r.pending {
-			b.updateNoticeLocked(key, false)
-			r.since = time.Now().Add(-routeNoticeWindow)
-			select {
-			case r.changed <- struct{}{}:
-			default:
-			}
-		}
-	}
-	b.notices.mu.Unlock()
 	waitForVoiceCondition(t, "manual fixture notices finished", func() bool {
 		b.notices.mu.Lock()
 		defer b.notices.mu.Unlock()

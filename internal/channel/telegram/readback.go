@@ -250,6 +250,10 @@ func capPreviewParts(f3, l3 string, more int) (string, string) {
 //   - bandDeadzone → ("sendRichMessage", rich HTML with a <details> collapse)
 //   - bandHuge     → ("sendDocument",    "" — the caller builds the .txt + caption)
 func renderReadback(transcript string) (method, payload string, band readbackBand) {
+	return renderReadbackWithSuffix(transcript, "")
+}
+
+func renderReadbackWithSuffix(transcript, suffix string) (method, payload string, band readbackBand) {
 	full := strings.TrimSpace(transcript)
 	sents := splitSentences(full)
 	words := len(strings.Fields(full))
@@ -265,10 +269,10 @@ func renderReadback(transcript string) (method, payload string, band readbackBan
 	// emit an oversized sendMessage — which also closes a latent bug where a
 	// few-but-huge-sentence note used to emit an over-4096 TINY message. The visible
 	// header mirrors the payload header with its <b> tags stripped (tags cost 0).
-	tinyDisplayedU16 := uint16Len("🎤 Voice transcript\n") + uint16Len(full)
+	tinyDisplayedU16 := uint16Len("🎤 Voice transcript\n") + uint16Len(full) + uint16Len(suffix)
 	if (len(sents) < readbackTinyMaxSentences || tinyDisplayedU16 <= readbackTinyMaxU16) &&
 		tinyDisplayedU16 <= readbackShortMaxU16 {
-		return "sendMessage", "🎤 <b>Voice transcript</b>\n" + htmlEscape(full), bandTiny
+		return "sendMessage", "🎤 <b>Voice transcript</b>\n" + htmlEscape(full) + suffix, bandTiny
 	}
 
 	f3, l3, more := buildPreview(sents)
@@ -304,9 +308,9 @@ func renderReadback(transcript string) (method, payload string, band readbackBan
 	// costs its single visible char, so we measure the unescaped visible string
 	// (and send the escaped one), exactly as the W4 Python did.
 	shortHTML := header + "\n" + summaryHTML +
-		"\n\n<b>Full Transcript</b>\n<blockquote expandable>" + htmlEscape(full) + "</blockquote>"
+		"\n\n<b>Full Transcript</b>\n<blockquote expandable>" + htmlEscape(full) + "</blockquote>" + suffix
 	shortVisible := fmt.Sprintf("🎤 Voice transcript · ~%d words", words) + "\n" + summaryVisible +
-		"\n\nFull Transcript\n" + full
+		"\n\nFull Transcript\n" + full + suffix
 	shortVisibleU16 := uint16Len(shortVisible)
 	if shortVisibleU16 <= readbackShortMaxU16 {
 		return "sendMessage", shortHTML, bandShort
@@ -326,6 +330,12 @@ func renderReadback(transcript string) (method, payload string, band readbackBan
 	detailsHTML := "<p>" + header + "</p>" +
 		previewHTML +
 		"<details><summary><b>📄 Full Transcript</b></summary><p>" + htmlEscape(full) + "</p></details>"
+
+	if suffix != "" {
+		richSuffix := "<p>" + strings.TrimSpace(suffix) + "</p>"
+		richHTML += richSuffix
+		detailsHTML += richSuffix
+	}
 
 	// DEADZONE — the 4096 < shortVisible ≤ 9000 window renders as a searchable
 	// <details> collapse rich message.
@@ -348,6 +358,10 @@ func renderReadback(transcript string) (method, payload string, band readbackBan
 // the HUGE band and as the caption when an earlier band's send errors and
 // cascades to the document.
 func readbackCaption(transcript string) string {
+	return readbackCaptionWithSuffix(transcript, "")
+}
+
+func readbackCaptionWithSuffix(transcript, suffix string) string {
 	full := strings.TrimSpace(transcript)
 	sents := splitSentences(full)
 	words := len(strings.Fields(full))
@@ -374,14 +388,14 @@ func readbackCaption(transcript string) string {
 	// we NEVER capUTF16 the already-escaped string.
 	visibleBudget := readbackCaptionPreviewBudget
 	caption := header + "\n" + htmlEscape(capUTF16(body, visibleBudget))
-	for uint16Len(caption) > readbackCaptionMaxU16 && visibleBudget > 0 {
+	for uint16Len(caption+suffix) > readbackCaptionMaxU16 && visibleBudget > 0 {
 		visibleBudget -= 128
 		if visibleBudget < 0 {
 			visibleBudget = 0
 		}
 		caption = header + "\n" + htmlEscape(capUTF16(body, visibleBudget))
 	}
-	return caption
+	return caption + suffix
 }
 
 // Readback outbound-retry budget. A transient outbound blip (network/timeout/
@@ -407,6 +421,11 @@ func isRetryableSendErr(err error) bool {
 	return class == errClassTransient || class == errClassRateLimited
 }
 
+type readbackArgs struct {
+	c3types.ReadbackArgs
+	heldCount int
+}
+
 // SendReadback echoes a voice transcript back to the source chat as ONE Telegram
 // message in the frozen readback format. It reuses the channel's existing
 // senders (no raw HTTP) and is the optional interface the broker reaches after
@@ -421,10 +440,14 @@ func isRetryableSendErr(err error) bool {
 // already has the transcript; only the chat echo is lost). The transcript is
 // NEVER truncated or summarized.
 func (c *Channel) SendReadback(args c3types.ReadbackArgs) (int64, error) {
+	return c.SendReadbackWithHeld(args, 0)
+}
+
+func (c *Channel) SendReadbackWithHeld(args c3types.ReadbackArgs, heldCount int) (int64, error) {
 	if c.bot == nil {
 		return 0, errors.New("telegram: channel not started")
 	}
-	id, err := c.retryReadbackSend(func() (int64, error) { return c.sendReadbackOnce(args) })
+	id, err := c.retryReadbackSend(func() (int64, error) { return c.sendReadbackOnce(readbackArgs{args, heldCount}) })
 	return id, c.scrubToken(err)
 }
 
@@ -482,8 +505,9 @@ func (c *Channel) retryReadbackSend(send func() (int64, error)) (int64, error) {
 // short notice. A retryable (transient/429) error short-circuits the cascade and
 // is returned to SendReadback's retry loop, because a smaller format won't send
 // on a wire that's down.
-func (c *Channel) sendReadbackOnce(args c3types.ReadbackArgs) (int64, error) {
-	method, payload, band := renderReadback(args.Transcript)
+func (c *Channel) sendReadbackOnce(args readbackArgs) (int64, error) {
+	suffix := readbackHeldSuffix(args)
+	method, payload, band := renderReadbackWithSuffix(args.Transcript, suffix)
 
 	switch band {
 	case bandTiny, bandShort:
@@ -510,7 +534,7 @@ func (c *Channel) sendReadbackOnce(args c3types.ReadbackArgs) (int64, error) {
 
 	// HUGE band, or a TINY/SHORT/LONG/DEADZONE FORMAT error → the whole verbatim
 	// transcript as a .txt document, captioned with the summary preview.
-	id, err := c.sendReadbackDocument(args, readbackCaption(args.Transcript))
+	id, err := c.sendReadbackDocument(args, readbackCaptionWithSuffix(args.Transcript, suffix))
 	if err == nil {
 		return id, nil
 	}
@@ -533,7 +557,7 @@ func (c *Channel) sendReadbackOnce(args c3types.ReadbackArgs) (int64, error) {
 // isParseEntityError plaintext fallback, recordOutboundErr/Success, and
 // MessageThreadId + ReplyParameters from TopicID/ReplyTo. htmlText is pre-formed
 // HTML (parse_mode HTML); the parse-error fallback re-sends the raw transcript.
-func (c *Channel) sendReadbackMessage(args c3types.ReadbackArgs, htmlText string) (int64, error) {
+func (c *Channel) sendReadbackMessage(args readbackArgs, htmlText string) (int64, error) {
 	opts := &gotgbot.SendMessageOpts{
 		ParseMode:       "HTML",
 		RequestOpts:     c.requestOptsFor("sendMessage"),
@@ -550,7 +574,7 @@ func (c *Channel) sendReadbackMessage(args c3types.ReadbackArgs, htmlText string
 		c.logf("telegram: readback HTML parse error, retrying as plaintext: %v", err)
 		plainOpts := *opts
 		plainOpts.ParseMode = ""
-		msg, err = c.bot.SendMessage(args.ChatID, args.Transcript, &plainOpts)
+		msg, err = c.bot.SendMessage(args.ChatID, args.Transcript+readbackHeldSuffix(args), &plainOpts)
 	}
 	if err != nil {
 		c.recordOutboundErr(err)
@@ -565,7 +589,7 @@ func (c *Channel) sendReadbackMessage(args c3types.ReadbackArgs, htmlText string
 // SendDocument — the same call sendMedia rides, NOT raw HTTP — with the SAME
 // rate.Wait + recordOutbound + thread/reply pattern as the rest of the channel.
 // The temp file is removed after the send.
-func (c *Channel) sendReadbackDocument(args c3types.ReadbackArgs, captionHTML string) (int64, error) {
+func (c *Channel) sendReadbackDocument(args readbackArgs, captionHTML string) (int64, error) {
 	f, err := os.CreateTemp("", "c3-voice-transcript-*.txt")
 	if err != nil {
 		return 0, fmt.Errorf("telegram: readback temp file: %w", err)
@@ -606,7 +630,7 @@ func (c *Channel) sendReadbackDocument(args c3types.ReadbackArgs, captionHTML st
 
 // sendReadbackNotice sends the short plain notice that is the last resort when
 // every other band failed. Same send pattern as the others; non-fatal upstream.
-func (c *Channel) sendReadbackNotice(args c3types.ReadbackArgs) (int64, error) {
+func (c *Channel) sendReadbackNotice(args readbackArgs) (int64, error) {
 	opts := &gotgbot.SendMessageOpts{
 		ParseMode:       "HTML",
 		RequestOpts:     c.requestOptsFor("sendMessage"),
@@ -617,11 +641,18 @@ func (c *Channel) sendReadbackNotice(args c3types.ReadbackArgs) (int64, error) {
 		return 0, fmt.Errorf("telegram: rate-wait: %w", err)
 	}
 	msg, err := c.bot.SendMessage(args.ChatID,
-		"🎤 <b>Voice transcript</b> (too long to display; delivery failed — see logs)", opts)
+		"🎤 <b>Voice transcript</b> (too long to display; delivery failed — see logs)"+readbackHeldSuffix(args), opts)
 	if err != nil {
 		c.recordOutboundErr(err)
 		return 0, fmt.Errorf("telegram: readback notice: %w", err)
 	}
 	c.recordOutboundSuccess()
 	return msg.MessageId, nil
+}
+
+func readbackHeldSuffix(args readbackArgs) string {
+	if args.heldCount <= 0 {
+		return ""
+	}
+	return fmt.Sprintf("\n📨 %d held in queue.", args.heldCount)
 }

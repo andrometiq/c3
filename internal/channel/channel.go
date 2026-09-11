@@ -58,6 +58,11 @@ type ReadbackSender interface {
 	SendReadback(c3types.ReadbackArgs) (sentMessageID int64, err error)
 }
 
+// HeldReadbackSender can include a queue count without changing transcript data.
+type HeldReadbackSender interface {
+	SendReadbackWithHeld(c3types.ReadbackArgs, int) (int64, error)
+}
+
 // LoginLinker is the optional authenticated-web-session bridge implemented by
 // a channel that can mint single-use login links. The broker type-asserts it
 // after a successful claim and from the local `c3-broker web link` admin path;

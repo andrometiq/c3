@@ -805,13 +805,13 @@ snapshot. Claims/session status also includes optional `confirmed_at` and `confi
 so inbox history stays accurate after exhaustion.
 Held notices recount at send time and exclude attempting rows. Scheduling
 precedes Held evaluation after enqueue, attempt termination, ownership or
-capability changes, enrichment and drain import. Route changes use a
-60-second stable-state timer comparing only state and reason,
-never age or queued count. Returning to the last announced state cancels the line.
-Held has a separate 10-second per-route cooldown; its one route line also records
-that state as announced. One sender holds the pending reservation through send
-completion, then checks the latest state. Legacy sessions retain their four-state
-wording (`channel`, `cross-session`, `probing`, `queue-only`).
+capability changes, enrichment and drain import. Telegram sends one quoted Held
+reply per backlog episode; pending voice work uses its readback and a short held
+count instead. Web retains its status-event flow and cooldown. Automatic route
+changes are silent in chat. `/status` describes delivery availability; local broker
+status and the MCP preamble retain their diagnostic wording and history.
+Legacy sessions retain their four-state wording on those surfaces (`channel`,
+`cross-session`, `probing`, `queue-only`).
 
 | Negotiated route state | Meaning and history |
 |---|---|

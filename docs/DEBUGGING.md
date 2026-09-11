@@ -40,8 +40,9 @@ claiming no receipt.
 
 Held counts only queued rows after scheduling, excluding open attempts, fetch
 groups and observed receipts. A channel timeout → inbox fallback → confirmation
-should produce no Held and one calm route line after 60 seconds of stability.
-State and reason changes restart that timer; confirmation age does not.
+should produce neither Held nor an automatic route diagnostic. Telegram emits
+one quoted Held per backlog episode; pending voice work uses its quoted readback
+with a short held-count suffix when needed. Drained rows are never quoted.
 Age eviction logs `queue eviction chan=… chat=… topic=…: expired=N over_count=M`;
 only count overflow says `queue full`. Both notices state the remaining held count.
 Use `/status` or `c3-broker status` to inspect route history and the session build.
@@ -72,7 +73,8 @@ inside open attempts. After channel expires, a new inbox attempt covers only the
 with a new token and fresh 15-second budget. After exhaustion, rows become visible again. Inbound
 at +30 seconds does not retry; inbound at or after +60 seconds rearms a cycle.
 Reconnect, explicit attach, changed capability facts, and a confirmation on a
-sibling route also rearm. Route notices use the 60-second stable-state timer described above.
+sibling route also rearm. The former 60-second stable-state timer for chat route
+notices has been removed; local status and the MCP preamble retain route diagnostics.
 
 Diagnostic lines are deliberately generic:
 
@@ -162,7 +164,7 @@ burst within debounce; `--photo` supplies attachment metadata, and `--voice`
 uses a deterministic local transcription hook through the real voice scheduler.
 There is no media download. All synthetic rows have `TestInjected=true`, channel
 frames have `c3_test_injected="true"`, and the channel namespace is `test-inject`.
-Replies, Held/route notices, edits, and voice echoes go to `TEST SINK` log lines.
+Replies, Held notices, edits, and voice echoes go to `TEST SINK` log lines.
 No injected route resolves to Telegram. Treat log contents as local test data.
 
 The full specification and [Acceptance for a release](TESTING-LIVE-MATRIX.md#acceptance-for-a-release)

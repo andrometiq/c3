@@ -99,6 +99,7 @@ func TestFlushInbounds_AppendFailSendsNotice(t *testing.T) {
 		t.Fatalf("setup: remove broken dir: %v", rmErr)
 	}
 	b.Queue = brokenStore
+	b.HeldNotices.reserveHeld(key) // Ordinary suppression must not hide storage failure.
 
 	in := &c3types.Inbound{Channel: "telegram", ChatID: -100, TopicID: &tid, MessageID: 77, Text: "hi", Timestamp: time.Now()}
 	w.flushInbounds(context.Background(), []*c3types.Inbound{in})

@@ -60,10 +60,10 @@ func heldReadError(t *testing.T, negotiated bool, cached int) {
 	if got, err := b.noticePending(key, s); got != cached || err == nil {
 		t.Fatalf("cached pending=%d, want %d", got, cached)
 	}
-	b.notices.window = time.Millisecond
+
 	b.evaluateNotices(key, true)
-	waitForVoiceCondition(t, "route notice despite unreadable queue", func() bool { return strings.Contains(logs.text(), "TEST SINK reply") })
-	if strings.Contains(logs.text(), "text=\"📨 Held") {
+	settleNotice(t, b, key)
+	if strings.Contains(logs.text(), "TEST SINK reply") {
 		t.Fatal("unreadable queue claimed Held", logs.text())
 	}
 

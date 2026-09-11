@@ -27,7 +27,7 @@ func waitNoticeReplies(t *testing.T, fc noticeReplies, n int) []c3types.ReplyArg
 func exceptionalReplies(replies []c3types.ReplyArgs) []c3types.ReplyArgs {
 	var out []c3types.ReplyArgs
 	for _, r := range replies {
-		if !strings.Contains(r.Text, "Live route:") {
+		if !strings.HasPrefix(r.Text, "📨 Held —") {
 			out = append(out, r)
 		}
 	}
@@ -63,9 +63,11 @@ func TestNoticeHeldCooldownAndSendTimeCount(t *testing.T) {
 			t.Run(fmt.Sprintf("negotiated=%v/%s", negotiated, action), func(t *testing.T) {
 				b, w, s, fc := noticeFixture(t, negotiated)
 				b.HeldNotices = newFallbackTracker(40 * time.Millisecond)
-				b.HeldNotices.ShouldSend(w.key)
 				first := negotiatedAppend(t, w, 1, "one")
-				b.evaluateNotices(w.key, true)
+				b.notices.mu.Lock()
+				isStarting := b.updateNoticeLocked(w.key, true)
+				b.notices.mu.Unlock()
+				// Delay the sender until the queue/attempt state has changed.
 				second := negotiatedAppend(t, w, 2, "two")
 				rows, _ := b.Queue.PeekTracked(queueRouteKey(w.key), -1)
 				if action != "queued" {
@@ -79,14 +81,12 @@ func TestNoticeHeldCooldownAndSendTimeCount(t *testing.T) {
 						w.updateAttempt("test-token", func(a *attemptRecord) { a.Evidence = true; a.Outcome = "failed" })
 					}
 				}
-				// A route line is separately delayed. Force the sender to finish via a
-				// previously announced semantic state so only the Held emitter is tested.
-				b.notices.mu.Lock()
-				b.notices.routes[w.key].announced = b.noticeRoute(w.key).Semantic()
-				b.notices.mu.Unlock()
+				if isStarting {
+					go b.sendRenderNotice(w.key)
+				}
 				if action == "queued" {
 					got := waitNoticeReplies(t, fc, 1)
-					if got[0].Text != heldReplyText("telegram", 2)+"\n"+b.noticeRoute(w.key).Text() {
+					if got[0].Text != heldReplyText("telegram", 2) {
 						t.Fatal(got)
 					}
 					for i := 0; i < 3; i++ {
@@ -111,7 +111,7 @@ func TestNoticeSemanticStabilityAndFlapCancellation(t *testing.T) {
 	for _, negotiated := range []bool{false, true} {
 		t.Run(fmt.Sprint(negotiated), func(t *testing.T) {
 			b, w, s, fc := noticeFixture(t, negotiated)
-			b.notices.window = 40 * time.Millisecond
+
 			set := func(state, reason string) {
 				if negotiated {
 					s.delivery.mu.Lock()
@@ -129,32 +129,12 @@ func TestNoticeSemanticStabilityAndFlapCancellation(t *testing.T) {
 				}
 				b.notifyRenderRoute(s)
 			}
-			set("A", "")
-			waitNoticeReplies(t, fc, 1)
-			settleNotice(t, b, w.key)
-			set("B", "first")
-			b.notices.mu.Lock()
-			first := b.notices.routes[w.key].since
-			b.notices.mu.Unlock()
-			set("B", "second")
-			b.notices.mu.Lock()
-			second := b.notices.routes[w.key].since
-			b.notices.mu.Unlock()
-			if !second.After(first) {
-				t.Fatal("reason change did not restart stable window")
+			for _, state := range []string{"A", "B", "A", "B"} {
+				set(state, "changed")
+				settleNotice(t, b, w.key)
 			}
-			set("A", "")
-			settleNotice(t, b, w.key)
-			if len(fc.sendRepliesSnapshot()) != 1 {
-				t.Fatal("flap emitted a line")
-			}
-			set("B", "stable")
-			waitNoticeReplies(t, fc, 2)
-			settleNotice(t, b, w.key)
-			for _, r := range fc.sendRepliesSnapshot() {
-				if strings.Contains(r.Text, "Held") || strings.Count(r.Text, "Live route:") != 1 || strings.Contains(r.Text, "\n") {
-					t.Fatal(r.Text)
-				}
+			if got := fc.sendRepliesSnapshot(); len(got) != 0 {
+				t.Fatalf("route change sent chat diagnostic: %+v", got)
 			}
 			r := ipc.RenderRoute{State: "live_inbox", Confirmed: time.Now(), Held: 1}
 			before := r.Semantic()
@@ -163,7 +143,7 @@ func TestNoticeSemanticStabilityAndFlapCancellation(t *testing.T) {
 			if r.Semantic() != before {
 				t.Fatal("age/count changed semantic state")
 			}
-			if routeNoticeWindow != 60*time.Second || defaultHeldNoticeCooldown != 10*time.Second {
+			if defaultHeldNoticeCooldown != 10*time.Second {
 				t.Fatal("production timer contract changed")
 			}
 		})
@@ -190,7 +170,7 @@ func TestNoticeNeverPullOnlyDuringLiveAttempt(t *testing.T) {
 func TestNoticeChannelTimeoutFallbackConfirmationScenario(t *testing.T) {
 	clearFetchTestEnvironment(t)
 	b, w, s, frames, ctx := negotiatedFixture(t)
-	b.notices.window = 50 * time.Millisecond
+
 	s.delivery.mu.Lock()
 	s.delivery.live.Inbox.Eligible = true
 	s.delivery.mu.Unlock()
@@ -207,9 +187,9 @@ func TestNoticeChannelTimeoutFallbackConfirmationScenario(t *testing.T) {
 	w.scheduleAttempt(ctx, false)
 	ch, _ := b.Channel("telegram")
 	fc := ch.(*fakeChannel)
-	got := waitNoticeReplies(t, fc, 1)
 	settleNotice(t, b, w.key)
-	if len(got) != 1 || strings.Contains(got[0].Text, "Held") || !strings.Contains(got[0].Text, "Live route: live: inbox, confirmed") {
+	got := fc.sendRepliesSnapshot()
+	if len(got) != 0 {
 		t.Fatal(got)
 	}
 }
@@ -285,10 +265,7 @@ func TestStatusNoticeSameQueuedRowsAndHistoryGolden(t *testing.T) {
 			}
 			resumeStatusWorker(t, b)
 			got := b.statusForTopic(w.key.Channel, w.key.ChatID, nil)
-			route := "Live route: queue-only (host unavailable)."
-			if negotiated {
-				route = "Live route: pull-only (no receipt on channel or inbox; retries on reconnect, attach or new messages after 60 s), was inbox, confirmed 1m30s ago."
-			}
+			route := "Live delivery unavailable; messages are held and recoverable with fetch_queue"
 			want := "📊 general · 1 queued (oldest <1m) · Claude Code attached · build test-build · " + route + " · broker up"
 			if got != want {
 				t.Fatalf("got %q\nwant %q", got, want)
@@ -396,7 +373,7 @@ func TestNoticeSenderSerializesAcrossOwnershipAndFlaps(t *testing.T) {
 				b.chMu.Lock()
 				b.channels[w.key.Channel] = &channelRegistration{Channel: blocked}
 				b.chMu.Unlock()
-				b.notices.window = time.Millisecond
+
 				released := false
 				t.Cleanup(func() {
 					if !released {
@@ -413,12 +390,16 @@ func TestNoticeSenderSerializesAcrossOwnershipAndFlaps(t *testing.T) {
 					}
 					b.notifyRenderRoute(s)
 				}
+				negotiatedAppend(t, w, 1, "held")
+				b.evaluateNotices(w.key, true)
 				set("A")
 				select {
 				case <-blocked.entered:
 				case <-time.After(time.Second):
 					t.Fatal("sender never entered")
 				}
+				negotiatedAppend(t, w, 2, "arrived during send")
+				b.evaluateNotices(w.key, true)
 				set("B")
 				if scenario == "back to sent" {
 					set("A")
@@ -447,15 +428,12 @@ func TestNoticeSenderSerializesAcrossOwnershipAndFlaps(t *testing.T) {
 				close(blocked.release)
 				released = true
 				settleNotice(t, b, w.key)
-				want := 2
-				if scenario == "back to sent" {
-					want = 1
-				}
+				want := 1
 				replies := fc.sendRepliesSnapshot()
 				if len(replies) != want {
 					t.Fatalf("got %+v want %d", replies, want)
 				}
-				if want == 2 && !strings.Contains(replies[1].Text, "B") {
+				if strings.Contains(replies[0].Text, "Live route:") {
 					t.Fatal(replies)
 				}
 			})
@@ -488,6 +466,7 @@ func TestEvictNoticeCountCapUsesRemainingQueuedRows(t *testing.T) {
 			last := rows[len(rows)-1]
 			b.attempts.open(attemptRecord{Negotiated: negotiated, Token: "open-fetch", Route: w.key, Transport: "fetch", Holder: shadowHolder(s), Members: []attemptMember{{ID: last.RecordID, Revision: rowRevision(last)}}}, time.Now())
 
+			b.HeldNotices.reserveHeld(w.key)
 			w.evictIfOverCap(queueRouteKey(w.key))
 			got := fc.sendRepliesSnapshot()
 			if len(got) != 1 || got[0].Text != "⚠️ queue full — dropped 1 oldest; 999 message(s) remain held." {
@@ -501,7 +480,7 @@ func TestNoticeLegacyFallbackConfirmationScenario(t *testing.T) {
 	clearFetchTestEnvironment(t)
 	b, w, s, frames := shadowFixture(t)
 	b.Workers.Stop()
-	b.notices.window = 40 * time.Millisecond
+
 	s.SetRenderRoute(ipc.RenderProbing, "awaiting confirmation", true)
 	f := shadowPushOne(t, w, frames, time.Now())
 	w.updateAttempt(f.DeliveryToken, func(a *attemptRecord) { a.Deadline = time.Now().Add(-time.Second) })
@@ -512,9 +491,9 @@ func TestNoticeLegacyFallbackConfirmationScenario(t *testing.T) {
 	w.scheduleAttempt(context.Background(), false)
 	ch, _ := b.Channel("telegram")
 	fc := ch.(*fakeChannel)
-	got := waitNoticeReplies(t, fc, 1)
 	settleNotice(t, b, w.key)
-	if len(got) != 1 || got[0].Text != "Live route: cross-session." {
+	got := fc.sendRepliesSnapshot()
+	if len(got) != 0 {
 		t.Fatal(got)
 	}
 }
@@ -688,8 +667,8 @@ func TestDocsQuotePhase5NoticeContracts(t *testing.T) {
 		quotes []string
 	}{
 		{"../../docs/DEBUGGING.md", []string{deliveredLog(key, 42, &Stub{CLI: "claude", ConnID: 7}, "channel", "TOKEN"), "attempt confirmed token=TOKEN route=-100/281 ms=100", "attempt retired n=1 token=TOKEN", "/reload-plugins"}},
-		{"../../docs/ADAPTERS.md", []string{"| Negotiated route state | Meaning and history |", "60-second stable-state timer", "accepted by <host>", "holder_build"}},
-		{"../../DECISIONS.md", []string{"D038: Notices derive from delivery state (phase 5)", "One broker-owned sender per route", "state cancels a pending change"}},
+		{"../../docs/ADAPTERS.md", []string{"| Negotiated route state | Meaning and history |", "Automatic route", "accepted by <host>", "holder_build"}},
+		{"../../DECISIONS.md", []string{"D038: Notices derive from delivery state (phase 5)", "One broker-owned sender per route", "No sent-message IDs are retained"}},
 	} {
 		body, err := os.ReadFile(doc.path)
 		if err != nil {

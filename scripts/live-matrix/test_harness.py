@@ -272,7 +272,7 @@ class MatrixTests(unittest.TestCase):
         self.assertIsInstance(clean["origin"]["verifiedPeerPid"], int)
 
     def evidence(self):
-        return {"no_false_held": True, "route_line_count": 1, "injected": True, "rows_final": 0, "received": {"1": 1}, "attempts": [
+        return {"no_false_held": True, "route_line_count": 0, "injected": True, "rows_final": 0, "received": {"1": 1}, "attempts": [
             {"phase": "reserved", "token": "one", "transport": "channel", "members": "1"},
             {"phase": "confirmed", "token": "one", "transport": "channel", "retired": "1", "elapsed_ms": "100"}]}
 
@@ -298,7 +298,7 @@ class MatrixTests(unittest.TestCase):
             self.assertIn("no false Held assertion failed or missing", verdict(cell, evidence), cell.name)
             evidence["no_false_held"] = True
             evidence["route_line_count"] = 0
-            self.assertIn("route line count assertion failed or missing", verdict(cell, evidence), cell.name)
+            self.assertNotIn("route line count assertion failed or missing", verdict(cell, evidence), cell.name)
             evidence["route_line_count"] = route_line_limit(cell) + 1
             self.assertIn("route line count assertion failed or missing", verdict(cell, evidence), cell.name)
             for field in ("no_false_held", "route_line_count"):
@@ -309,10 +309,10 @@ class MatrixTests(unittest.TestCase):
     def test_notice_collector_after_confirmation(self):
         log = "TEST ATTEMPT token=x phase=reserved members=1 transport=channel\n"
         log += "attempt confirmed token=x route=-100/1 ms=2\n"
-        log += 'TEST SINK reply text="📨 Held — nothing lost. 1 message queued. Send /status to check.\\nLive route: channel."\n'
+        log += 'TEST SINK reply text="📨 Held — nothing lost. 1 message queued. Send /status to check."\n'
         evidence = notice_evidence(log, 1)
         self.assertFalse(evidence["no_false_held"])
-        self.assertEqual(evidence["route_line_count"], 1)
+        self.assertEqual(evidence["route_line_count"], 0)
         self.assertTrue(notice_evidence('TEST SINK text="Live route: live: inbox, confirmed 1s ago."', 1)["no_false_held"])
 
     def test_fetch_rejects_consume_before_tool_result(self):

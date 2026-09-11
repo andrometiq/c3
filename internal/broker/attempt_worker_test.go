@@ -66,7 +66,7 @@ func TestNegotiatedAttemptResultDispatchedToWorker(t *testing.T) {
 	t.Setenv("C3_QUEUE_DIR", t.TempDir())
 	b := brokerWithChannel(t, mfWithTelegram(), &fakeChannel{})
 	t.Cleanup(b.Shutdown)
-	b.notices.window = 20 * time.Millisecond
+
 	key := MakeRouteKey("telegram", -100, nil)
 	s, frames := negotiatedHolder(t, b, key, 1)
 	b.Workers.Submit(key, Job{Kind: JobInbound, Inbound: inboundOn(-100, nil, 1, "receipt")})
@@ -89,7 +89,7 @@ func TestNegotiatedProcessDeathReleasesImmediately(t *testing.T) {
 	t.Setenv("C3_QUEUE_DIR", t.TempDir())
 	b := brokerWithChannel(t, mfWithTelegram(), &fakeChannel{})
 	t.Cleanup(b.Shutdown)
-	b.notices.window = 20 * time.Millisecond
+
 	key := MakeRouteKey("telegram", -100, nil)
 	s, frames := negotiatedHolder(t, b, key, 1)
 	b.Workers.Submit(key, Job{Kind: JobInbound, Inbound: inboundOn(-100, nil, 1, "death")})
@@ -142,7 +142,7 @@ func testNegotiatedSocketReconnect(t *testing.T, transport string) {
 			t.Setenv("C3_QUEUE_DIR", t.TempDir())
 			b := brokerWithChannel(t, mfWithTelegram(), &fakeChannel{})
 			t.Cleanup(b.Shutdown)
-			b.notices.window = 20 * time.Millisecond
+
 			first, closeFirst := peerPair(t, b)
 			t.Cleanup(closeFirst)
 			offer := channelOffer
@@ -210,11 +210,10 @@ func TestNegotiatedHeldRecountsAfterScheduling(t *testing.T) {
 	fc := &fakeChannel{}
 	b := brokerWithChannel(t, mfWithTelegram(), fc)
 	t.Cleanup(b.Shutdown)
-	b.notices.window = 20 * time.Millisecond
+
 	b.HeldNotices = newFallbackTracker(100 * time.Millisecond)
 	key := MakeRouteKey("telegram", -100, nil)
 	s, frames := negotiatedHolder(t, b, key, 1)
-	b.HeldNotices.ShouldSend(key) // keep the notice pending until scheduling runs
 	in := inboundOn(-100, nil, 1, "visible only while queued")
 	if _, err := b.Queue.AppendTracked(queueRouteKey(key), in); err != nil {
 		t.Fatal(err)
@@ -225,30 +224,13 @@ func TestNegotiatedHeldRecountsAfterScheduling(t *testing.T) {
 	b.notifyRenderRoute(s)
 	b.wakeDelivery(key)
 	f := nextDeliver(t, frames)
-	deadline := time.Now().Add(time.Second)
-	for time.Now().Before(deadline) {
-		fc.mu.Lock()
-		n := len(fc.replyCalls)
-		fc.mu.Unlock()
-		if n > 0 {
-			break
-		}
-		time.Sleep(time.Millisecond)
+	settleNotice(t, b, key)
+	if got := fc.sendRepliesSnapshot(); len(got) != 0 {
+		t.Fatalf("false Held or route diagnostic during attempt: %+v", got)
 	}
-	fc.mu.Lock()
-	if len(fc.replyCalls) == 0 {
-		fc.mu.Unlock()
-		t.Fatal("delayed route notice never sent")
-	}
-	for _, reply := range fc.replyCalls {
-		if strings.Contains(reply.Text, "Held —") {
-			t.Errorf("notice counted attempting row: %s", reply.Text)
-		}
-	}
-	fc.mu.Unlock()
 	raw, _ := json.Marshal(ipc.AttemptResultMsg{Op: ipc.OpAttemptResult, Token: f.Token, Outcome: "failed"})
 	b.handleAttemptResult(s, raw)
-	deadline = time.Now().Add(time.Second)
+	deadline := time.Now().Add(time.Second)
 	for time.Now().Before(deadline) {
 		fc.mu.Lock()
 		held := false

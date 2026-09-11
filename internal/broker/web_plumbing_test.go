@@ -457,7 +457,7 @@ func TestWebHeldCopyAndKeyboardlessPermissionNotice(t *testing.T) {
 	}, 0)
 	waitNoticeReplies(t, webChannel, 1)
 	replies := webChannel.sendRepliesSnapshot()
-	if len(replies) != 1 || !strings.HasPrefix(replies[0].Text, heldReplyText("web", 1)+"\nLive route: ") {
+	if len(replies) != 1 || replies[0].Text != heldReplyText("web", 1) {
 		t.Fatalf("unclaimed web route notice = %+v", replies)
 	}
 

@@ -35,13 +35,13 @@ func TestCodexRenderUpdateHoldsNextInboundAndRecoveryPushes(t *testing.T) {
 			defer w.Stop()
 			for i := 1; i <= 2; i++ {
 				w.forwardOrFallback(context.Background(), inbound(tid, i, "held"), 1)
-				waitNoticeReplies(t, fc, i)
+				waitNoticeReplies(t, fc, 1)
 			}
 			if n, _ := b.Queue.Pending(queueRouteKey(key)); n != 2 {
 				t.Fatalf("held count %d", n)
 			}
 			replies := fc.sendRepliesSnapshot()
-			if len(replies) != 2 {
+			if len(replies) != 1 {
 				t.Fatalf("per-message Telegram notices: %+v", replies)
 			}
 			for _, reply := range replies {
@@ -54,7 +54,7 @@ func TestCodexRenderUpdateHoldsNextInboundAndRecoveryPushes(t *testing.T) {
 				t.Fatal("pull-only inbound pushed")
 			case <-time.After(50 * time.Millisecond):
 			}
-			if got := b.statusForTopic(key.Channel, key.ChatID, &tid); !strings.Contains(got, "Live route: queue-only ("+reason+")") {
+			if got := b.statusForTopic(key.Channel, key.ChatID, &tid); !strings.Contains(got, "Live delivery unavailable; messages are held and recoverable with fetch_queue") {
 				t.Fatalf("status: %s", got)
 			}
 			raw, _ = json.Marshal(ipc.RenderStateMsg{Op: ipc.OpRenderState, RenderRoute: ipc.RenderRoute{State: ipc.RenderCapable}})
@@ -65,7 +65,7 @@ func TestCodexRenderUpdateHoldsNextInboundAndRecoveryPushes(t *testing.T) {
 			case <-time.After(time.Second):
 				t.Fatal("recovery did not restore push")
 			}
-			if len(fc.sendRepliesSnapshot()) != 2 {
+			if len(fc.sendRepliesSnapshot()) != 1 {
 				t.Fatal("capable arrival was held")
 			}
 		})

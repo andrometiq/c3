@@ -100,7 +100,7 @@ func (b *Broker) statusForTopic(channelName string, chatID int64, topicID *int64
 	attached := "nothing attached"
 	if h, held := b.Routes.Holder(key); held {
 		if h.IsAlive() {
-			attached = surfaceLabel(h.CLI) + " attached · build " + sessionBuild(h) + " · " + b.noticeRoute(key).Text()
+			attached = surfaceLabel(h.CLI) + " attached · build " + sessionBuild(h) + " · " + b.chatDeliveryStatus(key)
 		} else {
 			// Dead reference: the holder's adapter is gone (disconnected AND its
 			// PID is no longer in the OS process table). Verify liveness at READ
@@ -177,7 +177,7 @@ func (b *Broker) statusGlobal() string {
 	var routeLines []string
 	for _, claim := range b.Routes.Snapshot() {
 		if claim.Stub.IsAlive() {
-			routeLines = append(routeLines, fmt.Sprintf("\n• %s · %s · build %s · %s", b.topicDisplayName(claim.Key.Channel, claim.Key.ChatID, topicPointer(claim.Key)), surfaceLabel(claim.Stub.CLI), sessionBuild(claim.Stub), b.noticeRoute(claim.Key).Text()))
+			routeLines = append(routeLines, fmt.Sprintf("\n• %s · %s · build %s · %s", b.topicDisplayName(claim.Key.Channel, claim.Key.ChatID, topicPointer(claim.Key)), surfaceLabel(claim.Stub.CLI), sessionBuild(claim.Stub), b.chatDeliveryStatus(claim.Key)))
 		}
 	}
 	sort.Strings(routeLines)
@@ -292,4 +292,22 @@ func topicPointer(key RouteKey) *int64 {
 		return &id
 	}
 	return nil
+}
+
+func (b *Broker) chatDeliveryStatus(key RouteKey) string {
+	route := b.noticeRoute(key)
+	switch route.State {
+	case "capable", "cross_session", "live_channel", "live_inbox":
+		return "Live delivery available"
+	case "waiting", "probing":
+		return "Waiting for delivery confirmation"
+	default:
+		if route.Reason == "no session attached" {
+			return "No session attached"
+		}
+		if b.Queue == nil {
+			return "Live delivery unavailable"
+		}
+		return "Live delivery unavailable; messages are held and recoverable with fetch_queue"
+	}
 }

@@ -11,7 +11,7 @@ import (
 )
 
 // No session attached → the inbound is queued (not dropped) AND a held-count
-// auto-reply is sent (reusing the 5-min fallback cooldown).
+// auto-reply is sent once for the backlog episode.
 func TestForwardOrFallback_NoSession_QueuesAndHeldReply(t *testing.T) {
 	t.Setenv("C3_QUEUE_DIR", t.TempDir())
 	mf := mfWithTelegram()
@@ -47,12 +47,7 @@ func TestForwardOrFallback_NoSession_QueuesAndHeldReply(t *testing.T) {
 	}
 }
 
-// Debounce (msg 6083): on an edit-capable channel a BURST of holds coalesces
-// into ONE held-notice per route per the HeldNotices window — not a fresh notice
-// per message (which flooded, esp. under the Windows offset-loop). Both messages
-// still queue; the second notice is suppressed within the window; never an
-// in-place edit. After the window elapses a new hold re-alerts (leading-edge),
-// preserving #36's per-message re-alert intent, just rate-limited.
+// Edit support does not change episode semantics: one reply, no edits.
 func TestForwardOrFallback_NoSession_EditCapable_DebouncesHeldNotices(t *testing.T) {
 	t.Setenv("C3_QUEUE_DIR", t.TempDir())
 	mf := mfWithTelegram()
@@ -89,16 +84,15 @@ func TestForwardOrFallback_NoSession_EditCapable_DebouncesHeldNotices(t *testing
 		t.Fatalf("held-notice should carry a queued-count line; got %q", sends[0].Text)
 	}
 
-	// After the debounce window elapses, a new hold re-alerts. Backdate the
-	// tracker's last-notice timestamp instead of sleeping the full window.
+	// Crossing the former cooldown must not announce the same episode again.
 	b.HeldNotices.mu.Lock()
 	b.HeldNotices.lastByKey[key] = time.Now().Add(-defaultHeldNoticeCooldown - time.Second)
 	b.HeldNotices.mu.Unlock()
 	in3 := &c3types.Inbound{Channel: "telegram", ChatID: -1001234567890, TopicID: &tid, MessageID: 3, Text: "hi", Timestamp: time.Now()}
 	w.forwardOrFallback(context.Background(), in3, 1)
-	waitNoticeReplies(t, fc, 2)
-	if got := len(fc.sendRepliesSnapshot()); got != 2 {
-		t.Fatalf("a hold after the debounce window must re-alert; got %d sends, want 2", got)
+	settleNotice(t, b, key)
+	if got := len(fc.sendRepliesSnapshot()); got != 1 {
+		t.Fatalf("a backlog episode must send only once; got %d sends, want 1", got)
 	}
 }
 

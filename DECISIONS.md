@@ -894,28 +894,21 @@ for C3-controlled restarts only; arbitrary shutdown still loses prompt state.
 
 ## D038: Notices derive from delivery state (phase 5)
 
-Ordinary delivery status has two emitters: Held after scheduling at enqueue,
-attempt termination, ownership/capability change, enrichment and drain import;
-and one route line after a semantic state/reason holds for 60 seconds. Held uses
-a 10-second per-route cooldown and recomputes queued identities at send time.
-Open attempts and fetch groups never count as queued. Observed receipt evidence
-also excludes a row when storage retirement needs retries. Voice revisions remain
-distinct. Persistence, eviction, oversize, legacy recovery and drain warnings stay
-independent exceptional paths; age expiry and count overflow have separate copy.
+Held runs after scheduling at enqueue, attempt termination, ownership/capability
+change, enrichment and drain import. Counts exclude open attempts, fetch groups
+and observed receipt evidence, including when retirement needs retries.
+Persistence, eviction, oversize, legacy recovery and drain warnings remain independent.
 
-One broker-owned sender per route keeps its pending flag through send completion,
-then compares the newest state with the last one actually sent. Returning to that
-state cancels a pending change; age and held count never restart the route timer.
-A Held message includes one calm route line, which counts as an announcement.
-History survives reconnects at the route sender; negotiated proof still obeys the
-attempt model's ownership rules. Legacy sessions keep their four-state wording.
-Negotiated routes expose live channel/inbox proof, waiting or pull-only with prior
-transport/age history. Host acceptance is labelled acceptance, never display.
-
-Operator delivery, receipt and retirement logs use correlation tokens; notices
-and status never reveal tokens. Telegram and shell status show per-route state,
-history and session build. This replaces Held-by-route-change and raw-count notice
-behavior without changing delivery authority, retention limits or drain policy.
+One broker-owned sender per route serializes ordinary notices. Telegram sends
+one Held reply per backlog episode, quoting a local source row, never a drained
+row. Pending voice work uses the transcript or failure readback with a short held
+count instead. Episode state is in memory; restart may produce one extra notice.
+Web retains its status-event flow and cooldown. No sent-message IDs are retained.
+Automatic route diagnostics are silent in chat. Chat `/status` describes delivery
+availability and recovery; local status and the MCP preamble keep their detailed
+route wording. Delivery authority, adapter bytes, retention and drain policy are unchanged.
+Operator delivery, receipt and retirement logs retain correlation tokens; notices
+and status never reveal them.
 
 Phase-5 review corrections: legacy observations hide rows only while their
 captured holder still owns the route. Held retry state survives send and snapshot

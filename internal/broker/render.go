@@ -12,23 +12,17 @@ import (
 	"github.com/Andrometiq/c3/internal/queue"
 )
 
-const routeNoticeWindow = 60 * time.Second
-
-// Ordinary notices share one sender per route, including across reconnects.
-// Only successful sends advance announced; pending stays set through SendReply.
+// One sender per route, including across reconnects. Readbacks reserve the
+// ordinary notice slot while the voice echo waits for its FIFO predecessor.
 type routeNotices struct {
 	mu     sync.Mutex
 	routes map[RouteKey]*routeNotice
-	window time.Duration // zero uses the production window; tests can shorten it
 }
 type routeNotice struct {
-	route         ipc.RenderRoute
-	since         time.Time
-	announced     string
 	heldRows      string
 	heldVersion   uint64
 	held, pending bool
-	changed       chan struct{}
+	readbacks     int
 }
 
 func (b *Broker) handleRenderState(stub *Stub, raw []byte) {
@@ -94,8 +88,8 @@ func (b *Broker) noticeRoute(key RouteKey) ipc.RenderRoute {
 	return r
 }
 
-// Caller holds notices.mu. Read the current route inside the lock so concurrent
-// wakeups cannot replace a newer candidate with an older snapshot.
+// Caller holds notices.mu. Queue identities keep concurrent evaluations from
+// losing a new backlog while an outbound send is in progress.
 func (b *Broker) updateNoticeLocked(key RouteKey, held bool) bool {
 	n := &b.notices
 	if n.routes == nil {
@@ -103,18 +97,9 @@ func (b *Broker) updateNoticeLocked(key RouteKey, held bool) bool {
 	}
 	r := n.routes[key]
 	if r == nil {
-		r = &routeNotice{changed: make(chan struct{}, 1)}
+		r = &routeNotice{}
 		n.routes[key] = r
 	}
-	route := b.noticeRoute(key)
-	if r.route.Semantic() != route.Semantic() {
-		r.since = time.Now()
-		select {
-		case r.changed <- struct{}{}:
-		default:
-		}
-	}
-	r.route = route
 	if held && b.Queue != nil {
 		rows, err := b.queuedRows(key)
 		if err == nil {
@@ -123,124 +108,106 @@ func (b *Broker) updateNoticeLocked(key RouteKey, held bool) bool {
 				r.held = len(rows) > 0
 				r.heldRows = signature
 				r.heldVersion++
-				select {
-				case r.changed <- struct{}{}:
-				default:
-				}
+			}
+			// Open attempts are excluded from Held counts, but are not an empty
+			// backlog episode: they can still return to the queue.
+			if b.Queue.StatusFor(queueRouteKey(key)).Pending == 0 && b.HeldNotices != nil {
+				b.HeldNotices.clearEpisode(key)
 			}
 		}
 	}
-	if !r.pending && (r.held || r.announced != route.Semantic()) {
+	if !r.pending && r.held && r.readbacks == 0 {
 		r.pending = true
 		return true
 	}
-
 	return false
 }
 
 func (b *Broker) sendRenderNotice(key RouteKey) {
 	for {
-		if b.ctx.Err() != nil {
-			b.notices.mu.Lock()
-			b.notices.routes[key].pending = false
-			b.notices.mu.Unlock()
-			return
-		}
 		b.notices.mu.Lock()
 		version := b.notices.routes[key].heldVersion
 		b.notices.mu.Unlock()
-		rows, countErr := b.noticeSnapshot(key)
+		rows, err := b.noticeSnapshot(key)
 		b.notices.mu.Lock()
-		b.updateNoticeLocked(key, false)
 		r := b.notices.routes[key]
 		if r.heldVersion != version {
 			b.notices.mu.Unlock()
 			continue
 		}
-		window := b.notices.window
-		if window == 0 {
-			window = routeNoticeWindow
-		}
-		routeChanged := r.announced != r.route.Semantic()
-		delay := max(0, time.Until(r.since.Add(window)))
-		text := ""
-		heldSignature := ""
-		route := r.route
-		if r.held {
-			count := len(rows)
-			if countErr != nil {
-				// Preserve the pending Held through an unreadable snapshot. The next
-				// evaluation can retry the same identities without a new inbound.
-				r.pending = false
-				b.notices.mu.Unlock()
-				return
-			}
-			if count == 0 || b.Queue == nil {
-				r.held = false
-				if r.heldRows != "" {
-					r.heldRows = ""
-					r.heldVersion++
-				}
-			} else if b.HeldNotices == nil || b.HeldNotices.ShouldSend(key) {
-				text = heldReplyText(key.Channel, count) + "\n" + route.Text()
-				heldSignature = noticeRowSignature(rows)
-			} else {
-				heldDelay := b.HeldNotices.remaining(key)
-				if !routeChanged || heldDelay < delay {
-					delay = heldDelay
-				}
-			}
-		}
-		if text == "" && routeChanged && time.Since(r.since) >= window {
-			text = route.Text()
-		}
-		if text == "" && !routeChanged && !r.held {
+		if err != nil || len(rows) == 0 || r.readbacks > 0 || !hasHeldSource(key, rows) {
 			r.pending = false
 			b.notices.mu.Unlock()
 			return
 		}
-		changed := r.changed
-		b.notices.mu.Unlock()
-		if text == "" {
-			timer := time.NewTimer(max(time.Millisecond, delay))
-			select {
-			case <-b.ctx.Done():
-				timer.Stop()
-				b.notices.mu.Lock()
-				r.pending = false
-				b.notices.mu.Unlock()
-				return
-			case <-changed:
-				timer.Stop()
-			case <-timer.C:
-			}
-			continue
+		var reservation time.Time
+		if b.HeldNotices != nil {
+			reservation = b.HeldNotices.reserveHeld(key)
 		}
+		if b.HeldNotices != nil && reservation.IsZero() {
+			if key.Channel != "telegram" {
+				delay := b.HeldNotices.remaining(key)
+				b.notices.mu.Unlock()
+				timer := time.NewTimer(delay)
+				select {
+				case <-timer.C:
+					continue
+				case <-b.ctx.Done():
+					timer.Stop()
+				}
+				b.notices.mu.Lock()
+			}
+			r.pending = false
+			b.notices.mu.Unlock()
+			return
+		}
+		b.notices.mu.Unlock()
 		ch, err := b.Channel(key.Channel)
 		if err == nil {
-			var topic *int64
-			if key.HasTopic {
-				id := key.TopicID
-				topic = &id
-			}
-			_, err = ch.SendReply(c3types.ReplyArgs{Channel: key.Channel, ChatID: key.ChatID, TopicID: topic, Text: text})
+			_, err = ch.SendReply(c3types.ReplyArgs{Channel: key.Channel, ChatID: key.ChatID,
+				TopicID: topicPointer(key), ReplyTo: heldReplySource(key, rows), Text: heldReplyText(key.Channel, len(rows))})
 		}
 		b.notices.mu.Lock()
 		if err == nil {
-			// Held includes the calm route line, so it also counts as an announcement.
-			r.announced = route.Semantic()
-			if heldSignature != "" && (r.heldVersion == version || r.heldRows == heldSignature) {
+			if r.heldVersion == version {
 				r.held = false
-				r.heldRows = heldSignature
 			}
 		} else {
+			if b.HeldNotices != nil {
+				b.HeldNotices.cancelHeld(key, reservation)
+			}
 			log.Printf("delivery notice failed route=%s: %v", routeKeyStr(key), err)
-			r.pending = false
-			b.notices.mu.Unlock()
-			return
 		}
+		if err == nil && r.heldVersion != version {
+			b.notices.mu.Unlock()
+			continue
+		}
+		r.pending = false
 		b.notices.mu.Unlock()
+		return
 	}
+}
+
+func hasHeldSource(key RouteKey, rows []queue.TrackedInbound) bool {
+	for _, row := range rows {
+		if !row.Inbound.IsEvent() && (key.Channel != "telegram" || len(row.VoicePending) == 0) {
+			return true
+		}
+	}
+	return false
+}
+
+func heldReplySource(key RouteKey, rows []queue.TrackedInbound) *int64 {
+	if key.Channel != "telegram" {
+		return nil
+	}
+	for _, row := range rows {
+		in := row.Inbound
+		if !in.IsEvent() && in.DrainedFrom == "" && row.SourceRecordID == "" && len(row.VoicePending) == 0 && in.MessageID > 0 && MakeRouteKey(in.Channel, in.ChatID, in.TopicID) == key {
+			return &in.MessageID
+		}
+	}
+	return nil
 }
 
 func noticeRowSignature(rows []queue.TrackedInbound) string {

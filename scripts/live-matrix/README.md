@@ -131,9 +131,8 @@ can invoke the hook. This is the broker socket's existing trust model; the flag
 is an opt-in, not an additional caller-authentication boundary.
 
 Phase-5 collection requires `no_false_held` and `route_line_count` evidence for
-every cell. Counts start at injection and include the route line in Held. At least one
-line is required, with allowance for actual holds during voice enrichment and
-live startup. The driver observes for 80 seconds by default (at least 75),
-covering the receipt budget and 60-second stability timer. Missing evidence,
-zero lines or excess lines fails the cell. Collector
+every cell. Counts start at injection; automatic route diagnostics must remain
+absent, including on Held replies. Missing evidence or any route line fails the
+cell. The driver's existing 80-second default observation window (at least 75)
+continues to cover receipt and fallback behavior. Collector
 unit tests use local fixtures only and never launch the live harness.

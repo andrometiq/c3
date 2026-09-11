@@ -223,9 +223,8 @@ def notice_evidence(log, count):
 
 
 def route_line_limit(cell):
-    # One stable route line, with room for actual holds during voice
-    # enrichment and startup. The driver observes the full stability window.
-    return 1 + int(cell.kind == "voice") + int(cell.transport != "fetch" and cell.state == "startup")
+    # Automatic route diagnostics never belong in chat.
+    return 0
 
 
 def verdict(cell, evidence):
@@ -239,7 +238,7 @@ def verdict(cell, evidence):
     if evidence.get("no_false_held") is not True or evidence.get("false_held"):
         failures.append("no false Held assertion failed or missing")
     count = evidence.get("route_line_count")
-    if not isinstance(count, int) or not 1 <= count <= route_line_limit(cell):
+    if not isinstance(count, int) or not 0 <= count <= route_line_limit(cell):
         failures.append("route line count assertion failed or missing")
     if cell.transport == "fetch":
         if any(e.get("phase") == "reserved" and e.get("transport") != "fetch" for e in evidence.get("attempts", [])):

@@ -46,9 +46,7 @@ type Broker struct {
 	Workers          *WorkerPool
 	Fallbacks        *fallbackTracker
 	upgrades         upgradeRegistry
-	// HeldNotices throttles the "held — nothing lost" auto-reply on all
-	// channels to one per route per short window (defaultHeldNoticeCooldown) so a
-	// burst of holds coalesces into a single notice instead of a flood (msg 6083).
+	// HeldNotices tracks Telegram backlog episodes and the web notice cooldown.
 	HeldNotices *fallbackTracker
 	Plugins     *PluginHost
 	Pairing     *pairingState
