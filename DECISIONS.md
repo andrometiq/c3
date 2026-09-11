@@ -29,7 +29,9 @@ Sixty seconds gives a person time to read and tap. The 90-second watchdog covers
 eight for workers, leaving four seconds for remaining teardown. Channel calls
 can still wedge, so the watchdog is necessary. The client handshake/request has
 a two-second total deadline and old-process exit waits until 91 seconds from
-initiation, deliberately outliving the broker watchdog; failure prevents successor
+initiation. The two clocks start at different moments — the client's at its own
+request, the broker's at the intent it records afterwards — so the client normally
+outlives the watchdog but is not guaranteed to; failure prevents successor
 startup and propagates through `setup finish` without reporting completion.
 
 Cancellation removes local authority before notification. Notices use the stored

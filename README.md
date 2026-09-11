@@ -284,7 +284,8 @@ At the cap they cancel unanswered C3 requests and attempt notices on their origi
 routes. Cancelling a permission relay cannot cancel the host request at the laptop.
 Notices can fail, with no later retry; local cancellation still takes effect.
 Controlled shutdown has a 90-second watchdog armed at first intent; the client
-waits up to 91 seconds for exit so it outlives that watchdog. SIGTERM/SIGINT
+waits up to 91 seconds for exit, measured from its own request rather than
+from the broker's later intent, so it normally outlives that watchdog. SIGTERM/SIGINT
 preempt a controlled drain and use ordinary shutdown. OS termination and crashes retain
 the existing behavior. Older brokers reject the new restart request visibly.
 See [Updating C3](docs/USAGE.md#updating-c3) for the full boundary.

@@ -1202,8 +1202,10 @@ not prove host acceptance. The controlled shutdown watchdog forces exit after
 90 seconds from the first restart intent, armed by the callback even if channel
 startup is blocked; duplicate intent does not extend it.
 The administrative client allows two seconds for its entire exchange and waits
-up to 91 seconds from initiation for the old process to exit, deliberately
-outliving the broker’s 90-second watchdog. A failed exchange
+up to 91 seconds from initiation for the old process to exit. That clock starts at
+the client's request and the broker's 90-second watchdog starts at the intent it
+records afterwards, so the client normally outlives the watchdog; a slow exchange
+can narrow the margin to less than a second. A failed exchange
 or exit timeout prevents it from starting a successor. Configuration restart
 failures also fail `setup finish`; it does not print “Setup complete”.
 

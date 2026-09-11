@@ -241,7 +241,8 @@ A C3-controlled restart can wait 60 seconds for open questions and permission
 relays, then spend up to five seconds attempting cancellation notices. It holds
 the singleton until exit; the broker watchdog is 90 seconds, armed at first
 intent even during blocked channel startup. The client exit wait is deliberately
-91 seconds so it outlives that watchdog. Repeated restart
+91 seconds, measured from its own request rather than from the broker's later
+intent, so it normally outlives that watchdog. Repeated restart
 requests do not reset the clock. Notification failures log the kind, existing ID
 and original route, without prompt bodies. A missing notice does not mean the
 relay remains answerable: cancellation is local and there is no later retry.
