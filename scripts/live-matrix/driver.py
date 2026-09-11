@@ -167,6 +167,12 @@ def save_failure_evidence(root, destination):
         candidate = source / name
         if candidate.is_file():
             shutil.copyfile(candidate, destination / name)
+    # The session transcript says what the host actually did; without it a
+    # staging failure cannot be told apart from a detection failure.
+    for index, session in enumerate(read_jsonl(source / "sessions.jsonl")):
+        transcript = Path(session.get("transcript_path", ""))
+        if transcript.is_file() and transcript.is_relative_to(root):
+            shutil.copyfile(transcript, destination / f"transcript-{index}.jsonl")
 
 
 def write_report(output, version, results):
