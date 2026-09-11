@@ -231,26 +231,50 @@ class Host:
         wait_for(lambda: self.tmux("has-session", "-t", "matrix", check=False).returncode != 0,
                  15, "Claude did not exit")
 
+    def select_menu_row(self, label, limit=12):
+        """Move the /mcp list cursor onto the row matching label, then confirm it."""
+        def rows():
+            lines = self.pane().splitlines()
+            for index, line in enumerate(lines):
+                if "Manage MCP servers" in line:
+                    return lines[index + 1:]
+            return []
+        for _ in range(limit):
+            current = next((line for line in rows() if line.lstrip().startswith("\u276f")), None)
+            if current is None:
+                raise TimeoutError("unrecognized /mcp menu; supply --reconnect-keys for this version")
+            if re.search(label, current, re.I):
+                self.tmux("send-keys", "-t", "matrix", "Enter")
+                time.sleep(0.5)
+                return
+            self.tmux("send-keys", "-t", "matrix", "Down")
+            time.sleep(0.3)
+        raise TimeoutError("no /mcp row matched %s; supply --reconnect-keys for this version" % label)
+
     def reconnect(self, keys=None):
         stamp = time.time()
         self.send("/mcp")
+        wait_for(lambda: "Manage MCP servers" in self.pane(), 15,
+                 "/mcp menu did not open")
         if keys:
             for key in keys.split(","):
                 self.tmux("send-keys", "-t", "matrix", key)
                 time.sleep(0.3)
         else:
-            # Menus vary by version: select labelled numbered rows, never guess
-            # a key sequence that could activate an unrelated action.
-            for label in (r"(?:plugin:)?c3(?::c3)?", r"Reconnect"):
-                def menu_number():
-                    for line in self.pane().splitlines():
-                        match = re.search(r"\b(\d+)\.\s+.*" + label, line, re.I)
-                        if match:
-                            return match.group(1)
-                    return None
-                number = wait_for(menu_number, 10, "unrecognized /mcp menu; supply --reconnect-keys for this version")
-                self.tmux("send-keys", "-t", "matrix", number, "Enter")
-                time.sleep(0.5)
+            # Menus vary by version: act on labelled rows only, never guess a key
+            # sequence that could activate an unrelated action. The server list is
+            # cursor-navigated (no numbers since 2.1.268); the per-server view is
+            # still numbered.
+            self.select_menu_row(r"(?:plugin:)?c3(?::c3)?")
+            def menu_number():
+                for line in self.pane().splitlines():
+                    match = re.search(r"\b(\d+)\.\s+.*Reconnect", line, re.I)
+                    if match:
+                        return match.group(1)
+                return None
+            number = wait_for(menu_number, 10, "unrecognized /mcp server view; supply --reconnect-keys for this version")
+            self.tmux("send-keys", "-t", "matrix", number, "Enter")
+            time.sleep(0.5)
         return self.wait_event("initialized_waiting", stamp)
 
     def tool_state(self, background, seconds):

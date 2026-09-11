@@ -42,6 +42,7 @@ def run_cell(args, cell, binaries, repo, version):
     if output.exists():
         raise FileExistsError(f"refusing to overwrite {output}; choose --output or remove the old cell explicitly")
     host = None
+    result = None
     broker_process = None
     setup_complete = False
     evidence = {"setup_errors": [], "injected": False, "rows_final": None}
@@ -144,8 +145,28 @@ def run_cell(args, cell, binaries, repo, version):
             if args.keep_scratch:
                 print(f"Private scratch retained: {root}", flush=True)
             else:
+                # A FAIL cites control/pane.txt, so keep that evidence even
+                # without --keep-scratch. Never retain the copied credentials.
+                if isinstance(result, dict) and result.get("status") == "FAIL":
+                    save_failure_evidence(root, output)
                 shutil.rmtree(root)
     return result
+
+
+def save_failure_evidence(root, destination):
+    """Copy a failed cell's control artifacts next to its summary.json.
+
+    The scratch holds a copy of the host credentials; only the named control
+    files are ever copied out.
+    """
+    source = root / "control"
+    if not source.is_dir():
+        return
+    destination.mkdir(parents=True, exist_ok=True)
+    for name in ("pane.txt", "events.jsonl", "sessions.jsonl", "adapter.log"):
+        candidate = source / name
+        if candidate.is_file():
+            shutil.copyfile(candidate, destination / name)
 
 
 def write_report(output, version, results):
