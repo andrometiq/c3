@@ -11,6 +11,7 @@ import tempfile
 import time
 
 from collect import attempt_events, collect, export_fixtures, notice_evidence
+from capture_export import save_sanitized_failure_evidence
 from host import Host, HostSetupError, read_jsonl, wait_for
 from matrix import cells, selection, selection_summary
 
@@ -154,7 +155,7 @@ def run_cell(args, cell, binaries, repo, version):
         # Collect before stopping: shutdown/holder death changes queue state.
         try:
             result = collect(cell, host, root, output, evidence, args.collect_only)
-            if args.fixtures and (output / "records.jsonl").stat().st_size:
+            if args.fixtures and ((output / 'legacy-fixture-refused.txt').exists() or (output / "records.jsonl").stat().st_size):
                 export_fixtures(output, repo, version, cell)
         finally:
             if host:
@@ -178,25 +179,8 @@ def run_cell(args, cell, binaries, repo, version):
 
 
 def save_failure_evidence(root, destination):
-    """Copy a failed cell's control artifacts next to its summary.json.
-
-    The scratch holds a copy of the host credentials; only the named control
-    files are ever copied out.
-    """
-    source = root / "control"
-    if not source.is_dir():
-        return
-    destination.mkdir(parents=True, exist_ok=True)
-    for name in ("pane.txt", "events.jsonl", "sessions.jsonl", "adapter.log"):
-        candidate = source / name
-        if candidate.is_file():
-            shutil.copyfile(candidate, destination / name)
-    # The session transcript says what the host actually did; without it a
-    # staging failure cannot be told apart from a detection failure.
-    for index, session in enumerate(read_jsonl(source / "sessions.jsonl")):
-        transcript = Path(session.get("transcript_path", ""))
-        if transcript.is_file() and transcript.is_relative_to(root):
-            shutil.copyfile(transcript, destination / f"transcript-{index}.jsonl")
+    """Retain controls already sanitized during collection, before context seal."""
+    save_sanitized_failure_evidence(destination)
 
 
 def write_report(output, version, results):

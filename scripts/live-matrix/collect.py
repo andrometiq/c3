@@ -8,6 +8,8 @@ import re
 import shutil
 
 from host import read_jsonl
+from redaction import RedactionContext, RedactionError, sanitize
+from capture_export import export_capture
 from verdict_core import evaluate, derive, ROUTE_LINE_LIMIT
 from verdict_core import delivery_assertions as core_delivery_assertions
 
@@ -129,7 +131,7 @@ def classify_fetch(record, expected, call_ids):
     return result
 
 
-def sanitize(value, tokens=(), key="", receipt_ids=()):
+def sanitize_legacy_fixture(value, tokens=(), key="", receipt_ids=()):
     """Keep envelope keys and types; replace identifiers and local paths.
 
     Numeric identity fields use 1, the numeric stand-in for ID. Host prose from
@@ -137,9 +139,9 @@ def sanitize(value, tokens=(), key="", receipt_ids=()):
     """
     identity = key.lower().replace("_", "")
     if isinstance(value, dict):
-        return {k: sanitize(v, tokens, k, receipt_ids) for k, v in value.items()}
+        return {k: sanitize_legacy_fixture(v, tokens, k, receipt_ids) for k, v in value.items()}
     if isinstance(value, list):
-        return [sanitize(v, tokens, key, receipt_ids) for v in value]
+        return [sanitize_legacy_fixture(v, tokens, key, receipt_ids) for v in value]
     if identity == "recordid" and value in receipt_ids:
         return "ROW" + str(receipt_ids.index(value) + 1)
     if identity in {"uuid", "parentuuid", "promptid", "sessionid", "recordid", "tooluseid", "verifiedpeerpid", "verifiedpeerprocstart", "pid", "chatid", "topicid", "messageid", "userid", "id", "requestid"}:
@@ -438,16 +440,9 @@ def collect(cell, host, root, output, evidence, collect_only=False):
     receipt_ids = [m["record_id"] for m in expected["members"]] if expected else []
     if expected:
         tokens.add(expected["token"])
-    expectations = []
-    for record in selected:
-        expectation = classify_fetch(record, expected, fetch_calls) if cell.transport == "fetch" else classify(record)
-        expectations.append(sanitize(expectation, tokens, receipt_ids=receipt_ids))
-    (output / "records.jsonl").write_text("".join(json.dumps(sanitize(r, tokens, receipt_ids=receipt_ids), ensure_ascii=False) + "\n" for r in selected))
-    (output / "records.expect.json").write_text(json.dumps(expectations, indent=2) + "\n")
-    for name, log in (("broker.log", broker_log), ("adapter.log", adapter_log)):
-        (output / name).write_text(sanitize(log, tokens))
-    if host:
-        (output / "events.jsonl").write_text("".join(json.dumps(sanitize(r, tokens)) + "\n" for r in host.events()))
+    expectations = [classify_fetch(record, expected, fetch_calls) if cell.transport == "fetch" else classify(record)
+                    for record in selected]
+    events = host.events() if host else []
     evidence.update(notice_evidence(broker_log, cell.count))
     evidence["route_line_limit"] = route_line_limit(cell)
     evidence["attempts"] = attempts
@@ -470,22 +465,65 @@ def collect(cell, host, root, output, evidence, collect_only=False):
         for key in ("injected", "received", "rows_final", "fetch_tool_result", "fetch_source_occurrences", "fetch_token",
                     "fetch_trailer_complete", "no_false_held", "false_held", "route_line_count"):
             evidence[key] = projections[key]
-    (output / "observation.json").write_text(json.dumps(sanitize(raw_observation, tokens, receipt_ids=receipt_ids), indent=2) + "\n")
     result = {"cell": cell.name, "status": evaluation["status"], "reasons": evaluation["reasons"],
-              "evidence": sanitize(evidence, tokens, receipt_ids=receipt_ids),
+              "evidence": evidence,
               "todo_records": sum(e["accept"] is None for e in expectations), "not_evaluated": evaluation["not_evaluated"]}
-    # Counter keys must not leak raw message ids; preserve per-source order.
-    result["evidence"]["received"] = {f"ID{i+1}": n for i, n in enumerate(evidence["received"].values())}
-    result["evidence"]["message_ids"] = ["ID"] * len(evidence.get("message_ids", []))
-    (output / "summary.json").write_text(json.dumps(result, indent=2) + "\n")
+    # A setup failure may still have a complete or damaged transcript to export.
+    # This extra final read is for the artifact; it does not change the assembler.
+    export_host_read = host_read
+    if host and export_host_read is None:
+        try:
+            transcript = host.transcript()
+            if isinstance(transcript, Path):
+                export_host_read = checked_read(transcript, jsonl=True)
+        except Exception:
+            export_host_read = dict(state='unreadable', text='', records=[], detail='transcript unavailable during export')
+    result, context = export_capture(output, root, checked_read, broker_read, adapter_read, records, export_host_read, events,
+                                     inputs, result, tokens=tokens, receipt_ids=receipt_ids)
+    # Compatibility output is deliberately separate from the complete capture.
+    # Rejected trailer candidates also contain private tokens/rows. Add their
+    # hints only after legacy selection, preserving the old selection semantics.
+    legacy_tokens, legacy_rows = set(tokens), list(receipt_ids)
+    for record in selected:
+        for text in strings(record):
+            legacy_tokens.update(re.findall(r'^group ([^\n]+)', text, re.M))
+            for row in re.findall(r'^member (\S+)', text, re.M):
+                if row not in legacy_rows:
+                    legacy_rows.append(row)
+    legacy_records = [sanitize_legacy_fixture(record, legacy_tokens, receipt_ids=legacy_rows) for record in selected]
+    legacy_expectations = [sanitize_legacy_fixture(expectation, legacy_tokens, receipt_ids=legacy_rows) for expectation in expectations]
+    collapsed_negative = cell.transport == 'fetch' and any(
+        expectation['accept'] is False and classify_fetch(record, expectation, {'ID'})['accept'] is True
+        for record, expectation in zip(legacy_records, legacy_expectations))
+    refusal = 'collapse changes a rejected fetch correlation' if collapsed_negative else ''
+    try:
+        context.check_legacy_fixture(legacy_records, schema='host')
+        context.check_legacy_fixture(legacy_expectations)
+        legacy_record_text = ''.join(json.dumps(record, ensure_ascii=False) + '\n' for record in legacy_records)
+        legacy_expectation_text = json.dumps(legacy_expectations, indent=2) + '\n'
+        context.check_export_text(legacy_record_text, format='jsonl', schema='host', legacy_fixture=True)
+        context.check_export_text(legacy_expectation_text, format='json', legacy_fixture=True)
+    except RedactionError:
+        refusal = 'private identity unsupported by legacy renderer'
+    if refusal:
+        (output / 'legacy-fixture-refused.txt').write_text('legacy fixture export refused: ' + refusal + '\n')
+    else:
+        (output / "records.jsonl").write_text(legacy_record_text)
+        (output / "records.expect.json").write_text(legacy_expectation_text)
     return result
 
 
 def export_fixtures(output, repo, version, cell):
+    if (output / 'legacy-fixture-refused.txt').exists():
+        raise ValueError('legacy fixture export refused: unsafe redaction or collapse changes a rejected fetch correlation; replay bundle retained')
     target = repo / "cmd/c3-claude-adapter/testdata" / ("claude-" + version)
-    target.mkdir(exist_ok=True)
-    for source, suffix in (("records.jsonl", ".jsonl"), ("records.expect.json", ".expect.json")):
-        dest = target / (cell.name + suffix)
+    pair = [(output / source, target / (cell.name + suffix))
+            for source, suffix in (("records.jsonl", ".jsonl"), ("records.expect.json", ".expect.json"))]
+    for source, dest in pair:
         if dest.exists():
             raise FileExistsError(f"refusing to overwrite fixture {dest.name}")
-        shutil.copyfile(output / source, dest)
+        if not source.is_file():
+            raise FileNotFoundError('legacy fixture pair is incomplete')
+    target.mkdir(exist_ok=True)
+    for source, dest in pair:
+        shutil.copyfile(source, dest)
