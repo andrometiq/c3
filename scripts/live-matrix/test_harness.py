@@ -13,6 +13,7 @@ from collect import collect, notice_evidence, route_line_limit, classify_fetch, 
 from driver import false_held, offered_before_ready, run_cell, write_report
 from host import Host, HostSetupError, diagnose_pane, flatten, read_jsonl
 from matrix import Cell, cells, selection, selection_summary
+from verdict_fixture_support import witnessed_verdict
 
 
 TRUST_PANE = """Accessing workspace:
@@ -278,33 +279,33 @@ class MatrixTests(unittest.TestCase):
 
     def test_success_requires_every_contract(self):
         cell = Cell("channel", "foreground", "resumed", "text", "single")
-        self.assertEqual(verdict(cell, self.evidence()), [])
+        self.assertEqual(witnessed_verdict(cell, self.evidence()), [])
         for field, bad in (("injected", False), ("rows_final", 1), ("received", {"1": 2}), ("attempt_before_ready", True), ("false_held", True), ("attempts", [])):
             evidence = self.evidence()
             evidence[field] = bad
-            self.assertTrue(verdict(cell, evidence), field)
+            self.assertTrue(witnessed_verdict(cell, evidence), field)
         evidence = self.evidence()
         evidence["attempts"][1]["elapsed_ms"] = "15001"
-        self.assertTrue(verdict(cell, evidence))
+        self.assertTrue(witnessed_verdict(cell, evidence))
         evidence = self.evidence()
         evidence["attempts"].append({"phase": "reserved", "token": "two", "transport": "inbox", "members": "1"})
-        self.assertIn("fallback/wrong transport attempted", verdict(cell, evidence))
+        self.assertIn("fallback/wrong transport attempted", witnessed_verdict(cell, evidence))
 
     def test_notice_assertions_for_every_matrix_cell(self):
         for cell in cells():
             evidence = self.evidence()
             evidence["attempts"] = [dict(e, transport=cell.transport) for e in evidence["attempts"]]
             evidence["no_false_held"] = False
-            self.assertIn("no false Held assertion failed or missing", verdict(cell, evidence), cell.name)
+            self.assertIn("no false Held assertion failed or missing", witnessed_verdict(cell, evidence), cell.name)
             evidence["no_false_held"] = True
             evidence["route_line_count"] = 0
-            self.assertNotIn("route line count assertion failed or missing", verdict(cell, evidence), cell.name)
+            self.assertNotIn("route line count assertion failed or missing", witnessed_verdict(cell, evidence), cell.name)
             evidence["route_line_count"] = route_line_limit(cell) + 1
-            self.assertIn("route line count assertion failed or missing", verdict(cell, evidence), cell.name)
+            self.assertIn("route line count assertion failed or missing", witnessed_verdict(cell, evidence), cell.name)
             for field in ("no_false_held", "route_line_count"):
                 missing = dict(evidence)
                 del missing[field]
-                self.assertTrue(any(field.replace("_", " ") in reason.lower() for reason in verdict(cell, missing)), cell.name)
+                self.assertTrue(any(field.replace("_", " ") in reason.lower() for reason in witnessed_verdict(cell, missing)), cell.name)
 
     def test_notice_collector_after_confirmation(self):
         log = "TEST ATTEMPT token=x phase=reserved members=1 transport=channel\n"
@@ -318,11 +319,11 @@ class MatrixTests(unittest.TestCase):
     def test_fetch_rejects_consume_before_tool_result(self):
         cell = Cell("fetch", "idle", "resumed", "text", "single")
         evidence = dict(self.evidence(), attempts=[], rows_while_fetch_result_held=0, fetch_tool_result=True, fetch_token=True, fetch_source_occurrences=1)
-        self.assertTrue(verdict(cell, evidence))
+        self.assertTrue(witnessed_verdict(cell, evidence))
         evidence["rows_while_fetch_result_held"] = 1
         evidence["fetch_trailer_complete"] = True
         evidence["attempts"] = [dict(e, transport="fetch") for e in self.evidence()["attempts"]]
-        self.assertEqual(verdict(cell, evidence), [])
+        self.assertEqual(witnessed_verdict(cell, evidence), [])
 
     def test_fetch_trailer_sidecar_expectations(self):
         trailer = "[C3_FETCH_RECEIPT_V1]\ngroup group-1\nmember row-1 " + "a" * 64 + "\nmember row-2 " + "b" * 64 + "\n[/C3_FETCH_RECEIPT_V1]"

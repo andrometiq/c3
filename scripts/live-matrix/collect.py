@@ -1,11 +1,15 @@
 """Evidence selection, redaction, receipt-shape classification and report verdicts."""
 from collections import Counter
+from copy import deepcopy
+import hashlib
 import json
 from pathlib import Path
 import re
 import shutil
 
 from host import read_jsonl
+from verdict_core import evaluate, derive, ROUTE_LINE_LIMIT
+from verdict_core import delivery_assertions as core_delivery_assertions
 
 TOKEN = re.compile(r'c3_delivery_id=["\']([^"\']+)["\']')
 ATTEMPT = re.compile(r'c3_attempt=["\']([^"\']+)["\']')
@@ -223,79 +227,193 @@ def notice_evidence(log, count):
 
 
 def route_line_limit(cell):
-    # Automatic route diagnostics never belong in chat.
-    return 0
+    return ROUTE_LINE_LIMIT
 
 
-def verdict(cell, evidence):
-    failures = list(evidence.get("setup_errors", []))
-    if not evidence.get("injected"):
-        failures.append("injection was not completed")
-    if evidence.get("rows_final") != 0:
-        failures.append("durable rows remain")
-    if evidence.get("attempt_before_ready"):
-        # Name the observation: a system notice is not a reserved attempt.
-        observed = evidence.get("attempt_before_ready_observations") or ["observation not recorded"]
-        failures.append("delivery offered before host initialized (" + "; ".join(observed) + ")")
-    if evidence.get("no_false_held") is not True or evidence.get("false_held"):
-        failures.append("no false Held assertion failed or missing")
-    count = evidence.get("route_line_count")
-    if not isinstance(count, int) or not 0 <= count <= route_line_limit(cell):
-        failures.append("route line count assertion failed or missing")
-    if cell.transport == "fetch":
-        if any(e.get("phase") == "reserved" and e.get("transport") != "fetch" for e in evidence.get("attempts", [])):
-            failures.append("live offer in fetch-only cell")
-        if evidence.get("rows_while_fetch_result_held") != cell.count:
-            failures.append("rows retired before host tool-result receipt (baseline consume-on-fetch)")
-        if not evidence.get("fetch_tool_result"):
-            failures.append("no successful fetch tool-result record")
-        reserved = [e for e in evidence.get("attempts", []) if e.get("phase") == "reserved" and e.get("transport") == "fetch"]
-        confirmed = [e for e in evidence.get("attempts", []) if e.get("phase") == "confirmed" and e.get("transport") == "fetch"]
-        if not reserved or {e["token"] for e in reserved} != {e["token"] for e in confirmed} or any(int(e.get("elapsed_ms", 60000)) >= 60000 for e in confirmed):
-            failures.append("fetch group confirmation missing or outside 60-second window")
-        if sum(int(e.get("retired", 0)) for e in confirmed) != cell.count:
-            failures.append("fetch group retirement count differs from injected sources")
-        if not evidence.get("fetch_trailer_complete"):
-            failures.append("fetch tool result lacks the complete matching receipt trailer")
-        if not evidence.get("fetch_token"):
-            failures.append("fetch result has no broker receipt token")
-        if evidence.get("fetch_source_occurrences") != cell.count:
-            failures.append("fetch did not return each injected source exactly once")
+def build_verdict_inputs(cell, evidence, *, raw_observation=None, collect_only=False):
+    """Pin the harness contract; aggregate evidence is never a complete capture."""
+    is_fetch = cell.transport == 'fetch'
+    scenario = dict(schema_version=1, id=cell.name, transport=cell.transport, kind=cell.kind,
+                    burst=cell.burst, count=cell.count, state=cell.state, session=cell.session,
+                    freshness='transcript_free_at_injection' if cell.session == 'fresh' else 'not_applicable',
+                    resume_requirement='delivery_only', health_class='healthy', final_dispositions=['delivered'] * cell.count,
+                    evaluation_mode='collect_only' if collect_only else 'verify',
+                    run_id=evidence.get('run_id', 'unrecorded-run'), route_id=evidence.get('route_id', 'unrecorded-route'),
+                    host_session_id=evidence.get('host_session_id'), session_id=evidence.get('session_id'),
+                    injection_barrier_id=evidence.get('injection_barrier_id', 'injection'),
+                    readiness_barrier_id='ready' if cell.state in ('startup', 'reconnect') or evidence.get('attempt_before_ready') else None,
+                    final_barrier_id=evidence.get('final_barrier_id', 'final'), observation_duration_ms=60000 if is_fetch else 15000)
+    contract = dict(schema_version=1, id='matrix-negotiated-v1', capability_id='matrix-v1',
+                    axes=dict(negotiation='v1', live_eligibility=dict(channel=cell.transport == 'channel', inbox=cell.transport == 'inbox'),
+                              receipt_type='transcript', fetch_policy='receipt',
+                              accepted_modes=['fetch_receipt'] if is_fetch else [cell.transport, 'fetch_receipt']),
+                    milestones=dict(live='transcript_recorded', fetch='fetch_result_recorded'),
+                    timing=dict(live=dict(limit_ms=15000, basis='terminal_confirmation'), fetch=dict(limit_ms=60000, basis='terminal_confirmation')),
+                    readiness_boundary='ready' if scenario['readiness_barrier_id'] else None, contract_barrier_names=['injection', 'final'])
+    if raw_observation is not None:
+        observation = deepcopy(raw_observation)
     else:
-        reserved = [e for e in evidence.get("attempts", []) if e.get("phase") == "reserved"]
-        confirmed = [e for e in evidence.get("attempts", []) if e.get("phase") == "confirmed"]
-        if not reserved:
-            failures.append("no negotiated attempt observed")
-        if any(e.get("transport") != cell.transport for e in reserved):
-            failures.append("fallback/wrong transport attempted")
-        if sum(int(e.get("members", 0)) for e in reserved) != cell.count:
-            failures.append("source attempted more or less than once")
-        if {e["token"] for e in reserved} != {e["token"] for e in confirmed} or any(int(e.get("elapsed_ms", 15000)) >= 15000 for e in confirmed):
-            failures.append("receipt missing or outside 15-second window")
-        if sum(int(e.get("retired", 0)) for e in confirmed) != cell.count:
-            failures.append("retirement count differs from injected source count")
-        if list(evidence.get("received", {}).values()) != [1] * cell.count:
-            failures.append("host did not receive each source exactly once")
-    return failures
+        observation = dict(schema_version=1,
+            provenance=dict(kind='live_capture', capture_id=cell.name, schema_version=1, extractor_version='verdict-core-v1',
+                            contract_version=contract['id'], broker_build='unknown', adapter_build='unknown', host_version='unknown',
+                            platform='unknown', mode='matrix', known_defect_baselines=[]),
+            setup_errors=[], run_errors=[], collection_complete=False, streams=[], artifacts=[], sources=[], events=[],
+            barriers=[], queue_snapshots=[], contract_observations=[], state_proof=None, session_proof=None)
+        # These are explicit driver observations, not inferred delivery identities.
+        descriptions = evidence.get('attempt_before_ready_observations', [])
+        if evidence.get('attempt_before_ready') and descriptions:
+            scope = dict(run_id=scenario['run_id'], route_id=scenario['route_id'], host_session_id=scenario['host_session_id'],
+                         session_id=scenario['session_id'], connection_epoch_id=None, claim_generation=None)
+            observation['artifacts'].append(dict(id='driver-observations', kind='driver', content_digest=None))
+            for index, description in enumerate(descriptions, 1):
+                observation['events'].append(dict(id='driver-offer-' + str(index), scope=deepcopy(scope),
+                    position=dict(stream_id='driver', seq=index, clock_id=None, time_ms=None),
+                    artifact_ref=dict(artifact_id='driver-observations', locator='attempt_before_ready_observations/' + str(index - 1)),
+                    collection_complete=False, caused_by=[], origin='rig-control', milestone='delivery_offered', transport=cell.transport,
+                    attempt_id=None, group_id=None, token=None, operation_id=None, delivery_id=None, members=[], payload=dict(description=description)))
+            for identity, cutoff in ((scenario['injection_barrier_id'], 0), ('ready', len(descriptions))):
+                observation['barriers'].append(dict(id=identity, name=identity, scope=deepcopy(scope), state='reached',
+                    stream_cutoffs={'driver': cutoff}, artifact_refs=[dict(artifact_id='driver-observations', locator=identity)], collection_complete=False))
+    observation['setup_errors'] = list(evidence.get('setup_errors', []))
+    observation['run_errors'] = list(evidence.get('run_errors', []))
+    return scenario, contract, observation
+
+
+def verdict(cell, evidence, *, raw_observation=None, collect_only=False, full_result=False):
+    result = evaluate(*build_verdict_inputs(cell, evidence, raw_observation=raw_observation, collect_only=collect_only))
+    return result if full_result else result['reasons']
 
 
 def delivery_assertions(cell):
-    common = ["injection completed", "durable rows retired", "no attempt before initialization",
-              "no false Held", "route line count"]
-    if cell.transport == "fetch":
-        return common + ["no live offer in fetch-only cell", "rows retained until fetch receipt",
-                         "successful fetch tool result", "fetch confirmation within 60 seconds",
-                         "fetch retirement count", "complete fetch receipt trailer",
-                         "broker fetch receipt token", "each source fetched exactly once"]
-    return common + ["negotiated attempt observed", "no fallback or wrong transport",
-                     "each source attempted once", "receipt within 15 seconds",
-                     "retirement count", "each source received exactly once"]
+    scenario, contract, _ = build_verdict_inputs(cell, {})
+    return core_delivery_assertions(scenario, contract)
+
+
+def checked_read(path, *, jsonl=False):
+    """Final reads distinguish absence, invalid bytes, malformed lines and tails."""
+    try:
+        data = path.read_bytes()
+    except FileNotFoundError:
+        return {'state': 'missing', 'records': [], 'text': '', 'detail': 'file missing'}
+    except OSError as error:
+        return {'state': 'unreadable', 'records': [], 'text': '', 'detail': type(error).__name__}
+    try:
+        text = data.decode('utf-8')
+    except UnicodeDecodeError:
+        return {'state': 'malformed', 'records': [], 'text': '', 'detail': 'invalid UTF-8'}
+    result = dict(state='complete', records=[], text=text, detail='')
+    if jsonl:
+        for index, line in enumerate(text.splitlines(keepends=True), 1):
+            if not line.endswith('\n'):
+                result.update(state='partial', detail=f'partial tail at line {index}')
+                continue
+            try:
+                record = json.loads(line)
+                if not isinstance(record, dict):
+                    raise ValueError('record is not an object')
+                result['records'].append(record)
+            except (ValueError, json.JSONDecodeError):
+                result.update(state='malformed', detail=f'malformed record at line {index}')
+    return result
+
+
+def capture_observation(cell, evidence, broker_read, adapter_read, records, host_read=None):
+    """Retain available raw identities; current logs cannot prove full membership."""
+    scenario, _, observation = build_verdict_inputs(cell, evidence)
+    scope = dict(run_id=scenario['run_id'], route_id=scenario['route_id'], host_session_id=scenario['host_session_id'],
+                 session_id=scenario['session_id'], connection_epoch_id=None, claim_generation=None)
+    for identity, role, captured in (('broker', 'broker', broker_read), ('adapter', 'transport', adapter_read)):
+        observation['artifacts'].append(dict(id=identity, kind=role, content_digest=hashlib.sha256(captured['text'].encode()).hexdigest()))
+        observation['streams'].append(dict(id=identity, role=role, scope=deepcopy(scope), state=captured['state'],
+            first_seq=1 if captured['text'] else None, last_seq=len(captured['text'].splitlines()) if captured['text'] else None,
+            through_barrier_id=None, artifact_ids=[identity], detail=captured['detail'] or 'run/epoch end boundary unavailable'))
+    for index, line in enumerate(broker_read['text'].splitlines(), 1):
+        for attempt in attempt_events(line):
+            phase = attempt.get('phase')
+            if phase not in ('reserved', 'confirmed', 'failed', 'expired', 'released'):
+                continue
+            try:
+                elapsed = int(attempt['elapsed_ms']) if 'elapsed_ms' in attempt else None
+            except ValueError:
+                elapsed = None
+            observation['events'].append(dict(id=f'broker-line-{index}', scope=deepcopy(scope),
+                position=dict(stream_id='broker', seq=index, clock_id=None, time_ms=None), artifact_ref=dict(artifact_id='broker', locator=f'line:{index}'),
+                collection_complete=False, caused_by=[], origin='persistence' if phase == 'reserved' else 'retirement',
+                milestone='attempt_reserved' if phase == 'reserved' else 'attempt_terminal', transport=attempt.get('transport'),
+                attempt_id=None, group_id=None, token=attempt.get('token'), operation_id=None, delivery_id=None, members=[],
+                payload=dict(deadline_ms=None) if phase == 'reserved' else dict(outcome=phase, elapsed_ms=elapsed, retired_members=[], reason='')))
+    admission_line = next((index for index, line in enumerate(broker_read['text'].splitlines(), 1) if 'TEST INJECT accepted' in line), None)
+    if admission_line is not None:
+        admission_id = 'injection-line-' + str(admission_line)
+        observation['events'].append(dict(id=admission_id, scope=deepcopy(scope),
+            position=dict(stream_id='broker', seq=admission_line, clock_id=None, time_ms=None),
+            artifact_ref=dict(artifact_id='broker', locator=f'line:{admission_line}'), collection_complete=False,
+            caused_by=[], origin='rig-control', milestone='injection_completed', transport=cell.transport,
+            attempt_id=None, group_id=None, token=None, operation_id=None, delivery_id=None, members=[], payload=dict(accepted=True)))
+        observation['sources'] = [dict(slot=index, source_id=str(identity), kind=cell.kind, admission_event_id=admission_id)
+                                  for index, identity in enumerate(evidence.get('message_ids', []))]
+    if host_read is not None:
+        observation['streams'].append(dict(id='host', role='host', scope=deepcopy(scope), state=host_read['state'],
+            first_seq=1 if host_read['records'] else None, last_seq=len(host_read['records']) or None,
+            through_barrier_id=None, artifact_ids=['host-records'], detail=host_read['detail'] or 'host end boundary unavailable'))
+    for index, record in enumerate(records, 1):
+        classification = classify(record)
+        if cell.transport == 'fetch' or record.get('type') not in ('user', 'attachment') or classification['accept'] is not True:
+            continue
+        token = TOKEN.search(intake_text(record))
+        attempt = ATTEMPT.search(intake_text(record))
+        record_id = record.get('uuid')
+        if not isinstance(record_id, str) or not record_id:
+            continue
+        observation['events'].append(dict(id='host-record-' + record_id, scope=deepcopy(scope),
+            position=dict(stream_id='host', seq=index, clock_id=None, time_ms=None),
+            artifact_ref=dict(artifact_id='host-records', locator=f'record:{index}'), collection_complete=False,
+            caused_by=[], origin='host-evidence', milestone='transcript_recorded', transport=classification['transport'],
+            attempt_id=attempt[1] if attempt else None, group_id=None, token=token[1] if token else None,
+            operation_id=None, delivery_id=record_id, members=[], payload=dict(host_record_id=record_id)))
+    if cell.transport == 'fetch':
+        expected = fetch_trailer(result_text((evidence.get('fetch_result') or {}).get('content')))
+        if expected:
+            members = [dict(row_id=member['record_id'], revision=dict(kind='exact', value=member['revision']), source_ids=[])
+                       for member in expected['members']]
+            trailer = dict(state='complete', token=expected['token'], members=members)
+            observation['artifacts'].append(dict(id='held-fetch-response', kind='transport', content_digest=None))
+            observation['events'].append(dict(id='held-fetch-response', scope=deepcopy(scope),
+                position=dict(stream_id='adapter', seq=0, clock_id=None, time_ms=None),
+                artifact_ref=dict(artifact_id='held-fetch-response', locator='driver/fetch_result'), collection_complete=False,
+                caused_by=[], origin='rig-control', milestone='fetch_result_produced', transport='fetch',
+                attempt_id=None, group_id=None, token=expected['token'], operation_id=None, delivery_id=None,
+                members=deepcopy(members), payload=dict(success=True, trailer=deepcopy(trailer))))
+            calls = {block.get('id') for record in records
+                     for block in (record.get('message', {}).get('content', []) if isinstance(record.get('message', {}).get('content'), list) else [])
+                     if isinstance(block, dict) and block.get('type') == 'tool_use' and block.get('name', '').endswith('__fetch_queue')}
+            for index, record in enumerate(records, 1):
+                if classify_fetch(record, expected, calls)['accept'] is not True:
+                    continue
+                record_id = record.get('uuid')
+                if not isinstance(record_id, str) or not record_id:
+                    continue
+                for block_index, block in enumerate(record['message']['content']):
+                    if not isinstance(block, dict) or block.get('type') != 'tool_result' or block.get('tool_use_id') not in calls:
+                        continue
+                    if block.get('is_error', False) is not False or fetch_trailer(result_text(block.get('content'))) != expected:
+                        continue
+                    observation['events'].append(dict(id=f'host-result-{record_id}-{block_index}', scope=deepcopy(scope),
+                        position=dict(stream_id='host', seq=index, clock_id=None, time_ms=None),
+                        artifact_ref=dict(artifact_id='host-records', locator=f'record:{index}/block:{block_index}'), collection_complete=False,
+                        caused_by=[], origin='host-evidence', milestone='fetch_result_recorded', transport='fetch', attempt_id=None,
+                        group_id=None, token=expected['token'], operation_id=block['tool_use_id'], delivery_id=f'{record_id}/{block_index}',
+                        members=deepcopy(members), payload=dict(host_record_id=record_id, success=True, trailer=deepcopy(trailer))))
+    # Rejected or incomplete raw shapes remain extractor artifacts.
+    observation['artifacts'].append(dict(id='host-records', kind='host', content_digest=hashlib.sha256(json.dumps(records, sort_keys=True).encode()).hexdigest()))
+    return observation
 
 
 def collect(cell, host, root, output, evidence, collect_only=False):
     output.mkdir(parents=True, exist_ok=True)
-    broker_log = (root / "broker/broker.log").read_text(errors="replace") if (root / "broker/broker.log").exists() else ""
-    adapter_log = (root / "control/adapter.log").read_text(errors="replace") if (root / "control/adapter.log").exists() else ""
+    broker_read = checked_read(root / "broker/broker.log")
+    adapter_read = checked_read(root / "control/adapter.log")
+    broker_log, adapter_log = broker_read["text"], adapter_read["text"]
     attempts = attempt_events(broker_log)
     tokens = {e["token"] for e in attempts}
     try:
@@ -303,6 +421,14 @@ def collect(cell, host, root, output, evidence, collect_only=False):
     except Exception as exc:
         records = []
         evidence.setdefault("setup_errors", []).append(f"collection: {type(exc).__name__}: {exc}")
+    host_read = None
+    if host and not evidence.get('setup_errors'):
+        try:
+            transcript = host.transcript()
+            host_read = checked_read(transcript, jsonl=True) if transcript is not None else dict(state='missing', records=[], text='', detail='transcript unavailable')
+            records = host_read['records']
+        except Exception as exc:
+            evidence.setdefault('setup_errors', []).append(f"collection: {type(exc).__name__}: {exc}")
     tokens.update(match[1] for r in records for text in strings(r) for match in TOKEN.finditer(text))
     selected = [r for r in records if any(token in text for text in strings(r) for token in tokens)
                 or (cell.transport == "fetch" and ("MATRIX_SAMPLE" in json.dumps(r) or "__fetch_queue" in json.dumps(r)))]
@@ -334,12 +460,20 @@ def collect(cell, host, root, output, evidence, collect_only=False):
     evidence["fetch_source_occurrences"] = sum(json.dumps(b.get("content")).count("MATRIX_SAMPLE") for b in fetch_results)
     evidence["fetch_token"] = bool(expected)
     evidence["fetch_trailer_complete"] = any(classify_fetch(r, expected, fetch_calls)["accept"] for r in records) if expected else False
-    setup_errors = evidence.get("setup_errors", [])
-    failures = setup_errors[:1] if setup_errors else evidence.get("run_errors", []) + verdict(cell, evidence)
-    status = "COLLECTED" if collect_only and not setup_errors and not evidence.get("run_errors") else ("FAIL" if failures else "PASS")
-    result = {"cell": cell.name, "status": status, "reasons": failures, "evidence": sanitize(evidence, tokens, receipt_ids=receipt_ids),
-              "todo_records": sum(e["accept"] is None for e in expectations),
-              "not_evaluated": delivery_assertions(cell) if setup_errors else []}
+    raw_observation = capture_observation(cell, evidence, broker_read, adapter_read, records, host_read)
+    inputs = build_verdict_inputs(cell, evidence, raw_observation=raw_observation, collect_only=collect_only)
+    if evidence.get("setup_errors"):
+        evaluation = evaluate(*inputs)
+    else:
+        evaluation = verdict(cell, evidence, raw_observation=raw_observation, collect_only=collect_only, full_result=True)
+        projections = derive(*inputs)
+        for key in ("injected", "received", "rows_final", "fetch_tool_result", "fetch_source_occurrences", "fetch_token",
+                    "fetch_trailer_complete", "no_false_held", "false_held", "route_line_count"):
+            evidence[key] = projections[key]
+    (output / "observation.json").write_text(json.dumps(sanitize(raw_observation, tokens, receipt_ids=receipt_ids), indent=2) + "\n")
+    result = {"cell": cell.name, "status": evaluation["status"], "reasons": evaluation["reasons"],
+              "evidence": sanitize(evidence, tokens, receipt_ids=receipt_ids),
+              "todo_records": sum(e["accept"] is None for e in expectations), "not_evaluated": evaluation["not_evaluated"]}
     # Counter keys must not leak raw message ids; preserve per-source order.
     result["evidence"]["received"] = {f"ID{i+1}": n for i, n in enumerate(evidence["received"].values())}
     result["evidence"]["message_ids"] = ["ID"] * len(evidence.get("message_ids", []))
