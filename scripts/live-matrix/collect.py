@@ -234,7 +234,9 @@ def verdict(cell, evidence):
     if evidence.get("rows_final") != 0:
         failures.append("durable rows remain")
     if evidence.get("attempt_before_ready"):
-        failures.append("attempt reserved before host initialized")
+        # Name the observation: a system notice is not a reserved attempt.
+        observed = evidence.get("attempt_before_ready_observations") or ["observation not recorded"]
+        failures.append("delivery offered before host initialized (" + "; ".join(observed) + ")")
     if evidence.get("no_false_held") is not True or evidence.get("false_held"):
         failures.append("no false Held assertion failed or missing")
     count = evidence.get("route_line_count")

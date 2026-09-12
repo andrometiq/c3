@@ -346,16 +346,74 @@ class MatrixTests(unittest.TestCase):
     def test_startup_detects_legacy_and_negotiated_offers(self):
         from unittest.mock import Mock
         host = Mock()
-        host.events.return_value = []
+        host.events.side_effect = lambda name=None, after=0: []
         with patch("driver.broker_text", return_value=""):
-            self.assertFalse(offered_before_ready(host, Path("unused"), 0))
+            self.assertEqual(offered_before_ready(host, Path("unused"), 7, 0), [])
         with patch("driver.broker_text", return_value="delivered chan=test-inject chat=-1"):
-            self.assertTrue(offered_before_ready(host, Path("unused"), 0))
+            self.assertEqual(offered_before_ready(host, Path("unused"), 7, 0),
+                             ["broker delivered to the channel"])
         with patch("driver.broker_text", return_value="TEST ATTEMPT token=x phase=reserved"):
-            self.assertTrue(offered_before_ready(host, Path("unused"), 0))
-        host.events.return_value = [{"event": "channel_notify"}]
+            self.assertEqual(offered_before_ready(host, Path("unused"), 7, 0),
+                             ["broker reserved a delivery attempt"])
+        host.events.side_effect = lambda name=None, after=0: {
+            "channel_notify": [{"event": "channel_notify", "pid": 7, "time": 100.0}],
+        }.get(name, [])
         with patch("driver.broker_text", return_value=""):
-            self.assertTrue(offered_before_ready(host, Path("unused"), 0))
+            self.assertEqual(offered_before_ready(host, Path("unused"), 7, 0),
+                             ["gated proxy forwarded a channel notification"])
+
+    def test_predecessor_proxy_notice_is_not_this_proxys_early_offer(self):
+        # A reconnect cell attaches and warms up before /mcp reconnect, so the
+        # replaced proxy's auto-attach recovery notice lands inside the window.
+        # It belongs to that proxy, not to the gated one.
+        from unittest.mock import Mock
+        host = Mock()
+
+        def events(notify_pid, notify_time, released_time):
+            def lookup(name=None, after=0):
+                return {
+                    "channel_notify": [{"event": "channel_notify", "pid": notify_pid, "time": notify_time}],
+                    "initialized_released": [{"event": "initialized_released", "pid": 42, "time": released_time}],
+                }.get(name, [])
+            return lookup
+
+        with patch("driver.broker_text", return_value=""):
+            host.events.side_effect = events(41, 7.4, 11.9)
+            self.assertEqual(offered_before_ready(host, Path("unused"), 42, 0), [])
+            # The gated proxy's own notice after its release is delivery working.
+            host.events.side_effect = events(42, 12.0, 11.9)
+            self.assertEqual(offered_before_ready(host, Path("unused"), 42, 0), [])
+            # Positive control: the same notice before its release still fails.
+            host.events.side_effect = events(42, 11.5, 11.9)
+            self.assertEqual(offered_before_ready(host, Path("unused"), 42, 0),
+                             ["gated proxy forwarded a channel notification"])
+
+    def test_broker_cursor_excludes_the_previous_session_lifetime(self):
+        from unittest.mock import Mock
+        host = Mock()
+        host.events.side_effect = lambda name=None, after=0: []
+        before = "delivered chan=test-inject chat=-1\nTEST ATTEMPT token=x phase=reserved\n"
+        cursor = before.count("\n")
+        with patch("driver.broker_text", return_value=before):
+            self.assertEqual(offered_before_ready(host, Path("unused"), 42, cursor), [])
+            # Positive control: the same lines appended after the cursor fail.
+            with patch("driver.broker_text", return_value=before + before):
+                self.assertEqual(offered_before_ready(host, Path("unused"), 42, cursor),
+                                 ["broker reserved a delivery attempt",
+                                  "broker delivered to the channel"])
+        # A line still mid-write when the gate armed is counted, not dropped.
+        with patch("driver.broker_text", return_value=before + "TEST ATTEMPT token=y phase=reserved\n"):
+            self.assertEqual(offered_before_ready(host, Path("unused"), 42, cursor),
+                             ["broker reserved a delivery attempt"])
+
+    def test_verdict_names_which_observation_failed(self):
+        cell = Cell("channel", "reconnect", "resumed", "text", "single")
+        evidence = {"injected": True, "rows_final": 0, "no_false_held": True, "route_line_count": 0,
+                    "attempt_before_ready": True,
+                    "attempt_before_ready_observations": ["gated proxy forwarded a channel notification"]}
+        reasons = verdict(cell, evidence)
+        self.assertTrue(any("gated proxy forwarded a channel notification" in r for r in reasons), reasons)
+        self.assertFalse(any(r == "attempt reserved before host initialized" for r in reasons), reasons)
 
     def test_held_counts_exclude_only_open_members(self):
         begin = "TEST ATTEMPT token=x phase=reserved members=1\n"

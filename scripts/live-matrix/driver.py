@@ -25,10 +25,28 @@ def broker_text(root):
     return path.read_text(errors="replace") if path.exists() else ""
 
 
-def offered_before_ready(host, root, after):
-    return (bool(attempt_events(broker_text(root)))
-            or "delivered chan=test-inject " in broker_text(root)
-            or bool(host.events("channel_notify", after)))
+def offered_before_ready(host, root, pid, cursor):
+    """Name each observation that the gated session was offered delivery early.
+
+    Scoped to the gated proxy: a predecessor proxy's auto-attach recovery notice
+    is that proxy's event, not this one's premature offer. The broker log is read
+    from the cursor taken when the gate was armed, so a prior session lifetime
+    cannot be re-attributed to this one, and a notification the gated proxy
+    forwards after its own release is delivery working, not delivery early.
+    """
+    # Count complete lines, not characters: a line still being written when the
+    # gate armed is unattributable, and including it fails closed.
+    log = "\n".join(broker_text(root).splitlines()[cursor:])
+    observations = []
+    if attempt_events(log):
+        observations.append("broker reserved a delivery attempt")
+    if "delivered chan=test-inject " in log:
+        observations.append("broker delivered to the channel")
+    released = [e["time"] for e in host.events("initialized_released") if e.get("pid") == pid]
+    before_ready = released[0] if released else float("inf")
+    if any(e.get("pid") == pid and e["time"] < before_ready for e in host.events("channel_notify")):
+        observations.append("gated proxy forwarded a channel notification")
+    return observations
 
 
 def false_held(log, count):
@@ -57,7 +75,9 @@ def run_cell(args, cell, binaries, repo, version):
             host.ready_turn()
             host.stop_session()
         final_launch = time.time()
+        gate_cursor = 0
         if cell.state == "startup":
+            gate_cursor = broker_text(root).count("\n")
             (host.control / "gate-initialized").touch()
         host.launch(continued=cell.session == "resumed")
         if cell.state == "startup":
@@ -68,6 +88,7 @@ def run_cell(args, cell, binaries, repo, version):
             if cell.session == "resumed":
                 host.ready_turn()
         if cell.state == "reconnect":
+            gate_cursor = broker_text(root).count("\n")
             (host.control / "gate-initialized").touch()
             gate = host.reconnect(args.reconnect_keys)
         # The check is at arrival, not launch: transcript-free means precisely
@@ -84,7 +105,8 @@ def run_cell(args, cell, binaries, repo, version):
         if cell.transport == "fetch":
             (host.control / "gate-fetch").touch()
         if gate:
-            evidence["attempt_before_ready"] = offered_before_ready(host, root, final_launch)
+            evidence["attempt_before_ready_observations"] = offered_before_ready(host, root, gate["pid"], gate_cursor)
+            evidence["attempt_before_ready"] = bool(evidence["attempt_before_ready_observations"])
         setup_complete = True
         command = [str(binaries / "c3-broker"), "inject", "--socket", str(root / "broker/c3.sock"),
                    "--topic", "42", "--text", "MATRIX_SAMPLE: generic delivery sample.", "--count", str(cell.count)]
@@ -100,7 +122,9 @@ def run_cell(args, cell, binaries, repo, version):
             # demonstrably withheld. No sleep substitutes for a readiness test.
             wait_for(lambda: len(queue_rows(root)) == cell.count, 5, "startup input was not persisted")
             time.sleep(0.3)  # let the persisted batch finish scheduling while the real gate remains closed
-            evidence["attempt_before_ready"] |= offered_before_ready(host, root, final_launch)
+            seen = evidence["attempt_before_ready_observations"]
+            seen += [o for o in offered_before_ready(host, root, gate["pid"], gate_cursor) if o not in seen]
+            evidence["attempt_before_ready"] = bool(seen)
             evidence["rows_before_ready"] = len(queue_rows(root))
             (host.control / f"release-initialized-{gate['pid']}").touch()
             host.wait_event("attached", gate["time"])
