@@ -81,6 +81,18 @@ The first is cleaner; the second is far easier to reason about when it misbehave
 - The full rationale and later voice/native directions remain
   in the [on-the-go / voice-channel design capture](docs/future/on-the-go-voice-channel.md).
 - Other transports the interface already admits (Slack, Matrix, …).
+- **An OpenCode adapter (`c3-opencode-adapter`), candidate.** OpenCode exposes a local HTTP
+  control server (`opencode serve` / `--port`) with `/session`, `POST /session/{id}/message`,
+  `/permission` and `POST /permission/{id}/reply`; session history is in its own SQLite store.
+  That is enough for a pull-first adapter on the cursor-adapter pattern (own the session, deliver
+  by posting a message, relay `/permission` to the channel), but it needs a verified input/receipt
+  contract (acceptance ≠ transcript receipt) and real session ownership before it earns a place
+  above research. Prompt submission may still need a terminal keystroke path where the HTTP message
+  route is not authoritative. Learn-from reference: the Apache-2.0 project
+  [tanmoysrt/pulse](https://github.com/tanmoysrt/pulse) ("drive terminal agents from your phone"),
+  which drives OpenCode over this API plus tmux — credit and honor its attribution/NOTICE if any
+  code is reused; its weakness (a turn is marked "running" the instant tmux accepts keystrokes, with
+  no submitted/received separation) is exactly the receipt-contract gap to close here.
 
 ## Telegram completeness
 
