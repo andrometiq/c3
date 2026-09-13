@@ -100,6 +100,7 @@ type FetchJob struct {
 	Limit int
 	All   bool
 	Ack   bool
+	Mode  string
 	// Owner is the session authorized to consume this route. It is set by
 	// fetch_queue; internal read-only fetches leave it nil. The worker re-checks
 	// the authoritative holder and per-route confirmation immediately around the
@@ -126,6 +127,7 @@ type FetchResult struct {
 	Messages       []c3types.Inbound
 	intakeMessages []intakeFetchMessage
 	Members        []ipc.FetchReceiptMember
+	BlockedOn      *ipc.BlockedOn
 	Remaining      int
 	SkipReason     string
 	Err            error
@@ -1805,6 +1807,14 @@ func (w *RouteWorker) handleFetch(ctx context.Context, job *FetchJob) {
 	})
 	if w.broker == nil || w.broker.Queue == nil {
 		job.ResultCh <- FetchResult{Err: errOutboundNotImpl}
+		return
+	}
+	if err := fetchModeError(job.Mode, job.Owner); err != nil {
+		job.ResultCh <- FetchResult{Err: err}
+		return
+	}
+	if job.Mode == "ready_prefix" && job.Ack && job.ReceiptGroup == nil {
+		job.ResultCh <- FetchResult{Err: fmt.Errorf("ready_prefix ack:true requires a fetch receipt reservation")}
 		return
 	}
 	if job.ReceiptGroup != nil {

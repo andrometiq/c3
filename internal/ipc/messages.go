@@ -78,6 +78,7 @@ type FetchQueueReq struct {
 	// channel name or held Telegram topic name. Absent drains all held routes.
 	// Additive + omitempty: older callers retain the broker's default behavior.
 	Channel string `json:"channel,omitempty"`
+	Mode    string `json:"mode,omitempty"`
 	Limit   int    `json:"limit,omitempty"`
 	All     bool   `json:"all,omitempty"`
 	Ack     bool   `json:"ack"`
@@ -98,6 +99,12 @@ type FetchQueueResp struct {
 	LeaseToken     string               `json:"lease_token,omitempty"`
 	Members        []FetchReceiptMember `json:"members,omitempty"`
 	ReceiptTrailer string               `json:"receipt_trailer,omitempty"`
+	BlockedOn      *BlockedOn           `json:"blocked_on,omitempty"`
+}
+
+type BlockedOn struct {
+	RecordID string `json:"record_id"`
+	Reason   string `json:"reason"`
 }
 
 type IntakeMetadata struct {

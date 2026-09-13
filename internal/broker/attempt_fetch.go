@@ -80,12 +80,12 @@ func (w *RouteWorker) handleAttemptFetch(ctx context.Context, job *FetchJob) {
 				result.Err = err
 				return
 			}
-			rows, err := w.visibleAttemptRows(-1)
+			rows, total, blocked, err := w.intakeFetchRows(job.Mode)
 			if err != nil {
 				result.Err = err
 				return
 			}
-			result.Remaining = len(rows)
+			result.Remaining = total
 			limit := len(rows)
 			if !job.All && job.Limit >= 0 {
 				limit = min(limit, job.Limit)
@@ -94,7 +94,11 @@ func (w *RouteWorker) handleAttemptFetch(ctx context.Context, job *FetchJob) {
 			active := job.Owner.intakeMetadataActive()
 			fits := func(messages []c3types.Inbound, metadata []intakeFetchMessage, receipts []ipc.FetchReceiptMember, reserve int) bool {
 				if active {
-					encoded, err := json.Marshal(fetchQueueResponse{attemptFetchResponse(job.RespID, job.ReceiptGroup.token, messages, receipts, len(rows)), metadata})
+					frame := fetchQueueResponse{attemptFetchResponse(job.RespID, job.ReceiptGroup.token, messages, receipts, total), metadata}
+					if len(messages) == len(rows) {
+						frame.BlockedOn = blocked
+					}
+					encoded, err := json.Marshal(frame)
 					if err != nil {
 						result.Err = err
 					}
@@ -133,6 +137,9 @@ func (w *RouteWorker) handleAttemptFetch(ctx context.Context, job *FetchJob) {
 				result.Messages, result.Members = messages, receipts
 				result.intakeMessages = metadata
 				members = append(members, attemptMember{ID: member.RecordID, Revision: member.Revision})
+			}
+			if len(result.Messages) == len(rows) {
+				result.BlockedOn = blocked
 			}
 			if result.Err != nil || len(members) == 0 {
 				return
