@@ -1,0 +1,159 @@
+{
+  "artifacts": [
+    {
+      "artifact_id": "broker",
+      "file": "broker.log",
+      "format": "log",
+      "seal": {
+        "bytes": 303,
+        "lines": 3,
+        "read_state": "complete",
+        "sha256": "b114507aab187e2495a52ae0949806b72e190262a00199d3605b4986ed9ce1c8"
+      },
+      "table": "broker"
+    },
+    {
+      "artifact_id": "adapter",
+      "file": "adapter.log",
+      "format": "log",
+      "seal": {
+        "bytes": 20,
+        "lines": 1,
+        "read_state": "complete",
+        "sha256": "037352dc56de2be40c5607c8e24e2d2dd41342fcbef3e91122690aefaa12f30f"
+      },
+      "table": "adapter"
+    },
+    {
+      "artifact_id": "host-records",
+      "file": "records.jsonl",
+      "format": "jsonl",
+      "seal": {
+        "bytes": 545,
+        "lines": 2,
+        "read_state": "complete",
+        "sha256": "be3fe6286fa21dc7fc935730192ce65534141ed29c4f2b10dee08bdfc4925ee9"
+      },
+      "table": "host"
+    },
+    {
+      "artifact_id": "injection",
+      "file": "context/injection.json",
+      "format": "json",
+      "seal": {
+        "bytes": 86,
+        "lines": 1,
+        "read_state": "complete",
+        "sha256": "bfbabfb4855a04f39ad865f7069576ff8ee7e96f3f47f2b5832193246e152ab3"
+      },
+      "table": "injection"
+    },
+    {
+      "artifact_id": "queue",
+      "file": "context/rows.jsonl",
+      "format": "jsonl",
+      "seal": {
+        "bytes": 134,
+        "lines": 1,
+        "read_state": "complete",
+        "sha256": "384d5442ec341b6580611660aae29ee9bacbac93dfa227f34b4369e97b5d8888"
+      },
+      "table": "rows"
+    },
+    {
+      "artifact_id": "attempt-observers",
+      "file": "context/attempts.jsonl",
+      "format": "jsonl",
+      "seal": {
+        "bytes": 852,
+        "lines": 3,
+        "read_state": "complete",
+        "sha256": "01a94b3bbcaf5939e2dec226674e7f9a5363e041b5fac3c5dcc86e5517d48839"
+      },
+      "table": "attempts"
+    },
+    {
+      "artifact_id": "receipt-observers",
+      "file": "context/receipts.jsonl",
+      "format": "jsonl",
+      "seal": {
+        "bytes": 293,
+        "lines": 1,
+        "read_state": "complete",
+        "sha256": "ae1b943cfbe57cbfb45d4f973aff3f47674ad975f6ab475195b5db5d1e8528ad"
+      },
+      "table": "receipts"
+    },
+    {
+      "artifact_id": "sample-observers",
+      "file": "context/queue-samples.jsonl",
+      "format": "jsonl",
+      "seal": {
+        "bytes": 192,
+        "lines": 2,
+        "read_state": "complete",
+        "sha256": "60831792f8f077904c8cd0a1357379dc9cbd4ac4c5f523fe591d170f837ac995"
+      },
+      "table": "queue-samples"
+    },
+    {
+      "artifact_id": "contract",
+      "file": "context/contracts.jsonl",
+      "format": "jsonl",
+      "seal": {
+        "bytes": 366,
+        "lines": 2,
+        "read_state": "complete",
+        "sha256": "92bfd249c76720953f2fe62c21388dc2a91e61b9db44f07231a4388ee958e955"
+      },
+      "table": "contracts"
+    },
+    {
+      "artifact_id": "state",
+      "file": "context/driver.jsonl",
+      "format": "jsonl",
+      "seal": {
+        "bytes": 1681,
+        "lines": 6,
+        "read_state": "complete",
+        "sha256": "c79c137864017cc2e4a577570996663832175f0b5027b302192b950dd2137da7"
+      },
+      "table": "driver"
+    },
+    {
+      "artifact_id": "ownership-observers",
+      "file": "context/ownership.json",
+      "format": "json",
+      "seal": {
+        "bytes": 9608,
+        "lines": 1,
+        "read_state": "complete",
+        "sha256": "6ded878d34b56c6ef299529b7c22088ae21fd50fe3bb6735b912e0909ba27d18"
+      },
+      "table": "ownership"
+    }
+  ],
+  "cell": {
+    "burst": "single",
+    "kind": "text",
+    "session": "resumed",
+    "state": "idle",
+    "transport": "inbox"
+  },
+  "context_version": 1,
+  "evidence": {
+    "host_session_id": "session-host-original",
+    "route_id": "-771/881",
+    "run_id": "run-synthetic-original",
+    "session_id": "session-broker-original"
+  },
+  "provenance": {
+    "adapter_build": "synthetic",
+    "broker_build": "synthetic",
+    "capture_id": "synthetic-inbox",
+    "host_version": "synthetic",
+    "kind": "raw_replay",
+    "platform": "synthetic"
+  },
+  "schema_version": 1
+}

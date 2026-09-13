@@ -1,0 +1,13 @@
+{
+  "base": "healthy-fetch-double",
+  "changes": [
+    {
+      "after": null,
+      "before": "bae1a6405ad9ae61ca8782f0dfe05fd5294baead4cd0f5a2ec9219a827cea7d1",
+      "file": "broker.log"
+    }
+  ],
+  "required_reasons": [
+    "evidence collection incomplete"
+  ]
+}

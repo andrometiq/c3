@@ -1,0 +1,17 @@
+[
+  {
+    "artifact_id": "broker",
+    "code": "terminal token conflicts with reservation",
+    "locator": "line:4"
+  },
+  {
+    "artifact_id": "host-records",
+    "code": "host candidate rejected",
+    "locator": "line:1"
+  },
+  {
+    "artifact_id": "broker",
+    "code": "delivery evidence identity mismatch: token correlation conflict",
+    "locator": "line:4/block:0"
+  }
+]

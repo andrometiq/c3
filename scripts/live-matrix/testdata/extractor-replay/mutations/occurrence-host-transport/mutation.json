@@ -1,0 +1,28 @@
+{
+  "base": "healthy-inbox-single",
+  "changes": [
+    {
+      "after": "be3fe6286fa21dc7fc935730192ce65534141ed29c4f2b10dee08bdfc4925ee9",
+      "before": "41eab409d217f71d8b33efc92ee0347b566b2e370db0388d64d5817f0e3690ee",
+      "file": "records.jsonl"
+    }
+  ],
+  "identity": {
+    "bad": "channel:1",
+    "canonical_path": [
+      "attempt_id"
+    ],
+    "contains": true,
+    "field": "transport",
+    "file": "records.jsonl",
+    "line": 2,
+    "milestone": "transcript_recorded",
+    "path": [
+      "message",
+      "content"
+    ]
+  },
+  "required_reasons": [
+    "evidence collection incomplete"
+  ]
+}

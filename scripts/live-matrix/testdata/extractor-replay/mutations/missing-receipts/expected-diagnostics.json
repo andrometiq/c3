@@ -1,0 +1,12 @@
+[
+  {
+    "artifact_id": "receipt-observers",
+    "code": "file missing",
+    "locator": "read"
+  },
+  {
+    "artifact_id": "state",
+    "code": "stream cutoff outside observed extent",
+    "locator": "line:9"
+  }
+]

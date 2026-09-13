@@ -1,0 +1,10 @@
+{
+  "not_evaluated": [],
+  "reasons": [
+    "host did not receive each source exactly once",
+    "delivery evidence identity mismatch",
+    "injected source lacks its required final disposition",
+    "evidence collection incomplete"
+  ],
+  "status": "FAIL"
+}

@@ -1,0 +1,52 @@
+[
+  {
+    "artifact_id": "queue",
+    "code": "file missing",
+    "locator": "read"
+  },
+  {
+    "artifact_id": "state",
+    "code": "row revision source binding unavailable",
+    "locator": "line:5"
+  },
+  {
+    "artifact_id": "held-fetch-response",
+    "code": "row revision source binding unavailable",
+    "locator": "line:1"
+  },
+  {
+    "artifact_id": "broker",
+    "code": "row revision source binding unavailable",
+    "locator": "line:3"
+  },
+  {
+    "artifact_id": "broker",
+    "code": "row revision source binding unavailable",
+    "locator": "line:4"
+  },
+  {
+    "artifact_id": "host-records",
+    "code": "row revision source binding unavailable",
+    "locator": "line:3"
+  },
+  {
+    "artifact_id": "receipt-observers",
+    "code": "row revision source binding unavailable",
+    "locator": "line:1"
+  },
+  {
+    "artifact_id": "state",
+    "code": "stream cutoff outside observed extent",
+    "locator": "line:6"
+  },
+  {
+    "artifact_id": "state",
+    "code": "stream cutoff outside observed extent",
+    "locator": "line:9"
+  },
+  {
+    "artifact_id": "sample-observers",
+    "code": "row revision source binding unavailable",
+    "locator": "line:2"
+  }
+]

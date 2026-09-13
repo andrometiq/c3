@@ -1,0 +1,22 @@
+[
+  {
+    "artifact_id": "held-fetch-response",
+    "code": "held response reservation correlation rejected",
+    "locator": "line:1"
+  },
+  {
+    "artifact_id": "host-records",
+    "code": "delivery evidence identity mismatch: token correlation conflict",
+    "locator": "line:3/block:0"
+  },
+  {
+    "artifact_id": "host-records",
+    "code": "fetch candidate rejected",
+    "locator": "line:3"
+  },
+  {
+    "artifact_id": "held-fetch-response",
+    "code": "delivery evidence identity mismatch: token correlation conflict",
+    "locator": "line:1/block:0"
+  }
+]

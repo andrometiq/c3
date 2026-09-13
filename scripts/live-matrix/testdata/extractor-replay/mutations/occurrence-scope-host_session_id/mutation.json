@@ -1,0 +1,30 @@
+{
+  "base": "healthy-channel-double",
+  "changes": [
+    {
+      "after": "171875f8d9c7cfa55d177f1d286e53ac5b78486ca7f9ce2870737f6922ed365b",
+      "before": "bdc1efd144e03f2ba10fea220a233da24c61579694851821d1a06a1b201ff46e",
+      "file": "context/ownership.json"
+    }
+  ],
+  "identity": {
+    "bad": "host-occurrence-wrong",
+    "canonical_path": [
+      "scope",
+      "host_session_id"
+    ],
+    "contains": false,
+    "field": "host_session_id",
+    "file": "context/ownership.json",
+    "line": null,
+    "milestone": "attempt_terminal",
+    "path": [
+      "occurrences",
+      8,
+      "host_session_id"
+    ]
+  },
+  "required_reasons": [
+    "evidence collection incomplete"
+  ]
+}

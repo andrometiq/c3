@@ -1,0 +1,2 @@
+{"accepted_modes": ["fetch_receipt"], "barrier_id": "injection", "channel": false, "fetch_policy": "receipt", "inbox": false, "negotiation": "v1", "receipt_type": "transcript"}
+{"accepted_modes": ["fetch_receipt"], "barrier_id": "final", "channel": false, "fetch_policy": "receipt", "inbox": false, "negotiation": "v1", "receipt_type": "transcript"}

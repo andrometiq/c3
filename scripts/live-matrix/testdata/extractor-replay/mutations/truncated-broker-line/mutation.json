@@ -1,0 +1,13 @@
+{
+  "base": "healthy-channel-double",
+  "changes": [
+    {
+      "after": "a2bb77e0b952b296e5b2ff17ec1f15e75fe7dffff0312f4de138b9b73e018d7b",
+      "before": "9aa6877893efcb734712b1b33eaeb4dc13654f53e74802334158e8bcd7902f0e",
+      "file": "broker.log"
+    }
+  ],
+  "required_reasons": [
+    "evidence collection incomplete"
+  ]
+}

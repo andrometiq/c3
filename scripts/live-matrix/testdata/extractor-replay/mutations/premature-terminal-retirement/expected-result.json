@@ -1,0 +1,10 @@
+{
+  "not_evaluated": [],
+  "reasons": [
+    "retired rows do not match authorized delivery members",
+    "rows retired before contract evidence",
+    "injected source lacks its required final disposition",
+    "evidence collection incomplete"
+  ],
+  "status": "FAIL"
+}

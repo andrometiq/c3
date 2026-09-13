@@ -1,0 +1,14 @@
+{
+  "not_evaluated": [],
+  "reasons": [
+    "injection was not completed",
+    "durable rows remain",
+    "no false Held assertion failed or missing",
+    "route line count assertion failed or missing",
+    "host did not receive each source exactly once",
+    "observed delivery contract does not match expected contract",
+    "injected source lacks its required final disposition",
+    "evidence collection incomplete"
+  ],
+  "status": "FAIL"
+}

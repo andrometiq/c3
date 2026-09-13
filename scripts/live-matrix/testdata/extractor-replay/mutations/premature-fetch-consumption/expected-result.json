@@ -1,0 +1,9 @@
+{
+  "not_evaluated": [],
+  "reasons": [
+    "rows retired before host tool-result receipt (baseline consume-on-fetch)",
+    "retired rows do not match authorized delivery members",
+    "evidence collection incomplete"
+  ],
+  "status": "FAIL"
+}

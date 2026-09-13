@@ -1,0 +1,17 @@
+[
+  {
+    "artifact_id": "state",
+    "code": "delivery evidence identity mismatch: artifact_id correlation conflict",
+    "locator": "line:7/block:0"
+  },
+  {
+    "artifact_id": "state",
+    "code": "fetch release correlation rejected",
+    "locator": "line:7"
+  },
+  {
+    "artifact_id": "host-records",
+    "code": "host fetch recording lacks observed release",
+    "locator": "line:3"
+  }
+]

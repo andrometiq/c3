@@ -1,0 +1,23 @@
+{
+  "base": "healthy-channel-double",
+  "changes": [
+    {
+      "after": "423971944bf32af47523443a94650193e9ce93ec85b90446821a8abfedd68028",
+      "before": "f4908c3f2f154409390b9969a5b17d5cb5088cb57b58d0c9217cbb151b1ce56e",
+      "file": "context/rows.jsonl"
+    },
+    {
+      "after": "76534bac6f1ac86440aa48d64fa615fbf6eed005ff22275dcd446d5509b3e76e",
+      "before": "d94ba7d2676c3a65f53a5abc41dd2cc70b27802c9ce6cce34b3079e309481630",
+      "file": "context/driver.jsonl"
+    },
+    {
+      "after": "714d30713ce3c8746563e4c97b2b9fa94bbeb1394c5558875eadf617fea48928",
+      "before": "bdc1efd144e03f2ba10fea220a233da24c61579694851821d1a06a1b201ff46e",
+      "file": "context/ownership.json"
+    }
+  ],
+  "required_reasons": [
+    "retired rows do not match authorized delivery members"
+  ]
+}

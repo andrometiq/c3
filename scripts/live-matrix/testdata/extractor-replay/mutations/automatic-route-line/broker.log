@@ -1,0 +1,7 @@
+TEST INJECT accepted topic=881 message_id=41001 kind=text source=test-inject
+TEST INJECT accepted topic=881 message_id=41002 kind=text source=test-inject
+TEST ATTEMPT token=token-original-one topic=881 transport=channel phase=reserved members=1 retired=0 elapsed_ms=0
+TEST ATTEMPT token=token-original-one topic=881 transport=channel phase=confirmed members=1 retired=1 elapsed_ms=40
+TEST ATTEMPT token=token-original-two topic=881 transport=channel phase=reserved members=1 retired=0 elapsed_ms=0
+TEST ATTEMPT token=token-original-two topic=881 transport=channel phase=confirmed members=1 retired=1 elapsed_ms=40
+TEST SINK reply topic=881 text="Live route: inbox"

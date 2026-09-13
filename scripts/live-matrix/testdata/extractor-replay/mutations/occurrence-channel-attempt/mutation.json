@@ -1,0 +1,28 @@
+{
+  "base": "healthy-channel-double",
+  "changes": [
+    {
+      "after": "9089738cb9d5f8c0b8badb6b33fc37b14d8052ab5be24071de1fc0a5cab261de",
+      "before": "40b88f10c6c8ffcee24e8d23d2b93f1a13c2130acc1648900b75730e071cdaee",
+      "file": "records.jsonl"
+    }
+  ],
+  "identity": {
+    "bad": "channel:999",
+    "canonical_path": [
+      "attempt_id"
+    ],
+    "contains": true,
+    "field": "attempt_id",
+    "file": "records.jsonl",
+    "line": 2,
+    "milestone": "transcript_recorded",
+    "path": [
+      "message",
+      "content"
+    ]
+  },
+  "required_reasons": [
+    "evidence collection incomplete"
+  ]
+}

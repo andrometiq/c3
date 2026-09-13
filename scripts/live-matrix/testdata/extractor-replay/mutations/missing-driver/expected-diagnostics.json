@@ -1,0 +1,42 @@
+[
+  {
+    "artifact_id": "state",
+    "code": "file missing",
+    "locator": "read"
+  },
+  {
+    "artifact_id": "driver-observations",
+    "code": "fetch operation association unavailable or ambiguous",
+    "locator": "driver"
+  },
+  {
+    "artifact_id": "held-fetch-response",
+    "code": "held response request correlation rejected",
+    "locator": "line:1"
+  },
+  {
+    "artifact_id": "broker",
+    "code": "fetch attempt request correlation rejected",
+    "locator": "line:3"
+  },
+  {
+    "artifact_id": "broker",
+    "code": "fetch attempt request correlation rejected",
+    "locator": "line:4"
+  },
+  {
+    "artifact_id": "host-records",
+    "code": "fetch candidate rejected",
+    "locator": "line:3"
+  },
+  {
+    "artifact_id": "driver-observations",
+    "code": "missing final cut or observation window boundary",
+    "locator": "driver"
+  },
+  {
+    "artifact_id": "receipt-observers",
+    "code": "delivery evidence identity mismatch: operation_id correlation conflict",
+    "locator": "line:1/block:0"
+  }
+]

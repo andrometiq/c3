@@ -1,0 +1,28 @@
+{
+  "base": "healthy-inbox-single",
+  "changes": [
+    {
+      "after": "43d751f3f3a2f0a3ceb9d68fc8b8a537d79f3eead1f50e62fade3b33ba2871e9",
+      "before": "41eab409d217f71d8b33efc92ee0347b566b2e370db0388d64d5817f0e3690ee",
+      "file": "records.jsonl"
+    }
+  ],
+  "identity": {
+    "bad": "inbox:999",
+    "canonical_path": [
+      "attempt_id"
+    ],
+    "contains": true,
+    "field": "attempt_id",
+    "file": "records.jsonl",
+    "line": 2,
+    "milestone": "transcript_recorded",
+    "path": [
+      "message",
+      "content"
+    ]
+  },
+  "required_reasons": [
+    "evidence collection incomplete"
+  ]
+}

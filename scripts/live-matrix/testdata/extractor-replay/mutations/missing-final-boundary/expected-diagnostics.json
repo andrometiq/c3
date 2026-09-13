@@ -1,0 +1,12 @@
+[
+  {
+    "artifact_id": "host-records",
+    "code": "host candidate rejected",
+    "locator": "line:1"
+  },
+  {
+    "artifact_id": "driver-observations",
+    "code": "missing final cut or observation window boundary",
+    "locator": "driver"
+  }
+]

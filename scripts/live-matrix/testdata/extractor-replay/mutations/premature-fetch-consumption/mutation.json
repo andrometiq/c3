@@ -1,0 +1,13 @@
+{
+  "base": "healthy-fetch-double",
+  "changes": [
+    {
+      "after": "dc1c34403e02fa319b046ce4c6e3625f62eb0ee539c072c4df00123f69636aa5",
+      "before": "8b74a9699a458455750fffb0e28351a6df12f26f177199b8fb26cd034f72d8c1",
+      "file": "context/queue-samples.jsonl"
+    }
+  ],
+  "required_reasons": [
+    "rows retired before host tool-result receipt (baseline consume-on-fetch)"
+  ]
+}

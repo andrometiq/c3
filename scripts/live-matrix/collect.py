@@ -7,7 +7,7 @@ from pathlib import Path
 import re
 import shutil
 
-from host import read_jsonl
+from host import read_jsonl, checked_read, read_problem
 from redaction import RedactionContext, RedactionError, sanitize
 from capture_export import export_capture
 from verdict_core import evaluate, derive, ROUTE_LINE_LIMIT
@@ -30,6 +30,9 @@ def strings(value):
 
 
 def intake_text(record):
+    from capture_context import host_shape_valid
+    if not host_shape_valid(record):
+        return ""
     if record.get("type") == "user" and record.get("message", {}).get("role") == "user":
         content = record["message"].get("content", "")
         if isinstance(content, str):
@@ -46,6 +49,9 @@ def intake_text(record):
 
 def classify(record):
     """Only observed, checked-in shapes become positives; new shapes are TODO."""
+    from capture_context import host_shape_valid
+    if not host_shape_valid(record):
+        return dict(transport="channel", token="TOKEN", attempt="channel:1", accept=False, reason="malformed host record")
     text = intake_text(record)
     token, attempt = TOKEN.search(text), ATTEMPT.search(text)
     transport = "inbox" if attempt and attempt[1].startswith(("inbox:", "cross-session:")) else "channel"
@@ -115,6 +121,10 @@ def classify_fetch(record, expected, call_ids):
     if not expected:
         result.update(accept=None, reason="TODO: capture a complete broker fetch trailer")
         return result
+    from capture_context import host_shape_valid
+    if not host_shape_valid(record):
+        result.update(reason="malformed host record")
+        return result
     content = record.get("message", {}).get("content", [])
     if record.get("type") != "user" or not isinstance(content, list):
         return result
@@ -129,6 +139,12 @@ def classify_fetch(record, expected, call_ids):
             result.update(accept=True, reason="matching tool result with complete phase-4 receipt trailer")
             return result
     return result
+
+
+def _same_fetch_trailer(left, right):
+    return bool(left and right and left['token'] == right['token'] and
+                sorted(left['members'], key=lambda member: member['record_id']) ==
+                sorted(right['members'], key=lambda member: member['record_id']))
 
 
 def sanitize_legacy_fixture(value, tokens=(), key="", receipt_ids=()):
@@ -207,6 +223,13 @@ def notice_evidence(log, count):
         if "TEST INJECT accepted" in line:
             injected = True
         for event in attempt_events(line):
+            try:
+                if not event.get("token") or event.get("phase") not in ("reserved", "confirmed", "failed", "expired", "released"):
+                    continue
+                int(event.get("members", "invalid") if event["phase"] == "reserved" else 0)
+                int(event.get("retired", 0))
+            except (TypeError, ValueError):
+                continue
             token = event["token"]
             if event["phase"] == "reserved":
                 active[token] = int(event["members"])
@@ -291,36 +314,11 @@ def delivery_assertions(cell):
     return core_delivery_assertions(scenario, contract)
 
 
-def checked_read(path, *, jsonl=False):
-    """Final reads distinguish absence, invalid bytes, malformed lines and tails."""
-    try:
-        data = path.read_bytes()
-    except FileNotFoundError:
-        return {'state': 'missing', 'records': [], 'text': '', 'detail': 'file missing'}
-    except OSError as error:
-        return {'state': 'unreadable', 'records': [], 'text': '', 'detail': type(error).__name__}
-    try:
-        text = data.decode('utf-8')
-    except UnicodeDecodeError:
-        return {'state': 'malformed', 'records': [], 'text': '', 'detail': 'invalid UTF-8'}
-    result = dict(state='complete', records=[], text=text, detail='')
-    if jsonl:
-        for index, line in enumerate(text.splitlines(keepends=True), 1):
-            if not line.endswith('\n'):
-                result.update(state='partial', detail=f'partial tail at line {index}')
-                continue
-            try:
-                record = json.loads(line)
-                if not isinstance(record, dict):
-                    raise ValueError('record is not an object')
-                result['records'].append(record)
-            except (ValueError, json.JSONDecodeError):
-                result.update(state='malformed', detail=f'malformed record at line {index}')
-    return result
-
-
-def capture_observation(cell, evidence, broker_read, adapter_read, records, host_read=None):
-    """Retain available raw identities; current logs cannot prove full membership."""
+def capture_observation(cell, evidence, broker_read, adapter_read, records, host_read=None, *, capture_context=None):
+    """Assemble checked occurrences; missing observer facts never imply completeness."""
+    if capture_context is not None:
+        from capture_context import assemble_context
+        return assemble_context(cell, evidence, broker_read, adapter_read, records, host_read, capture_context)
     scenario, _, observation = build_verdict_inputs(cell, evidence)
     scope = dict(run_id=scenario['run_id'], route_id=scenario['route_id'], host_session_id=scenario['host_session_id'],
                  session_id=scenario['session_id'], connection_epoch_id=None, claim_generation=None)
@@ -358,6 +356,7 @@ def capture_observation(cell, evidence, broker_read, adapter_read, records, host
         observation['streams'].append(dict(id='host', role='host', scope=deepcopy(scope), state=host_read['state'],
             first_seq=1 if host_read['records'] else None, last_seq=len(host_read['records']) or None,
             through_barrier_id=None, artifact_ids=['host-records'], detail=host_read['detail'] or 'host end boundary unavailable'))
+    seen_host = {}
     for index, record in enumerate(records, 1):
         classification = classify(record)
         if cell.transport == 'fetch' or record.get('type') not in ('user', 'attachment') or classification['accept'] is not True:
@@ -367,7 +366,16 @@ def capture_observation(cell, evidence, broker_read, adapter_read, records, host
         record_id = record.get('uuid')
         if not isinstance(record_id, str) or not record_id:
             continue
-        observation['events'].append(dict(id='host-record-' + record_id, scope=deepcopy(scope),
+        if record_id in seen_host:
+            if seen_host[record_id] != record and host_read is not None:
+                observation['streams'][-1]['state'] = 'malformed'
+                observation['streams'][-1]['detail'] += f'; record:{index}: host UUID content conflict'
+            continue
+        seen_host[record_id] = record
+        observed_scope = dict(scope, host_session_id=record.get('sessionId', record.get('session_id')))
+        if not isinstance(observed_scope['host_session_id'], str):
+            observed_scope['host_session_id'] = None
+        observation['events'].append(dict(id='host-record-' + str(index), scope=observed_scope,
             position=dict(stream_id='host', seq=index, clock_id=None, time_ms=None),
             artifact_ref=dict(artifact_id='host-records', locator=f'record:{index}'), collection_complete=False,
             caused_by=[], origin='host-evidence', milestone='transcript_recorded', transport=classification['transport'],
@@ -398,13 +406,13 @@ def capture_observation(cell, evidence, broker_read, adapter_read, records, host
                 for block_index, block in enumerate(record['message']['content']):
                     if not isinstance(block, dict) or block.get('type') != 'tool_result' or block.get('tool_use_id') not in calls:
                         continue
-                    if block.get('is_error', False) is not False or fetch_trailer(result_text(block.get('content'))) != expected:
+                    if block.get('is_error', False) is not False or not _same_fetch_trailer(fetch_trailer(result_text(block.get('content'))), expected):
                         continue
-                    observation['events'].append(dict(id=f'host-result-{record_id}-{block_index}', scope=deepcopy(scope),
+                    observation['events'].append(dict(id=f'host-result-{index}-{block_index}', scope=dict(scope, host_session_id=record.get('sessionId', record.get('session_id')) if isinstance(record.get('sessionId', record.get('session_id')), str) else None),
                         position=dict(stream_id='host', seq=index, clock_id=None, time_ms=None),
                         artifact_ref=dict(artifact_id='host-records', locator=f'record:{index}/block:{block_index}'), collection_complete=False,
                         caused_by=[], origin='host-evidence', milestone='fetch_result_recorded', transport='fetch', attempt_id=None,
-                        group_id=None, token=expected['token'], operation_id=block['tool_use_id'], delivery_id=f'{record_id}/{block_index}',
+                        group_id=None, token=expected['token'], operation_id=block['tool_use_id'], delivery_id=json.dumps([record_id, block_index], separators=(',', ':')),
                         members=deepcopy(members), payload=dict(host_record_id=record_id, success=True, trailer=deepcopy(trailer))))
     # Rejected or incomplete raw shapes remain extractor artifacts.
     observation['artifacts'].append(dict(id='host-records', kind='host', content_digest=hashlib.sha256(json.dumps(records, sort_keys=True).encode()).hexdigest()))
@@ -417,7 +425,7 @@ def collect(cell, host, root, output, evidence, collect_only=False):
     adapter_read = checked_read(root / "control/adapter.log")
     broker_log, adapter_log = broker_read["text"], adapter_read["text"]
     attempts = attempt_events(broker_log)
-    tokens = {e["token"] for e in attempts}
+    tokens = {e["token"] for e in attempts if e.get("token")}
     try:
         records = host.records() if host else []
     except Exception as exc:
@@ -431,6 +439,17 @@ def collect(cell, host, root, output, evidence, collect_only=False):
             records = host_read['records']
         except Exception as exc:
             evidence.setdefault('setup_errors', []).append(f"collection: {type(exc).__name__}: {exc}")
+    from capture_context import host_shape_valid, broker_records
+    for line, kind, record in broker_records(broker_log):
+        if record is None:
+            read_problem(broker_read, 'malformed', f'line:{line}: malformed recognized TEST {kind} record')
+    valid_records = []
+    for index, record in enumerate(records, 1):
+        if host_shape_valid(record):
+            valid_records.append(record)
+        elif host_read is not None:
+            read_problem(host_read, 'malformed', f'line:{index}: malformed recognized host record')
+    records = valid_records
     tokens.update(match[1] for r in records for text in strings(r) for match in TOKEN.finditer(text))
     selected = [r for r in records if any(token in text for text in strings(r) for token in tokens)
                 or (cell.transport == "fetch" and ("MATRIX_SAMPLE" in json.dumps(r) or "__fetch_queue" in json.dumps(r)))]

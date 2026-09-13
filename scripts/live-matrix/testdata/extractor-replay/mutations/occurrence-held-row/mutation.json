@@ -1,0 +1,32 @@
+{
+  "base": "healthy-fetch-double",
+  "changes": [
+    {
+      "after": "dfd760097b6c3211dba258969f73a2b44ee8ec31a7fb7db4026456c8df04f29a",
+      "before": "d76f7e2f970010eede6a6c50976685d5ef55f22680d3f31bf9946fb0949cec42",
+      "file": "held-fetch/response-1.json"
+    }
+  ],
+  "identity": {
+    "bad": "row-fetch-wrong",
+    "canonical_path": [
+      "members",
+      0,
+      "row_id"
+    ],
+    "contains": true,
+    "field": "members",
+    "file": "held-fetch/response-1.json",
+    "line": null,
+    "milestone": "fetch_result_produced",
+    "path": [
+      "result",
+      "content",
+      0,
+      "text"
+    ]
+  },
+  "required_reasons": [
+    "evidence collection incomplete"
+  ]
+}

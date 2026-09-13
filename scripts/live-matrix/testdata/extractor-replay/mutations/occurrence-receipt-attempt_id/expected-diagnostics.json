@@ -1,0 +1,7 @@
+[
+  {
+    "artifact_id": "receipt-observers",
+    "code": "delivery evidence identity mismatch: attempt_id correlation conflict",
+    "locator": "line:1/block:0"
+  }
+]

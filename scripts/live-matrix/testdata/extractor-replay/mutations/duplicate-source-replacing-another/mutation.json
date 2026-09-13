@@ -1,0 +1,14 @@
+{
+  "base": "healthy-channel-double",
+  "changes": [
+    {
+      "after": "06844a3038000ed4b7de0c6d30edb8d8f9a96302eb764f65aaf8a7bcf73d3870",
+      "before": "40b88f10c6c8ffcee24e8d23d2b93f1a13c2130acc1648900b75730e071cdaee",
+      "file": "records.jsonl"
+    }
+  ],
+  "required_reasons": [
+    "host did not receive each source exactly once",
+    "delivery evidence identity mismatch"
+  ]
+}

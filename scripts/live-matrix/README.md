@@ -114,7 +114,7 @@ The export-only bundle contains:
 
 ```text
 replay/capture.json          # identity-v1, artifact states, byte extents/digests
-replay/context/             # empty; observer-context loading is Phase 2B
+replay/context/             # live export stays empty until observers supply these facts
 replay/broker.log
 replay/adapter.log
 replay/records.jsonl         # complete captured stream, including rejected records
@@ -143,18 +143,33 @@ Every serialized export is audited before publication, including diagnostics and
 exporter-built metadata. Arbitrary non-identity, non-secret-shaped natural
 language still requires registry coverage; this is not general prose anonymization.
 
-This phase adds the export side only. It supplies no replay reader or synthetic
-observer facts; live observations still fail completeness checks where evidence
-is unavailable. Existing collapsed fixtures cannot recover lost distinctions.
+The Phase 2B production loader is `capture_context.load_capture(directory)`.
+It reads a versioned descriptor and raw observer tables, then calls
+`capture_observation(..., capture_context=...)` and `build_verdict_inputs()`.
+The frozen [extractor-replay corpus](testdata/extractor-replay/README.md) supplies
+explicitly synthetic ownership, row membership, receipts, queue samples,
+contract samples and collection boundaries. Today's live driver does not collect
+all those facts: `collect()` supplies no authored context, and live captures stay
+incomplete. A synthetic replay context is never live-run evidence. Existing
+collapsed fixtures cannot recover lost distinctions.
+
+The replay suite checks raw extraction, canonical export round trips, and
+sanitized raw extraction in a fresh interpreter. It compares complete semantic
+observations, with only representation digests excluded, plus complete verdicts,
+classification decisions and source/occurrence projections. Every logical
+mutation has updated byte seals; truncation controls retain the original seal.
 
 Receipt counts distinguish
 intake enqueues from delivered user/queued-command records, and deduplicate only
-identical record UUIDs, so a real second delivery is still counted.
+identical re-observations of one UUID. Conflicting contents under one UUID fail
+integrity checks; distinct UUIDs remain separate delivery occurrences.
 
 Implementation concerns: `matrix.py` enumerates, `host.py` controls configuration
 and tmux, `proxy.py` records/barriers MCP, `hook.py` captures SessionStart,
 `collect.py` classifies and evaluates, `redaction.py` owns identity maps,
-`capture_export.py` writes capture artifacts, and `driver.py` orchestrates. Pure helper tests
+`capture_export.py` writes live capture artifacts, `capture_context.py` loads
+raw observer context, `replay_export.py` exports checked replay bundles, and
+`driver.py` orchestrates. Pure helper tests
 run without Claude, tmux, a broker, or network:
 
 ```sh
@@ -163,7 +178,8 @@ bash -n scripts/live-matrix/run.sh
 ```
 
 Python discovery is a required Phase 2 gate in addition to the Go checks; the
-repository's `make ci` does not run it. Focused Phase 2A gates are
+repository's `make ci` does not run it. The focused replay gate is
+`python3 -m unittest test_extractor_replay` from this directory. Other focused gates are
 `python3 -m unittest test_sanitize` and
 `python3 -m unittest test_harness test_verdict_core` from this directory, plus
 `go test ./cmd/c3-claude-adapter` and `go build ./...` from the repository root.

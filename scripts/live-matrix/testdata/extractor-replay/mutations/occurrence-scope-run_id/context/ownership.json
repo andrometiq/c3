@@ -1,0 +1,460 @@
+{
+  "occurrences": [
+    {
+      "artifact_id": "broker",
+      "block": 0,
+      "clock_id": "observer-clock",
+      "delivery_id": null,
+      "event_id": "admission-log-1",
+      "line": 1,
+      "stream_id": "broker",
+      "time_ms": 100
+    },
+    {
+      "artifact_id": "queue",
+      "block": 0,
+      "clock_id": "observer-clock",
+      "delivery_id": null,
+      "event_id": "persist-1",
+      "line": 1,
+      "stream_id": "queue",
+      "time_ms": 110
+    },
+    {
+      "artifact_id": "broker",
+      "block": 0,
+      "clock_id": "observer-clock",
+      "delivery_id": null,
+      "event_id": "admission-log-2",
+      "line": 2,
+      "stream_id": "broker",
+      "time_ms": 101
+    },
+    {
+      "artifact_id": "queue",
+      "block": 0,
+      "clock_id": "observer-clock",
+      "delivery_id": null,
+      "event_id": "persist-2",
+      "line": 2,
+      "stream_id": "queue",
+      "time_ms": 111
+    },
+    {
+      "artifact_id": "injection",
+      "block": 0,
+      "clock_id": "observer-clock",
+      "delivery_id": null,
+      "event_id": "admission",
+      "line": 1,
+      "stream_id": "injection",
+      "time_ms": 102
+    },
+    {
+      "artifact_id": "adapter",
+      "block": 0,
+      "clock_id": "observer-clock",
+      "delivery_id": null,
+      "event_id": "adapter-start",
+      "line": 1,
+      "stream_id": "adapter",
+      "time_ms": 0
+    },
+    {
+      "artifact_id": "host-records",
+      "block": 0,
+      "clock_id": "observer-clock",
+      "delivery_id": null,
+      "event_id": "seed-record",
+      "line": 1,
+      "stream_id": "host",
+      "time_ms": 0
+    },
+    {
+      "artifact_id": "broker",
+      "block": 0,
+      "clock_id": "observer-clock",
+      "delivery_id": null,
+      "event_id": "reserve-1",
+      "line": 3,
+      "stream_id": "broker",
+      "time_ms": 200
+    },
+    {
+      "artifact_id": "broker",
+      "block": 0,
+      "clock_id": "observer-clock",
+      "delivery_id": null,
+      "event_id": "terminal-1",
+      "line": 4,
+      "run_id": "run-occurrence-wrong",
+      "stream_id": "broker",
+      "time_ms": 280
+    },
+    {
+      "artifact_id": "receipt-observers",
+      "block": 0,
+      "clock_id": "observer-clock",
+      "delivery_id": null,
+      "event_id": "receipt-1",
+      "line": 1,
+      "stream_id": "receipt-stream",
+      "time_ms": 270
+    },
+    {
+      "artifact_id": "host-records",
+      "block": 0,
+      "clock_id": "observer-clock",
+      "delivery_id": "delivery-original-1",
+      "event_id": "host-1",
+      "line": 2,
+      "stream_id": "host",
+      "time_ms": 250
+    },
+    {
+      "artifact_id": "broker",
+      "block": 0,
+      "clock_id": "observer-clock",
+      "delivery_id": null,
+      "event_id": "reserve-2",
+      "line": 5,
+      "stream_id": "broker",
+      "time_ms": 300
+    },
+    {
+      "artifact_id": "broker",
+      "block": 0,
+      "clock_id": "observer-clock",
+      "delivery_id": null,
+      "event_id": "terminal-2",
+      "line": 6,
+      "stream_id": "broker",
+      "time_ms": 380
+    },
+    {
+      "artifact_id": "receipt-observers",
+      "block": 0,
+      "clock_id": "observer-clock",
+      "delivery_id": null,
+      "event_id": "receipt-2",
+      "line": 2,
+      "stream_id": "receipt-stream",
+      "time_ms": 370
+    },
+    {
+      "artifact_id": "host-records",
+      "block": 0,
+      "clock_id": "observer-clock",
+      "delivery_id": "delivery-original-2",
+      "event_id": "host-2",
+      "line": 3,
+      "stream_id": "host",
+      "time_ms": 350
+    },
+    {
+      "artifact_id": "state",
+      "block": 0,
+      "clock_id": "observer-clock",
+      "delivery_id": null,
+      "event_id": "journal-1",
+      "line": 1,
+      "stream_id": "driver",
+      "time_ms": 0
+    },
+    {
+      "artifact_id": "state",
+      "block": 0,
+      "clock_id": "observer-clock",
+      "delivery_id": null,
+      "event_id": "journal-2",
+      "line": 2,
+      "stream_id": "driver",
+      "time_ms": 20
+    },
+    {
+      "artifact_id": "state",
+      "block": 0,
+      "clock_id": "observer-clock",
+      "delivery_id": null,
+      "event_id": "journal-3",
+      "line": 3,
+      "stream_id": "driver",
+      "time_ms": 30
+    },
+    {
+      "artifact_id": "state",
+      "block": 0,
+      "clock_id": "observer-clock",
+      "delivery_id": null,
+      "event_id": "journal-4",
+      "line": 4,
+      "stream_id": "driver",
+      "time_ms": 50
+    },
+    {
+      "artifact_id": "state",
+      "block": 0,
+      "clock_id": "observer-clock",
+      "delivery_id": null,
+      "event_id": "journal-5",
+      "line": 5,
+      "stream_id": "driver",
+      "time_ms": 70000
+    },
+    {
+      "artifact_id": "state",
+      "block": 0,
+      "clock_id": "observer-clock",
+      "delivery_id": null,
+      "event_id": "journal-6",
+      "line": 6,
+      "stream_id": "driver",
+      "time_ms": 70000
+    },
+    {
+      "artifact_id": "attempt-observers",
+      "block": 0,
+      "clock_id": "observer-clock",
+      "delivery_id": null,
+      "event_id": "attempt-observers-observation-1",
+      "line": 1,
+      "stream_id": "attempt-observer-stream",
+      "time_ms": 0
+    },
+    {
+      "artifact_id": "attempt-observers",
+      "block": 0,
+      "clock_id": "observer-clock",
+      "delivery_id": null,
+      "event_id": "attempt-observers-observation-2",
+      "line": 2,
+      "stream_id": "attempt-observer-stream",
+      "time_ms": 0
+    },
+    {
+      "artifact_id": "attempt-observers",
+      "block": 0,
+      "clock_id": "observer-clock",
+      "delivery_id": null,
+      "event_id": "attempt-observers-observation-3",
+      "line": 3,
+      "stream_id": "attempt-observer-stream",
+      "time_ms": 0
+    },
+    {
+      "artifact_id": "attempt-observers",
+      "block": 0,
+      "clock_id": "observer-clock",
+      "delivery_id": null,
+      "event_id": "attempt-observers-observation-4",
+      "line": 4,
+      "stream_id": "attempt-observer-stream",
+      "time_ms": 0
+    },
+    {
+      "artifact_id": "attempt-observers",
+      "block": 0,
+      "clock_id": "observer-clock",
+      "delivery_id": null,
+      "event_id": "attempt-observers-observation-5",
+      "line": 5,
+      "stream_id": "attempt-observer-stream",
+      "time_ms": 0
+    },
+    {
+      "artifact_id": "attempt-observers",
+      "block": 0,
+      "clock_id": "observer-clock",
+      "delivery_id": null,
+      "event_id": "attempt-observers-observation-6",
+      "line": 6,
+      "stream_id": "attempt-observer-stream",
+      "time_ms": 0
+    },
+    {
+      "artifact_id": "sample-observers",
+      "block": 0,
+      "clock_id": "observer-clock",
+      "delivery_id": null,
+      "event_id": "sample-observers-observation-1",
+      "line": 1,
+      "stream_id": "sample-stream",
+      "time_ms": 0
+    },
+    {
+      "artifact_id": "sample-observers",
+      "block": 0,
+      "clock_id": "observer-clock",
+      "delivery_id": null,
+      "event_id": "sample-observers-observation-2",
+      "line": 2,
+      "stream_id": "sample-stream",
+      "time_ms": 0
+    },
+    {
+      "artifact_id": "contract",
+      "block": 0,
+      "clock_id": "observer-clock",
+      "delivery_id": null,
+      "event_id": "contract-observation-1",
+      "line": 1,
+      "stream_id": "contract",
+      "time_ms": 0
+    },
+    {
+      "artifact_id": "contract",
+      "block": 0,
+      "clock_id": "observer-clock",
+      "delivery_id": null,
+      "event_id": "contract-observation-2",
+      "line": 2,
+      "stream_id": "contract",
+      "time_ms": 0
+    },
+    {
+      "artifact_id": "ownership-observers",
+      "block": 0,
+      "clock_id": "observer-clock",
+      "delivery_id": null,
+      "event_id": "ownership-observers-observation-1",
+      "line": 1,
+      "stream_id": "ownership-stream",
+      "time_ms": 0
+    }
+  ],
+  "owners": [
+    {
+      "artifact_id": "broker",
+      "claim_generation": 3,
+      "connection_epoch_id": "epoch-original",
+      "host_session_id": "session-host-original",
+      "pid": 45671,
+      "role": "broker",
+      "route_id": "-771/881",
+      "run_id": "run-synthetic-original",
+      "session_id": "session-broker-original",
+      "stream_id": "broker"
+    },
+    {
+      "artifact_id": "adapter",
+      "claim_generation": 3,
+      "connection_epoch_id": "epoch-original",
+      "host_session_id": "session-host-original",
+      "pid": 45671,
+      "role": "transport",
+      "route_id": "-771/881",
+      "run_id": "run-synthetic-original",
+      "session_id": "session-broker-original",
+      "stream_id": "adapter"
+    },
+    {
+      "artifact_id": "host-records",
+      "claim_generation": 3,
+      "connection_epoch_id": "epoch-original",
+      "host_session_id": "session-host-original",
+      "pid": 45671,
+      "role": "host",
+      "route_id": "-771/881",
+      "run_id": "run-synthetic-original",
+      "session_id": "session-broker-original",
+      "stream_id": "host"
+    },
+    {
+      "artifact_id": "injection",
+      "claim_generation": 3,
+      "connection_epoch_id": "epoch-original",
+      "host_session_id": "session-host-original",
+      "pid": 45671,
+      "role": "injection",
+      "route_id": "-771/881",
+      "run_id": "run-synthetic-original",
+      "session_id": "session-broker-original",
+      "stream_id": "injection"
+    },
+    {
+      "artifact_id": "queue",
+      "claim_generation": 3,
+      "connection_epoch_id": "epoch-original",
+      "host_session_id": "session-host-original",
+      "pid": 45671,
+      "role": "queue",
+      "route_id": "-771/881",
+      "run_id": "run-synthetic-original",
+      "session_id": "session-broker-original",
+      "stream_id": "queue"
+    },
+    {
+      "artifact_id": "attempt-observers",
+      "claim_generation": 3,
+      "connection_epoch_id": "epoch-original",
+      "host_session_id": "session-host-original",
+      "pid": 45671,
+      "role": "state",
+      "route_id": "-771/881",
+      "run_id": "run-synthetic-original",
+      "session_id": "session-broker-original",
+      "stream_id": "attempt-observer-stream"
+    },
+    {
+      "artifact_id": "receipt-observers",
+      "claim_generation": 3,
+      "connection_epoch_id": "epoch-original",
+      "host_session_id": "session-host-original",
+      "pid": 45671,
+      "role": "broker",
+      "route_id": "-771/881",
+      "run_id": "run-synthetic-original",
+      "session_id": "session-broker-original",
+      "stream_id": "receipt-stream"
+    },
+    {
+      "artifact_id": "sample-observers",
+      "claim_generation": 3,
+      "connection_epoch_id": "epoch-original",
+      "host_session_id": "session-host-original",
+      "pid": 45671,
+      "role": "queue",
+      "route_id": "-771/881",
+      "run_id": "run-synthetic-original",
+      "session_id": "session-broker-original",
+      "stream_id": "sample-stream"
+    },
+    {
+      "artifact_id": "contract",
+      "claim_generation": 3,
+      "connection_epoch_id": "epoch-original",
+      "host_session_id": "session-host-original",
+      "pid": 45671,
+      "role": "contract",
+      "route_id": "-771/881",
+      "run_id": "run-synthetic-original",
+      "session_id": "session-broker-original",
+      "stream_id": "contract"
+    },
+    {
+      "artifact_id": "state",
+      "claim_generation": 3,
+      "connection_epoch_id": "epoch-original",
+      "host_session_id": "session-host-original",
+      "pid": 45671,
+      "role": "state",
+      "route_id": "-771/881",
+      "run_id": "run-synthetic-original",
+      "session_id": "session-broker-original",
+      "stream_id": "driver"
+    },
+    {
+      "artifact_id": "ownership-observers",
+      "claim_generation": 3,
+      "connection_epoch_id": "epoch-original",
+      "host_session_id": "session-host-original",
+      "pid": 45671,
+      "role": "state",
+      "route_id": "-771/881",
+      "run_id": "run-synthetic-original",
+      "session_id": "session-broker-original",
+      "stream_id": "ownership-stream"
+    }
+  ],
+  "schema_version": 1
+}

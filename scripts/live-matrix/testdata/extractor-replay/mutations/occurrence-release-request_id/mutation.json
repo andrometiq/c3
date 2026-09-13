@@ -1,0 +1,23 @@
+{
+  "base": "healthy-fetch-double",
+  "changes": [
+    {
+      "after": "22604aba770e2c3de4de2af2d1b36fad24da88484d53b5f0ee05d044a04e7cff",
+      "before": "35b22b117e53ba2f9e055b5b844450303420915cb049c171ae61361016279069",
+      "file": "context/driver.jsonl"
+    }
+  ],
+  "identity": {
+    "bad": "rpc-release-wrong",
+    "contains": false,
+    "field": "request_id",
+    "file": "context/driver.jsonl",
+    "line": 7,
+    "path": [
+      "request_id"
+    ]
+  },
+  "required_reasons": [
+    "evidence collection incomplete"
+  ]
+}

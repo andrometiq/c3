@@ -1,0 +1,28 @@
+{
+  "base": "healthy-channel-double",
+  "changes": [
+    {
+      "after": "e20e6aefb252ed29bf63d0e2fbc314e4aa28d9c15908fad6063d8e5cf315a84e",
+      "before": "9aa6877893efcb734712b1b33eaeb4dc13654f53e74802334158e8bcd7902f0e",
+      "file": "broker.log"
+    },
+    {
+      "after": "b830f7d5f5238a5624364f9d2fd8470ed3536ea6d522a17184a2456b46147a31",
+      "before": "60831792f8f077904c8cd0a1357379dc9cbd4ac4c5f523fe591d170f837ac995",
+      "file": "context/queue-samples.jsonl"
+    },
+    {
+      "after": "19fcbc1dbee0e6f29f1748d39c5cb751e49f6eff526f63c7539f5e7d9c9c658c",
+      "before": "d94ba7d2676c3a65f53a5abc41dd2cc70b27802c9ce6cce34b3079e309481630",
+      "file": "context/driver.jsonl"
+    },
+    {
+      "after": "8bb267b41c60140e491d6a2e084cd94e528b08e370ff5f0d16223e6c0eea2a24",
+      "before": "bdc1efd144e03f2ba10fea220a233da24c61579694851821d1a06a1b201ff46e",
+      "file": "context/ownership.json"
+    }
+  ],
+  "required_reasons": [
+    "no false Held assertion failed or missing"
+  ]
+}

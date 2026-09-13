@@ -1,0 +1,17 @@
+[
+  {
+    "accept": null,
+    "artifact_id": "host-records",
+    "locator": "line:1/block:0"
+  },
+  {
+    "accept": true,
+    "artifact_id": "host-records",
+    "locator": "line:2/block:0"
+  },
+  {
+    "accept": true,
+    "artifact_id": "host-records",
+    "locator": "line:3/block:0"
+  }
+]

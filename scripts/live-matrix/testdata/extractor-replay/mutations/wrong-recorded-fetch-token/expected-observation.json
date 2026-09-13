@@ -1,0 +1,1299 @@
+{
+  "artifacts": [
+    {
+      "content_digest": "bae1a6405ad9ae61ca8782f0dfe05fd5294baead4cd0f5a2ec9219a827cea7d1",
+      "id": "broker",
+      "kind": "broker"
+    },
+    {
+      "content_digest": "037352dc56de2be40c5607c8e24e2d2dd41342fcbef3e91122690aefaa12f30f",
+      "id": "adapter",
+      "kind": "adapter"
+    },
+    {
+      "content_digest": "37f3fc61889f89e705ecd00cfff1df25c53775d1089131ccfed64d902022a4ae",
+      "id": "host-records",
+      "kind": "host"
+    },
+    {
+      "content_digest": "15f015856178c34a5fdf6bb88c5b2dad331b9a629bbf5eeb33f162d056b05e5e",
+      "id": "injection",
+      "kind": "injection"
+    },
+    {
+      "content_digest": "f4908c3f2f154409390b9969a5b17d5cb5088cb57b58d0c9217cbb151b1ce56e",
+      "id": "queue",
+      "kind": "rows"
+    },
+    {
+      "content_digest": "640ce13b7afcab59da1da7737250274df3c980e77ff00d8202be518b57799fcd",
+      "id": "attempt-observers",
+      "kind": "attempts"
+    },
+    {
+      "content_digest": "21f949a89ff5c71d9068162aa24d319622f6686e52180de3662246cf1f9f82e6",
+      "id": "receipt-observers",
+      "kind": "receipts"
+    },
+    {
+      "content_digest": "8b74a9699a458455750fffb0e28351a6df12f26f177199b8fb26cd034f72d8c1",
+      "id": "sample-observers",
+      "kind": "queue-samples"
+    },
+    {
+      "content_digest": "439ef611cb8f5cadddf2d7e4c590d6008a0501701e768623b1c37a260d99feb9",
+      "id": "contract",
+      "kind": "contracts"
+    },
+    {
+      "content_digest": "35b22b117e53ba2f9e055b5b844450303420915cb049c171ae61361016279069",
+      "id": "state",
+      "kind": "driver"
+    },
+    {
+      "content_digest": "d76f7e2f970010eede6a6c50976685d5ef55f22680d3f31bf9946fb0949cec42",
+      "id": "held-fetch-response",
+      "kind": "held"
+    },
+    {
+      "content_digest": "b075250c14df0e9cefc0e85ee0ea48090fb406a6a9c4b5f0e72708717a587d2b",
+      "id": "ownership-observers",
+      "kind": "ownership"
+    }
+  ],
+  "barriers": [
+    {
+      "artifact_refs": [
+        {
+          "artifact_id": "state",
+          "locator": "line:1"
+        }
+      ],
+      "collection_complete": true,
+      "id": "pre_injection",
+      "name": "pre_injection",
+      "scope": {
+        "claim_generation": 3,
+        "connection_epoch_id": "epoch-original",
+        "host_session_id": "session-host-original",
+        "route_id": "-771/881",
+        "run_id": "run-synthetic-original",
+        "session_id": "session-broker-original"
+      },
+      "state": "reached",
+      "stream_cutoffs": {
+        "adapter": 0,
+        "attempt-observer-stream": 0,
+        "broker": 0,
+        "contract": 0,
+        "driver": 1,
+        "held-stream": 0,
+        "host": 1,
+        "injection": 0,
+        "ownership-stream": 1,
+        "queue": 0,
+        "receipt-stream": 0,
+        "sample-stream": 1,
+        "transport": 0
+      }
+    },
+    {
+      "artifact_refs": [
+        {
+          "artifact_id": "state",
+          "locator": "line:4"
+        }
+      ],
+      "collection_complete": true,
+      "id": "injection",
+      "name": "injection",
+      "scope": {
+        "claim_generation": 3,
+        "connection_epoch_id": "epoch-original",
+        "host_session_id": "session-host-original",
+        "route_id": "-771/881",
+        "run_id": "run-synthetic-original",
+        "session_id": "session-broker-original"
+      },
+      "state": "reached",
+      "stream_cutoffs": {
+        "adapter": 0,
+        "attempt-observer-stream": 0,
+        "broker": 0,
+        "contract": 1,
+        "driver": 4,
+        "held-stream": 0,
+        "host": 1,
+        "injection": 0,
+        "ownership-stream": 1,
+        "queue": 0,
+        "receipt-stream": 0,
+        "sample-stream": 1,
+        "transport": 0
+      }
+    },
+    {
+      "artifact_refs": [
+        {
+          "artifact_id": "state",
+          "locator": "line:6"
+        }
+      ],
+      "collection_complete": true,
+      "id": "fetch_result_held",
+      "name": "fetch_result_held",
+      "scope": {
+        "claim_generation": 3,
+        "connection_epoch_id": "epoch-original",
+        "host_session_id": "session-host-original",
+        "route_id": "-771/881",
+        "run_id": "run-synthetic-original",
+        "session_id": "session-broker-original"
+      },
+      "state": "reached",
+      "stream_cutoffs": {
+        "adapter": 1,
+        "attempt-observer-stream": 5,
+        "broker": 3,
+        "contract": 1,
+        "driver": 6,
+        "held-stream": 1,
+        "host": 2,
+        "injection": 1,
+        "ownership-stream": 1,
+        "queue": 2,
+        "receipt-stream": 0,
+        "sample-stream": 2,
+        "transport": 6
+      }
+    },
+    {
+      "artifact_refs": [
+        {
+          "artifact_id": "state",
+          "locator": "line:9"
+        }
+      ],
+      "collection_complete": true,
+      "id": "final",
+      "name": "final",
+      "scope": {
+        "claim_generation": 3,
+        "connection_epoch_id": "epoch-original",
+        "host_session_id": "session-host-original",
+        "route_id": "-771/881",
+        "run_id": "run-synthetic-original",
+        "session_id": "session-broker-original"
+      },
+      "state": "reached",
+      "stream_cutoffs": {
+        "adapter": 1,
+        "attempt-observer-stream": 5,
+        "broker": 4,
+        "contract": 2,
+        "driver": 9,
+        "held-stream": 1,
+        "host": 3,
+        "injection": 1,
+        "ownership-stream": 1,
+        "queue": 2,
+        "receipt-stream": 1,
+        "sample-stream": 3,
+        "transport": 9
+      }
+    }
+  ],
+  "collection_complete": false,
+  "contract_observations": [
+    {
+      "artifact_refs": [
+        {
+          "artifact_id": "contract",
+          "locator": "line:1"
+        }
+      ],
+      "axes": {
+        "accepted_modes": [
+          "fetch_receipt"
+        ],
+        "fetch_policy": "receipt",
+        "live_eligibility": {
+          "channel": false,
+          "inbox": false
+        },
+        "negotiation": "v1",
+        "receipt_type": "transcript"
+      },
+      "barrier_id": "injection",
+      "collection_complete": true,
+      "scope": {
+        "claim_generation": 3,
+        "connection_epoch_id": "epoch-original",
+        "host_session_id": "session-host-original",
+        "route_id": "-771/881",
+        "run_id": "run-synthetic-original",
+        "session_id": "session-broker-original"
+      }
+    },
+    {
+      "artifact_refs": [
+        {
+          "artifact_id": "contract",
+          "locator": "line:2"
+        }
+      ],
+      "axes": {
+        "accepted_modes": [
+          "fetch_receipt"
+        ],
+        "fetch_policy": "receipt",
+        "live_eligibility": {
+          "channel": false,
+          "inbox": false
+        },
+        "negotiation": "v1",
+        "receipt_type": "transcript"
+      },
+      "barrier_id": "final",
+      "collection_complete": true,
+      "scope": {
+        "claim_generation": 3,
+        "connection_epoch_id": "epoch-original",
+        "host_session_id": "session-host-original",
+        "route_id": "-771/881",
+        "run_id": "run-synthetic-original",
+        "session_id": "session-broker-original"
+      }
+    }
+  ],
+  "events": [
+    {
+      "artifact_ref": {
+        "artifact_id": "state",
+        "locator": "line:2/block:0"
+      },
+      "attempt_id": null,
+      "caused_by": [],
+      "collection_complete": true,
+      "delivery_id": null,
+      "group_id": null,
+      "id": "journal-2",
+      "members": [],
+      "milestone": "state_observed",
+      "operation_id": null,
+      "origin": "rig-control",
+      "payload": {
+        "detail": "state_sample",
+        "state": "idle"
+      },
+      "position": {
+        "clock_id": "observer-clock",
+        "seq": 2,
+        "stream_id": "driver",
+        "time_ms": 20
+      },
+      "scope": {
+        "claim_generation": 3,
+        "connection_epoch_id": "epoch-original",
+        "host_session_id": "session-host-original",
+        "route_id": "-771/881",
+        "run_id": "run-synthetic-original",
+        "session_id": "session-broker-original"
+      },
+      "token": null,
+      "transport": null
+    },
+    {
+      "artifact_ref": {
+        "artifact_id": "state",
+        "locator": "line:3/block:0"
+      },
+      "attempt_id": null,
+      "caused_by": [],
+      "collection_complete": true,
+      "delivery_id": null,
+      "group_id": null,
+      "id": "journal-3",
+      "members": [],
+      "milestone": "state_observed",
+      "operation_id": null,
+      "origin": "rig-control",
+      "payload": {
+        "detail": "session_sample",
+        "state": "resumed"
+      },
+      "position": {
+        "clock_id": "observer-clock",
+        "seq": 3,
+        "stream_id": "driver",
+        "time_ms": 30
+      },
+      "scope": {
+        "claim_generation": 3,
+        "connection_epoch_id": "epoch-original",
+        "host_session_id": "session-host-original",
+        "route_id": "-771/881",
+        "run_id": "run-synthetic-original",
+        "session_id": "session-broker-original"
+      },
+      "token": null,
+      "transport": null
+    },
+    {
+      "artifact_ref": {
+        "artifact_id": "state",
+        "locator": "line:8/block:0"
+      },
+      "attempt_id": null,
+      "caused_by": [],
+      "collection_complete": true,
+      "delivery_id": null,
+      "group_id": null,
+      "id": "journal-8",
+      "members": [],
+      "milestone": "state_observed",
+      "operation_id": null,
+      "origin": "rig-control",
+      "payload": {
+        "detail": "window_end",
+        "state": "idle"
+      },
+      "position": {
+        "clock_id": "observer-clock",
+        "seq": 8,
+        "stream_id": "driver",
+        "time_ms": 70000
+      },
+      "scope": {
+        "claim_generation": 3,
+        "connection_epoch_id": "epoch-original",
+        "host_session_id": "session-host-original",
+        "route_id": "-771/881",
+        "run_id": "run-synthetic-original",
+        "session_id": "session-broker-original"
+      },
+      "token": null,
+      "transport": null
+    },
+    {
+      "artifact_ref": {
+        "artifact_id": "queue",
+        "locator": "line:1/block:0"
+      },
+      "attempt_id": null,
+      "caused_by": [],
+      "collection_complete": true,
+      "delivery_id": null,
+      "group_id": null,
+      "id": "persist-1",
+      "members": [
+        {
+          "revision": {
+            "kind": "exact",
+            "value": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          },
+          "row_id": "row-original-1",
+          "source_ids": [
+            "41001"
+          ]
+        }
+      ],
+      "milestone": "row_persisted",
+      "operation_id": null,
+      "origin": "persistence",
+      "payload": {},
+      "position": {
+        "clock_id": "observer-clock",
+        "seq": 1,
+        "stream_id": "queue",
+        "time_ms": 110
+      },
+      "scope": {
+        "claim_generation": 3,
+        "connection_epoch_id": "epoch-original",
+        "host_session_id": "session-host-original",
+        "route_id": "-771/881",
+        "run_id": "run-synthetic-original",
+        "session_id": "session-broker-original"
+      },
+      "token": null,
+      "transport": null
+    },
+    {
+      "artifact_ref": {
+        "artifact_id": "queue",
+        "locator": "line:2/block:0"
+      },
+      "attempt_id": null,
+      "caused_by": [],
+      "collection_complete": true,
+      "delivery_id": null,
+      "group_id": null,
+      "id": "persist-2",
+      "members": [
+        {
+          "revision": {
+            "kind": "exact",
+            "value": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          },
+          "row_id": "row-original-2",
+          "source_ids": [
+            "41002"
+          ]
+        }
+      ],
+      "milestone": "row_persisted",
+      "operation_id": null,
+      "origin": "persistence",
+      "payload": {},
+      "position": {
+        "clock_id": "observer-clock",
+        "seq": 2,
+        "stream_id": "queue",
+        "time_ms": 111
+      },
+      "scope": {
+        "claim_generation": 3,
+        "connection_epoch_id": "epoch-original",
+        "host_session_id": "session-host-original",
+        "route_id": "-771/881",
+        "run_id": "run-synthetic-original",
+        "session_id": "session-broker-original"
+      },
+      "token": null,
+      "transport": null
+    },
+    {
+      "artifact_ref": {
+        "artifact_id": "injection",
+        "locator": "line:1/block:0"
+      },
+      "attempt_id": null,
+      "caused_by": [],
+      "collection_complete": true,
+      "delivery_id": null,
+      "group_id": null,
+      "id": "admission",
+      "members": [
+        {
+          "revision": {
+            "kind": "exact",
+            "value": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          },
+          "row_id": "row-original-1",
+          "source_ids": [
+            "41001"
+          ]
+        },
+        {
+          "revision": {
+            "kind": "exact",
+            "value": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          },
+          "row_id": "row-original-2",
+          "source_ids": [
+            "41002"
+          ]
+        }
+      ],
+      "milestone": "injection_completed",
+      "operation_id": null,
+      "origin": "rig-control",
+      "payload": {
+        "accepted": true
+      },
+      "position": {
+        "clock_id": "observer-clock",
+        "seq": 1,
+        "stream_id": "injection",
+        "time_ms": 102
+      },
+      "scope": {
+        "claim_generation": 3,
+        "connection_epoch_id": "epoch-original",
+        "host_session_id": "session-host-original",
+        "route_id": "-771/881",
+        "run_id": "run-synthetic-original",
+        "session_id": "session-broker-original"
+      },
+      "token": null,
+      "transport": null
+    },
+    {
+      "artifact_ref": {
+        "artifact_id": "state",
+        "locator": "line:5/block:0"
+      },
+      "attempt_id": "attempt-original-1",
+      "caused_by": [],
+      "collection_complete": true,
+      "delivery_id": null,
+      "group_id": "group-original-1",
+      "id": "journal-5",
+      "members": [
+        {
+          "revision": {
+            "kind": "exact",
+            "value": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          },
+          "row_id": "row-original-1",
+          "source_ids": [
+            "41001"
+          ]
+        },
+        {
+          "revision": {
+            "kind": "exact",
+            "value": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          },
+          "row_id": "row-original-2",
+          "source_ids": [
+            "41002"
+          ]
+        }
+      ],
+      "milestone": "fetch_requested",
+      "operation_id": "call-original",
+      "origin": "rig-control",
+      "payload": {
+        "ack": true
+      },
+      "position": {
+        "clock_id": "observer-clock",
+        "seq": 5,
+        "stream_id": "transport",
+        "time_ms": 180
+      },
+      "scope": {
+        "claim_generation": 3,
+        "connection_epoch_id": "epoch-original",
+        "host_session_id": "session-host-original",
+        "route_id": "-771/881",
+        "run_id": "run-synthetic-original",
+        "session_id": "session-broker-original"
+      },
+      "token": null,
+      "transport": "fetch"
+    },
+    {
+      "artifact_ref": {
+        "artifact_id": "held-fetch-response",
+        "locator": "line:1/block:0"
+      },
+      "attempt_id": "attempt-original-1",
+      "caused_by": [],
+      "collection_complete": true,
+      "delivery_id": "produced-original-fetch",
+      "group_id": "group-original-1",
+      "id": "held-fetch-response",
+      "members": [
+        {
+          "revision": {
+            "kind": "exact",
+            "value": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          },
+          "row_id": "row-original-1",
+          "source_ids": [
+            "41001"
+          ]
+        },
+        {
+          "revision": {
+            "kind": "exact",
+            "value": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          },
+          "row_id": "row-original-2",
+          "source_ids": [
+            "41002"
+          ]
+        }
+      ],
+      "milestone": "fetch_result_produced",
+      "operation_id": "call-original",
+      "origin": "rig-control",
+      "payload": {
+        "success": true,
+        "trailer": {
+          "members": [
+            {
+              "revision": {
+                "kind": "exact",
+                "value": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+              },
+              "row_id": "row-original-1",
+              "source_ids": [
+                "41001"
+              ]
+            },
+            {
+              "revision": {
+                "kind": "exact",
+                "value": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+              },
+              "row_id": "row-original-2",
+              "source_ids": [
+                "41002"
+              ]
+            }
+          ],
+          "state": "complete",
+          "token": "token-original-one"
+        }
+      },
+      "position": {
+        "clock_id": "observer-clock",
+        "seq": 1,
+        "stream_id": "held-stream",
+        "time_ms": 220
+      },
+      "scope": {
+        "claim_generation": 3,
+        "connection_epoch_id": "epoch-original",
+        "host_session_id": "session-host-original",
+        "route_id": "-771/881",
+        "run_id": "run-synthetic-original",
+        "session_id": "session-broker-original"
+      },
+      "token": "token-original-one",
+      "transport": "fetch"
+    },
+    {
+      "artifact_ref": {
+        "artifact_id": "state",
+        "locator": "line:7/block:0"
+      },
+      "attempt_id": null,
+      "caused_by": [],
+      "collection_complete": true,
+      "delivery_id": null,
+      "group_id": null,
+      "id": "journal-7",
+      "members": [],
+      "milestone": "state_observed",
+      "operation_id": null,
+      "origin": "rig-control",
+      "payload": {
+        "detail": "fetch_release",
+        "state": "fetch_response_released"
+      },
+      "position": {
+        "clock_id": "observer-clock",
+        "seq": 7,
+        "stream_id": "driver",
+        "time_ms": 240
+      },
+      "scope": {
+        "claim_generation": 3,
+        "connection_epoch_id": "epoch-original",
+        "host_session_id": "session-host-original",
+        "route_id": "-771/881",
+        "run_id": "run-synthetic-original",
+        "session_id": "session-broker-original"
+      },
+      "token": null,
+      "transport": null
+    },
+    {
+      "artifact_ref": {
+        "artifact_id": "broker",
+        "locator": "line:3/block:0"
+      },
+      "attempt_id": "attempt-original-1",
+      "caused_by": [],
+      "collection_complete": true,
+      "delivery_id": null,
+      "group_id": "group-original-1",
+      "id": "reserve-1",
+      "members": [
+        {
+          "revision": {
+            "kind": "exact",
+            "value": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          },
+          "row_id": "row-original-1",
+          "source_ids": [
+            "41001"
+          ]
+        },
+        {
+          "revision": {
+            "kind": "exact",
+            "value": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          },
+          "row_id": "row-original-2",
+          "source_ids": [
+            "41002"
+          ]
+        }
+      ],
+      "milestone": "attempt_reserved",
+      "operation_id": "call-original",
+      "origin": "persistence",
+      "payload": {
+        "deadline_ms": null
+      },
+      "position": {
+        "clock_id": "observer-clock",
+        "seq": 3,
+        "stream_id": "broker",
+        "time_ms": 200
+      },
+      "scope": {
+        "claim_generation": 3,
+        "connection_epoch_id": "epoch-original",
+        "host_session_id": "session-host-original",
+        "route_id": "-771/881",
+        "run_id": "run-synthetic-original",
+        "session_id": "session-broker-original"
+      },
+      "token": "token-original-one",
+      "transport": "fetch"
+    },
+    {
+      "artifact_ref": {
+        "artifact_id": "broker",
+        "locator": "line:4/block:0"
+      },
+      "attempt_id": "attempt-original-1",
+      "caused_by": [],
+      "collection_complete": true,
+      "delivery_id": null,
+      "group_id": "group-original-1",
+      "id": "terminal-1",
+      "members": [
+        {
+          "revision": {
+            "kind": "exact",
+            "value": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          },
+          "row_id": "row-original-1",
+          "source_ids": [
+            "41001"
+          ]
+        },
+        {
+          "revision": {
+            "kind": "exact",
+            "value": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          },
+          "row_id": "row-original-2",
+          "source_ids": [
+            "41002"
+          ]
+        }
+      ],
+      "milestone": "attempt_terminal",
+      "operation_id": "call-original",
+      "origin": "retirement",
+      "payload": {
+        "elapsed_ms": 40,
+        "outcome": "confirmed",
+        "reason": "",
+        "retired_members": [
+          {
+            "revision": {
+              "kind": "exact",
+              "value": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            },
+            "row_id": "row-original-1",
+            "source_ids": [
+              "41001"
+            ]
+          },
+          {
+            "revision": {
+              "kind": "exact",
+              "value": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            },
+            "row_id": "row-original-2",
+            "source_ids": [
+              "41002"
+            ]
+          }
+        ]
+      },
+      "position": {
+        "clock_id": "observer-clock",
+        "seq": 4,
+        "stream_id": "broker",
+        "time_ms": 280
+      },
+      "scope": {
+        "claim_generation": 3,
+        "connection_epoch_id": "epoch-original",
+        "host_session_id": "session-host-original",
+        "route_id": "-771/881",
+        "run_id": "run-synthetic-original",
+        "session_id": "session-broker-original"
+      },
+      "token": "token-original-one",
+      "transport": "fetch"
+    },
+    {
+      "artifact_ref": {
+        "artifact_id": "receipt-observers",
+        "locator": "line:1/block:0"
+      },
+      "attempt_id": "attempt-original-1",
+      "caused_by": [],
+      "collection_complete": true,
+      "delivery_id": null,
+      "group_id": "group-original-1",
+      "id": "receipt-1",
+      "members": [
+        {
+          "revision": {
+            "kind": "exact",
+            "value": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          },
+          "row_id": "row-original-1",
+          "source_ids": [
+            "41001"
+          ]
+        },
+        {
+          "revision": {
+            "kind": "exact",
+            "value": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          },
+          "row_id": "row-original-2",
+          "source_ids": [
+            "41002"
+          ]
+        }
+      ],
+      "milestone": "receipt_accepted",
+      "operation_id": "call-original",
+      "origin": "broker-ack",
+      "payload": {
+        "elapsed_ms": 30
+      },
+      "position": {
+        "clock_id": "observer-clock",
+        "seq": 1,
+        "stream_id": "receipt-stream",
+        "time_ms": 270
+      },
+      "scope": {
+        "claim_generation": 3,
+        "connection_epoch_id": "epoch-original",
+        "host_session_id": "session-host-original",
+        "route_id": "-771/881",
+        "run_id": "run-synthetic-original",
+        "session_id": "session-broker-original"
+      },
+      "token": "token-original-one",
+      "transport": "fetch"
+    }
+  ],
+  "provenance": {
+    "adapter_build": "synthetic",
+    "broker_build": "synthetic",
+    "capture_id": "synthetic-fetch",
+    "contract_version": "matrix-negotiated-v1",
+    "extractor_version": "capture-context-v1",
+    "host_version": "synthetic",
+    "kind": "raw_replay",
+    "known_defect_baselines": [],
+    "mode": "matrix",
+    "platform": "synthetic",
+    "schema_version": 1
+  },
+  "queue_snapshots": [
+    {
+      "artifact_refs": [
+        {
+          "artifact_id": "sample-observers",
+          "locator": "line:1"
+        }
+      ],
+      "barrier_id": "pre_injection",
+      "id": "sample-pre",
+      "rows": [],
+      "scope": {
+        "claim_generation": 3,
+        "connection_epoch_id": "epoch-original",
+        "host_session_id": "session-host-original",
+        "route_id": "-771/881",
+        "run_id": "run-synthetic-original",
+        "session_id": "session-broker-original"
+      },
+      "state": "complete"
+    },
+    {
+      "artifact_refs": [
+        {
+          "artifact_id": "sample-observers",
+          "locator": "line:2"
+        }
+      ],
+      "barrier_id": "fetch_result_held",
+      "id": "sample-held",
+      "rows": [
+        {
+          "revision": {
+            "kind": "exact",
+            "value": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          },
+          "row_id": "row-original-1",
+          "source_ids": [
+            "41001"
+          ]
+        },
+        {
+          "revision": {
+            "kind": "exact",
+            "value": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          },
+          "row_id": "row-original-2",
+          "source_ids": [
+            "41002"
+          ]
+        }
+      ],
+      "scope": {
+        "claim_generation": 3,
+        "connection_epoch_id": "epoch-original",
+        "host_session_id": "session-host-original",
+        "route_id": "-771/881",
+        "run_id": "run-synthetic-original",
+        "session_id": "session-broker-original"
+      },
+      "state": "complete"
+    },
+    {
+      "artifact_refs": [
+        {
+          "artifact_id": "sample-observers",
+          "locator": "line:3"
+        }
+      ],
+      "barrier_id": "final",
+      "id": "sample-final",
+      "rows": [],
+      "scope": {
+        "claim_generation": 3,
+        "connection_epoch_id": "epoch-original",
+        "host_session_id": "session-host-original",
+        "route_id": "-771/881",
+        "run_id": "run-synthetic-original",
+        "session_id": "session-broker-original"
+      },
+      "state": "complete"
+    }
+  ],
+  "run_errors": [],
+  "schema_version": 1,
+  "session_proof": {
+    "barrier_id": "injection",
+    "detail": "session_sample",
+    "event_ids": [
+      "journal-3"
+    ],
+    "freshness": "not_applicable",
+    "posture": "resumed",
+    "proven": true,
+    "scope": {
+      "claim_generation": 3,
+      "connection_epoch_id": "epoch-original",
+      "host_session_id": "session-host-original",
+      "route_id": "-771/881",
+      "run_id": "run-synthetic-original",
+      "session_id": "session-broker-original"
+    }
+  },
+  "setup_errors": [],
+  "sources": [
+    {
+      "admission_event_id": "admission",
+      "kind": "text",
+      "slot": 0,
+      "source_id": "41001"
+    },
+    {
+      "admission_event_id": "admission",
+      "kind": "text",
+      "slot": 1,
+      "source_id": "41002"
+    }
+  ],
+  "state_proof": {
+    "barrier_id": "injection",
+    "detail": "state_sample",
+    "event_ids": [
+      "journal-2"
+    ],
+    "proven": true,
+    "scope": {
+      "claim_generation": 3,
+      "connection_epoch_id": "epoch-original",
+      "host_session_id": "session-host-original",
+      "route_id": "-771/881",
+      "run_id": "run-synthetic-original",
+      "session_id": "session-broker-original"
+    },
+    "state": "idle"
+  },
+  "streams": [
+    {
+      "artifact_ids": [
+        "broker"
+      ],
+      "detail": "",
+      "first_seq": 1,
+      "id": "broker",
+      "last_seq": 4,
+      "role": "broker",
+      "scope": {
+        "claim_generation": 3,
+        "connection_epoch_id": "epoch-original",
+        "host_session_id": "session-host-original",
+        "route_id": "-771/881",
+        "run_id": "run-synthetic-original",
+        "session_id": "session-broker-original"
+      },
+      "state": "complete",
+      "through_barrier_id": "final"
+    },
+    {
+      "artifact_ids": [
+        "adapter"
+      ],
+      "detail": "",
+      "first_seq": 1,
+      "id": "adapter",
+      "last_seq": 1,
+      "role": "transport",
+      "scope": {
+        "claim_generation": 3,
+        "connection_epoch_id": "epoch-original",
+        "host_session_id": "session-host-original",
+        "route_id": "-771/881",
+        "run_id": "run-synthetic-original",
+        "session_id": "session-broker-original"
+      },
+      "state": "complete",
+      "through_barrier_id": "final"
+    },
+    {
+      "artifact_ids": [
+        "host-records"
+      ],
+      "detail": "line:3/block:0: delivery evidence identity mismatch: token correlation conflict; line:3: fetch candidate rejected",
+      "first_seq": 1,
+      "id": "host",
+      "last_seq": 3,
+      "role": "host",
+      "scope": {
+        "claim_generation": 3,
+        "connection_epoch_id": "epoch-original",
+        "host_session_id": "session-host-original",
+        "route_id": "-771/881",
+        "run_id": "run-synthetic-original",
+        "session_id": "session-broker-original"
+      },
+      "state": "complete",
+      "through_barrier_id": "final"
+    },
+    {
+      "artifact_ids": [
+        "injection"
+      ],
+      "detail": "",
+      "first_seq": 1,
+      "id": "injection",
+      "last_seq": 1,
+      "role": "injection",
+      "scope": {
+        "claim_generation": 3,
+        "connection_epoch_id": "epoch-original",
+        "host_session_id": "session-host-original",
+        "route_id": "-771/881",
+        "run_id": "run-synthetic-original",
+        "session_id": "session-broker-original"
+      },
+      "state": "complete",
+      "through_barrier_id": "final"
+    },
+    {
+      "artifact_ids": [
+        "queue"
+      ],
+      "detail": "",
+      "first_seq": 1,
+      "id": "queue",
+      "last_seq": 2,
+      "role": "queue",
+      "scope": {
+        "claim_generation": 3,
+        "connection_epoch_id": "epoch-original",
+        "host_session_id": "session-host-original",
+        "route_id": "-771/881",
+        "run_id": "run-synthetic-original",
+        "session_id": "session-broker-original"
+      },
+      "state": "complete",
+      "through_barrier_id": "final"
+    },
+    {
+      "artifact_ids": [
+        "attempt-observers"
+      ],
+      "detail": "",
+      "first_seq": 1,
+      "id": "attempt-observer-stream",
+      "last_seq": 5,
+      "role": "state",
+      "scope": {
+        "claim_generation": 3,
+        "connection_epoch_id": "epoch-original",
+        "host_session_id": "session-host-original",
+        "route_id": "-771/881",
+        "run_id": "run-synthetic-original",
+        "session_id": "session-broker-original"
+      },
+      "state": "complete",
+      "through_barrier_id": "final"
+    },
+    {
+      "artifact_ids": [
+        "receipt-observers"
+      ],
+      "detail": "",
+      "first_seq": 1,
+      "id": "receipt-stream",
+      "last_seq": 1,
+      "role": "broker",
+      "scope": {
+        "claim_generation": 3,
+        "connection_epoch_id": "epoch-original",
+        "host_session_id": "session-host-original",
+        "route_id": "-771/881",
+        "run_id": "run-synthetic-original",
+        "session_id": "session-broker-original"
+      },
+      "state": "complete",
+      "through_barrier_id": "final"
+    },
+    {
+      "artifact_ids": [
+        "sample-observers"
+      ],
+      "detail": "",
+      "first_seq": 1,
+      "id": "sample-stream",
+      "last_seq": 3,
+      "role": "queue",
+      "scope": {
+        "claim_generation": 3,
+        "connection_epoch_id": "epoch-original",
+        "host_session_id": "session-host-original",
+        "route_id": "-771/881",
+        "run_id": "run-synthetic-original",
+        "session_id": "session-broker-original"
+      },
+      "state": "complete",
+      "through_barrier_id": "final"
+    },
+    {
+      "artifact_ids": [
+        "contract"
+      ],
+      "detail": "",
+      "first_seq": 1,
+      "id": "contract",
+      "last_seq": 2,
+      "role": "contract",
+      "scope": {
+        "claim_generation": 3,
+        "connection_epoch_id": "epoch-original",
+        "host_session_id": "session-host-original",
+        "route_id": "-771/881",
+        "run_id": "run-synthetic-original",
+        "session_id": "session-broker-original"
+      },
+      "state": "complete",
+      "through_barrier_id": "final"
+    },
+    {
+      "artifact_ids": [
+        "state"
+      ],
+      "detail": "",
+      "first_seq": 1,
+      "id": "driver",
+      "last_seq": 9,
+      "role": "state",
+      "scope": {
+        "claim_generation": 3,
+        "connection_epoch_id": "epoch-original",
+        "host_session_id": "session-host-original",
+        "route_id": "-771/881",
+        "run_id": "run-synthetic-original",
+        "session_id": "session-broker-original"
+      },
+      "state": "complete",
+      "through_barrier_id": "final"
+    },
+    {
+      "artifact_ids": [
+        "state"
+      ],
+      "detail": "",
+      "first_seq": 1,
+      "id": "transport",
+      "last_seq": 9,
+      "role": "transport",
+      "scope": {
+        "claim_generation": 3,
+        "connection_epoch_id": "epoch-original",
+        "host_session_id": "session-host-original",
+        "route_id": "-771/881",
+        "run_id": "run-synthetic-original",
+        "session_id": "session-broker-original"
+      },
+      "state": "complete",
+      "through_barrier_id": "final"
+    },
+    {
+      "artifact_ids": [
+        "held-fetch-response"
+      ],
+      "detail": "",
+      "first_seq": 1,
+      "id": "held-stream",
+      "last_seq": 1,
+      "role": "transport",
+      "scope": {
+        "claim_generation": 3,
+        "connection_epoch_id": "epoch-original",
+        "host_session_id": "session-host-original",
+        "route_id": "-771/881",
+        "run_id": "run-synthetic-original",
+        "session_id": "session-broker-original"
+      },
+      "state": "complete",
+      "through_barrier_id": "final"
+    },
+    {
+      "artifact_ids": [
+        "ownership-observers"
+      ],
+      "detail": "",
+      "first_seq": 1,
+      "id": "ownership-stream",
+      "last_seq": 1,
+      "role": "state",
+      "scope": {
+        "claim_generation": 3,
+        "connection_epoch_id": "epoch-original",
+        "host_session_id": "session-host-original",
+        "route_id": "-771/881",
+        "run_id": "run-synthetic-original",
+        "session_id": "session-broker-original"
+      },
+      "state": "complete",
+      "through_barrier_id": "final"
+    }
+  ]
+}

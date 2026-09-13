@@ -1,0 +1,21 @@
+{
+  "base": "healthy-channel-double",
+  "changes": [
+    {
+      "after": "b2794165378456c5c03dd8ea22996981af5509164d76721cff7ca4e9c79b35fd",
+      "before": "9aa6877893efcb734712b1b33eaeb4dc13654f53e74802334158e8bcd7902f0e",
+      "file": "broker.log"
+    }
+  ],
+  "identity": {
+    "bad": "transport=inbox",
+    "contains": true,
+    "field": "transport",
+    "file": "broker.log",
+    "line": 4,
+    "path": []
+  },
+  "required_reasons": [
+    "evidence collection incomplete"
+  ]
+}

@@ -1,0 +1,13 @@
+{
+  "not_evaluated": [],
+  "reasons": [
+    "injection was not completed",
+    "source attempted more or less than once",
+    "host did not receive each source exactly once",
+    "delivery evidence identity mismatch",
+    "retired rows do not match authorized delivery members",
+    "injected source lacks its required final disposition",
+    "evidence collection incomplete"
+  ],
+  "status": "FAIL"
+}

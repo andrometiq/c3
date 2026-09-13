@@ -1,0 +1,23 @@
+{
+  "base": "healthy-channel-double",
+  "changes": [
+    {
+      "after": "74e2e493523ad182a0dde1e0c38da5346c5ec96bfcefd07a0330eeb9995bd812",
+      "before": "9aa6877893efcb734712b1b33eaeb4dc13654f53e74802334158e8bcd7902f0e",
+      "file": "broker.log"
+    },
+    {
+      "after": "065d74894d8e4e195b0bf5978c5854f2ed09292e6177ffd0a0bdb8a58aea8ac2",
+      "before": "d94ba7d2676c3a65f53a5abc41dd2cc70b27802c9ce6cce34b3079e309481630",
+      "file": "context/driver.jsonl"
+    },
+    {
+      "after": "32796d8f6c05d68eb3f1af0a3b76125b3bba67d260a09c0a0b68e678cdc7dd3e",
+      "before": "bdc1efd144e03f2ba10fea220a233da24c61579694851821d1a06a1b201ff46e",
+      "file": "context/ownership.json"
+    }
+  ],
+  "required_reasons": [
+    "route line count assertion failed or missing"
+  ]
+}

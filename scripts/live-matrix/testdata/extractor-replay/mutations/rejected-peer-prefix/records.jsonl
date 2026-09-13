@@ -1,0 +1,2 @@
+{"message": {"content": "seed conversation", "role": "assistant"}, "sessionId": "session-host-original", "type": "assistant", "uuid": "11111111-2222-4333-8444-000000000090"}
+{"isMeta": true, "message": {"content": "<channel source=\"plugin:c3:c3\" message_id=\"41001\" c3_delivery_id=\"token-original-one\" c3_attempt=\"inbox:1\">MATRIX_SAMPLE</channel>", "role": "user"}, "origin": {"from": "c3", "kind": "peer"}, "sessionId": "session-host-original", "type": "user", "uuid": "11111111-2222-4333-8444-000000000001", "verifiedPeerPid": 45671}

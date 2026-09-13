@@ -1,0 +1,14 @@
+{
+  "base": "healthy-channel-double",
+  "changes": [
+    {
+      "after": "85294d2a3166a64d002c48704a21dbdb2306b1f2dc3cd813b4e45866daa32c58",
+      "before": "9aa6877893efcb734712b1b33eaeb4dc13654f53e74802334158e8bcd7902f0e",
+      "file": "broker.log"
+    }
+  ],
+  "required_reasons": [
+    "receipt missing or outside 15-second window",
+    "delivery evidence identity mismatch"
+  ]
+}

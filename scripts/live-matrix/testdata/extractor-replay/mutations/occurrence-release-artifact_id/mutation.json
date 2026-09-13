@@ -1,0 +1,23 @@
+{
+  "base": "healthy-fetch-double",
+  "changes": [
+    {
+      "after": "0cc852c7005715d5836421c67d893b5e127759cc836ec424423206832fc278e1",
+      "before": "35b22b117e53ba2f9e055b5b844450303420915cb049c171ae61361016279069",
+      "file": "context/driver.jsonl"
+    }
+  ],
+  "identity": {
+    "bad": "response-release-wrong",
+    "contains": false,
+    "field": "artifact_id",
+    "file": "context/driver.jsonl",
+    "line": 7,
+    "path": [
+      "artifact_id"
+    ]
+  },
+  "required_reasons": [
+    "evidence collection incomplete"
+  ]
+}

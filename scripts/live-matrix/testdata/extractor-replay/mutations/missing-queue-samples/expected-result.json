@@ -1,0 +1,9 @@
+{
+  "not_evaluated": [],
+  "reasons": [
+    "durable rows remain",
+    "rows retired before host tool-result receipt (baseline consume-on-fetch)",
+    "evidence collection incomplete"
+  ],
+  "status": "FAIL"
+}

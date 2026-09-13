@@ -1,0 +1,13 @@
+{
+  "base": "healthy-inbox-single",
+  "changes": [
+    {
+      "after": "189f5def75650521b1d9c6742471484f297a2529a14d065def9623e2a3294800",
+      "before": "41eab409d217f71d8b33efc92ee0347b566b2e370db0388d64d5817f0e3690ee",
+      "file": "records.jsonl"
+    }
+  ],
+  "required_reasons": [
+    "host did not receive each source exactly once"
+  ]
+}

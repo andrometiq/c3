@@ -1,0 +1,30 @@
+{
+  "base": "healthy-channel-double",
+  "changes": [
+    {
+      "after": "7eabe20b7b629c5b7031bacea39a8b91376163c59ad630a24c7c32131b7b92ff",
+      "before": "bdc1efd144e03f2ba10fea220a233da24c61579694851821d1a06a1b201ff46e",
+      "file": "context/ownership.json"
+    }
+  ],
+  "identity": {
+    "bad": 999,
+    "canonical_path": [
+      "scope",
+      "claim_generation"
+    ],
+    "contains": false,
+    "field": "claim_generation",
+    "file": "context/ownership.json",
+    "line": null,
+    "milestone": "attempt_terminal",
+    "path": [
+      "occurrences",
+      8,
+      "claim_generation"
+    ]
+  },
+  "required_reasons": [
+    "evidence collection incomplete"
+  ]
+}

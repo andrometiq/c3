@@ -1,0 +1,23 @@
+{
+  "base": "healthy-channel-double",
+  "changes": [
+    {
+      "after": "a8c5518c9581fb046b3ed375dc448752a130541947162867bd4ad57b2ed95199",
+      "before": "40b88f10c6c8ffcee24e8d23d2b93f1a13c2130acc1648900b75730e071cdaee",
+      "file": "records.jsonl"
+    }
+  ],
+  "identity": {
+    "bad": "session-alias-wrong",
+    "contains": false,
+    "field": "host_session_id",
+    "file": "records.jsonl",
+    "line": 2,
+    "path": [
+      "session_id"
+    ]
+  },
+  "required_reasons": [
+    "evidence collection incomplete"
+  ]
+}
