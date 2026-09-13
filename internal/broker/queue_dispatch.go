@@ -130,8 +130,8 @@ func (b *Broker) handleFetchQueue(conn *ipc.Conn, stub *Stub, raw []byte) {
 // snapshot. The worker applies the authoritative ownership + confirmation gate
 // immediately around every destructive queue mutation. A stale or unconfirmed
 // route is skipped and counted in Remaining; valid siblings continue.
-func (b *Broker) fetchSelectedRoutes(stub *Stub, req ipc.FetchQueueReq, routes []RouteKey) ipc.FetchQueueResp {
-	resp := ipc.FetchQueueResp{Op: ipc.OpFetchQueueResult, ID: req.ID}
+func (b *Broker) fetchSelectedRoutes(stub *Stub, req ipc.FetchQueueReq, routes []RouteKey) fetchQueueResponse {
+	resp := fetchQueueResponse{FetchQueueResp: ipc.FetchQueueResp{Op: ipc.OpFetchQueueResult, ID: req.ID}}
 	var group *attemptFetchGroup
 	if stub.acceptsDeliveryMode("fetch_receipt") && req.Ack {
 		if string(req.Lease) != "true" {
@@ -188,6 +188,7 @@ func (b *Broker) fetchSelectedRoutes(stub *Stub, req ipc.FetchQueueReq, routes [
 		// Codex invalidates only matching pending pushes; neither the combined
 		// Remaining count nor this response's frame order is a drain boundary.
 		resp.Messages = append(resp.Messages, res.Messages...)
+		resp.intakeMessages = append(resp.intakeMessages, res.intakeMessages...)
 		if group != nil {
 			resp.Members = append(resp.Members, res.Members...)
 			if len(resp.Members) > 0 {

@@ -24,6 +24,10 @@ func (s *Stub) acceptsDeliveryMode(mode string) bool {
 	return s.negotiated() && s.deliveryModes.Load().HasMode(mode)
 }
 
+func (s *Stub) intakeMetadataActive() bool {
+	return s != nil && s.intakeActive.Load()
+}
+
 func sameAcceptedModes(a, b *Stub) bool {
 	x, y := a.deliveryModes.Load(), b.deliveryModes.Load()
 	return x != nil && y != nil && slices.Equal(x.Modes, y.Modes)

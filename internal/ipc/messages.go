@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/Andrometiq/c3/internal/c3types"
+	"github.com/Andrometiq/c3/internal/intake"
 	"github.com/Andrometiq/c3/internal/mappings"
 )
 
@@ -97,6 +98,11 @@ type FetchQueueResp struct {
 	LeaseToken     string               `json:"lease_token,omitempty"`
 	Members        []FetchReceiptMember `json:"members,omitempty"`
 	ReceiptTrailer string               `json:"receipt_trailer,omitempty"`
+}
+
+type IntakeMetadata struct {
+	Source           *intake.Source          `json:"source"`
+	AttachmentsState intake.AttachmentsState `json:"attachments_state"`
 }
 
 // ObserveReq is the adapter → broker READ-ONLY peek of a topic's held inbound,

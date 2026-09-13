@@ -123,11 +123,12 @@ type FetchJob struct {
 
 // FetchResult carries the pulled messages + remaining count back to the handler.
 type FetchResult struct {
-	Messages   []c3types.Inbound
-	Members    []ipc.FetchReceiptMember
-	Remaining  int
-	SkipReason string
-	Err        error
+	Messages       []c3types.Inbound
+	intakeMessages []intakeFetchMessage
+	Members        []ipc.FetchReceiptMember
+	Remaining      int
+	SkipReason     string
+	Err            error
 }
 
 // fetchLease makes "caller timed out" and "destructive Consume started" mutually
@@ -1812,6 +1813,10 @@ func (w *RouteWorker) handleFetch(ctx context.Context, job *FetchJob) {
 	}
 	if job.Ack && job.Owner.acceptsDeliveryMode("fetch_receipt") {
 		job.ResultCh <- FetchResult{Err: fmt.Errorf("fetch_receipt requires a reservation")}
+		return
+	}
+	if !job.Ack && job.Owner.intakeMetadataActive() {
+		w.handleIntakePeek(job)
 		return
 	}
 	qrk := queueRouteKey(w.key)
