@@ -26,7 +26,7 @@ Budget **2–4 hours per complete pass** (126 real cells, 216 conversational
 launches including resume seeds, roughly 1–2 minutes per cell;
 slow authentication/model setup can take longer). Foreground/background sleeps
 are 35 seconds, deliberately beyond the 15-second live receipt window. Every
-cell observes for another 45 seconds after injection, including after early
+cell then observes for 80 seconds by default (minimum 75), including after early
 retirement. Setup has a 90-second bound per checkpoint. Two passes cost roughly
 4–8 hours. Collection makes no delivery-success assertion; setup errors still
 exit nonzero. Assertion mode exits nonzero for any failed selected cell.
