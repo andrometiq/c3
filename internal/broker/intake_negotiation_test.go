@@ -10,6 +10,7 @@ import (
 	"github.com/Andrometiq/c3/internal/c3types"
 	"github.com/Andrometiq/c3/internal/intake"
 	"github.com/Andrometiq/c3/internal/ipc"
+	"github.com/Andrometiq/c3/internal/queue"
 )
 
 const intakeReceiptOffer = `{"version":1,"live":{"channel":{"eligible":false},"inbox":{"eligible":false}},"receipts":"none","fetch":"receipt"}`
@@ -105,6 +106,9 @@ func TestIntakeNegotiationWireAndFetch(t *testing.T) {
 					if err := json.Unmarshal(raw, &resp); err != nil || resp.Err != "" || len(resp.Messages) != 1 || len(resp.Members) != 1 || resp.LeaseToken == "" {
 						t.Fatalf("legacy receipt fetch=%s err=%v", raw, err)
 					}
+					if resp.BlockedOn != nil {
+						t.Fatalf("inactive receipt fetch gained blocked_on: %s", raw)
+					}
 					baseline, err := json.Marshal(resp)
 					if err != nil || string(raw) != string(baseline) {
 						t.Fatalf("legacy receipt bytes changed: %s err=%v", raw, err)
@@ -127,6 +131,62 @@ func TestIntakeNegotiationWireAndFetch(t *testing.T) {
 				t.Fatal("unconfirmed receipt fetch consumed the row")
 			}
 		})
+	}
+}
+
+func TestIntakeNegotiationReadyPrefixAcceptance(t *testing.T) {
+	clearFetchTestEnvironment(t)
+	b := brokerWithChannel(t, mfWithTelegram(), &fakeChannel{})
+	t.Cleanup(b.Shutdown)
+	peer, closePeer := peerPair(t, b)
+	t.Cleanup(closePeer)
+	hello := ipc.HelloMsg{Op: ipc.OpHello, CLI: "acme", PID: os.Getpid(), CWD: "/work",
+		Capabilities: []string{"intake_metadata:1"}, Delivery: json.RawMessage(intakeReceiptOffer)}
+	if err := peer.WriteJSON(hello); err != nil {
+		t.Fatal(err)
+	}
+	raw := nextWireOp(t, peer, ipc.OpHelloAck)
+	var ack ipc.HelloAckMsg
+	if err := json.Unmarshal(raw, &ack); err != nil || !ack.Delivery.HasMode("fetch_receipt") || !slices.Equal(ack.AcceptedCapabilities, []string{"intake_metadata:1"}) {
+		t.Fatalf("hello_ack=%s err=%v", raw, err)
+	}
+	s, ok := b.Stubs.Get(ack.ConnID)
+	if !ok || s.intakeMetadataActive() {
+		t.Fatal("hello/hello_ack activated intake without confirmation")
+	}
+	key := MakeRouteKey("telegram", -100, nil)
+	b.Routes.Claim(key, s)
+	s.AddRoute(key)
+	s.MarkRouteConfirmed(key)
+	ready := appendReadyPrefixRow(t, b, key, false, false, false)
+	blocked := appendReadyPrefixRow(t, b, key, false, false, true)
+	appendReadyPrefixRow(t, b, key, false, false, false)
+	fetch := func() []byte {
+		t.Helper()
+		if err := peer.WriteJSON(ipc.FetchQueueReq{Op: ipc.OpFetchQueue, ID: "q", Mode: "ready_prefix",
+			All: true, Ack: true, Lease: json.RawMessage("true")}); err != nil {
+			t.Fatal(err)
+		}
+		return nextWireOp(t, peer, ipc.OpFetchQueueResult)
+	}
+	if raw := fetch(); string(raw) != `{"op":"fetch_queue_result","id":"q","err":"fetch_queue: ready_prefix requires the negotiated intake_metadata capability"}` {
+		t.Fatalf("pre-confirmation ready_prefix=%s", raw)
+	}
+	if err := peer.WriteJSON(json.RawMessage(intakeConfirmReport)); err != nil {
+		t.Fatal(err)
+	}
+	raw = fetch() // Synchronizes with the preceding confirmation report.
+	if !s.intakeMetadataActive() || !s.acceptsDeliveryMode("fetch_receipt") {
+		t.Fatal("complete handshake did not activate intake and receipt fetch")
+	}
+	resp := assertReadyPrefixWire(t, raw, []string{readyPrefixMemberGolden()},
+		[]queue.TrackedInbound{ready}, 2, blocked.RecordID, "stt_pending", true)
+	if len(resp.Members) != 1 || resp.Members[0].RecordID != ready.RecordID {
+		t.Fatal("receipt did not identify exactly the returned ready head")
+	}
+	assertReadyPrefixWire(t, fetch(), nil, nil, 3, ready.RecordID, "reserved", true)
+	if b.Queue.StatusFor(queueRouteKey(key)).Pending != 3 {
+		t.Fatal("unconfirmed ready_prefix fetch consumed rows")
 	}
 }
 

@@ -123,6 +123,11 @@ On a broker drop, wake every pending request with an error so the host CLI's too
 
 This is frozen deliberately. Those Go field names *were* the on-disk queue format and the IPC wire format before explicit tags existed; the tags now pin the keys so the Go identifiers can change without moving the format. There is a one-directional golden test in the tree whose literals are the contract. **The keys will not be "tidied" to snake_case** — doing so would orphan every queued message on every user's disk.
 
+The **Provisional-negotiated** `intake_metadata:1` extension adds one snake_case
+`intake` sibling to each flat PascalCase `messages[]` entry. All keys inside
+`intake` are snake_case; the existing Inbound keys keep their casing. See
+[Fetch and receipt groups](#fetch-and-receipt-groups).
+
 New queue lines also carry one reserved, additive top-level key:
 `_c3_queue_id`. It is a broker-private durable-line identity used to make a
 tokened live-delivery ack remove the exact original/edit occurrence it rendered.
@@ -163,7 +168,7 @@ An adapter that implements only these is correct and complete for a CLI with no 
 | `cli` | string | your adapter's CLI name. Appears in claim listings and logs. Avoid `c3-broker-cli` — that name is reserved for the bundled status client and is filtered out of session listings. |
 | `pid` | int | your adapter's pid. The broker keeps a claim alive as long as this pid lives, so it must be a real, live process id. A future version may additionally bind this pid to its process start time, so that a *recycled* pid is not treated as the same session; an honest pid is unaffected. |
 | `cwd` | string | resolved-absolute path. Seeds the attach picker's "current project" suggestion and the cwd→mapping lookup. |
-| `capabilities`? | []string | free-form tags. **Currently recorded on the wire but not read by the broker** — informational only. |
+| `capabilities`? | []string | capability tokens; `intake_metadata:1` is Provisional-negotiated. Unknown tokens are not accepted. See [Capability offer, acceptance and confirmation](#capability-offer-acceptance-and-confirmation-protocol-v1). |
 | `cannot_render_channels`? | bool | Legacy only: true for `queue_only`, `probing`, and `cross_session`; absent preserves the old default. |
 | `render_state`? | string | Legacy only: `capable`, `probing`, `cross_session`, or `queue_only`; never a negotiated receipt declaration. |
 | `render_reason`? | string | Short generic explanation, without personal paths or identifiers. |
@@ -196,6 +201,7 @@ If your CLI has no unsolicited-notification path at all — the exact case this 
 | `no_config`? | bool | the broker has no config file. Tell the agent to run setup. |
 | `no_mapping`? | bool | config exists, but this `cwd` has no saved mapping. The agent has to call `attach`. |
 | `capabilities`? | object\|null | the resolvable channel's capability manifest — **PascalCase keys**. May be `null` (older broker, or no channel resolvable). Fall back to an all-false default; never fabricate a capability. |
+| `accepted_capabilities`? | []string | Provisional-negotiated: supported tokens echoed from `hello.capabilities`; omitted when none are accepted. Separate from the channel manifest. |
 | `protocol_version`? | int | absent ⇒ 1. |
 
 There are exactly **two** cases to branch on: `no_config`, and `no_mapping`. Neither set means config exists and a mapping is on file — it does **not** mean you are attached. **Nothing is claimed at hello.**
@@ -332,7 +338,10 @@ The durable-queue drain. Every adapter exposes this as a tool; for a CLI with no
 | `limit`? | int | oldest-first batch cap. The built-ins default to 3 and cap at 50. Every finite limit is still subject to the one-frame response budget; keep calling until `remaining` is zero. |
 | `all`? | bool | overrides `limit`, still subject to the same one-frame response budget. |
 | `ack` | bool | `true` consumes on the legacy/consume path, or reserves with `lease:true` on accepted receipt fetch; `false` peeks without mutation. Send explicitly; see Inbound delivery. |
+| `mode`? | string | Provisional-negotiated: `ready_prefix` requires active `intake_metadata:1`; absent or empty retains normal selection. See [Fetch and receipt groups](#fetch-and-receipt-groups). |
 | `messages`? | array | oldest first. Normal records carry their stored content. A record that can never fit in an IPC frame is moved aside and replaced **in position** by a broker-authored notice with the original identity and no original content; do not treat that notice as a user message. |
+| `messages[].intake`? | object | Provisional-negotiated: `{source, attachments_state}` beside the flat Inbound fields, only while `intake_metadata:1` is active. |
+| `blocked_on`? | object | Provisional-negotiated: `ready_prefix` blocker `{record_id, reason}`; zero-ready responses explicitly include `messages:[]`. |
 | `remaining` | int | still queued after this batch. |
 | `err`? | string | set (and `messages` nil) on failure, e.g. no route claimed. |
 
@@ -358,6 +367,12 @@ Sent by either side. **Not correlated to any request** — you cannot match it t
 
 `delivery_report`, `deliver`, `attempt_result` and `fetch_confirm` are defined in
 [Inbound delivery](#inbound-delivery), including their negotiation gates.
+
+`intake_metadata:1` is also **Provisional-negotiated**, extending existing ops:
+`hello.capabilities`, `hello_ack.accepted_capabilities`,
+`delivery_report.accepted_capabilities`, `fetch_queue.mode`, and
+`fetch_queue_result.messages[].intake` / `blocked_on`. It adds no ops and does
+not freeze these new fields.
 
 ### Provisional — 12 ops
 
@@ -620,6 +635,25 @@ The broker can accept channel, inbox and, for `fetch:"receipt"`, `fetch_receipt`
 A degraded broker (`Queue == nil`) never accepts. Malformed optional delivery
 data does not invalidate an otherwise valid hello.
 
+**Intake metadata (Provisional-negotiated):** any adapter may offer
+`intake_metadata:1` alongside a version-1 `delivery` offer with `fetch:"receipt"`.
+Activation requires all three steps on the same connection:
+
+1. `hello.capabilities` includes `"intake_metadata:1"`.
+2. `hello_ack.accepted_capabilities` echoes `["intake_metadata:1"]`.
+3. `delivery_report` includes both `accepted_capabilities:["intake_metadata:1"]`
+   and `accepted:["fetch_receipt",...]`, confirming only offered delivery modes.
+
+`delivery_report.accepted` stays **delivery-modes-only**; capability tokens ride
+the separate `accepted_capabilities` field. The echo alone does not activate
+intake. Activation is per-connection and resets on reconnect; repeat all three
+steps. Peers that do not negotiate intake omit the new field and retain their
+existing fetch payloads. The echo comes from `buildHelloAck` in
+[`handler.go`](../internal/broker/handler.go); `supportedCapabilities` and
+`handleDeliveryReport` in
+[`attempt_fetch_negotiation.go`](../internal/broker/attempt_fetch_negotiation.go)
+define support and activation.
+
 **Adapter confirmation:** negotiation completes only when the adapter
 sends `delivery_report{accepted:[...]}` immediately after `hello_ack`, listing the
 supported modes it accepts from that acknowledgement. Until then the broker
@@ -735,13 +769,14 @@ For a confirmed `fetch_receipt` connection:
 * `ack:true` without `lease:true` is refused without mutation. If host correlation
   or transcript observation is unavailable, the adapter refuses destructive fetch
   and suggests a peek; it never silently downgrades a receipt fetch to consume.
-* `messages` keeps the frozen PascalCase inbound array. New `members` is a parallel
+* `messages` keeps the frozen PascalCase Inbound fields; active intake adds the
+  sibling described below. New `members` is a parallel
   array of `{record_id,revision}`, one pair per returned message, in message order.
   `record_id` is the durable queue identity; `revision` is an opaque lowercase
   64-character SHA-256 digest of that tracked stored row. Adapters echo it; they
   never compute it. `receipt_trailer` contains the broker-authored trailer below.
   Empty batches have no group, members or trailer.
-* Rows in open attempts of any transport are invisible to fetch, live scheduling,
+* Rows in open attempts of any transport are invisible to normal fetch, live scheduling,
   Held and attach backlog. `remaining` counts fetchable rows after this batch.
   Attach text explicitly says how many messages are fetchable now.
 * The drain snapshot excludes attempting rows and precedes any new reservation.
@@ -749,6 +784,79 @@ For a confirmed `fetch_receipt` connection:
   empty attempts close without proof or rearm. An oversized row stays durable
   until the replacement notice receives confirmation. Only surviving unchanged
   revisions retire. Voice enrichment invalidates its old membership immediately.
+
+**Intake fetch members (Provisional-negotiated):** while `intake_metadata:1` is
+active, both peek and receipt fetch return each flat Inbound plus one
+`intake:{source:{...}|null, attachments_state:[...]}` sibling. This follows the
+[casing rule](#json-key-casing--the-silent-corruption-trap); it does not nest
+Inbound under another key. `source` is immutable per provider occurrence:
+
+* `channel` is a string; `chat_id`, `message_id` and `update_id` are decimal
+  strings. `topic_id` and `sender_id` are decimal strings or `null` when absent.
+  One occurrence is one `update_id` within its source channel/chat/topic; an edit
+  is a new occurrence, with a new `update_id` and the same `message_id`.
+* `text` is the raw provider text or caption, possibly empty, independent of
+  presentation `Text`. `attachments` preserves received order, with snake_case
+  `{kind, file_id, size, mime, name}` entries (`size` is numeric); absent
+  attachments are `[]`. Rows without captured provenance have `source:null`.
+* `attachments_state` uses zero-based `index` into the source attachments.
+  `stt` is `pending`, `done`, `failed` or `not_applicable` (non-STT attachments).
+  `done` carries the **raw** `transcript`, without a `[Transcribed voice]:`
+  marker. `failed` carries `error` and no transcript, including
+  `transcript_too_large` when the transcript exceeds the record budget.
+  An empty state list is `[]`.
+
+One literal `messages[]` member:
+
+```json
+{"Channel":"acme","ChatID":-100,"TopicID":null,"MessageID":7,
+ "Sender":{"UserID":0,"Username":""},"Text":"hello","Attachments":null,
+ "ReplyTo":null,"Timestamp":"2026-01-01T00:00:00Z","V":1,
+ "intake":{"source":{"channel":"acme","chat_id":"-100","topic_id":null,
+ "message_id":"7","sender_id":null,"update_id":"9","text":"hello",
+ "attachments":[]},"attachments_state":[]}}
+```
+
+The projection and frame sizing share `intakeFetchMessage` in
+[`intake_fetch.go`](../internal/broker/intake_fetch.go). Source and attachment
+state shapes are defined in [`source.go`](../internal/intake/source.go) and
+[`attachments_state.go`](../internal/intake/attachments_state.go). `intake`
+counts against `ipc.MaxFrameSize`, as does `blocked_on`.
+
+**Ready prefix (Provisional-negotiated):** `fetch_queue` with
+`"mode":"ready_prefix"` returns the maximal ready head, subject to `limit` and
+the frame budget. It walks physical queue order, using normal fetch route order
+(output first, then claim order). The first not-ready row stops the prefix,
+including later routes, and appears as `blocked_on:{record_id, reason}`.
+When predicates overlap, reasons take this precedence:
+
+| reason | first blocking condition |
+|---|---|
+| `reserved` | Row belongs to an open attempt. |
+| `no_source` | No captured source. |
+| `frozen` | Drained copy (`DrainedFrom` is set). |
+| `stt_pending` | Voice work remains pending. |
+
+If limit or frame exhaustion stops the batch before that row, `blocked_on` is
+omitted; later rows/routes are still not skipped. `remaining` includes ready
+but unreturned, blocked and unvisited rows. `ack:false` peeks without reserving;
+`ack:true` still requires `lease:true` and accepted `fetch_receipt`.
+When the head is blocked, the zero-ready response has `messages:[]` and
+`blocked_on`, with no receipt group, `lease_token`, `members` or `receipt_trailer`:
+
+```json
+{"op":"fetch_queue_result","id":"acme-fetch-1","messages":[],"remaining":1,
+ "blocked_on":{"record_id":"acme-row-1","reason":"stt_pending"}}
+```
+
+Adapters **MUST NOT** send `ready_prefix` until intake negotiation completes.
+A supporting broker rejects an unnegotiated request with correlated
+`fetch_queue_result{id, err}` and no mutation. An old broker ignores the unknown
+`mode` field and performs a normal fetch. Unknown nonempty modes are also errors
+on supporting brokers. Selection and gating are defined in
+[`ready_prefix.go`](../internal/broker/ready_prefix.go); multi-route stopping and
+the correlated error envelope are in
+[`queue_dispatch.go`](../internal/broker/queue_dispatch.go).
 
 The rendered tool response ends with this **fixed trailer grammar**, with LF
 separators, exactly one ASCII space between fields, no escaping, and no final
