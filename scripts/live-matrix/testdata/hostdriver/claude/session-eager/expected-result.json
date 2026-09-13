@@ -1,0 +1,7 @@
+{
+  "not_evaluated": [],
+  "reasons": [
+    "requested session posture was not proven at injection"
+  ],
+  "status": "FAIL"
+}

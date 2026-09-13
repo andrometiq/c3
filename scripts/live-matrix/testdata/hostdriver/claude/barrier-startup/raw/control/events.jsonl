@@ -1,0 +1,3 @@
+{"event": "proxy_started", "pid": 45671, "time": 0}
+{"event": "initialized_waiting", "pid": 45671, "time": 0.05}
+{"event": "initialized_released", "pid": 45671, "time": 0.16}

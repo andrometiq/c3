@@ -1,0 +1,72 @@
+[
+  {
+    "artifact_id": "host-records",
+    "code": "file missing",
+    "locator": "read"
+  },
+  {
+    "artifact_id": "host-records",
+    "code": "seal: non-complete captured read",
+    "locator": "read"
+  },
+  {
+    "artifact_id": "driver-observations",
+    "code": "host-records: missing: file missing",
+    "locator": "producer"
+  },
+  {
+    "artifact_id": "state",
+    "code": "fetch request and recorded tool call association rejected",
+    "locator": "line:5"
+  },
+  {
+    "artifact_id": "driver-observations",
+    "code": "fetch operation association unavailable or ambiguous",
+    "locator": "driver"
+  },
+  {
+    "artifact_id": "held-fetch-response",
+    "code": "held response request correlation rejected",
+    "locator": "line:1"
+  },
+  {
+    "artifact_id": "state",
+    "code": "fetch release correlation rejected",
+    "locator": "line:7"
+  },
+  {
+    "artifact_id": "broker",
+    "code": "fetch attempt request correlation rejected",
+    "locator": "line:3"
+  },
+  {
+    "artifact_id": "broker",
+    "code": "fetch attempt request correlation rejected",
+    "locator": "line:4"
+  },
+  {
+    "artifact_id": "state",
+    "code": "stream cutoff outside observed extent",
+    "locator": "line:1"
+  },
+  {
+    "artifact_id": "state",
+    "code": "stream cutoff outside observed extent",
+    "locator": "line:4"
+  },
+  {
+    "artifact_id": "state",
+    "code": "stream cutoff outside observed extent",
+    "locator": "line:6"
+  },
+  {
+    "artifact_id": "state",
+    "code": "stream cutoff outside observed extent",
+    "locator": "line:9"
+  },
+  {
+    "artifact_id": "receipt-observers",
+    "code": "delivery evidence identity mismatch: operation_id correlation conflict",
+    "locator": "line:1/block:0"
+  }
+]

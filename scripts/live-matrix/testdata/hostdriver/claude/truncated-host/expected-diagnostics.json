@@ -1,0 +1,22 @@
+[
+  {
+    "artifact_id": "host-records",
+    "code": "seal: non-complete captured read",
+    "locator": "read"
+  },
+  {
+    "artifact_id": "driver-observations",
+    "code": "host-records: truncated: extent: previously observed bytes changed or shrank",
+    "locator": "producer"
+  },
+  {
+    "artifact_id": "host-records",
+    "code": "host candidate rejected",
+    "locator": "line:1"
+  },
+  {
+    "artifact_id": "state",
+    "code": "stream cutoff outside observed extent",
+    "locator": "line:5"
+  }
+]

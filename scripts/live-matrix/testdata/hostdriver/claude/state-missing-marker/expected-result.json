@@ -1,0 +1,8 @@
+{
+  "not_evaluated": [],
+  "reasons": [
+    "requested host state was not proven at injection",
+    "evidence collection incomplete"
+  ],
+  "status": "FAIL"
+}

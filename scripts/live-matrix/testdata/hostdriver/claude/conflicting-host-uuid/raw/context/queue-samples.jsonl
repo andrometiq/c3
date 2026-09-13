@@ -1,0 +1,2 @@
+{"barrier_id": "pre_injection", "read_state": "complete", "rows": [], "snapshot_id": "sample-pre"}
+{"barrier_id": "final", "read_state": "complete", "rows": [], "snapshot_id": "sample-final"}
