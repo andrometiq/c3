@@ -44,19 +44,20 @@ const (
 // Job is one unit of work for a route worker. Exactly one of the payload
 // fields is set based on Kind.
 type Job struct {
-	AttemptResult *attemptResultJob
-	AttemptAdopt  *attemptAdoptJob
-	Kind          JobKind
-	Inbound       *c3types.Inbound
-	source        *intake.Source
-	Outbound      *OutboundJob
-	Fetch         *FetchJob
-	Consume       *ConsumeJob
-	Backlog       *BacklogJob
-	DrainPeek     *DrainPeekJob
-	DrainAppend   *DrainAppendJob
-	DrainRemove   *DrainRemoveJob
-	ResolveVoice  *ResolveVoiceJob
+	AttemptResult    *attemptResultJob
+	AttemptAdopt     *attemptAdoptJob
+	Kind             JobKind
+	Inbound          *c3types.Inbound
+	source           *intake.Source
+	attachmentsState intake.AttachmentsState
+	Outbound         *OutboundJob
+	Fetch            *FetchJob
+	Consume          *ConsumeJob
+	Backlog          *BacklogJob
+	DrainPeek        *DrainPeekJob
+	DrainAppend      *DrainAppendJob
+	DrainRemove      *DrainRemoveJob
+	ResolveVoice     *ResolveVoiceJob
 }
 
 type ResolveVoiceJob struct {
@@ -65,6 +66,7 @@ type ResolveVoiceJob struct {
 	FileID      string
 	SegmentText string
 	Success     bool
+	Outcome     intake.STTOutcome
 }
 
 // BacklogJob asks the worker to read the route's queued total AND a compact
@@ -519,7 +521,7 @@ func (w *RouteWorker) run(ctx context.Context) {
 					w.flushEvent(ctx, job.Inbound)
 					continue
 				}
-				debBuf = append(debBuf, occurrence(job.Inbound, job.source))
+				debBuf = append(debBuf, occurrence(job.Inbound, job.source, job.attachmentsState))
 				maxMsgs := w.debounceMaxMessages()
 				if len(debBuf) >= maxMsgs {
 					flushDeb()
@@ -624,9 +626,11 @@ var sttFlushTimeout = 750 * time.Second
 func (w *RouteWorker) flushOccurrences(ctx context.Context, occurrences []inboundOccurrence) {
 	batch := make([]*c3types.Inbound, len(occurrences))
 	sources := make(map[*c3types.Inbound]*intake.Source, len(occurrences))
+	states := make(map[*c3types.Inbound]intake.AttachmentsState, len(occurrences))
 	for i, item := range occurrences {
 		batch[i] = item.Inbound
 		sources[item.Inbound] = item.source.Clone()
+		states[item.Inbound] = item.attachmentsState.Clone()
 	}
 	defer func() {
 		if w.broker != nil {
@@ -741,7 +745,7 @@ func (w *RouteWorker) flushOccurrences(ctx context.Context, occurrences []inboun
 			}
 			plan, hasVoicePlan := voicePlans[in]
 			isPendingVoice := hasVoicePlan && len(plan.pending) > 0
-			recordID, err := w.broker.Queue.AppendTrackedSource(qrk, in, sources[in], plan.pending...)
+			recordID, err := w.broker.Queue.AppendTrackedIntake(qrk, in, sources[in], states[in], plan.pending...)
 			if err != nil {
 				log.Printf("queue append FAIL chan=%s chat=%d topic=%s msg=%d: %v — offset will NOT advance; Telegram redelivers — %s",
 					w.key.Channel, w.key.ChatID, TopicKeyStr(w.key), in.MessageID, err, fallbackSummary(in))
@@ -766,6 +770,7 @@ func (w *RouteWorker) flushOccurrences(ctx context.Context, occurrences []inboun
 			}
 			if persisted, ok := w.queuedRecord(qrk, recordID); ok {
 				sources[in] = persisted.Source.Clone()
+				states[in] = persisted.AttachmentsState.Clone()
 			}
 			// The source offset becomes eligible immediately after the durable
 			// append, before any scheduler admission or network work.
@@ -778,7 +783,7 @@ func (w *RouteWorker) flushOccurrences(ctx context.Context, occurrences []inboun
 			w.evictIfOverCap(qrk)
 			if isPendingVoice {
 				echo := w.reserveVoiceReadback()
-				if !w.broker.Voice.ScheduleAuto(w.key, recordID, *in, plan.voices, plan.initialNotice, echo, sources[in]) {
+				if !w.broker.Voice.scheduleAutoIntake(w.key, recordID, *in, plan.voices, plan.initialNotice, echo, sources[in], states[in]) {
 					close(echo.mine)
 					log.Printf("voice scheduler: admission stopped chan=%s chat=%d topic=%s msg=%d record=%s — durable pending row will recover on restart",
 						w.key.Channel, w.key.ChatID, TopicKeyStr(w.key), in.MessageID, recordID)
@@ -791,7 +796,7 @@ func (w *RouteWorker) flushOccurrences(ctx context.Context, occurrences []inboun
 			}
 			deliveryAppended++
 			deliveryIDs = append(deliveryIDs, recordID)
-			deliverySources = append(deliverySources, occurrence(in, sources[in]))
+			deliverySources = append(deliverySources, occurrence(in, sources[in], states[in]))
 		}
 	} else if w.broker != nil {
 		// No durable copy exists: hold the Telegram frontier for replay after
@@ -802,7 +807,7 @@ func (w *RouteWorker) flushOccurrences(ctx context.Context, occurrences []inboun
 			if plan, ok := voicePlans[in]; ok {
 				if len(plan.pending) > 0 {
 					echo := w.reserveVoiceReadback()
-					if !w.broker.Voice.ScheduleAuto(w.key, "", *in, plan.voices, plan.initialNotice, echo, sources[in]) {
+					if !w.broker.Voice.scheduleAutoIntake(w.key, "", *in, plan.voices, plan.initialNotice, echo, sources[in], states[in]) {
 						close(echo.mine)
 						log.Printf("voice scheduler: degraded admission stopped chan=%s chat=%d topic=%s msg=%d — no durable row exists",
 							w.key.Channel, w.key.ChatID, TopicKeyStr(w.key), in.MessageID)
@@ -838,7 +843,7 @@ func (w *RouteWorker) flushOccurrences(ctx context.Context, occurrences []inboun
 	// by identity; pending voice rows are excluded from both.
 	if w.broker.Queue == nil {
 		for _, in := range deliveryBatch {
-			deliverySources = append(deliverySources, occurrence(in, sources[in]))
+			deliverySources = append(deliverySources, occurrence(in, sources[in], states[in]))
 		}
 	}
 	w.forwardOccurrences(ctx, merged, deliverySources, deliveryAppended, deliveryIDs, true)
@@ -1423,7 +1428,7 @@ func (w *RouteWorker) forwardOccurrences(ctx context.Context, in *c3types.Inboun
 				if source.Inbound == nil || source.IsEvent() || (w.dedup != nil && w.dedup.alreadySeen(source.MessageID)) {
 					continue
 				}
-				if err := w.broker.Queue.Append(queueRouteKey(w.key), source.Inbound, source.source); err != nil {
+				if _, err := w.broker.Queue.AppendTrackedIntake(queueRouteKey(w.key), source.Inbound, source.source, source.attachmentsState); err != nil {
 					w.markPersistFailed(source.Inbound)
 					w.notePersistFailure(source.Inbound)
 				} else {
@@ -2264,7 +2269,7 @@ func (w *RouteWorker) handleResolveVoiceTarget(ctx context.Context, scheduler *V
 		scheduler.markResolveApplied(job.Key, target.recordID)
 		durableApplied = true
 		w.finishVoiceGroup(ctx, in, target.group)
-		w.forwardOccurrences(ctx, w.voiceResolvePresentation(in), []inboundOccurrence{occurrence(in, target.source)}, 0, nil, true)
+		w.forwardOccurrences(ctx, w.voiceResolvePresentation(in), []inboundOccurrence{occurrence(in, target.source, target.attachmentsState)}, 0, nil, true)
 		w.runVoiceResolveTestHook("after_push")
 		return false
 	}
@@ -2276,6 +2281,7 @@ func (w *RouteWorker) handleResolveVoiceTarget(ctx context.Context, scheduler *V
 			recordID = pending.RecordID
 			target.inbound = cloneVoiceInbound(pending.Inbound)
 			target.source = pending.Source.Clone()
+			target.attachmentsState = pending.AttachmentsState.Clone()
 		}
 	}
 	current, found := w.queuedRecord(qrk, recordID)
@@ -2283,7 +2289,7 @@ func (w *RouteWorker) handleResolveVoiceTarget(ctx context.Context, scheduler *V
 	if found {
 		newText = replacePendingVoiceSegment(current.Inbound.Text, job.FileID, job.SegmentText)
 	}
-	resolved, allDone, err := w.broker.Queue.ResolveVoiceText(qrk, recordID, job.FileID, newText)
+	resolved, allDone, err := w.broker.Queue.ResolveVoiceOutcome(qrk, recordID, job.FileID, newText, job.Outcome, target.attachmentsState)
 	if err != nil {
 		log.Printf("voice resolve FAIL chan=%s chat=%d topic=%s msg=%d file_id=%s record=%s: %v — rescheduling the same durable resolve",
 			w.key.Channel, w.key.ChatID, TopicKeyStr(w.key), job.Key.messageID, job.FileID, recordID, err)
@@ -2306,7 +2312,7 @@ func (w *RouteWorker) handleResolveVoiceTarget(ctx context.Context, scheduler *V
 					w.dedup.record(final.Inbound.MessageID)
 				}
 				w.finishVoiceGroup(ctx, &final.Inbound, target.group)
-				w.forwardOccurrences(ctx, w.voiceResolvePresentation(&final.Inbound), []inboundOccurrence{occurrence(&final.Inbound, final.Source)}, 1, []string{recordID}, true)
+				w.forwardOccurrences(ctx, w.voiceResolvePresentation(&final.Inbound), []inboundOccurrence{occurrence(&final.Inbound, final.Source, final.AttachmentsState)}, 1, []string{recordID}, true)
 				w.runVoiceResolveTestHook("after_push")
 			}
 		}
@@ -2318,7 +2324,12 @@ func (w *RouteWorker) handleResolveVoiceTarget(ctx context.Context, scheduler *V
 	// row so it has the same retention, delivery-token, ack, and held semantics
 	// as every other inbound.
 	revision := voiceRevisionInbound(target.inbound, job.Key.messageID, job.SegmentText)
-	revisionID, err := w.broker.Queue.AppendTrackedSource(qrk, revision, target.source)
+	stateSource := attachmentStateSource(target.source, target.inbound)
+	if target.attachmentsState == nil {
+		target.attachmentsState = intake.NewAttachmentsState(stateSource, nil)
+	}
+	target.attachmentsState = target.attachmentsState.WithOutcome(stateSource, job.FileID, job.Outcome)
+	revisionID, err := w.broker.Queue.AppendTrackedIntake(qrk, revision, target.source, target.attachmentsState)
 	if err != nil {
 		log.Printf("voice revision APPEND FAIL chan=%s chat=%d topic=%s msg=%d file_id=%s: %v — rescheduling without losing the terminal result",
 			w.key.Channel, w.key.ChatID, TopicKeyStr(w.key), job.Key.messageID, job.FileID, err)
@@ -2332,7 +2343,7 @@ func (w *RouteWorker) handleResolveVoiceTarget(ctx context.Context, scheduler *V
 	}
 	w.evictIfOverCap(qrk)
 	w.finishVoiceGroup(ctx, revision, target.group)
-	w.forwardOccurrences(ctx, w.voiceResolvePresentation(revision), []inboundOccurrence{occurrence(revision, target.source)}, 1, []string{revisionID}, true)
+	w.forwardOccurrences(ctx, w.voiceResolvePresentation(revision), []inboundOccurrence{occurrence(revision, target.source, target.attachmentsState)}, 1, []string{revisionID}, true)
 	w.runVoiceResolveTestHook("after_push")
 	return false
 }
@@ -2576,7 +2587,7 @@ func (w *RouteWorker) trackPendingOccurrences(sources []inboundOccurrence, ids .
 	var recordIDs []string
 	for i, source := range sources {
 		if source.Inbound != nil && !source.IsEvent() {
-			discrete = append(discrete, occurrence(source.Inbound, source.source))
+			discrete = append(discrete, occurrence(source.Inbound, source.source, source.attachmentsState))
 			id := ""
 			if i < len(ids) {
 				id = ids[i]
@@ -2637,7 +2648,7 @@ func (w *RouteWorker) flushPendingAck(reason string) {
 				if id != "" && exists[id] {
 					continue
 				}
-				if err := w.broker.Queue.Append(queueRouteKey(w.key), in.Inbound, in.source); err != nil {
+				if _, err := w.broker.Queue.AppendTrackedIntake(queueRouteKey(w.key), in.Inbound, in.source, in.attachmentsState); err != nil {
 					log.Printf("pendingAck flush FAIL chan=%s chat=%d topic=%s msg=%d: re-queue: %v",
 						w.key.Channel, w.key.ChatID, TopicKeyStr(w.key), in.MessageID, err)
 					continue

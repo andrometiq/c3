@@ -261,6 +261,12 @@ func TestSourceSchedulerRestartTargetsKeepOwnOccurrenceInReplacement(t *testing.
 		if len(row.Inbound.Attachments) != expectedAttachments {
 			t.Fatalf("update %d attachments=%+v", update, row.Inbound.Attachments)
 		}
+		if len(row.AttachmentsState) != expectedAttachments || row.AttachmentsState[0].STT != intake.STTDone || row.AttachmentsState[0].Transcript != "resolved transcript" {
+			t.Fatalf("update %d attachment state=%+v", update, row.AttachmentsState)
+		}
+		if update == 1002 && row.AttachmentsState[1].STT != intake.STTNotApplicable {
+			t.Fatalf("edit document state=%+v", row.AttachmentsState[1])
+		}
 		if row.RecordID == before[0].RecordID || row.RecordID == before[1].RecordID {
 			t.Fatal("test did not exercise replacement")
 		}

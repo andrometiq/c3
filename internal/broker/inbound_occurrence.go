@@ -9,15 +9,23 @@ import (
 
 type inboundOccurrence struct {
 	*c3types.Inbound
-	source *intake.Source
+	source           *intake.Source
+	attachmentsState intake.AttachmentsState
 }
 
-func occurrence(in *c3types.Inbound, source *intake.Source) inboundOccurrence {
+func occurrence(in *c3types.Inbound, source *intake.Source, states ...intake.AttachmentsState) inboundOccurrence {
 	if in == nil {
 		return inboundOccurrence{}
 	}
 	cp := cloneVoiceInbound(*in)
-	return inboundOccurrence{Inbound: &cp, source: source.Clone()}
+	var state intake.AttachmentsState
+	if len(states) > 1 {
+		panic("broker: more than one attachment state for an occurrence")
+	}
+	if len(states) == 1 {
+		state = states[0].Clone()
+	}
+	return inboundOccurrence{Inbound: &cp, source: source.Clone(), attachmentsState: state}
 }
 
 func unsourcedInbounds(batch []*c3types.Inbound) []inboundOccurrence {
@@ -38,4 +46,16 @@ func (w *RouteWorker) forwardOrFallbackCovering(ctx context.Context, in *c3types
 
 func (w *RouteWorker) trackPendingAck(sources []*c3types.Inbound, ids ...string) {
 	w.trackPendingOccurrences(unsourcedInbounds(sources), ids...)
+}
+
+// attachmentStateSource supplies indices for legacy inbounds without provenance.
+func attachmentStateSource(source *intake.Source, in c3types.Inbound) *intake.Source {
+	if source != nil {
+		return source
+	}
+	source = &intake.Source{}
+	for _, att := range in.Attachments {
+		source.Attachments = append(source.Attachments, intake.SourceAttachment{Kind: att.Kind, FileID: att.FileID})
+	}
+	return source
 }

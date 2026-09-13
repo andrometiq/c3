@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/Andrometiq/c3/internal/c3types"
+	"github.com/Andrometiq/c3/internal/intake"
 	"github.com/Andrometiq/c3/internal/mappings"
 	"github.com/Andrometiq/c3/internal/queue"
 )
@@ -490,7 +491,7 @@ func TestVoiceResolvePanicAfterDurableMutationDoesNotDuplicateRevisionOrPush(t *
 			}
 			job := &ResolveVoiceJob{
 				Key: key, Targets: []voiceResolveTarget{target},
-				FileID: key.fileID, SegmentText: "[Transcribed voice]: one transcript", Success: true,
+				FileID: key.fileID, SegmentText: "[Transcribed voice]: one transcript", Success: true, Outcome: intake.STTOutcome{STT: intake.STTDone, Transcript: "one transcript"},
 			}
 			w.handleResolveVoice(context.Background(), job)
 			if tc.wantPushes == 1 {
@@ -565,7 +566,7 @@ func TestVoiceResolveRereadMissClosesEchoWithoutPush(t *testing.T) {
 	}
 	w.handleResolveVoice(context.Background(), &ResolveVoiceJob{
 		Key: key, Targets: []voiceResolveTarget{target},
-		FileID: key.fileID, SegmentText: "[Transcribed voice]: one transcript", Success: true,
+		FileID: key.fileID, SegmentText: "[Transcribed voice]: one transcript", Success: true, Outcome: intake.STTOutcome{STT: intake.STTDone, Transcript: "one transcript"},
 	})
 	if consumeErr != nil {
 		t.Fatalf("consume between resolve and re-read: %v", consumeErr)

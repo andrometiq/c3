@@ -66,6 +66,7 @@ type voiceEntry struct {
 }
 
 type voiceGroup struct {
+	outcomes    map[string]intake.STTOutcome
 	order       []string
 	remaining   int
 	finished    map[voiceScheduleKey]bool
@@ -84,6 +85,7 @@ type voiceEchoReservation struct {
 }
 
 type voiceResolve struct {
+	outcome     intake.STTOutcome
 	segmentText string
 	success     bool
 	transcript  string
@@ -96,12 +98,14 @@ type voiceResolve struct {
 // several targets when Telegram delivers an edit while the original row is
 // still pending.
 type voiceResolveTarget struct {
-	inbound        c3types.Inbound
-	source         *intake.Source
-	recordID       string
-	group          *voiceGroup
-	findPending    bool
-	transcriptOnly bool
+	inbound          c3types.Inbound
+	source           *intake.Source
+	attachmentsState intake.AttachmentsState
+	recordID         string
+	group            *voiceGroup
+	stateGroup       *voiceGroup // recovery siblings for a promoted manual target
+	findPending      bool
+	transcriptOnly   bool
 }
 
 type voiceScheduleResult struct {
@@ -289,15 +293,31 @@ func cloneVoiceInbound(in c3types.Inbound) c3types.Inbound {
 }
 
 func (s *VoiceScheduler) ScheduleAuto(route RouteKey, recordID string, in c3types.Inbound, voices []c3types.Attachment, initialNotice string, echo voiceEchoReservation, sources ...*intake.Source) bool {
-	return s.schedule(route, recordID, in, voices, initialNotice, echo, false, false, nil, intake.Optional(sources)) == nil
+	return s.scheduleAutoIntake(route, recordID, in, voices, initialNotice, echo, intake.Optional(sources), nil)
+}
+
+func (s *VoiceScheduler) scheduleAutoIntake(route RouteKey, recordID string, in c3types.Inbound, voices []c3types.Attachment, initialNotice string, echo voiceEchoReservation, source *intake.Source, states intake.AttachmentsState) bool {
+	return s.schedule(route, recordID, in, voices, initialNotice, echo, false, false, nil, source, states) == nil
 }
 
 func (s *VoiceScheduler) ScheduleManual(route RouteKey, recordID string, in c3types.Inbound, att c3types.Attachment, transcriptOnly bool, hook chan<- voiceScheduleResult) error {
-	return s.schedule(route, recordID, in, []c3types.Attachment{att}, "", voiceEchoReservation{}, true, transcriptOnly, hook)
+	return s.schedule(route, recordID, in, []c3types.Attachment{att}, "", voiceEchoReservation{}, true, transcriptOnly, hook, nil, nil)
 }
 
-func (s *VoiceScheduler) schedule(route RouteKey, recordID string, in c3types.Inbound, voices []c3types.Attachment, initialNotice string, echo voiceEchoReservation, manual, transcriptOnly bool, hook chan<- voiceScheduleResult, sources ...*intake.Source) error {
-	source := intake.Optional(sources)
+func (s *VoiceScheduler) schedule(route RouteKey, recordID string, in c3types.Inbound, voices []c3types.Attachment, initialNotice string, echo voiceEchoReservation, manual, transcriptOnly bool, hook chan<- voiceScheduleResult, source *intake.Source, states intake.AttachmentsState) error {
+	source = source.Clone()
+	states = states.Clone()
+	if states == nil {
+		var pending []string
+		for _, att := range voices {
+			pending = append(pending, att.FileID)
+		}
+		states = intake.NewAttachmentsState(attachmentStateSource(source, in), pending)
+	}
+	if err := states.Validate(attachmentStateSource(source, in)); err != nil {
+		log.Printf("voice scheduler: invalid attachment state: %v", err)
+		return err
+	}
 	now := s.clock.Now()
 	manualDeferred := manual && s.healthDown(route.Channel) && !s.broker.voiceCachedLocally(route.Channel, firstVoiceFileID(voices))
 	s.mu.Lock()
@@ -343,7 +363,7 @@ func (s *VoiceScheduler) schedule(route RouteKey, recordID string, in c3types.In
 				existing.firstFailure = now
 			}
 			if !manual {
-				s.addTargetLocked(existing, recordID, group, false, false, in, source)
+				s.addTargetLocked(existing, recordID, group, false, false, in, source, states)
 			}
 			added = true
 			continue
@@ -360,7 +380,7 @@ func (s *VoiceScheduler) schedule(route RouteKey, recordID string, in c3types.In
 			entry.hooks = append(entry.hooks, hook)
 		}
 		s.entries[key] = entry
-		s.addTargetLocked(entry, recordID, group, manual && !transcriptOnly, transcriptOnly, in, source)
+		s.addTargetLocked(entry, recordID, group, manual && !transcriptOnly, transcriptOnly, in, source, states)
 		added = true
 	}
 	groupUnused := group.remaining == 0
@@ -389,7 +409,7 @@ func firstVoiceFileID(voices []c3types.Attachment) string {
 	return ""
 }
 
-func (s *VoiceScheduler) addTargetLocked(entry *voiceEntry, recordID string, group *voiceGroup, findPending, transcriptOnly bool, in c3types.Inbound, source *intake.Source) {
+func (s *VoiceScheduler) addTargetLocked(entry *voiceEntry, recordID string, group *voiceGroup, findPending, transcriptOnly bool, in c3types.Inbound, source *intake.Source, states intake.AttachmentsState) {
 	if entry == nil || group == nil {
 		return
 	}
@@ -407,13 +427,21 @@ func (s *VoiceScheduler) addTargetLocked(entry *voiceEntry, recordID string, gro
 			pending.findPending = false
 			pending.inbound = cloneVoiceInbound(in)
 			pending.source = source.Clone()
+			pending.attachmentsState = states.Clone()
+			pending.stateGroup = group
 			entry.targets[recordID] = pending
+			entry.groups = append(entry.groups, group)
+			group.order = append(group.order, entry.key.fileID)
+			group.remaining++
+			if entry.state == voiceResolveReady || entry.state == voiceResolveSubmitted {
+				s.finishGroupMemberLocked(entry, group)
+			}
 			return
 		}
 	}
 	entry.targets[recordID] = voiceResolveTarget{
 		recordID: recordID, group: group, findPending: findPending, transcriptOnly: transcriptOnly,
-		inbound: cloneVoiceInbound(in), source: source.Clone(),
+		inbound: cloneVoiceInbound(in), source: source.Clone(), attachmentsState: states.Clone(),
 	}
 	entry.groups = append(entry.groups, group)
 	group.order = append(group.order, entry.key.fileID)
@@ -461,7 +489,7 @@ func (s *VoiceScheduler) RecoverPending() {
 				log.Printf("voice scheduler: pending row record=%s msg=%d names file_id=%s absent from Attachments; scheduling a visible failure path", row.RecordID, row.Inbound.MessageID, fileID)
 				voices = append(voices, c3types.Attachment{Kind: "voice", FileID: fileID})
 			}
-			if s.ScheduleAuto(route, row.RecordID, row.Inbound, voices, "", voiceEchoReservation{}, row.Source) {
+			if s.scheduleAutoIntake(route, row.RecordID, row.Inbound, voices, "", voiceEchoReservation{}, row.Source, row.AttachmentsState) {
 				recovered++
 			}
 		}
@@ -743,7 +771,14 @@ func (s *VoiceScheduler) finishAttempt(key voiceScheduleKey, out voiceAttemptRes
 }
 
 func (s *VoiceScheduler) finishTerminalLocked(entry *voiceEntry, out voiceAttemptResult) {
+	outcome := intake.STTOutcome{STT: intake.STTFailed, Error: out.detail}
+	if out.success {
+		outcome = intake.STTOutcome{STT: intake.STTDone, Transcript: out.transcript}
+	} else if outcome.Error == "" {
+		outcome.Error = "transcription_failed"
+	}
 	entry.resolve = voiceResolve{
+		outcome:     outcome,
 		segmentText: out.segmentText, success: out.success, transcript: out.transcript, notice: out.notice, detail: out.detail,
 	}
 	for _, group := range entry.groups {
@@ -758,6 +793,10 @@ func (s *VoiceScheduler) finishGroupMemberLocked(entry *voiceEntry, group *voice
 		return
 	}
 	group.finished[entry.key] = true
+	if group.outcomes == nil {
+		group.outcomes = make(map[string]intake.STTOutcome)
+	}
+	group.outcomes[entry.key.fileID] = entry.resolve.outcome
 	if entry.resolve.transcript != "" {
 		group.transcripts[entry.key.fileID] = entry.resolve.transcript
 	}
@@ -810,6 +849,16 @@ func (s *VoiceScheduler) submitResolve(key voiceScheduleKey) {
 		if !entry.applied[targetID] {
 			target.inbound = cloneVoiceInbound(target.inbound)
 			target.source = target.source.Clone()
+			target.attachmentsState = target.attachmentsState.Clone()
+			group := target.group
+			if target.stateGroup != nil {
+				group = target.stateGroup
+			}
+			if group != nil {
+				for fileID, outcome := range group.outcomes {
+					target.attachmentsState = target.attachmentsState.WithOutcome(attachmentStateSource(target.source, target.inbound), fileID, outcome)
+				}
+			}
 			targets = append(targets, target)
 		}
 	}
@@ -821,7 +870,7 @@ func (s *VoiceScheduler) submitResolve(key voiceScheduleKey) {
 	}
 	job := &ResolveVoiceJob{
 		Key: key, Targets: targets,
-		FileID: key.fileID, SegmentText: entry.resolve.segmentText, Success: entry.resolve.success,
+		FileID: key.fileID, SegmentText: entry.resolve.segmentText, Success: entry.resolve.success, Outcome: entry.resolve.outcome,
 	}
 	entry.state = voiceResolveSubmitted
 	s.wg.Add(1)

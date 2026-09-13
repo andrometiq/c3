@@ -17,7 +17,7 @@ import (
 
 // AppendTrackedSource carries private provenance alongside the public payload.
 func (s *Store) AppendTrackedSource(rk RouteKey, in *c3types.Inbound, source *intake.Source, voicePending ...string) (string, error) {
-	return s.appendTracked(rk, in, "", voicePending, source)
+	return s.appendTracked(rk, in, "", voicePending, source, nil)
 }
 
 // firstSource is bounded by live queue files, including rows behind a cursor
@@ -74,4 +74,32 @@ func sourceInFile(path string, source *intake.Source) (*intake.Source, error) {
 		}
 	}
 	return nil, sc.Err()
+}
+
+// AppendTrackedIntake carries an owned attachment-state snapshot with provenance.
+func (s *Store) AppendTrackedIntake(rk RouteKey, in *c3types.Inbound, source *intake.Source, states intake.AttachmentsState, voicePending ...string) (string, error) {
+	return s.appendTracked(rk, in, "", voicePending, source, states)
+}
+
+func (s *Store) AppendDrainedIntake(rk RouteKey, in *c3types.Inbound, sourceRecordID string, source *intake.Source, states intake.AttachmentsState) (string, error) {
+	return s.appendTracked(rk, in, sourceRecordID, nil, source, states, "drain")
+}
+
+// Legacy rows can still describe attachment indices without provider identity.
+func attachmentSource(source *intake.Source, in *c3types.Inbound) *intake.Source {
+	if source != nil || in == nil {
+		return source
+	}
+	source = &intake.Source{}
+	for _, att := range in.Attachments {
+		source.Attachments = append(source.Attachments, intake.SourceAttachment{Kind: att.Kind, FileID: att.FileID})
+	}
+	return source
+}
+
+func storedAttachmentsState(in storedInbound) intake.AttachmentsState {
+	if in.AttachmentsState != nil {
+		return in.AttachmentsState.Clone()
+	}
+	return intake.NewAttachmentsState(attachmentSource(in.Source, &in.Inbound), in.VoicePending)
 }

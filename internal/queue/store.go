@@ -80,25 +80,28 @@ type Store struct {
 //   - VoicePending is the only authority for which voice attachments still need
 //     enrichment. Agent-visible placeholder text is deliberately not state.
 //   - Source preserves the original provider occurrence independently of Inbound.
+//   - AttachmentsState holds raw STT outcomes by source attachment index.
 type storedInbound struct {
 	c3types.Inbound
-	Origin         string         `json:"origin,omitempty"`
-	RecordID       string         `json:"_c3_queue_id,omitempty"`
-	SourceRecordID string         `json:"_c3_drained_record_id,omitempty"`
-	VoicePending   []string       `json:"_c3_voice_pending,omitempty"`
-	Source         *intake.Source `json:"_c3_source,omitempty"`
+	Origin           string                  `json:"origin,omitempty"`
+	RecordID         string                  `json:"_c3_queue_id,omitempty"`
+	SourceRecordID   string                  `json:"_c3_drained_record_id,omitempty"`
+	VoicePending     []string                `json:"_c3_voice_pending,omitempty"`
+	Source           *intake.Source          `json:"_c3_source,omitempty"`
+	AttachmentsState intake.AttachmentsState `json:"_c3_attachments_state,omitempty"`
 }
 
 // TrackedInbound exposes queue-private identity only to broker internals. The
 // public Inbound remains unchanged, so private fields cannot leak over IPC.
 // Empty IDs identify legacy lines written before the private envelope existed.
 type TrackedInbound struct {
-	Origin         string
-	Inbound        c3types.Inbound
-	RecordID       string
-	SourceRecordID string
-	VoicePending   []string
-	Source         *intake.Source
+	Origin           string
+	Inbound          c3types.Inbound
+	RecordID         string
+	SourceRecordID   string
+	VoicePending     []string
+	Source           *intake.Source
+	AttachmentsState intake.AttachmentsState
 }
 
 // NewStore creates the queue dir (0700) and returns a Store. Call
@@ -145,10 +148,10 @@ func (s *Store) AppendTracked(rk RouteKey, in *c3types.Inbound, voicePending ...
 // legacy untracked source: retries then fail toward another copy, never toward
 // mistaking an unrelated same-MessageID line for the landed record.
 func (s *Store) AppendDrainedTracked(rk RouteKey, in *c3types.Inbound, sourceRecordID string, sources ...*intake.Source) (string, error) {
-	return s.appendTracked(rk, in, sourceRecordID, nil, intake.Optional(sources), "drain")
+	return s.appendTracked(rk, in, sourceRecordID, nil, intake.Optional(sources), nil, "drain")
 }
 
-func (s *Store) appendTracked(rk RouteKey, in *c3types.Inbound, sourceRecordID string, voicePending []string, source *intake.Source, origin ...string) (string, error) {
+func (s *Store) appendTracked(rk RouteKey, in *c3types.Inbound, sourceRecordID string, voicePending []string, source *intake.Source, states intake.AttachmentsState, origin ...string) (string, error) {
 	if source != nil {
 		s.sourceMu.Lock()
 		defer s.sourceMu.Unlock()
@@ -157,6 +160,12 @@ func (s *Store) appendTracked(rk RouteKey, in *c3types.Inbound, sourceRecordID s
 		if err != nil {
 			return "", err
 		}
+	}
+	if states == nil {
+		states = intake.NewAttachmentsState(attachmentSource(source, in), voicePending)
+	}
+	if err := states.Validate(attachmentSource(source, in)); err != nil {
+		return "", err
 	}
 	// Stamp the record format version on the way to disk. Append is the ONLY
 	// place a record enters the queue, so it is the only place that has to do
@@ -203,10 +212,11 @@ func (s *Store) appendTracked(rk RouteKey, in *c3types.Inbound, sourceRecordID s
 				}
 				return ""
 			}(),
-			RecordID:       rand.Text(),
-			SourceRecordID: sourceRecordID,
-			VoicePending:   append([]string(nil), voicePending...),
-			Source:         source.Clone(),
+			RecordID:         rand.Text(),
+			SourceRecordID:   sourceRecordID,
+			VoicePending:     append([]string(nil), voicePending...),
+			Source:           source.Clone(),
+			AttachmentsState: states.Clone(),
 		}
 	}
 	data, err := json.Marshal(rec)
@@ -504,12 +514,13 @@ func pendingTrackedFrom(lines []storedInbound, cursor int) []TrackedInbound {
 			continue
 		}
 		out = append(out, TrackedInbound{
-			Inbound:        in.Inbound,
-			Origin:         in.Origin,
-			RecordID:       in.RecordID,
-			SourceRecordID: in.SourceRecordID,
-			VoicePending:   append([]string(nil), in.VoicePending...),
-			Source:         in.Source.Clone(),
+			Inbound:          in.Inbound,
+			Origin:           in.Origin,
+			RecordID:         in.RecordID,
+			SourceRecordID:   in.SourceRecordID,
+			VoicePending:     append([]string(nil), in.VoicePending...),
+			Source:           in.Source.Clone(),
+			AttachmentsState: storedAttachmentsState(in),
 		})
 	}
 	return out
@@ -817,12 +828,33 @@ func (s *Store) EvictOverCap(rk RouteKey) (aged, overCount int, err error) {
 // row, or a row already consumed/evicted is a clean no-op; callers can then use
 // the revision-line path without ever inferring state from agent-visible text.
 func (s *Store) ResolveVoiceText(rk RouteKey, recordID, fileID, newText string) (resolved, allDone bool, err error) {
+	return s.ResolveVoiceOutcome(rk, recordID, fileID, newText, intake.STTOutcome{STT: intake.STTFailed, Error: "metadata_unavailable"}, nil)
+}
+
+// ResolveVoiceOutcome writes the private vector in the same rewrite as Text and pending.
+func (s *Store) ResolveVoiceOutcome(rk RouteKey, recordID, fileID, newText string, outcome intake.STTOutcome, snapshot intake.AttachmentsState) (resolved, allDone bool, err error) {
+	if err := outcome.Validate(); err != nil {
+		return false, false, err
+	}
+	if err := snapshot.Validate(nil); err != nil {
+		return false, false, err
+	}
 	if recordID == "" || fileID == "" {
 		return false, false, nil
 	}
+	var stateErr error
 	resolved, err = s.rewritePending(rk, func(in storedInbound) bool {
 		if in.RecordID != recordID || in.DrainedFrom != "" {
 			return false
+		}
+		stateSource := attachmentSource(in.Source, &in.Inbound)
+		if stateErr = storedAttachmentsState(in).Validate(stateSource); stateErr != nil {
+			return false
+		}
+		if snapshot != nil {
+			if stateErr = snapshot.Validate(stateSource); stateErr != nil {
+				return false
+			}
 		}
 		for _, pending := range in.VoicePending {
 			if pending == fileID {
@@ -832,6 +864,14 @@ func (s *Store) ResolveVoiceText(rk RouteKey, recordID, fileID, newText string) 
 		return false
 	}, func(in *storedInbound) {
 		in.Text = newText
+		states := storedAttachmentsState(*in)
+		// A scheduler snapshot can contain siblings that finished before this write.
+		for i, state := range snapshot {
+			if (state.STT == intake.STTDone || state.STT == intake.STTFailed) && states[i].STT == intake.STTPending {
+				states[i] = state
+			}
+		}
+		in.AttachmentsState = states.WithOutcome(attachmentSource(in.Source, &in.Inbound), fileID, outcome)
 		pending := in.VoicePending[:0]
 		for _, id := range in.VoicePending {
 			if id != fileID {
@@ -843,6 +883,9 @@ func (s *Store) ResolveVoiceText(rk RouteKey, recordID, fileID, newText string) 
 	})
 	if err != nil {
 		return false, false, err
+	}
+	if stateErr != nil {
+		return false, false, stateErr
 	}
 	return resolved, allDone, err
 }
