@@ -68,6 +68,10 @@ type Store struct {
 	// rewriteTestHook injects a failure immediately before rewrite mutates the
 	// JSONL. Tests use it to pin cursor-first crash semantics.
 	rewriteTestHook func() error
+
+	// SyncDirTestHook injects a failure after file bytes land, before directory fsync.
+	// Tests set it only while the route owner is idle.
+	SyncDirTestHook func() error
 }
 
 // storedInbound is the queue's private on-disk envelope. Embedding keeps every
@@ -152,6 +156,10 @@ func (s *Store) AppendDrainedTracked(rk RouteKey, in *c3types.Inbound, sourceRec
 }
 
 func (s *Store) appendTracked(rk RouteKey, in *c3types.Inbound, sourceRecordID string, voicePending []string, source *intake.Source, states intake.AttachmentsState, origin ...string) (string, error) {
+	return s.appendTrackedPrepared(rk, in, sourceRecordID, voicePending, source, states, nil, origin...)
+}
+
+func (s *Store) appendTrackedPrepared(rk RouteKey, in *c3types.Inbound, sourceRecordID string, voicePending []string, source *intake.Source, states intake.AttachmentsState, prepare func(*storedInbound) error, origin ...string) (string, error) {
 	if source != nil {
 		s.sourceMu.Lock()
 		defer s.sourceMu.Unlock()
@@ -217,6 +225,11 @@ func (s *Store) appendTracked(rk RouteKey, in *c3types.Inbound, sourceRecordID s
 			VoicePending:     append([]string(nil), voicePending...),
 			Source:           source.Clone(),
 			AttachmentsState: states.Clone(),
+		}
+	}
+	if prepare != nil {
+		if err := prepare(rec); err != nil {
+			return "", err
 		}
 	}
 	data, err := json.Marshal(rec)
@@ -375,6 +388,11 @@ func (s *Store) retainOversize(rk RouteKey, data []byte) error {
 // .jsonl on first Append, renamed .cur/.jsonl on writeCursor/rewrite) are
 // durable across a crash. Mirrors offset_store.go's dir-fsync.
 func (s *Store) syncDir() error {
+	if s.SyncDirTestHook != nil {
+		if err := s.SyncDirTestHook(); err != nil {
+			return err
+		}
+	}
 	// Windows disallows fsync on a directory handle (FlushFileBuffers returns
 	// ERROR_ACCESS_DENIED). Skipping it here is REQUIRED for correctness, not
 	// just durability polish: Append() propagates this error, the poll loop
@@ -828,27 +846,31 @@ func (s *Store) EvictOverCap(rk RouteKey) (aged, overCount int, err error) {
 // row, or a row already consumed/evicted is a clean no-op; callers can then use
 // the revision-line path without ever inferring state from agent-visible text.
 func (s *Store) ResolveVoiceText(rk RouteKey, recordID, fileID, newText string) (resolved, allDone bool, err error) {
-	return s.ResolveVoiceOutcome(rk, recordID, fileID, newText, intake.STTOutcome{STT: intake.STTFailed, Error: "metadata_unavailable"}, nil)
+	resolved, allDone, _, err = s.ResolveVoiceOutcome(rk, recordID, fileID, newText, newText, intake.STTOutcome{STT: intake.STTFailed, Error: "metadata_unavailable"}, nil)
+	return
 }
 
-// ResolveVoiceOutcome writes the private vector in the same rewrite as Text and pending.
-func (s *Store) ResolveVoiceOutcome(rk RouteKey, recordID, fileID, newText string, outcome intake.STTOutcome, snapshot intake.AttachmentsState) (resolved, allDone bool, err error) {
+// ResolveVoiceOutcome budgets the complete mutated row before its atomic rewrite.
+// Both text variants are broker presentations of the same voice segment.
+func (s *Store) ResolveVoiceOutcome(rk RouteKey, recordID, fileID, newText, oversizeText string, outcome intake.STTOutcome, snapshot intake.AttachmentsState) (resolved, allDone bool, final intake.STTOutcome, err error) {
 	if err := outcome.Validate(); err != nil {
-		return false, false, err
+		return false, false, final, err
 	}
 	if err := snapshot.Validate(nil); err != nil {
-		return false, false, err
+		return false, false, final, err
 	}
 	if recordID == "" || fileID == "" {
-		return false, false, nil
+		return false, false, final, nil
 	}
+	var candidate storedInbound
 	var stateErr error
 	resolved, err = s.rewritePending(rk, func(in storedInbound) bool {
 		if in.RecordID != recordID || in.DrainedFrom != "" {
 			return false
 		}
 		stateSource := attachmentSource(in.Source, &in.Inbound)
-		if stateErr = storedAttachmentsState(in).Validate(stateSource); stateErr != nil {
+		states := storedAttachmentsState(in)
+		if stateErr = states.Validate(stateSource); stateErr != nil {
 			return false
 		}
 		if snapshot != nil {
@@ -856,38 +878,35 @@ func (s *Store) ResolveVoiceOutcome(rk RouteKey, recordID, fileID, newText strin
 				return false
 			}
 		}
-		for _, pending := range in.VoicePending {
-			if pending == fileID {
-				return true
-			}
+		pending := false
+		for _, id := range in.VoicePending {
+			pending = pending || id == fileID
 		}
-		return false
-	}, func(in *storedInbound) {
-		in.Text = newText
-		states := storedAttachmentsState(*in)
-		// A scheduler snapshot can contain siblings that finished before this write.
-		for i, state := range snapshot {
-			if (state.STT == intake.STTDone || state.STT == intake.STTFailed) && states[i].STT == intake.STTPending {
-				states[i] = state
-			}
+		if !pending {
+			return false
 		}
-		in.AttachmentsState = states.WithOutcome(attachmentSource(in.Source, &in.Inbound), fileID, outcome)
-		pending := in.VoicePending[:0]
+		candidate = in
+		candidate.VoicePending = nil
 		for _, id := range in.VoicePending {
 			if id != fileID {
-				pending = append(pending, id)
+				candidate.VoicePending = append(candidate.VoicePending, id)
 			}
 		}
-		in.VoicePending = pending
+		// Pending siblings are budgeted by their own completion, not a scheduler snapshot.
+		candidate.AttachmentsState = states
+		final, stateErr = completeVoiceRecord(&candidate, fileID, newText, oversizeText, outcome)
+		return stateErr == nil
+	}, func(in *storedInbound) {
+		*in = candidate
 		allDone = len(in.VoicePending) == 0
 	})
 	if err != nil {
-		return false, false, err
+		return false, false, intake.STTOutcome{}, err
 	}
 	if stateErr != nil {
-		return false, false, stateErr
+		return false, false, intake.STTOutcome{}, stateErr
 	}
-	return resolved, allDone, err
+	return resolved, allDone, final, nil
 }
 
 // rewritePending is the crash-safe voice-row mutation composite: readLines,

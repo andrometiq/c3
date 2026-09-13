@@ -66,6 +66,7 @@ type voiceEntry struct {
 }
 
 type voiceGroup struct {
+	persisted   map[string]bool // route-worker owned; separate from audio completion
 	outcomes    map[string]intake.STTOutcome
 	order       []string
 	remaining   int
@@ -815,6 +816,40 @@ func containsString(values []string, want string) bool {
 		}
 	}
 	return false
+}
+
+// Resolve submission waits for every group member to finish under scheduler.mu.
+// After submission, only this route's worker mutates readback and persistence state.
+func (g *voiceGroup) demoteToNotice(fileID, notice string) {
+	if g == nil {
+		return
+	}
+	delete(g.transcripts, fileID)
+	if !containsString(g.notices, notice) {
+		g.notices = append(g.notices, notice)
+	}
+}
+
+func (g *voiceGroup) persistedOutcome(fileID string, outcome intake.STTOutcome, notice string) {
+	if g == nil {
+		return
+	}
+	if outcome.STT == intake.STTFailed && outcome.Error == "transcript_too_large" {
+		g.demoteToNotice(fileID, notice)
+	}
+	if g.persisted == nil {
+		g.persisted = make(map[string]bool)
+	}
+	g.persisted[fileID] = true
+}
+
+func (g *voiceGroup) persistenceComplete() bool {
+	for _, fileID := range g.order {
+		if !g.persisted[fileID] {
+			return false
+		}
+	}
+	return true
 }
 
 func (g *voiceGroup) echoTranscript() string {

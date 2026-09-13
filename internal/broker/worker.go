@@ -1678,6 +1678,8 @@ func fetchFrameFitReserved(respID string, remainingHint int, msgs []c3types.Inbo
 	return fit, nil
 }
 
+const voiceTranscriptTooLargeText = "⚠️ [C3] Voice transcription was too large to store (over the %d-byte record limit) — ask the sender to resend it in shorter parts."
+
 // oversizeNoticeText is the in-band explanation that replaces a record which can
 // never be encoded into a response frame. %s is where the original went.
 const oversizeNoticeText = "⚠️ [C3] This message could not be delivered: its stored record is %d bytes, past the %d-byte IPC frame cap, so no fetch_queue response can ever carry it. %s%s Ask the sender to resend it in smaller parts."
@@ -2268,6 +2270,7 @@ func (w *RouteWorker) handleResolveVoiceTarget(ctx context.Context, scheduler *V
 		in := voiceRevisionInbound(target.inbound, job.Key.messageID, job.SegmentText)
 		scheduler.markResolveApplied(job.Key, target.recordID)
 		durableApplied = true
+		target.group.persistedOutcome(job.FileID, job.Outcome, "")
 		w.finishVoiceGroup(ctx, in, target.group)
 		w.forwardOccurrences(ctx, w.voiceResolvePresentation(in), []inboundOccurrence{occurrence(in, target.source, target.attachmentsState)}, 0, nil, true)
 		w.runVoiceResolveTestHook("after_push")
@@ -2284,22 +2287,43 @@ func (w *RouteWorker) handleResolveVoiceTarget(ctx context.Context, scheduler *V
 			target.attachmentsState = pending.AttachmentsState.Clone()
 		}
 	}
-	current, found := w.queuedRecord(qrk, recordID)
-	newText := job.SegmentText
-	if found {
-		newText = replacePendingVoiceSegment(current.Inbound.Text, job.FileID, job.SegmentText)
+	current, found, readErr := w.queuedRecordResult(qrk, recordID)
+	if readErr != nil {
+		return true
 	}
-	resolved, allDone, err := w.broker.Queue.ResolveVoiceOutcome(qrk, recordID, job.FileID, newText, job.Outcome, target.attachmentsState)
+	notice := fmt.Sprintf(voiceTranscriptTooLargeText, queue.MaxRecordBytes)
+	newText, oversizeText := job.SegmentText, notice
+	if found && containsString(current.VoicePending, job.FileID) {
+		newText = replacePendingVoiceSegment(current.Inbound.Text, job.FileID, job.SegmentText)
+		oversizeText = replacePendingVoiceSegment(current.Inbound.Text, job.FileID, notice)
+	}
+	resolved, allDone, outcome, err := w.broker.Queue.ResolveVoiceOutcome(qrk, recordID, job.FileID, newText, oversizeText, job.Outcome, target.attachmentsState)
 	if err != nil {
 		log.Printf("voice resolve FAIL chan=%s chat=%d topic=%s msg=%d file_id=%s record=%s: %v — rescheduling the same durable resolve",
 			w.key.Channel, w.key.ChatID, TopicKeyStr(w.key), job.Key.messageID, job.FileID, recordID, err)
 		return true
+	}
+	if !resolved && found && current.Inbound.DrainedFrom == "" {
+		stateSource := attachmentStateSource(current.Source, current.Inbound)
+		if final, terminal := current.AttachmentsState.TerminalOutcome(stateSource, job.FileID); terminal {
+			if target.source != nil && !target.source.SameOccurrence(current.Source) {
+				log.Printf("voice resolve invariant: record=%s occurrence mismatch", recordID)
+				return true
+			}
+			// Rename may have landed before dir-fsync failed. Visibility is not durability.
+			if err := w.broker.Queue.SyncRoute(qrk); err != nil {
+				log.Printf("voice resolve retry fsync FAIL record=%s: %v", recordID, err)
+				return true
+			}
+			resolved, allDone, outcome = true, len(current.VoicePending) == 0, final
+		}
 	}
 	if resolved {
 		w.broker.recorded.forget(w.key, []string{recordID})
 		w.reconcileAttempt()
 		scheduler.markResolveApplied(job.Key, target.recordID)
 		durableApplied = true
+		target.group.persistedOutcome(job.FileID, outcome, notice)
 		w.runVoiceResolveTestHook("after_durable")
 		if allDone {
 			final, ok := w.queuedRecord(qrk, recordID)
@@ -2324,12 +2348,8 @@ func (w *RouteWorker) handleResolveVoiceTarget(ctx context.Context, scheduler *V
 	// row so it has the same retention, delivery-token, ack, and held semantics
 	// as every other inbound.
 	revision := voiceRevisionInbound(target.inbound, job.Key.messageID, job.SegmentText)
-	stateSource := attachmentStateSource(target.source, target.inbound)
-	if target.attachmentsState == nil {
-		target.attachmentsState = intake.NewAttachmentsState(stateSource, nil)
-	}
-	target.attachmentsState = target.attachmentsState.WithOutcome(stateSource, job.FileID, job.Outcome)
-	revisionID, err := w.broker.Queue.AppendTrackedIntake(qrk, revision, target.source, target.attachmentsState)
+	oversizeRevision := voiceRevisionInbound(target.inbound, job.Key.messageID, notice)
+	revisionID, outcome, err := w.broker.Queue.AppendVoiceOutcome(qrk, recordID, job.FileID, target.inbound, revision, oversizeRevision.Text, target.source, target.attachmentsState, job.Outcome)
 	if err != nil {
 		log.Printf("voice revision APPEND FAIL chan=%s chat=%d topic=%s msg=%d file_id=%s: %v — rescheduling without losing the terminal result",
 			w.key.Channel, w.key.ChatID, TopicKeyStr(w.key), job.Key.messageID, job.FileID, err)
@@ -2337,19 +2357,26 @@ func (w *RouteWorker) handleResolveVoiceTarget(ctx context.Context, scheduler *V
 	}
 	scheduler.markResolveApplied(job.Key, target.recordID)
 	durableApplied = true
+	target.group.persistedOutcome(job.FileID, outcome, notice)
 	w.runVoiceResolveTestHook("after_durable")
+	final, ok := w.queuedRecord(qrk, revisionID)
+	if !ok {
+		log.Printf("voice revision record=%s: durable row could not be re-read for live push", revisionID)
+		target.group.closeEcho()
+		return false
+	}
 	if w.dedup != nil {
-		w.dedup.record(revision.MessageID)
+		w.dedup.record(final.Inbound.MessageID)
 	}
 	w.evictIfOverCap(qrk)
-	w.finishVoiceGroup(ctx, revision, target.group)
-	w.forwardOccurrences(ctx, w.voiceResolvePresentation(revision), []inboundOccurrence{occurrence(revision, target.source, target.attachmentsState)}, 1, []string{revisionID}, true)
+	w.finishVoiceGroup(ctx, &final.Inbound, target.group)
+	w.forwardOccurrences(ctx, w.voiceResolvePresentation(&final.Inbound), []inboundOccurrence{occurrence(&final.Inbound, final.Source, final.AttachmentsState)}, 1, []string{revisionID}, true)
 	w.runVoiceResolveTestHook("after_push")
 	return false
 }
 
 func (w *RouteWorker) finishVoiceGroup(ctx context.Context, in *c3types.Inbound, group *voiceGroup) {
-	if group == nil {
+	if group == nil || !group.persistenceComplete() {
 		return
 	}
 	group.echoOnce.Do(func() {
@@ -2373,21 +2400,26 @@ func (w *RouteWorker) runVoiceResolveTestHook(stage string) {
 }
 
 func (w *RouteWorker) queuedRecord(qrk queue.RouteKey, recordID string) (queue.TrackedInbound, bool) {
+	row, found, _ := w.queuedRecordResult(qrk, recordID)
+	return row, found
+}
+
+func (w *RouteWorker) queuedRecordResult(qrk queue.RouteKey, recordID string) (queue.TrackedInbound, bool, error) {
 	if recordID == "" {
-		return queue.TrackedInbound{}, false
+		return queue.TrackedInbound{}, false, nil
 	}
 	lines, err := w.broker.Queue.PeekTracked(qrk, -1)
 	if err != nil {
 		log.Printf("voice resolve queue read FAIL chan=%s chat=%d topic=%s record=%s: %v",
 			w.key.Channel, w.key.ChatID, TopicKeyStr(w.key), recordID, err)
-		return queue.TrackedInbound{}, false
+		return queue.TrackedInbound{}, false, err
 	}
 	for _, line := range lines {
 		if line.RecordID == recordID {
-			return line, true
+			return line, true, nil
 		}
 	}
-	return queue.TrackedInbound{}, false
+	return queue.TrackedInbound{}, false, nil
 }
 
 func replacePendingVoiceSegment(text, fileID, segment string) string {

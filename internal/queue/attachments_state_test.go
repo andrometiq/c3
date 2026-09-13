@@ -26,7 +26,7 @@ func TestAttachmentStateAtomicTerminalPersistenceAndRestart(t *testing.T) {
 	raw := "  literal raw\nwords & <tags>  "
 	done := intake.STTOutcome{STT: intake.STTDone, Transcript: raw}
 	s.rewriteTestHook = func() error { return errors.New("injected before rewrite") }
-	if _, _, err := s.ResolveVoiceOutcome(rk, id, "audio-a", "[Transcribed voice]: "+raw, done, nil); err == nil {
+	if _, _, _, err := s.ResolveVoiceOutcome(rk, id, "audio-a", "[Transcribed voice]: "+raw, "oversize notice", done, nil); err == nil {
 		t.Fatal("rewrite failure hidden")
 	}
 	s = restartSourceStore(t, s)
@@ -37,8 +37,8 @@ func TestAttachmentStateAtomicTerminalPersistenceAndRestart(t *testing.T) {
 	if rows[0].Inbound.Text != "pending" || len(rows[0].VoicePending) != 2 || rows[0].AttachmentsState[0].STT != intake.STTPending {
 		t.Fatalf("partial mutation: %+v", rows[0])
 	}
-	ok, allDone, err := s.ResolveVoiceOutcome(rk, id, "audio-a", "[Transcribed voice]: "+raw, done, nil)
-	if err != nil || !ok || allDone {
+	ok, allDone, final, err := s.ResolveVoiceOutcome(rk, id, "audio-a", "[Transcribed voice]: "+raw, "oversize notice", done, nil)
+	if err != nil || !ok || allDone || final != done {
 		t.Fatalf("resolve=%v/%v/%v", ok, allDone, err)
 	}
 	s = restartSourceStore(t, s)
@@ -56,8 +56,8 @@ func TestAttachmentStateAtomicTerminalPersistenceAndRestart(t *testing.T) {
 	}
 	rows[0].AttachmentsState[0].Transcript = "projection mutation"
 	failed := intake.STTOutcome{STT: intake.STTFailed, Error: "provider_unavailable"}
-	ok, allDone, err = s.ResolveVoiceOutcome(rk, id, "audio-b", "failure presentation", failed, nil)
-	if err != nil || !ok || !allDone {
+	ok, allDone, final, err = s.ResolveVoiceOutcome(rk, id, "audio-b", "failure presentation", "oversize notice", failed, nil)
+	if err != nil || !ok || !allDone || final != failed {
 		t.Fatalf("resolve=%v/%v/%v", ok, allDone, err)
 	}
 	want[2] = intake.AttachmentState{Index: 2, STT: intake.STTFailed, Error: "provider_unavailable"}
@@ -129,11 +129,11 @@ func TestAttachmentStateRejectsInvalidOutcomeWithoutClearingPending(t *testing.T
 		{STT: intake.STTDone, Transcript: "raw", Error: "unexpected"},
 		{STT: intake.STTFailed},
 	} {
-		if _, _, err := s.ResolveVoiceOutcome(rk, id, "audio-a", "invalid", outcome, nil); err == nil {
+		if _, _, _, err := s.ResolveVoiceOutcome(rk, id, "audio-a", "invalid", "oversize notice", outcome, nil); err == nil {
 			t.Fatalf("invalid outcome accepted: %+v", outcome)
 		}
 	}
-	if _, _, err := s.ResolveVoiceOutcome(rk, id, "audio-a", "invalid", intake.STTOutcome{STT: intake.STTDone, Transcript: "raw"}, intake.AttachmentsState{}); err == nil {
+	if _, _, _, err := s.ResolveVoiceOutcome(rk, id, "audio-a", "invalid", "oversize notice", intake.STTOutcome{STT: intake.STTDone, Transcript: "raw"}, intake.AttachmentsState{}); err == nil {
 		t.Fatal("snapshot with wrong attachment count accepted")
 	}
 	s = restartSourceStore(t, s)

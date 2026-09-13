@@ -115,3 +115,24 @@ func (s AttachmentsState) WithOutcome(source *Source, fileID string, outcome STT
 	}
 	return out
 }
+
+// TerminalOutcome requires every matching voice index to agree on a terminal result.
+func (s AttachmentsState) TerminalOutcome(source *Source, fileID string) (STTOutcome, bool) {
+	var final STTOutcome
+	found := false
+	if source == nil || fileID == "" || len(s) != len(source.Attachments) {
+		return final, false
+	}
+	for i, att := range source.Attachments {
+		if att.Kind != "voice" || att.FileID != fileID {
+			continue
+		}
+		state := s[i]
+		outcome := STTOutcome{STT: state.STT, Transcript: state.Transcript, Error: state.Error}
+		if state.Index != i || outcome.Validate() != nil || (found && final != outcome) {
+			return STTOutcome{}, false
+		}
+		final, found = outcome, true
+	}
+	return final, found
+}
