@@ -13,138 +13,8 @@ from capture_export import export_capture
 from verdict_core import evaluate, derive, ROUTE_LINE_LIMIT
 from verdict_core import delivery_assertions as core_delivery_assertions
 
-TOKEN = re.compile(r'c3_delivery_id=["\']([^"\']+)["\']')
-ATTEMPT = re.compile(r'c3_attempt=["\']([^"\']+)["\']')
-PEER_PREFIX = "Another Claude session sent a message:\n"
-
-
-def strings(value):
-    if isinstance(value, str):
-        yield value
-    elif isinstance(value, dict):
-        for item in value.values():
-            yield from strings(item)
-    elif isinstance(value, list):
-        for item in value:
-            yield from strings(item)
-
-
-def intake_text(record):
-    from capture_context import host_shape_valid
-    if not host_shape_valid(record):
-        return ""
-    if record.get("type") == "user" and record.get("message", {}).get("role") == "user":
-        content = record["message"].get("content", "")
-        if isinstance(content, str):
-            return content
-        return "\n".join(b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text") if isinstance(content, list) else ""
-    if record.get("type") == "attachment" and record.get("attachment", {}).get("type") == "queued_command":
-        prompt = record["attachment"].get("prompt", "")
-        return prompt if isinstance(prompt, str) else ""
-    if record.get("type") == "queue-operation":
-        content = record.get("content", "")
-        return content if isinstance(content, str) else ""
-    return ""
-
-
-def classify(record):
-    """Only observed, checked-in shapes become positives; new shapes are TODO."""
-    from capture_context import host_shape_valid
-    if not host_shape_valid(record):
-        return dict(transport="channel", token="TOKEN", attempt="channel:1", accept=False, reason="malformed host record")
-    text = intake_text(record)
-    token, attempt = TOKEN.search(text), ATTEMPT.search(text)
-    transport = "inbox" if attempt and attempt[1].startswith(("inbox:", "cross-session:")) else "channel"
-    result = dict(transport=transport, token=token[1] if token else "TOKEN", attempt=attempt[1] if attempt else "channel:1", accept=None,
-                  reason="TODO: review captured host shape before adding positive coverage")
-    if record.get("type") == "queue-operation" and record.get("operation") == "remove":
-        result.update(accept=False, reason="queue removal is not receipt evidence")
-    elif text and not token:
-        result.update(accept=False, reason="captured record predates delivery token metadata")
-    elif token and attempt:
-        if transport == "inbox":
-            if record.get("type") == "user":
-                result.update(accept=bool(record.get("isMeta") and record.get("origin", {}).get("kind") == "peer"
-                                          and record.get("origin", {}).get("from") == "c3" and text.startswith(PEER_PREFIX)),
-                              reason="verified 2.1.263 peer user shape and prefix")
-            elif record.get("type") in ("queue-operation", "attachment"):
-                source = re.match(r'<channel\s[^>]*\bsource=["\']plugin:c3:c3["\']', text)
-                if record.get("type") == "queue-operation":
-                    provenance = record.get("operation") == "enqueue"
-                else:
-                    attachment = record.get("attachment", {})
-                    provenance = (attachment.get("isMeta") and attachment.get("origin", {}).get("kind") == "peer"
-                                  and attachment.get("origin", {}).get("from") == "c3")
-                result.update(accept=bool(source and provenance), reason="verified 2.1.266 bare peer intake envelope")
-        elif text.lstrip().startswith("<channel"):
-            known = record.get("type") == "user" or (record.get("type") == "queue-operation" and record.get("operation") == "enqueue") or (
-                record.get("type") == "attachment" and record.get("attachment", {}).get("origin", {}).get("kind") == "channel")
-            if known:
-                result.update(accept=True, reason="verified channel intake envelope")
-    return result
-
-
-def result_text(content):
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list) and all(isinstance(p, dict) and p.get("type") == "text" and isinstance(p.get("text"), str) for p in content):
-        return "\n".join(p["text"] for p in content)
-    return ""
-
-
-def fetch_trailer(text):
-    """The phase-4 grammar: final delimiter, complete unique member set."""
-    marker = "[C3_FETCH_RECEIPT_V1]\n"
-    start = text.rfind(marker)
-    if start < 0 or (start and text[start - 1] != "\n"):
-        return None
-    lines = text[start:].split("\n")
-    if len(lines) < 4 or lines[-1] != "[/C3_FETCH_RECEIPT_V1]":
-        return None
-    group = re.fullmatch(r"group ([A-Za-z0-9_-]+)", lines[1])
-    if not group:
-        return None
-    members = []
-    for line in lines[2:-1]:
-        member = re.fullmatch(r"member ([A-Za-z0-9_-]+) ([0-9a-f]{64})", line)
-        if not member or any(m["record_id"] == member[1] for m in members):
-            return None
-        members.append(dict(record_id=member[1], revision=member[2]))
-    return dict(token=group[1], members=members)
-
-
-def classify_fetch(record, expected, call_ids):
-    """Expected identities come from the held MCP response, not the transcript."""
-    result = dict(transport="fetch", token=expected["token"] if expected else "TOKEN",
-                  members=expected["members"] if expected else [], tool_use_id="ID", accept=False,
-                  reason="not a matching successful complete fetch tool result")
-    if not expected:
-        result.update(accept=None, reason="TODO: capture a complete broker fetch trailer")
-        return result
-    from capture_context import host_shape_valid
-    if not host_shape_valid(record):
-        result.update(reason="malformed host record")
-        return result
-    content = record.get("message", {}).get("content", [])
-    if record.get("type") != "user" or not isinstance(content, list):
-        return result
-    for block in content:
-        if not isinstance(block, dict) or block.get("type") != "tool_result" or block.get("tool_use_id") not in call_ids:
-            continue
-        result["tool_use_id"] = block["tool_use_id"]
-        if block.get("is_error", False) is not False:
-            continue
-        trailer = fetch_trailer(result_text(block.get("content")))
-        if trailer and trailer["token"] == expected["token"] and sorted(trailer["members"], key=lambda m: m["record_id"]) == sorted(expected["members"], key=lambda m: m["record_id"]):
-            result.update(accept=True, reason="matching tool result with complete phase-4 receipt trailer")
-            return result
-    return result
-
-
-def _same_fetch_trailer(left, right):
-    return bool(left and right and left['token'] == right['token'] and
-                sorted(left['members'], key=lambda member: member['record_id']) ==
-                sorted(right['members'], key=lambda member: member['record_id']))
+from hostdrivers.claude_evidence import (TOKEN, ATTEMPT, PEER_PREFIX, strings, intake_text, classify,
+    result_text, fetch_trailer, classify_fetch, _same_fetch_trailer)
 
 
 def sanitize_legacy_fixture(value, tokens=(), key="", receipt_ids=()):
@@ -255,7 +125,8 @@ def route_line_limit(cell):
     return ROUTE_LINE_LIMIT
 
 
-def build_verdict_inputs(cell, evidence, *, raw_observation=None, collect_only=False):
+def build_verdict_inputs(cell, evidence, *, raw_observation=None, collect_only=False,
+                         pinned_scenario=None, pinned_contract=None):
     """Pin the harness contract; aggregate evidence is never a complete capture."""
     is_fetch = cell.transport == 'fetch'
     scenario = dict(schema_version=1, id=cell.name, transport=cell.transport, kind=cell.kind,
@@ -275,6 +146,10 @@ def build_verdict_inputs(cell, evidence, *, raw_observation=None, collect_only=F
                     milestones=dict(live='transcript_recorded', fetch='fetch_result_recorded'),
                     timing=dict(live=dict(limit_ms=15000, basis='terminal_confirmation'), fetch=dict(limit_ms=60000, basis='terminal_confirmation')),
                     readiness_boundary='ready' if scenario['readiness_barrier_id'] else None, contract_barrier_names=['injection', 'final'])
+    if (pinned_scenario is None) != (pinned_contract is None):
+        raise ValueError('scenario and contract must be pinned together')
+    if pinned_scenario is not None:
+        scenario, contract = deepcopy(pinned_scenario), deepcopy(pinned_contract)
     if raw_observation is not None:
         observation = deepcopy(raw_observation)
     else:
@@ -419,20 +294,68 @@ def capture_observation(cell, evidence, broker_read, adapter_read, records, host
     return observation
 
 
-def collect(cell, host, root, output, evidence, collect_only=False):
+def assemble_driver_capture(cell, host, evidence, *, profile, cursor=None):
+    """Thin checked-table adapter; policy and expected inputs stay caller-owned."""
+    from capture_store import checked_context
+    from evidence_io import checked_bytes
+    from capture_context import CaptureContext
+    bundle = None
+    tables = None
+    try:
+        tables, bundle = host.observe(cursor)
+        context = checked_context(tables, bundle, live=profile.execution == 'live')
+    except Exception as error:
+        context = CaptureContext({}, {}, [])
+        context.problem('driver-observations', 'observe', type(error).__name__ + ': ' + str(error))
+    def read(table):
+        entries = context.entries(table)
+        if entries:
+            return context.reads[entries[0]['artifact_id']]
+        if bundle and tables:
+            entries = [entry for entry in bundle.inventory if entry['table'] == table]
+            if len(entries) == 1:
+                return dict(tables.reads)[entries[0]['artifact_id']]
+        result = checked_bytes(b'')
+        result.update(state='missing', bytes=None, sha256=None, detail='observer artifact unavailable')
+        return result
+    broker, adapter, host_read = read('broker'), read('adapter'), read('host')
+    observed_evidence = dict(context.descriptor.get('evidence', {}), **evidence)
+    observation = capture_observation(cell, observed_evidence, broker, adapter, host_read['records'], host_read,
+                                      capture_context=context)
+    inputs = build_verdict_inputs(cell, observed_evidence, raw_observation=observation,
+                                 pinned_scenario=profile.scenario, pinned_contract=profile.contract)
+    parity = None
+    if profile.execution == 'live':
+        from capture_context import host_shape_valid
+        safe_records = [record for record in host_read['records'] if host_shape_valid(record)]
+        baseline = capture_observation(cell, observed_evidence, broker, adapter, safe_records, host_read)
+        baseline_inputs = build_verdict_inputs(cell, observed_evidence, raw_observation=baseline,
+                                              pinned_scenario=profile.scenario, pinned_contract=profile.contract)
+        legacy, current = evaluate(*baseline_inputs), evaluate(*inputs)
+        parity = dict(matches=legacy == current, legacy=legacy, driver=current)
+    return dict(parity=parity, inputs=inputs, context=context, bundle=bundle, evidence=observed_evidence,
+                classifications=deepcopy(context.decisions), diagnostics=deepcopy(context.diagnostics),
+                reads=dict(tables.reads) if tables else {}, verdict=evaluate(*inputs), broker_read=broker, adapter_read=adapter, host_read=host_read)
+
+
+def collect(cell, host, root, output, evidence, collect_only=False, capture_profile=None):
+    from capture_store import DriverCapture
+    if isinstance(host, DriverCapture):
+        host, capture_profile = host.driver, host.profile
     output.mkdir(parents=True, exist_ok=True)
-    broker_read = checked_read(root / "broker/broker.log")
-    adapter_read = checked_read(root / "control/adapter.log")
+    capture = assemble_driver_capture(cell, host, evidence, profile=capture_profile) if capture_profile is not None else None
+    broker_read = capture['broker_read'] if capture else checked_read(root / "broker/broker.log")
+    adapter_read = capture["adapter_read"] if capture else checked_read(root / "control/adapter.log")
     broker_log, adapter_log = broker_read["text"], adapter_read["text"]
     attempts = attempt_events(broker_log)
     tokens = {e["token"] for e in attempts if e.get("token")}
     try:
-        records = host.records() if host else []
+        records = capture["host_read"]["records"] if capture else host.records() if host else []
     except Exception as exc:
         records = []
         evidence.setdefault("setup_errors", []).append(f"collection: {type(exc).__name__}: {exc}")
-    host_read = None
-    if host and not evidence.get('setup_errors'):
+    host_read = capture["host_read"] if capture else None
+    if not capture and host and not evidence.get('setup_errors'):
         try:
             transcript = host.transcript()
             host_read = checked_read(transcript, jsonl=True) if transcript is not None else dict(state='missing', records=[], text='', detail='transcript unavailable')
@@ -461,7 +384,11 @@ def collect(cell, host, root, output, evidence, collect_only=False):
         tokens.add(expected["token"])
     expectations = [classify_fetch(record, expected, fetch_calls) if cell.transport == "fetch" else classify(record)
                     for record in selected]
-    events = host.events() if host else []
+    events = [] if capture else host.events() if host else []
+    if capture and capture['bundle']:
+        from evidence_io import checked_bytes
+        events = [row for ref, data in capture['bundle'].artifacts if ref.artifact_id == 'proxy'
+                  for row in checked_bytes(data, format='jsonl')['records']]
     evidence.update(notice_evidence(broker_log, cell.count))
     evidence["route_line_limit"] = route_line_limit(cell)
     evidence["attempts"] = attempts
@@ -474,12 +401,12 @@ def collect(cell, host, root, output, evidence, collect_only=False):
     evidence["fetch_source_occurrences"] = sum(json.dumps(b.get("content")).count("MATRIX_SAMPLE") for b in fetch_results)
     evidence["fetch_token"] = bool(expected)
     evidence["fetch_trailer_complete"] = any(classify_fetch(r, expected, fetch_calls)["accept"] for r in records) if expected else False
-    raw_observation = capture_observation(cell, evidence, broker_read, adapter_read, records, host_read)
-    inputs = build_verdict_inputs(cell, evidence, raw_observation=raw_observation, collect_only=collect_only)
+    raw_observation = capture['inputs'][2] if capture else capture_observation(cell, evidence, broker_read, adapter_read, records, host_read)
+    inputs = capture['inputs'] if capture else build_verdict_inputs(cell, evidence, raw_observation=raw_observation, collect_only=collect_only)
     if evidence.get("setup_errors"):
         evaluation = evaluate(*inputs)
     else:
-        evaluation = verdict(cell, evidence, raw_observation=raw_observation, collect_only=collect_only, full_result=True)
+        evaluation = evaluate(*inputs)
         projections = derive(*inputs)
         for key in ("injected", "received", "rows_final", "fetch_tool_result", "fetch_source_occurrences", "fetch_token",
                     "fetch_trailer_complete", "no_false_held", "false_held", "route_line_count"):
@@ -487,6 +414,10 @@ def collect(cell, host, root, output, evidence, collect_only=False):
     result = {"cell": cell.name, "status": evaluation["status"], "reasons": evaluation["reasons"],
               "evidence": evidence,
               "todo_records": sum(e["accept"] is None for e in expectations), "not_evaluated": evaluation["not_evaluated"]}
+    if capture:
+        result['collection_diagnostics'] = capture['diagnostics']
+    if capture and capture['parity'] is not None:
+        result['capture_parity'] = capture['parity']
     # A setup failure may still have a complete or damaged transcript to export.
     # This extra final read is for the artifact; it does not change the assembler.
     export_host_read = host_read
@@ -498,7 +429,7 @@ def collect(cell, host, root, output, evidence, collect_only=False):
         except Exception:
             export_host_read = dict(state='unreadable', text='', records=[], detail='transcript unavailable during export')
     result, context = export_capture(output, root, checked_read, broker_read, adapter_read, records, export_host_read, events,
-                                     inputs, result, tokens=tokens, receipt_ids=receipt_ids)
+                                     inputs, result, tokens=tokens, receipt_ids=receipt_ids, driver_capture=capture)
     # Compatibility output is deliberately separate from the complete capture.
     # Rejected trailer candidates also contain private tokens/rows. Add their
     # hints only after legacy selection, preserving the old selection semantics.

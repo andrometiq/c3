@@ -92,8 +92,9 @@ def contained_file(root, name):
         return False
 
 
-def _load_context(root, *, live=False):
-    descriptor_read = checked_read(root / 'capture.json', format='json')
+def _load_context(root, *, live=False, reader=None):
+    read_artifact = reader or checked_read
+    descriptor_read = read_artifact(root / 'capture.json', format='json')
     descriptor = next(iter(descriptor_read['records']), {})
     context = CaptureContext(descriptor, {}, [])
     descriptor_schema = dict(schema_version=lambda v: type(v) is int and v == 1,
@@ -123,7 +124,7 @@ def _load_context(root, *, live=False):
         files.add(entry['file'])
         context.inventory.append(entry)
         identity = entry['artifact_id']
-        read = checked_read(root / entry['file'], format=entry['format'])
+        read = read_artifact(root / entry['file'], format=entry['format'])
         context.reads[identity] = read
         seal = entry['seal']
         if read['bytes'] is not None and read['bytes'] < seal['bytes']:
@@ -237,6 +238,14 @@ def assemble_context(cell, evidence, broker_read, adapter_read, records, host_re
         scope['run_id'] = evidence.get('run_id', 'unrecorded-run')
         observation['streams'] = [dict(id='state', role='state', scope=scope, state='malformed', first_seq=None,
             last_seq=None, through_barrier_id=None, artifact_ids=[CAPTURE_ARTIFACT], detail='capture context must be checked raw tables; canonical input forbidden')]
+        return observation
+    if not context.descriptor:
+        # Retain the legacy incomplete facts on descriptor failure. Missing v1
+        # identities cannot erase a raw attempt or authorize a delivery witness.
+        from collect import capture_observation
+        safe_records = [record for record in records if host_shape_valid(record)]
+        observation = capture_observation(cell, evidence, broker_read, adapter_read, safe_records, host_read)
+        observation['collection_complete'] = False
         return observation
     # The seam's principal arguments remain authoritative. A context may bind
     # their occurrences, but cannot substitute an older copy of the raw evidence.

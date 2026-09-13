@@ -33,12 +33,12 @@ def attempt_label_keys(value, *, restore=False):
     return result
 
 
-def export_replay_capture(replay, destination):
+def export_replay_capture(replay, destination, *, redaction_context=None, write=True):
     capture = replay['context']
-    descriptor = deepcopy(capture.descriptor)
+    descriptor = deepcopy(replay.get('descriptor', capture.descriptor))
     scenario, contract, observation = replay['inputs']
     inputs = attempt_label_keys(dict(scenario=scenario, contract=contract, observation=observation))
-    context = RedactionContext()
+    context = redaction_context if redaction_context is not None else RedactionContext()
     # Filenames and extent hashes are representation metadata, not private IDs.
     identity_descriptor = {key:value for key,value in descriptor.items() if key != 'artifacts'}
     identity_inventory = [{key:value for key,value in entry.items() if key not in ('file','seal')} for entry in descriptor['artifacts']]
@@ -127,10 +127,11 @@ def export_replay_capture(replay, destination):
             format = entry['format'] if entry else 'json'
             schema = {'host':'host','broker':'broker','adapter':'adapter','held':'ipc'}.get(entry['table'], 'generic') if entry else 'canonical'
             context.check_export_text(data.decode(), format='text' if format=='log' else format, schema=schema)
-    destination.mkdir(parents=True, exist_ok=True)
-    for name, data in rendered.items():
-        path = destination / name
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(data)
-    return dict(inputs=clean_inputs, diagnostics=sanitize(replay['diagnostics'], context=context),
+    if write:
+        destination.mkdir(parents=True, exist_ok=True)
+        for name, data in rendered.items():
+            path = destination / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(data)
+    return dict(rendered=rendered, inputs=clean_inputs, diagnostics=sanitize(replay['diagnostics'], context=context),
                 classifications=sanitize(replay['classifications'], context=context))

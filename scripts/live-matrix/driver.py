@@ -65,6 +65,7 @@ def default_profile(host, args, cell, scratch, version):
     case = next(case for case in description['capabilities']['cases'] if case['id'] == cell.name)
     scenario, _, _ = build_verdict_inputs(cell, {'run_id': scratch.run_id, 'route_id': 'test-inject/42'},
                                          collect_only=args.collect_only)
+    scenario["observation_duration_ms"] = getattr(args, "observe_seconds", 80) * 1000
     setup = args.setup_timeout
     return RunProfile(description, case, scenario, resolve_contract(description, case), args.claude.resolve(), version,
                       'matrix', None, workload=Workload('sleep', getattr(args, 'sleep_seconds', 35) * 1000, 'workload'),
@@ -152,6 +153,8 @@ def run_cell(args, cell, binaries, repo, version, *, host_driver=None, profile=N
             command += ["--photo"]
         response = subprocess.run(command, check=True, capture_output=True, text=True, timeout=10)
         admitted = json.loads(response.stdout)
+        from capture_store import record_injection
+        record_injection(root, admitted, cell.kind)
         evidence.update(injected=admitted["accepted"], message_ids=admitted["message_ids"], injected_at=time.time())
         if gate:
             # Allow ordinary debounce/persistence to finish while initialized is
@@ -181,6 +184,7 @@ def run_cell(args, cell, binaries, repo, version, *, host_driver=None, profile=N
         while time.monotonic() < deadline:
             host.observe()
             time.sleep(0.2)
+        checkpoint("final")
         evidence["rows_final"] = len(queue_rows(root))
         evidence["false_held"] = false_held(broker_text(root), cell.count)
     except Exception as exc:
@@ -190,7 +194,9 @@ def run_cell(args, cell, binaries, repo, version, *, host_driver=None, profile=N
     finally:
         # Collect before stopping: shutdown/holder death changes queue state.
         try:
-            result = collect(cell, host, root, output, evidence, args.collect_only)
+            from capture_store import DriverCapture
+            source = DriverCapture(host, profile) if profile is not None else host
+            result = collect(cell, source, root, output, evidence, args.collect_only)
             if args.fixtures and ((output / 'legacy-fixture-refused.txt').exists() or (output / "records.jsonl").stat().st_size):
                 export_fixtures(output, repo, version, cell)
         finally:

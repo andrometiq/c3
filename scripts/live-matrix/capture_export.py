@@ -75,10 +75,47 @@ def capture_controls(root, checked_read):
     return sorted(artifacts, key=lambda artifact: artifact.name)
 
 
+def control_values(value):
+    """Tag protocol-only control identifiers for the existing redaction registry."""
+    if type(value) is list:
+        return [control_values(item) for item in value]
+    if type(value) is not dict:
+        return value
+    tags = {'boundary_id': ('boundary', 'checkpoint_id'), 'release_id': ('release', 'opaque_id'),
+            'session_handle_id': ('session_handle', 'opaque_id'), 'handle_id': ('handle', 'opaque_id'),
+            'scratch_id': ('scratch', 'opaque_id'), 'driver_id': ('driver_name', 'opaque_id'),
+            'workload_id': ('workload', 'opaque_id')}
+    result = {}
+    for key, item in value.items():
+        if key in tags:
+            name, domain = tags[key]
+            result[name] = {domain: item}
+        else:
+            result[key] = control_values(item)
+    return result
+
+
 def export_capture(output, root, checked_read, broker_read, adapter_read, records, host_read, events,
-                   inputs, report, *, tokens=(), receipt_ids=()):
+                   inputs, report, *, tokens=(), receipt_ids=(), driver_capture=None):
     scenario, contract, observation = inputs
-    controls = capture_controls(root, checked_read)
+    failed_snapshot = driver_capture is not None and driver_capture['bundle'] is None
+    controls = capture_controls(root, checked_read) if driver_capture is None or failed_snapshot else []
+    if failed_snapshot:
+        broker_read = checked_read(root / 'broker/broker.log')
+        adapter_read = checked_read(root / 'control/adapter.log')
+    if driver_capture and driver_capture['bundle']:
+        from evidence_io import checked_bytes
+        for ref, data in driver_capture['bundle'].artifacts:
+            if ref in driver_capture['bundle'].control_refs:
+                schema = 'session_hook' if ref.artifact_id == 'sessions' else 'generic'
+                if ref.artifact_id.startswith('prior-host'):
+                    schema = 'host'
+                elif ref.artifact_id in ('prior-broker', 'prior-adapter'):
+                    schema = ref.artifact_id.removeprefix('prior-')
+                controls.append(Artifact(ref.locator, checked_bytes(data, format='jsonl' if ref.locator.endswith(('.jsonl', '.json')) else 'log'),
+                                         schema, jsonl=ref.locator.endswith(('.jsonl', '.json'))))
+                if ref.artifact_id in ('controls', 'prior-controls'):
+                    controls[-1].value = control_values(controls[-1].value)
     broker = Artifact('broker.log', broker_read, 'broker')
     adapter = Artifact('adapter.log', adapter_read, 'adapter')
     if host_read is None:
@@ -92,6 +129,9 @@ def export_capture(output, root, checked_read, broker_read, adapter_read, record
     if not held_responses and report['evidence'].get('fetch_result') is not None:
         held_responses = [report['evidence']['fetch_result']]
     verdict_inputs = dict(scenario=scenario, contract=contract, observation=observation)
+    if driver_capture:
+        from replay_export import attempt_label_keys
+        verdict_inputs = attempt_label_keys(verdict_inputs)
     artifacts = [broker, adapter, host, *controls]
     descriptor = dict(schema_version=1, redaction_version='identity-v1', capture_id=scenario['id'],
                       scenario=scenario, context=[],
@@ -112,14 +152,30 @@ def export_capture(output, root, checked_read, broker_read, adapter_read, record
         context.discover(artifact.value, schema=artifact.schema)
     context.discover(events)
     context.discover(verdict_inputs, schema='canonical')
-    context.discover(observation, schema='canonical')
+    context.discover(verdict_inputs['observation'], schema='canonical')
     context.discover(report)
     # Include every detail in discovery; diagnostics from checked_read are safe,
     # but callers must never be able to bypass redaction with an error string.
     context.discover([artifact.detail for artifact in artifacts])
+    context_export = None
+    if driver_capture and driver_capture['bundle']:
+        from copy import deepcopy
+        from capture_context import CaptureContext
+        from replay_export import export_replay_capture
+        bundle = driver_capture['bundle']
+        raw_descriptor = next(json.loads(data) for ref, data in bundle.artifacts if ref.artifact_id == 'capture-descriptor')
+        # Invalid setup descriptors still export their actual inventory and failed
+        # reads; they are never repaired with expected scenario identities.
+        export_context = deepcopy(driver_capture['context'])
+        if not export_context.inventory:
+            export_context = CaptureContext(raw_descriptor, deepcopy(driver_capture['reads']), list(bundle.inventory))
+        replay = dict(driver_capture, context=export_context, descriptor=raw_descriptor)
+        context_export = export_replay_capture(replay, output / 'checked', redaction_context=context, write=False)
     context.seal()
     descriptor['redaction_diagnostics'] = context.diagnostics
     clean_inputs = sanitize(verdict_inputs, context=context, schema='canonical')
+    if driver_capture:
+        clean_inputs = attempt_label_keys(clean_inputs, restore=True)
     clean_report = sanitize(report, context=context)
     descriptor.update(sanitize(identity_descriptor, context=context))
     rendered = {}
@@ -134,7 +190,7 @@ def export_capture(output, root, checked_read, broker_read, adapter_read, record
         rendered[f'replay/held-fetch/response-{index}.json'] = json_text(sanitize(held, context=context, schema='ipc'))
     rendered['replay/capture.json'] = json_text(descriptor)
     rendered['replay/verdict-inputs.json'] = json_text(clean_inputs)
-    rendered['observation.json'] = json_text(sanitize(observation, context=context, schema='canonical'))
+    rendered['observation.json'] = json_text(clean_inputs['observation'])
     rendered['summary.json'] = json_text(clean_report)
     for name in ('broker.log', 'adapter.log'):
         if 'replay/' + name in rendered:
@@ -150,10 +206,18 @@ def export_capture(output, root, checked_read, broker_read, adapter_read, record
     for name, text in rendered.items():
         format = 'jsonl' if name.endswith('.jsonl') else 'json' if name.endswith('.json') else 'text'
         context.check_export_text(text, format=format, schema=schemas.get(name, 'generic'))
+    if context_export:
+        for name, data in context_export['rendered'].items():
+            # Raw replay exporter has audited these representation-correct bytes,
+            # including deliberate malformed-byte placeholders.
+            path = output / 'checked' / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(data)
     output.mkdir(parents=True, exist_ok=True)
     for directory in ('replay/context', 'replay/held-fetch', 'replay/control'):
         (output / directory).mkdir(parents=True, exist_ok=True)
     for name, text in rendered.items():
+        (output / name).parent.mkdir(parents=True, exist_ok=True)
         (output / name).write_text(text)
     return clean_report, context
 

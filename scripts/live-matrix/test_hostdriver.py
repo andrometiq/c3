@@ -315,9 +315,11 @@ class DriverControls(unittest.TestCase):
         wrapper = self.prepare()
         wrapper.launch()
         tables, artifacts = wrapper.observe()
-        self.assertEqual(tables, ObserverTables())
+        self.assertEqual(dict(tables.reads)['host-records']['state'], 'missing')
+        self.assertIn('ownership-observers', dict(tables.reads))
         self.assertEqual(artifacts.artifacts[0][1], self.pane.encode())
-        self.assertIsNone(artifacts.next_cursor)
+        self.assertEqual(artifacts.next_cursor.run_id, self.scratch.run_id)
+        self.assertEqual(artifacts.next_cursor.snapshot_id, artifacts.snapshot_id)
         result = collect(Cell('channel', 'idle', 'resumed', 'text', 'single'), wrapper,
                          self.scratch.root, self.scratch.root / 'output', {'setup_errors': [], 'injected': True})
         self.assertEqual(result['status'], 'FAIL')
@@ -329,7 +331,10 @@ class DriverControls(unittest.TestCase):
     def test_replay_and_construction_do_not_execute(self):
         factory = Mock(side_effect=AssertionError('backend execution'))
         wrapper = self.prepare(execution='replay', backend_factory=factory)
-        self.assertEqual(wrapper.observe()[0], ObserverTables())
+        tables, bundle = wrapper.observe()
+        self.assertEqual(dict(tables.reads)['host-records']['state'], 'missing')
+        self.assertEqual(dict(tables.reads)['receipt-observers']['state'], 'missing')
+        self.assertIsInstance(bundle.next_cursor, ObservationCursor)
         with self.assertRaises(DriverError) as caught:
             wrapper.launch()
         self.assertEqual(caught.exception.kind, 'unsupported')

@@ -113,6 +113,7 @@ class ClaudeHostDriver:
         self._session_line = 0
         self._gates = {}
         self._workload = None
+        self._observed_state = None
         self._submission_pending = False
         self._is_disposed = False
         self._is_prepared = False
@@ -202,6 +203,8 @@ class ClaudeHostDriver:
         self._binding = (scratch, adapter, broker, self._profile)
         self._clock = profile.clock
         self._instance_id = uuid.uuid4().hex
+        from hostdrivers.claude_evidence import ClaudeObservation
+        self._observation = ClaudeObservation(scratch, broker, adapter, self._profile, self._instance_id)
         if profile.case['feasibility'] != 'feasible':
             self._error('missing_prerequisite' if profile.case['feasibility'] == 'unknown' else 'unsupported', profile.case['reason'])
         if profile.execution == 'replay':
@@ -307,13 +310,20 @@ class ClaudeHostDriver:
             gate = self._gates.get('readiness')
             if workload.kind != 'none' or not gate or gate['status'] != 'held':
                 self._error('invalid_request', 'requested state requires a held readiness gate')
+        self._observed_state = state
         evidence = self._control(facts)
         return StateEvidence(**evidence, state=state, workload_id=workload_id,
                              valid_from=evidence['positions'][0], valid_until=None)
 
     def _checkpoint(self, boundary):
         facts = {}
-        if boundary == 'adapter-attached':
+        if boundary == 'observation-end':
+            # Persist the boundary so frozen observation has the same authority
+            # as live observation; read time is never an event timestamp.
+            facts['observation_window_end'] = dict(
+                observed_state='idle' if self._backend.composer() is not None else None,
+                clock_id='control-monotonic', time_ms=int(self._clock.monotonic() * 1000))
+        elif boundary == 'adapter-attached':
             gate = self._gates.get('readiness')
             after = gate['event']['time'] if gate and gate['status'] == 'released' else self._launch_time
             self._backend.wait_event('attached', after)
@@ -330,6 +340,12 @@ class ClaudeHostDriver:
             transcript = self._backend.transcript()
             if self._profile.case['session'] == 'fresh' and transcript and transcript.exists() and transcript.stat().st_size:
                 self._error('unrecognized_state', 'RuntimeError: fresh cell already has a transcript before injection')
+            from evidence_io import checked_read
+            selected_read = checked_read(transcript, jsonl=True) if transcript is not None else None
+            if self._session.host_session_id and selected_read is not None and selected_read['state'] == 'complete':
+                facts['observer_rows'] = [dict(action='session_sample',
+                    operation='resume' if self._session.posture == 'resumed' else 'new',
+                    host_session_ref=self._session.host_session_id, transcript_records=len(selected_read['records']))]
             if self._profile.case['transport'] == 'inbox':
                 started = self._backend.events('proxy_started', self._launch_time)
                 if not started or not started[-1].get('inbox_env'):
@@ -348,6 +364,11 @@ class ClaudeHostDriver:
             if gate and gate['status'] == 'held' and any(
                     event.get('pid') == gate['event']['pid'] for event in self._backend.events('initialized_released', gate['event']['time'])):
                 self._error('unrecognized_state', 'readiness gate was released before injection')
+            observed_state = self._observed_state
+            if self._gates.get('readiness', {}).get('status') == 'held':
+                observed_state = self._profile.case['state']
+            if observed_state is not None:
+                facts['observer_rows'] = [dict(action='state_sample', observed_state=observed_state)]
         elif boundary == 'offers-before-ready':
             gate = self._gates.get('readiness')
             if not gate or gate['status'] != 'held':
@@ -438,7 +459,9 @@ class ClaudeHostDriver:
                 else:
                     self._error('invalid_request', 'invalid gate action')
             status, release_id = gate['status'], gate['release_id']
-        evidence = self._control(dict(facts, barrier=asdict(point), status=status))
+        barrier_record = asdict(point)
+        barrier_record['barrier_id'] = barrier_record.pop('id')
+        evidence = self._control(dict(facts, barrier=barrier_record, status=status))
         return Release(**evidence, release_id=release_id, barrier_id=point.id, status=status, cuts=())
 
     @controlled
@@ -460,20 +483,9 @@ class ClaudeHostDriver:
     def observe(self, cursor=None):
         if self._profile is None:
             self._error('invalid_request', 'driver is not prepared')
-        if cursor is not None:
-            from hostdriver import ObservationCursor
-            if not isinstance(cursor, ObservationCursor) or type(cursor.schema_version) is not int or cursor.schema_version != 1 or cursor.driver_instance_id != self._instance_id or cursor.run_id != self._scratch.run_id:
-                self._error('invalid_request', 'foreign observation cursor')
-            self._error('unsupported', 'incremental artifact observation is deferred')
-        # Lane 1 retains pane polling. Checked table production belongs to step 4.
         if self._profile.execution == 'live' and self._session is not None and not self._is_disposed:
-            pane = self._backend.pane().encode()
-        else:
-            path = (self._profile.artifact_source or self._scratch.root) / 'control/pane.txt'
-            pane = path.read_bytes() if path.exists() else b''
-        reference = ArtifactRef('pane', 'control/pane.txt')
-        return ObserverTables(), ArtifactBundle(self._scratch.run_id, self._operation_id, None,
-            artifacts=((reference, pane),), diagnostics=('legacy observation; checked observer tables are unavailable',))
+            self._backend.pane()
+        return self._observation.observe(cursor)
 
     @controlled
     def stop(self, preserve_session):
@@ -507,7 +519,7 @@ class ClaudeHostDriver:
         self._session = None
         return None
 
-    # The unchanged collector still consumes these readers until step 5.
+    # Compatibility readers for legacy fixture callers; live assembly uses observe().
     def records(self):
         return self._backend.records() if self._backend is not None else []
 
