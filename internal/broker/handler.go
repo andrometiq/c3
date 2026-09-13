@@ -8,6 +8,7 @@ import (
 	"log"
 	"net"
 	"os"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -334,6 +335,15 @@ func (b *Broker) buildHelloAck(hello ipc.HelloMsg, stub *Stub) ipc.HelloAckMsg {
 		// too (an older broker omits it ⇒ the adapter reads v1).
 		ProtocolVersion: ipc.ProtocolVersion,
 	}
+	supported := supportedCapabilities()
+	for _, capability := range hello.Capabilities {
+		if slices.Contains(supported, capability) && !slices.Contains(ack.AcceptedCapabilities, capability) {
+			ack.AcceptedCapabilities = append(ack.AcceptedCapabilities, capability)
+		}
+	}
+	stub.stubMu.Lock()
+	stub.helloAcceptedCaps = slices.Clone(ack.AcceptedCapabilities)
+	stub.stubMu.Unlock()
 	if len(b.Mappings().Channels) == 0 {
 		ack.NoConfig = true
 	} else if _, ok := b.Mappings().LookupByCwd(hello.CWD); !ok {

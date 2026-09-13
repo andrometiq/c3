@@ -373,16 +373,17 @@ type RecoverSessionResp struct {
 
 // HelloAckMsg is the broker's response to HelloMsg.
 type HelloAckMsg struct {
-	Build        string              `json:"build,omitempty"`
-	Upgrade      *UpgradeHint        `json:"upgrade,omitempty"`
-	Delivery     *DeliveryAcceptance `json:"delivery,omitempty"`
-	Op           Op                  `json:"op"` // = OpHelloAck
-	ConnID       uint64              `json:"conn_id"`
-	AutoAttached bool                `json:"auto_attached"`
-	Mapping      *Mapping            `json:"mapping,omitempty"`
-	ClaimHolder  *Holder             `json:"claim_holder,omitempty"`
-	NoConfig     bool                `json:"no_config,omitempty"`
-	NoMapping    bool                `json:"no_mapping,omitempty"`
+	AcceptedCapabilities []string            `json:"accepted_capabilities,omitempty"`
+	Build                string              `json:"build,omitempty"`
+	Upgrade              *UpgradeHint        `json:"upgrade,omitempty"`
+	Delivery             *DeliveryAcceptance `json:"delivery,omitempty"`
+	Op                   Op                  `json:"op"` // = OpHelloAck
+	ConnID               uint64              `json:"conn_id"`
+	AutoAttached         bool                `json:"auto_attached"`
+	Mapping              *Mapping            `json:"mapping,omitempty"`
+	ClaimHolder          *Holder             `json:"claim_holder,omitempty"`
+	NoConfig             bool                `json:"no_config,omitempty"`
+	NoMapping            bool                `json:"no_mapping,omitempty"`
 
 	// Capabilities carries the resolvable channel's static capability
 	// manifest so the adapter can fold GuidanceFor(caps) into the agent's

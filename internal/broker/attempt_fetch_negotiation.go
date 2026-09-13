@@ -9,6 +9,10 @@ import (
 	"github.com/Andrometiq/c3/internal/ipc"
 )
 
+func supportedCapabilities() []string {
+	return []string{"intake_metadata:1"}
+}
+
 func deliveryAcceptance(offer ipc.DeliveryOffer) *ipc.DeliveryAcceptance {
 	modes := []string{}
 	if offer.Receipts == "transcript" {
@@ -95,6 +99,14 @@ func (b *Broker) handleDeliveryReport(s *Stub, raw []byte) {
 			}
 			s.deliveryReady.Store(true)
 			b.rearmDelivery(s)
+		}
+		if slices.Contains(msg.AcceptedCapabilities, "intake_metadata:1") && slices.Contains(msg.Accepted, "fetch_receipt") {
+			s.stubMu.Lock()
+			offered := slices.Contains(s.helloAcceptedCaps, "intake_metadata:1")
+			s.stubMu.Unlock()
+			if offered {
+				s.intakeActive.Store(true)
+			}
 		}
 	}
 	if s.negotiated() && msg.ReceiptShapeDrift != "" {
