@@ -342,7 +342,7 @@ func TestNoticeHeldWorkerEvents(t *testing.T) {
 					}
 				case "enrichment":
 					b.Voice.wg.Add(1)
-					b.Workers.Submit(key, Job{Kind: JobResolveVoice, ResolveVoice: &ResolveVoiceJob{Key: voiceScheduleKey{route: key, messageID: 1, fileID: "voice-file"}, Targets: []voiceResolveTarget{{recordID: id}}, Inbound: *in, FileID: "voice-file", SegmentText: "enriched", Success: true}})
+					b.Workers.Submit(key, Job{Kind: JobResolveVoice, ResolveVoice: &ResolveVoiceJob{Key: voiceScheduleKey{route: key, messageID: 1, fileID: "voice-file"}, Targets: []voiceResolveTarget{{recordID: id, inbound: cloneVoiceInbound(*in)}}, FileID: "voice-file", SegmentText: "enriched", Success: true}})
 				case "drain import":
 					done := make(chan DrainAppendResult, 1)
 					b.Workers.Submit(key, Job{Kind: JobDrainAppend, DrainAppend: &DrainAppendJob{From: "source", Messages: []DrainAppendMessage{{Inbound: *in, SourceRecordID: "source-row"}}, ResultCh: done}})

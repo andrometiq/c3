@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/Andrometiq/c3/internal/c3types"
+	"github.com/Andrometiq/c3/internal/intake"
 	"github.com/Andrometiq/c3/internal/mappings"
 )
 
@@ -95,6 +96,8 @@ type voiceResolve struct {
 // several targets when Telegram delivers an edit while the original row is
 // still pending.
 type voiceResolveTarget struct {
+	inbound        c3types.Inbound
+	source         *intake.Source
 	recordID       string
 	group          *voiceGroup
 	findPending    bool
@@ -285,15 +288,16 @@ func cloneVoiceInbound(in c3types.Inbound) c3types.Inbound {
 	return in
 }
 
-func (s *VoiceScheduler) ScheduleAuto(route RouteKey, recordID string, in c3types.Inbound, voices []c3types.Attachment, initialNotice string, echo voiceEchoReservation) bool {
-	return s.schedule(route, recordID, in, voices, initialNotice, echo, false, false, nil) == nil
+func (s *VoiceScheduler) ScheduleAuto(route RouteKey, recordID string, in c3types.Inbound, voices []c3types.Attachment, initialNotice string, echo voiceEchoReservation, sources ...*intake.Source) bool {
+	return s.schedule(route, recordID, in, voices, initialNotice, echo, false, false, nil, intake.Optional(sources)) == nil
 }
 
 func (s *VoiceScheduler) ScheduleManual(route RouteKey, recordID string, in c3types.Inbound, att c3types.Attachment, transcriptOnly bool, hook chan<- voiceScheduleResult) error {
 	return s.schedule(route, recordID, in, []c3types.Attachment{att}, "", voiceEchoReservation{}, true, transcriptOnly, hook)
 }
 
-func (s *VoiceScheduler) schedule(route RouteKey, recordID string, in c3types.Inbound, voices []c3types.Attachment, initialNotice string, echo voiceEchoReservation, manual, transcriptOnly bool, hook chan<- voiceScheduleResult) error {
+func (s *VoiceScheduler) schedule(route RouteKey, recordID string, in c3types.Inbound, voices []c3types.Attachment, initialNotice string, echo voiceEchoReservation, manual, transcriptOnly bool, hook chan<- voiceScheduleResult, sources ...*intake.Source) error {
+	source := intake.Optional(sources)
 	now := s.clock.Now()
 	manualDeferred := manual && s.healthDown(route.Channel) && !s.broker.voiceCachedLocally(route.Channel, firstVoiceFileID(voices))
 	s.mu.Lock()
@@ -339,7 +343,7 @@ func (s *VoiceScheduler) schedule(route RouteKey, recordID string, in c3types.In
 				existing.firstFailure = now
 			}
 			if !manual {
-				s.addTargetLocked(existing, recordID, group, false, false)
+				s.addTargetLocked(existing, recordID, group, false, false, in, source)
 			}
 			added = true
 			continue
@@ -356,7 +360,7 @@ func (s *VoiceScheduler) schedule(route RouteKey, recordID string, in c3types.In
 			entry.hooks = append(entry.hooks, hook)
 		}
 		s.entries[key] = entry
-		s.addTargetLocked(entry, recordID, group, manual && !transcriptOnly, transcriptOnly)
+		s.addTargetLocked(entry, recordID, group, manual && !transcriptOnly, transcriptOnly, in, source)
 		added = true
 	}
 	groupUnused := group.remaining == 0
@@ -385,7 +389,7 @@ func firstVoiceFileID(voices []c3types.Attachment) string {
 	return ""
 }
 
-func (s *VoiceScheduler) addTargetLocked(entry *voiceEntry, recordID string, group *voiceGroup, findPending, transcriptOnly bool) {
+func (s *VoiceScheduler) addTargetLocked(entry *voiceEntry, recordID string, group *voiceGroup, findPending, transcriptOnly bool, in c3types.Inbound, source *intake.Source) {
 	if entry == nil || group == nil {
 		return
 	}
@@ -401,12 +405,15 @@ func (s *VoiceScheduler) addTargetLocked(entry *voiceEntry, recordID string, gro
 			delete(entry.targets, "")
 			pending.recordID = recordID
 			pending.findPending = false
+			pending.inbound = cloneVoiceInbound(in)
+			pending.source = source.Clone()
 			entry.targets[recordID] = pending
 			return
 		}
 	}
 	entry.targets[recordID] = voiceResolveTarget{
 		recordID: recordID, group: group, findPending: findPending, transcriptOnly: transcriptOnly,
+		inbound: cloneVoiceInbound(in), source: source.Clone(),
 	}
 	entry.groups = append(entry.groups, group)
 	group.order = append(group.order, entry.key.fileID)
@@ -454,7 +461,7 @@ func (s *VoiceScheduler) RecoverPending() {
 				log.Printf("voice scheduler: pending row record=%s msg=%d names file_id=%s absent from Attachments; scheduling a visible failure path", row.RecordID, row.Inbound.MessageID, fileID)
 				voices = append(voices, c3types.Attachment{Kind: "voice", FileID: fileID})
 			}
-			if s.ScheduleAuto(route, row.RecordID, row.Inbound, voices, "", voiceEchoReservation{}) {
+			if s.ScheduleAuto(route, row.RecordID, row.Inbound, voices, "", voiceEchoReservation{}, row.Source) {
 				recovered++
 			}
 		}
@@ -801,6 +808,8 @@ func (s *VoiceScheduler) submitResolve(key voiceScheduleKey) {
 	targets := make([]voiceResolveTarget, 0, len(entry.targets))
 	for targetID, target := range entry.targets {
 		if !entry.applied[targetID] {
+			target.inbound = cloneVoiceInbound(target.inbound)
+			target.source = target.source.Clone()
 			targets = append(targets, target)
 		}
 	}
@@ -811,7 +820,7 @@ func (s *VoiceScheduler) submitResolve(key voiceScheduleKey) {
 		return
 	}
 	job := &ResolveVoiceJob{
-		Key: key, Targets: targets, Inbound: cloneVoiceInbound(entry.inbound),
+		Key: key, Targets: targets,
 		FileID: key.fileID, SegmentText: entry.resolve.segmentText, Success: entry.resolve.success,
 	}
 	entry.state = voiceResolveSubmitted

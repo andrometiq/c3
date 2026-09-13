@@ -49,7 +49,7 @@ func TestFlushPendingAck_RequeuesAndNotifies(t *testing.T) {
 	w := newRouteWorker(context.Background(), key, time.Hour, b)
 	defer w.Stop()
 
-	w.pendingAck = []pendingDelivery{{sources: []*c3types.Inbound{inbound(tid, 1, "first")}}, {sources: []*c3types.Inbound{inbound(tid, 2, "second")}}}
+	w.pendingAck = []pendingDelivery{{sources: unsourcedInbounds([]*c3types.Inbound{inbound(tid, 1, "first")})}, {sources: unsourcedInbounds([]*c3types.Inbound{inbound(tid, 2, "second")})}}
 	w.flushPendingAck("The session exited")
 
 	if n, _ := b.Queue.Pending(queueRouteKey(key)); n != 2 {
@@ -166,7 +166,7 @@ func TestStalePath_FlushesPendingAck(t *testing.T) {
 
 	w := newRouteWorker(context.Background(), key, time.Hour, b)
 	defer w.Stop()
-	w.pendingAck = []pendingDelivery{{sources: []*c3types.Inbound{inbound(tid, 1, "earlier")}}} // an earlier delivery
+	w.pendingAck = []pendingDelivery{{sources: unsourcedInbounds([]*c3types.Inbound{inbound(tid, 1, "earlier")})}} // an earlier delivery
 
 	w.forwardOrFallback(context.Background(), inbound(tid, 2, "new"), 1)
 

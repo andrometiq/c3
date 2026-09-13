@@ -8,6 +8,7 @@ import (
 	"github.com/PaulSonOfLars/gotgbot/v2"
 
 	"github.com/Andrometiq/c3/internal/c3types"
+	"github.com/Andrometiq/c3/internal/intake"
 )
 
 // convertInbound translates a gotgbot.Message into a c3types.Inbound, applying
@@ -235,3 +236,22 @@ func isUnsupportedService(msg *gotgbot.Message) bool {
 
 // formatChatID is a cheap helper for log lines.
 func formatChatID(chatID int64) string { return strconv.FormatInt(chatID, 10) }
+
+// captureSource reads the admitted provider occurrence, before broker enrichment.
+func captureSource(channel string, updateID int64, msg *gotgbot.Message, attachments []c3types.Attachment) *intake.Source {
+	s := &intake.Source{Channel: channel, ChatID: msg.Chat.Id, MessageID: msg.MessageId,
+		UpdateID: updateID, Text: replyText(msg), Attachments: make([]intake.SourceAttachment, 0, len(attachments))}
+	if msg.MessageThreadId != 0 {
+		id := msg.MessageThreadId
+		s.TopicID = &id
+	}
+	if msg.From != nil {
+		id := msg.From.Id
+		s.SenderID = &id
+	}
+	for _, att := range attachments {
+		s.Attachments = append(s.Attachments, intake.SourceAttachment{
+			Kind: att.Kind, FileID: att.FileID, Size: att.Size, MIME: att.MIME, Name: att.Name})
+	}
+	return s
+}

@@ -472,7 +472,7 @@ func TestVoiceResolvePanicAfterDurableMutationDoesNotDuplicateRevisionOrPush(t *
 				echo:        voiceEchoReservation{prev: echoHead, mine: make(chan struct{})},
 			}
 			key := voiceScheduleKey{route: route, messageID: 8801, fileID: "voice-panic-push"}
-			target := voiceResolveTarget{recordID: "", group: group}
+			target := voiceResolveTarget{recordID: "", group: group, inbound: c3types.Inbound{Channel: "telegram", ChatID: -100, TopicID: ptrI64(914), MessageID: 8801}}
 			b.Voice.mu.Lock()
 			b.Voice.entries[key] = &voiceEntry{
 				key: key, inbound: c3types.Inbound{Channel: "telegram", ChatID: -100, TopicID: ptrI64(914), MessageID: 8801},
@@ -490,8 +490,7 @@ func TestVoiceResolvePanicAfterDurableMutationDoesNotDuplicateRevisionOrPush(t *
 			}
 			job := &ResolveVoiceJob{
 				Key: key, Targets: []voiceResolveTarget{target},
-				Inbound: c3types.Inbound{Channel: "telegram", ChatID: -100, TopicID: ptrI64(914), MessageID: 8801},
-				FileID:  key.fileID, SegmentText: "[Transcribed voice]: one transcript", Success: true,
+				FileID: key.fileID, SegmentText: "[Transcribed voice]: one transcript", Success: true,
 			}
 			w.handleResolveVoice(context.Background(), job)
 			if tc.wantPushes == 1 {
@@ -549,7 +548,7 @@ func TestVoiceResolveRereadMissClosesEchoWithoutPush(t *testing.T) {
 		echo:        voiceEchoReservation{prev: echoHead, mine: make(chan struct{})},
 	}
 	key := voiceScheduleKey{route: route, messageID: in.MessageID, fileID: "voice-reread-miss"}
-	target := voiceResolveTarget{recordID: recordID, group: group}
+	target := voiceResolveTarget{recordID: recordID, group: group, inbound: cloneVoiceInbound(in)}
 	b.Voice.mu.Lock()
 	b.Voice.entries[key] = &voiceEntry{
 		key: key, inbound: in, attachment: in.Attachments[0], state: voiceResolveSubmitted,
@@ -565,7 +564,7 @@ func TestVoiceResolveRereadMissClosesEchoWithoutPush(t *testing.T) {
 		}
 	}
 	w.handleResolveVoice(context.Background(), &ResolveVoiceJob{
-		Key: key, Targets: []voiceResolveTarget{target}, Inbound: in,
+		Key: key, Targets: []voiceResolveTarget{target},
 		FileID: key.fileID, SegmentText: "[Transcribed voice]: one transcript", Success: true,
 	})
 	if consumeErr != nil {

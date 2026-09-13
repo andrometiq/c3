@@ -9,6 +9,7 @@ import (
 
 	"github.com/Andrometiq/c3/internal/c3types"
 	"github.com/Andrometiq/c3/internal/channel"
+	"github.com/Andrometiq/c3/internal/intake"
 	"github.com/Andrometiq/c3/internal/ipc"
 )
 
@@ -129,12 +130,13 @@ func (h *BrokerHost) SendWebLoginLink(requestedBy string) (bool, error) {
 // updates pace at 2s×K. That is more pacing than the 1s idle backoff it skips,
 // not less, which is why the hot-repoll failure mode does not arise here.
 // (v0.1.0 release audit, 2026-07-25 — maintainer's call on the I4 trade-off.)
-func (h *BrokerHost) Emit(in *c3types.Inbound) bool {
+func (h *BrokerHost) Emit(in *c3types.Inbound, sources ...*intake.Source) bool {
 	if in == nil {
 		return false
 	}
+	cp := cloneVoiceInbound(*in)
 	key := MakeRouteKey(in.Channel, in.ChatID, in.TopicID)
-	if !h.broker.Workers.SubmitWait(key, Job{Kind: JobInbound, Inbound: in}) {
+	if !h.broker.Workers.SubmitWait(key, Job{Kind: JobInbound, Inbound: &cp, source: intake.Optional(sources)}) {
 		log.Printf("emit SATURATED chan=%s chat=%d topic=%s msg=%d: worker queue full after %s — HOLDING the offset so Telegram redelivers (not dropped)",
 			in.Channel, in.ChatID, TopicPtrStr(in.TopicID), in.MessageID, submitGraceWindow)
 		return false

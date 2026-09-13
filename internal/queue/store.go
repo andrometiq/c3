@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/Andrometiq/c3/internal/c3types"
+	"github.com/Andrometiq/c3/internal/intake"
 )
 
 // Status is a per-route snapshot for /status and /queue. Pending is lines after
@@ -39,7 +40,8 @@ type Status struct {
 // the file ops hold no per-file locks. Only the cheap cross-route status index
 // is mutex-guarded — it touches no files.
 type Store struct {
-	dir string
+	dir      string
+	sourceMu sync.Mutex // serializes source-bearing appends across destination routes
 
 	mu sync.Mutex // guards idx ONLY (the cross-route status counters)
 	// idx is keyed by the canonical RouteKey.File() string, NOT by RouteKey:
@@ -77,16 +79,18 @@ type Store struct {
 //     drain. It lets a retry distinguish later edits that reuse MessageID.
 //   - VoicePending is the only authority for which voice attachments still need
 //     enrichment. Agent-visible placeholder text is deliberately not state.
+//   - Source preserves the original provider occurrence independently of Inbound.
 type storedInbound struct {
 	c3types.Inbound
-	Origin         string   `json:"origin,omitempty"`
-	RecordID       string   `json:"_c3_queue_id,omitempty"`
-	SourceRecordID string   `json:"_c3_drained_record_id,omitempty"`
-	VoicePending   []string `json:"_c3_voice_pending,omitempty"`
+	Origin         string         `json:"origin,omitempty"`
+	RecordID       string         `json:"_c3_queue_id,omitempty"`
+	SourceRecordID string         `json:"_c3_drained_record_id,omitempty"`
+	VoicePending   []string       `json:"_c3_voice_pending,omitempty"`
+	Source         *intake.Source `json:"_c3_source,omitempty"`
 }
 
 // TrackedInbound exposes queue-private identity only to broker internals. The
-// public Inbound remains unchanged, so neither private field can leak over IPC.
+// public Inbound remains unchanged, so private fields cannot leak over IPC.
 // Empty IDs identify legacy lines written before the private envelope existed.
 type TrackedInbound struct {
 	Origin         string
@@ -94,6 +98,7 @@ type TrackedInbound struct {
 	RecordID       string
 	SourceRecordID string
 	VoicePending   []string
+	Source         *intake.Source
 }
 
 // NewStore creates the queue dir (0700) and returns a Store. Call
@@ -123,8 +128,8 @@ func (s *Store) curPath(rk RouteKey) string   { return filepath.Join(s.dir, rk.F
 // Append writes one JSON line and fsyncs it (data + parent dir), then refreshes
 // the status index. The caller (worker) only treats the source update_id as
 // offset-eligible AFTER this returns nil.
-func (s *Store) Append(rk RouteKey, in *c3types.Inbound) error {
-	_, err := s.AppendTracked(rk, in)
+func (s *Store) Append(rk RouteKey, in *c3types.Inbound, sources ...*intake.Source) error {
+	_, err := s.AppendTrackedSource(rk, in, intake.Optional(sources))
 	return err
 }
 
@@ -132,18 +137,27 @@ func (s *Store) Append(rk RouteKey, in *c3types.Inbound) error {
 // The identity survives queue rewrites and lets a live-delivery ack remove that
 // line even when another pending edit has the same channel MessageID.
 func (s *Store) AppendTracked(rk RouteKey, in *c3types.Inbound, voicePending ...string) (string, error) {
-	return s.appendTracked(rk, in, "", voicePending)
+	return s.AppendTrackedSource(rk, in, nil, voicePending...)
 }
 
 // AppendDrainedTracked appends a drain copy and privately records the immutable
 // source-line identity it represents. An empty sourceRecordID is accepted for a
 // legacy untracked source: retries then fail toward another copy, never toward
 // mistaking an unrelated same-MessageID line for the landed record.
-func (s *Store) AppendDrainedTracked(rk RouteKey, in *c3types.Inbound, sourceRecordID string) (string, error) {
-	return s.appendTracked(rk, in, sourceRecordID, nil, "drain")
+func (s *Store) AppendDrainedTracked(rk RouteKey, in *c3types.Inbound, sourceRecordID string, sources ...*intake.Source) (string, error) {
+	return s.appendTracked(rk, in, sourceRecordID, nil, intake.Optional(sources), "drain")
 }
 
-func (s *Store) appendTracked(rk RouteKey, in *c3types.Inbound, sourceRecordID string, voicePending []string, origin ...string) (string, error) {
+func (s *Store) appendTracked(rk RouteKey, in *c3types.Inbound, sourceRecordID string, voicePending []string, source *intake.Source, origin ...string) (string, error) {
+	if source != nil {
+		s.sourceMu.Lock()
+		defer s.sourceMu.Unlock()
+		var err error
+		source, err = s.firstSource(source)
+		if err != nil {
+			return "", err
+		}
+	}
 	// Stamp the record format version on the way to disk. Append is the ONLY
 	// place a record enters the queue, so it is the only place that has to do
 	// this — rewrite() and snapshotDropped() re-serialize records that were
@@ -192,6 +206,7 @@ func (s *Store) appendTracked(rk RouteKey, in *c3types.Inbound, sourceRecordID s
 			RecordID:       rand.Text(),
 			SourceRecordID: sourceRecordID,
 			VoicePending:   append([]string(nil), voicePending...),
+			Source:         source.Clone(),
 		}
 	}
 	data, err := json.Marshal(rec)
@@ -494,6 +509,7 @@ func pendingTrackedFrom(lines []storedInbound, cursor int) []TrackedInbound {
 			RecordID:       in.RecordID,
 			SourceRecordID: in.SourceRecordID,
 			VoicePending:   append([]string(nil), in.VoicePending...),
+			Source:         in.Source.Clone(),
 		})
 	}
 	return out
