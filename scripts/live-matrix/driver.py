@@ -10,10 +10,12 @@ import subprocess
 import tempfile
 import time
 
-from collect import attempt_events, collect, export_fixtures, notice_evidence
+from collect import attempt_events, build_verdict_inputs, collect, export_fixtures, notice_evidence
 from capture_export import save_sanitized_failure_evidence
 from host import Host, HostSetupError, read_jsonl, wait_for
 from matrix import cells, selection, selection_summary
+from hostdriver import Adapter, BarrierPoint, Broker, ControlJournal, DriverError, RunProfile, Scratch, Timeouts, Workload, resolve_contract
+from hostdrivers import registry
 
 
 def queue_rows(root):
@@ -54,7 +56,24 @@ def false_held(log, count):
     return notice_evidence(log, count)["false_held"]
 
 
-def run_cell(args, cell, binaries, repo, version):
+def default_driver(args):
+    return registry().create('claude', backend_factory=Host, reconnect_keys=getattr(args, 'reconnect_keys', None))
+
+
+def default_profile(host, args, cell, scratch, version):
+    description = host.describe(version, 'matrix')
+    case = next(case for case in description['capabilities']['cases'] if case['id'] == cell.name)
+    scenario, _, _ = build_verdict_inputs(cell, {'run_id': scratch.run_id, 'route_id': 'test-inject/42'},
+                                         collect_only=args.collect_only)
+    setup = args.setup_timeout
+    return RunProfile(description, case, scenario, resolve_contract(description, case), args.claude.resolve(), version,
+                      'matrix', None, workload=Workload('sleep', getattr(args, 'sleep_seconds', 35) * 1000, 'workload'),
+                      timeouts=Timeouts(checkpoint_seconds=setup, prepare_seconds=setup * 2, state_seconds=setup + 8,
+                                        barrier_seconds=setup, reconnect_seconds=setup + 70,
+                                        observe_seconds=getattr(args, 'observe_seconds', 80)))
+
+
+def run_cell(args, cell, binaries, repo, version, *, host_driver=None, profile=None):
     root = Path(tempfile.mkdtemp(prefix="c3mx-"))
     root.chmod(0o700)
     output = args.output / version / cell.name
@@ -69,45 +88,61 @@ def run_cell(args, cell, binaries, repo, version):
         with (root / "broker-stderr.log").open("wb") as err:
             broker_process = subprocess.Popen([str(binaries / "c3-broker"), "test-serve", "--allow-test-inject", "--state", str(root / "broker")], stdout=err, stderr=err)
         wait_for(lambda: (root / "broker/c3.sock").is_socket(), 10, "scratch broker socket did not appear")
-        host = Host(root, args.claude, binaries / "c3-broker", binaries / "c3-claude-adapter", Path(__file__).parent.resolve(), cell, version, args.setup_timeout)
+        scratch = Scratch(root, root.name, root.name, root / 'cwd', root, ControlJournal(root / 'control'))
+        host = host_driver if host_driver is not None else default_driver(args)
+        profile = profile if profile is not None else default_profile(host, args, cell, scratch, version)
+        host.prepare(scratch, Adapter((binaries / 'c3-claude-adapter').resolve(), 'scratch-build'),
+                     Broker((binaries / 'c3-broker').resolve(), root / 'broker/c3.sock', root / 'broker',
+                            scratch.run_id, profile.scenario['route_id']), profile)
+        boundaries = profile.description['operations']['barriers']
+        def barrier(kind, name, action='sample', release=None):
+            return host.barrier(BarrierPoint(name, kind, action, boundaries[kind][name],
+                                            release_id=release.release_id if release else None))
+        def checkpoint(name):
+            return barrier('checkpoint', name)
+        def warmup():
+            host.enter_state('idle', Workload('warmup'))
+        def early_offers():
+            log = "\n".join(broker_text(root).splitlines()[gate_cursor:])
+            observations = []
+            if attempt_events(log):
+                observations.append('broker reserved a delivery attempt')
+            if 'delivered chan=test-inject ' in log:
+                observations.append('broker delivered to the channel')
+            sample = scratch.journal.legacy_evidence(checkpoint('before_ready'))
+            return observations + sample.get('attempt_before_ready_observations', [])
+        resume_handle = None
         if cell.session == "resumed":
             host.launch()
-            host.wait_event("attached")
-            host.ready_turn()
-            host.stop_session()
-        final_launch = time.time()
+            checkpoint('attachment')
+            warmup()
+            resume_handle = host.stop(True)
         gate_cursor = 0
+        gate = None
         if cell.state == "startup":
             gate_cursor = broker_text(root).count("\n")
-            (host.control / "gate-initialized").touch()
-        host.launch(continued=cell.session == "resumed")
+            gate = barrier('readiness', 'ready', 'arm')
+        session = host.launch(resume_handle)
         if cell.state == "startup":
-            gate = host.wait_event("initialized_waiting", final_launch)
+            gate = barrier('readiness', 'ready', 'wait', gate)
         else:
-            host.wait_event("attached", final_launch)
-            gate = None
+            checkpoint('attachment')
             if cell.session == "resumed":
-                host.ready_turn()
+                warmup()
         if cell.state == "reconnect":
             gate_cursor = broker_text(root).count("\n")
-            (host.control / "gate-initialized").touch()
-            gate = host.reconnect(args.reconnect_keys)
-        # The check is at arrival, not launch: transcript-free means precisely
-        # that. The host may create it later when the warmup prompt is submitted.
-        transcript = host.transcript()
-        if cell.session == "fresh" and transcript and transcript.exists() and transcript.stat().st_size:
-            raise RuntimeError("fresh cell already has a transcript before injection")
-        if cell.transport == "inbox":
-            started = host.events("proxy_started", final_launch)
-            if not started or not started[-1].get("inbox_env"):
-                raise RuntimeError("host did not supply an owning-session inbox endpoint")
+            gate = barrier('readiness', 'ready', 'arm')
+            host.reconnect(session)
+        checkpoint('session')
         if cell.state in ("foreground", "background"):
-            evidence["tool_state"] = host.tool_state(cell.state == "background", args.sleep_seconds)
+            state = host.enter_state(cell.state, profile.workload)
+            evidence.update(scratch.journal.legacy_evidence(state))
         if cell.transport == "fetch":
-            (host.control / "gate-fetch").touch()
+            fetch_gate = barrier('fetch_result', 'fetch', 'arm')
         if gate:
-            evidence["attempt_before_ready_observations"] = offered_before_ready(host, root, gate["pid"], gate_cursor)
+            evidence["attempt_before_ready_observations"] = early_offers()
             evidence["attempt_before_ready"] = bool(evidence["attempt_before_ready_observations"])
+        checkpoint('injection')
         setup_complete = True
         command = [str(binaries / "c3-broker"), "inject", "--socket", str(root / "broker/c3.sock"),
                    "--topic", "42", "--text", "MATRIX_SAMPLE: generic delivery sample.", "--count", str(cell.count)]
@@ -124,33 +159,34 @@ def run_cell(args, cell, binaries, repo, version):
             wait_for(lambda: len(queue_rows(root)) == cell.count, 5, "startup input was not persisted")
             time.sleep(0.3)  # let the persisted batch finish scheduling while the real gate remains closed
             seen = evidence["attempt_before_ready_observations"]
-            seen += [o for o in offered_before_ready(host, root, gate["pid"], gate_cursor) if o not in seen]
+            seen += [o for o in early_offers() if o not in seen]
             evidence["attempt_before_ready"] = bool(seen)
             evidence["rows_before_ready"] = len(queue_rows(root))
-            (host.control / f"release-initialized-{gate['pid']}").touch()
-            host.wait_event("attached", gate["time"])
+            barrier('readiness', 'ready', 'release', gate)
+            checkpoint('attachment')
         if cell.session == "fresh":
-            host.ready_turn()
+            warmup()
         if cell.transport == "fetch":
             wait_for(lambda: len(queue_rows(root)) == cell.count and all(not r.get("_c3_voice_pending") for r in queue_rows(root)), 10, "fetch rows/revisions not ready")
             if cell.state == "foreground":
-                wait_for(lambda: not (host.cwd / "tool-running").exists(), args.sleep_seconds + 5, "foreground tool did not finish")
-            host.send("Call c3 fetch_queue exactly once with limit='all' and ack=true. Then reply MATRIX_FETCHED. Do not repeat the fetch.")
-            held = host.wait_event("fetch_result_waiting", evidence["injected_at"])
+                barrier('workload_finished', 'workload', 'wait')
+            host.send_prompt("Call c3 fetch_queue exactly once with limit='all' and ack=true. Then reply MATRIX_FETCHED. Do not repeat the fetch.")
+            held = barrier('fetch_result', 'fetch', 'wait', fetch_gate)
             evidence["rows_while_fetch_result_held"] = len(queue_rows(root))
-            evidence["fetch_result"] = held["frame"].get("result")
-            (host.control / "release-fetch").touch()
+            evidence.update(scratch.journal.legacy_evidence(held))
+            barrier('fetch_result', 'fetch', 'release', held)
         # Wait past both live windows: missing primary receipt must expose an
         # inbox fallback and duplicate turn. Keep checking after first retirement.
-        deadline = time.monotonic() + args.observe_seconds
+        deadline = time.monotonic() + profile.timeouts.observe_seconds
         while time.monotonic() < deadline:
-            host.pane()
+            host.observe()
             time.sleep(0.2)
         evidence["rows_final"] = len(queue_rows(root))
         evidence["false_held"] = false_held(broker_text(root), cell.count)
     except Exception as exc:
-        field = "setup_errors" if not setup_complete or isinstance(exc, HostSetupError) else "run_errors"
-        evidence.setdefault(field, []).append(str(exc) if isinstance(exc, HostSetupError) else f"{type(exc).__name__}: {exc}")
+        is_setup = not setup_complete or isinstance(exc, HostSetupError) or isinstance(exc.__cause__, HostSetupError)
+        field = "setup_errors" if is_setup else "run_errors"
+        evidence.setdefault(field, []).append(str(exc) if isinstance(exc, (HostSetupError, DriverError)) else f"{type(exc).__name__}: {exc}")
     finally:
         # Collect before stopping: shutdown/holder death changes queue state.
         try:
@@ -158,23 +194,54 @@ def run_cell(args, cell, binaries, repo, version):
             if args.fixtures and ((output / 'legacy-fixture-refused.txt').exists() or (output / "records.jsonl").stat().st_size):
                 export_fixtures(output, repo, version, cell)
         finally:
-            if host:
-                host.close()
-            if broker_process:
-                broker_process.terminate()
+            cleanup_errors = []
+            def cleanup(step, action):
                 try:
-                    broker_process.wait(timeout=15)
-                except subprocess.TimeoutExpired:
-                    broker_process.kill()
-                    broker_process.wait()
+                    action()
+                except Exception as error:
+                    cleanup_errors.append(error)
+                    # Persist only a fixed step and exception type, never raw
+                    # teardown text which has not passed collection redaction.
+                    reason = f'cleanup {step} failed: {type(error).__name__}'
+                    if isinstance(result, dict):
+                        result['status'] = 'FAIL'
+                        result.setdefault('reasons', []).append(reason)
+                        try:
+                            summary = output / 'summary.json'
+                            saved = json.loads(summary.read_text())
+                            saved['status'] = 'FAIL'
+                            saved.setdefault('reasons', []).append(reason)
+                            pending = output / 'summary-cleanup.tmp'
+                            pending.write_text(json.dumps(saved, indent=2) + '\n')
+                            pending.replace(summary)
+                        except Exception as persistence_error:
+                            cleanup_errors.append(persistence_error)
+            if host:
+                cleanup('host stop', lambda: host.stop(False))
+            if broker_process:
+                cleanup('broker terminate', broker_process.terminate)
+                def wait_broker():
+                    try:
+                        broker_process.wait(timeout=15)
+                    except subprocess.TimeoutExpired:
+                        broker_process.kill()
+                        broker_process.wait()
+                cleanup('broker wait', wait_broker)
             if args.keep_scratch:
                 print(f"Private scratch retained: {root}", flush=True)
             else:
-                # A FAIL cites control/pane.txt, so keep that evidence even
-                # without --keep-scratch. Never retain the copied credentials.
-                if isinstance(result, dict) and result.get("status") == "FAIL":
-                    save_failure_evidence(root, output)
-                shutil.rmtree(root)
+                failed = isinstance(result, dict) and result.get('status') == 'FAIL'
+                if failed:
+                    cleanup('failure evidence export', lambda: save_failure_evidence(root, output))
+                cleanup('scratch removal', lambda: shutil.rmtree(root))
+                if cleanup_errors and not failed:
+                    cleanup('failure evidence export', lambda: save_failure_evidence(root, output))
+            if cleanup_errors:
+                # An active collection error retains precedence. Otherwise the
+                # cleanup exception propagates and makes the process fail loud.
+                import sys
+                if sys.exc_info()[0] is None:
+                    raise cleanup_errors[0]
     return result
 
 
@@ -183,10 +250,11 @@ def save_failure_evidence(root, destination):
     save_sanitized_failure_evidence(destination)
 
 
-def write_report(output, version, results):
+def write_report(output, version, results, description=None):
     output.mkdir(parents=True, exist_ok=True)
-    lines = [f"# Live matrix — Claude {version}", "", "| Cell | Result | Reason |", "| --- | --- | --- |"]
-    for cell in cells():
+    label = description['driver_id'].capitalize() if description else 'Claude'
+    lines = [f"# Live matrix — {label} {version}", "", "| Cell | Result | Reason |", "| --- | --- | --- |"]
+    for cell in cells(description):
         result = results.get(cell.name)
         if cell.infeasible:
             status, reason = "N/A", cell.infeasible
@@ -198,13 +266,15 @@ def write_report(output, version, results):
                 reason = "shapes collected; no success assertion; " + reason
         else:
             status, reason = "NOT RUN", "not selected or not yet completed"
+            if cell.feasibility == 'unknown':
+                reason += '; unknown: ' + (cell.capability_case or {}).get('reason', 'combination recipe is not declared')
         lines.append(f"| {cell.name} | {status} | {reason.replace('|', '/')} |")
     (output / "REPORT.md").write_text("\n".join(lines) + "\n")
     (output / version).mkdir(exist_ok=True)
     shutil.copyfile(output / "REPORT.md", output / version / "REPORT.md")
 
 
-def main():
+def argument_parser():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--claude", type=Path, help="installed binary; default newest numeric version under ~/.local/share/claude/versions")
     parser.add_argument("--version-label", help="required for binaries whose filename is not a numeric version")
@@ -218,6 +288,11 @@ def main():
     parser.add_argument("--setup-timeout", type=int, default=90)
     parser.add_argument("--sleep-seconds", type=int, default=35)
     parser.add_argument("--observe-seconds", type=int, default=80)
+    return parser
+
+
+def main():
+    parser = argument_parser()
     args = parser.parse_args()
     repo = Path(__file__).resolve().parents[2]
     lane_temp = Path.home() / ".cache/c3-lanes"
@@ -226,11 +301,15 @@ def main():
     lane_temp.mkdir(parents=True, exist_ok=True)
     (lane_temp / "go-cache").mkdir(exist_ok=True)
     tempfile.tempdir = str(lane_temp)
-    matched, selected, _ = selection(args.cell)
-    print(selection_summary(args.cell), flush=True)
+    description = default_driver(args).describe(args.version_label or '2.1.267', 'matrix')
+    matched, selected, _ = selection(args.cell, description)
     if args.list:
+        print(selection_summary(args.cell, description), flush=True)
         for cell in matched:
-            print(cell.name + "\t" + ("N/A: " + cell.infeasible if cell.infeasible else "FEASIBLE"))
+            status = "N/A: " + cell.infeasible if cell.infeasible else cell.feasibility.upper()
+            if cell.feasibility == 'unknown':
+                status += ': ' + (cell.capability_case or {}).get('reason', 'combination recipe is not declared')
+            print(cell.name + "\t" + status)
         return
     if args.sleep_seconds <= 15 or args.observe_seconds < max(75, args.sleep_seconds + 5):
         parser.error("sleep must exceed 15 seconds; observation must be at least 75 seconds and exceed sleep by at least 5 seconds")
@@ -243,6 +322,9 @@ def main():
     version = args.version_label or args.claude.name
     if not re.fullmatch(r"\d+\.\d+\.\d+(?:[-.][A-Za-z0-9]+)*", version):
         parser.error("supply a safe numeric --version-label")
+    description = default_driver(args).describe(version, 'matrix')
+    matched, selected, _ = selection(args.cell, description)
+    print(selection_summary(args.cell, description), flush=True)
     for command in ("tmux", "go", "python3"):
         if not shutil.which(command):
             parser.error(f"missing dependency: {command}")
@@ -257,12 +339,12 @@ def main():
         binaries = Path(build)
         for name in ("c3-broker", "c3-claude-adapter"):
             subprocess.run(["go", "build", "-p", "1", "-o", str(binaries / name), "./cmd/" + name], cwd=repo, check=True)
-        write_report(args.output, version, results)
+        write_report(args.output, version, results, description)
         for index, cell in enumerate(selected, 1):
             print(f"[{index}/{len(selected)}] {cell.name}", flush=True)
             result = run_cell(args, cell, binaries, repo, version)
             results[cell.name] = result
-            write_report(args.output, version, results)
+            write_report(args.output, version, results, description)
             print(result["status"] + ": " + "; ".join(result.get("reasons", [])), flush=True)
     raise SystemExit(1 if any(results[c.name]["status"] == "FAIL" for c in selected) else 0)
 
