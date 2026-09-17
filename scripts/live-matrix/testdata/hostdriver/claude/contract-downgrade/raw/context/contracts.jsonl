@@ -1,0 +1,2 @@
+{"accepted_modes": [], "barrier_id": "injection", "channel": false, "fetch_policy": "consume", "inbox": false, "negotiation": "none", "receipt_type": "none"}
+{"accepted_modes": [], "barrier_id": "final", "channel": false, "fetch_policy": "consume", "inbox": false, "negotiation": "none", "receipt_type": "none"}

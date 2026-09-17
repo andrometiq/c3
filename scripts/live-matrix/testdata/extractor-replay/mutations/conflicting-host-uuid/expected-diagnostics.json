@@ -1,0 +1,12 @@
+[
+  {
+    "artifact_id": "host-records",
+    "code": "host UUID content conflict with line:2",
+    "locator": "line:3"
+  },
+  {
+    "artifact_id": "host-records",
+    "code": "host candidate rejected",
+    "locator": "line:1"
+  }
+]

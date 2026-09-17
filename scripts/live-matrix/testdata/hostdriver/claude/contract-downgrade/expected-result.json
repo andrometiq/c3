@@ -1,0 +1,7 @@
+{
+  "not_evaluated": [],
+  "reasons": [
+    "observed delivery contract does not match expected contract"
+  ],
+  "status": "FAIL"
+}

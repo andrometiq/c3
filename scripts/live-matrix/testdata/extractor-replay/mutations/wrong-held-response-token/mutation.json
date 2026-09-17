@@ -1,0 +1,14 @@
+{
+  "base": "healthy-fetch-double",
+  "changes": [
+    {
+      "after": "17e0d291f7bf3fa2fc9fe0a54d83191ae5d2688e16b129df71a6ec9105fb253b",
+      "before": "d76f7e2f970010eede6a6c50976685d5ef55f22680d3f31bf9946fb0949cec42",
+      "file": "held-fetch/response-1.json"
+    }
+  ],
+  "required_reasons": [
+    "fetch tool result lacks the complete matching receipt trailer",
+    "delivery evidence identity mismatch"
+  ]
+}

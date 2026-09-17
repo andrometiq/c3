@@ -1,0 +1,32 @@
+[
+  {
+    "artifact_id": "held-fetch-response",
+    "code": "delivery evidence identity mismatch: request_id correlation conflict",
+    "locator": "line:1/block:0"
+  },
+  {
+    "artifact_id": "held-fetch-response",
+    "code": "held response request correlation rejected",
+    "locator": "line:1"
+  },
+  {
+    "artifact_id": "state",
+    "code": "delivery evidence identity mismatch: request_id correlation conflict",
+    "locator": "line:7/block:0"
+  },
+  {
+    "artifact_id": "state",
+    "code": "fetch release correlation rejected",
+    "locator": "line:7"
+  },
+  {
+    "artifact_id": "host-records",
+    "code": "host fetch recording lacks observed release",
+    "locator": "line:3"
+  },
+  {
+    "artifact_id": "held-fetch-response",
+    "code": "delivery evidence identity mismatch: operation_id correlation conflict",
+    "locator": "line:1/block:0"
+  }
+]

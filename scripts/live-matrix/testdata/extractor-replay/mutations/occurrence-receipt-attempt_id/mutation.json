@@ -1,0 +1,27 @@
+{
+  "base": "healthy-fetch-double",
+  "changes": [
+    {
+      "after": "7407fd6a862df2ec1f00ac478ca01dcbd223b77e2ba4919723c06b0a41b5c015",
+      "before": "21f949a89ff5c71d9068162aa24d319622f6686e52180de3662246cf1f9f82e6",
+      "file": "context/receipts.jsonl"
+    }
+  ],
+  "identity": {
+    "bad": "attempt-receipt-wrong",
+    "canonical_path": [
+      "attempt_id"
+    ],
+    "contains": false,
+    "field": "attempt_id",
+    "file": "context/receipts.jsonl",
+    "line": 1,
+    "milestone": "receipt_accepted",
+    "path": [
+      "attempt_id"
+    ]
+  },
+  "required_reasons": [
+    "evidence collection incomplete"
+  ]
+}

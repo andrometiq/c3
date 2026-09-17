@@ -1,0 +1,12 @@
+[
+  {
+    "artifact_id": "host-records",
+    "code": "host candidate rejected",
+    "locator": "line:1"
+  },
+  {
+    "artifact_id": "host-records",
+    "code": "delivery evidence identity mismatch: route_id correlation conflict",
+    "locator": "line:2/block:0"
+  }
+]

@@ -1,0 +1,27 @@
+{
+  "base": "healthy-fetch-double",
+  "changes": [
+    {
+      "after": "1a9e10440d25dd34a4fb239dcb31e929b080b28e523abd16124e88e7f0d12d2e",
+      "before": "21f949a89ff5c71d9068162aa24d319622f6686e52180de3662246cf1f9f82e6",
+      "file": "context/receipts.jsonl"
+    }
+  ],
+  "identity": {
+    "bad": "group-receipt-wrong",
+    "canonical_path": [
+      "group_id"
+    ],
+    "contains": false,
+    "field": "group_id",
+    "file": "context/receipts.jsonl",
+    "line": 1,
+    "milestone": "receipt_accepted",
+    "path": [
+      "group_id"
+    ]
+  },
+  "required_reasons": [
+    "evidence collection incomplete"
+  ]
+}

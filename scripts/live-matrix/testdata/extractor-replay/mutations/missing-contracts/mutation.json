@@ -1,0 +1,13 @@
+{
+  "base": "healthy-fetch-double",
+  "changes": [
+    {
+      "after": null,
+      "before": "439ef611cb8f5cadddf2d7e4c590d6008a0501701e768623b1c37a260d99feb9",
+      "file": "context/contracts.jsonl"
+    }
+  ],
+  "required_reasons": [
+    "evidence collection incomplete"
+  ]
+}

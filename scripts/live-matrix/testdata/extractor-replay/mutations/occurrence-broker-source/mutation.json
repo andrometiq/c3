@@ -1,0 +1,21 @@
+{
+  "base": "healthy-channel-double",
+  "changes": [
+    {
+      "after": "b7673645bee93d3ec2b0107c1e79dba2c43f728880f350e40f94321f8c9db1a9",
+      "before": "9aa6877893efcb734712b1b33eaeb4dc13654f53e74802334158e8bcd7902f0e",
+      "file": "broker.log"
+    }
+  ],
+  "identity": {
+    "bad": "message_id=49999",
+    "contains": true,
+    "field": "source_ids",
+    "file": "broker.log",
+    "line": 1,
+    "path": []
+  },
+  "required_reasons": [
+    "evidence collection incomplete"
+  ]
+}

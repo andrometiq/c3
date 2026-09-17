@@ -1,0 +1,11 @@
+{
+  "status": "FAIL",
+  "not_evaluated": [],
+  "reasons": [
+    "host did not receive each source exactly once",
+    "observed delivery contract does not match expected contract",
+    "delivery evidence identity mismatch",
+    "injected source lacks its required final disposition",
+    "evidence collection incomplete"
+  ]
+}

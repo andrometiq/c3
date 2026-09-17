@@ -9,10 +9,11 @@ import unittest
 import xml.etree.ElementTree as ET
 from unittest.mock import Mock, patch
 
-from collect import collect, notice_evidence, route_line_limit, classify_fetch, fetch_trailer, classify, count_receives, sanitize, verdict
+from collect import RedactionContext, collect, notice_evidence, route_line_limit, classify_fetch, fetch_trailer, classify, count_receives, sanitize, verdict
 from driver import false_held, offered_before_ready, run_cell, write_report
 from host import Host, HostSetupError, diagnose_pane, flatten, read_jsonl
 from matrix import Cell, cells, selection, selection_summary
+from verdict_fixture_support import witnessed_verdict
 
 
 TRUST_PANE = """Accessing workspace:
@@ -258,18 +259,38 @@ class MatrixTests(unittest.TestCase):
 
     def test_redaction_preserves_attempt_and_peer_provenance(self):
         sample = {"uuid": "private", "cwd": "/home/example/private", "origin": {"kind": "peer", "from": "c3", "verifiedPeerPid": 123},
-                  "user": "someone", "content": 'Another Claude session sent a message:\n<channel source="plugin:c3:c3" c3_delivery_id="secret-token" c3_attempt="inbox:3" user="someone" user_id="987" chat_id="-123">sample</channel>'}
-        clean = sanitize(sample, {"secret-token"})
-        encoded = json.dumps(clean)
+                  "sessionId": "private-session", "user": "someone", "user_id": 987, "chat_id": -123,
+                  "token": "secret-token", "content": 'Another Claude session sent a message:\n<channel source="plugin:c3:c3" c3_delivery_id="secret-token" c3_attempt="inbox:3" user="someone" user_id="987" chat_id="-123">sample</channel>'}
+        second = copy.deepcopy(sample)
+        second.update(uuid="private-second", sessionId="private-session-second", user="someone-second", user_id=988,
+                      chat_id=-124, token="secret-token-second")
+        second["origin"]["verifiedPeerPid"] = 124
+        second["content"] = second["content"].replace('"secret-token"', '"secret-token-second"').replace('"someone"', '"someone-second"').replace('"987"', '"988"').replace('"-123"', '"-124"')
+        originals = [sample, second, sample]
+        context = RedactionContext(tokens={"secret-token", "secret-token-second"}).discover(originals, schema="host").seal()
+        sanitized = sanitize(originals, context=context, schema="host")
+        clean = sanitized[0]
+        encoded = json.dumps(sanitized)
         for secret in ("private", "someone", "secret-token", "987", "-123", "/home/"):
             self.assertNotIn(secret, encoded)
         self.assertEqual(clean["origin"]["from"], "c3")
         self.assertIn('c3_attempt="inbox:3"', clean["content"])
-        self.assertIn('c3_delivery_id="TOKEN"', clean["content"])
+        self.assertIn('c3_delivery_id="TOKEN1"', clean["content"])
         tag = ET.fromstring(clean["content"].split("\n", 1)[1])
-        self.assertEqual(tag.attrib["user_id"], "ID")
-        self.assertEqual(tag.attrib["chat_id"], "ID")
+        self.assertEqual(tag.attrib["user_id"], str(context.pseudonym("user_id", 987)))
+        self.assertEqual(tag.attrib["chat_id"], str(context.pseudonym("chat", -123)))
+        self.assertEqual(tag.attrib["user"], context.pseudonym("user", "someone"))
         self.assertIsInstance(clean["origin"]["verifiedPeerPid"], int)
+        self.assertNotEqual(clean["origin"]["verifiedPeerPid"], 123)
+        self.assertNotEqual(clean["origin"]["verifiedPeerPid"], sanitized[1]["origin"]["verifiedPeerPid"])
+        self.assertEqual(sanitized[0], sanitized[2])
+        for field in ("uuid", "sessionId", "user", "user_id", "chat_id", "token"):
+            self.assertNotEqual(sanitized[0][field], sanitized[1][field])
+        for record in sanitized:
+            attributes = ET.fromstring(record["content"].split("\n", 1)[1]).attrib
+            for field in ("user", "user_id", "chat_id"):
+                self.assertEqual(attributes[field], str(record[field]))
+            self.assertEqual(attributes["c3_delivery_id"], record["token"])
 
     def evidence(self):
         return {"no_false_held": True, "route_line_count": 0, "injected": True, "rows_final": 0, "received": {"1": 1}, "attempts": [
@@ -278,33 +299,33 @@ class MatrixTests(unittest.TestCase):
 
     def test_success_requires_every_contract(self):
         cell = Cell("channel", "foreground", "resumed", "text", "single")
-        self.assertEqual(verdict(cell, self.evidence()), [])
+        self.assertEqual(witnessed_verdict(cell, self.evidence()), [])
         for field, bad in (("injected", False), ("rows_final", 1), ("received", {"1": 2}), ("attempt_before_ready", True), ("false_held", True), ("attempts", [])):
             evidence = self.evidence()
             evidence[field] = bad
-            self.assertTrue(verdict(cell, evidence), field)
+            self.assertTrue(witnessed_verdict(cell, evidence), field)
         evidence = self.evidence()
         evidence["attempts"][1]["elapsed_ms"] = "15001"
-        self.assertTrue(verdict(cell, evidence))
+        self.assertTrue(witnessed_verdict(cell, evidence))
         evidence = self.evidence()
         evidence["attempts"].append({"phase": "reserved", "token": "two", "transport": "inbox", "members": "1"})
-        self.assertIn("fallback/wrong transport attempted", verdict(cell, evidence))
+        self.assertIn("fallback/wrong transport attempted", witnessed_verdict(cell, evidence))
 
     def test_notice_assertions_for_every_matrix_cell(self):
         for cell in cells():
             evidence = self.evidence()
             evidence["attempts"] = [dict(e, transport=cell.transport) for e in evidence["attempts"]]
             evidence["no_false_held"] = False
-            self.assertIn("no false Held assertion failed or missing", verdict(cell, evidence), cell.name)
+            self.assertIn("no false Held assertion failed or missing", witnessed_verdict(cell, evidence), cell.name)
             evidence["no_false_held"] = True
             evidence["route_line_count"] = 0
-            self.assertNotIn("route line count assertion failed or missing", verdict(cell, evidence), cell.name)
+            self.assertNotIn("route line count assertion failed or missing", witnessed_verdict(cell, evidence), cell.name)
             evidence["route_line_count"] = route_line_limit(cell) + 1
-            self.assertIn("route line count assertion failed or missing", verdict(cell, evidence), cell.name)
+            self.assertIn("route line count assertion failed or missing", witnessed_verdict(cell, evidence), cell.name)
             for field in ("no_false_held", "route_line_count"):
                 missing = dict(evidence)
                 del missing[field]
-                self.assertTrue(any(field.replace("_", " ") in reason.lower() for reason in verdict(cell, missing)), cell.name)
+                self.assertTrue(any(field.replace("_", " ") in reason.lower() for reason in witnessed_verdict(cell, missing)), cell.name)
 
     def test_notice_collector_after_confirmation(self):
         log = "TEST ATTEMPT token=x phase=reserved members=1 transport=channel\n"
@@ -318,11 +339,11 @@ class MatrixTests(unittest.TestCase):
     def test_fetch_rejects_consume_before_tool_result(self):
         cell = Cell("fetch", "idle", "resumed", "text", "single")
         evidence = dict(self.evidence(), attempts=[], rows_while_fetch_result_held=0, fetch_tool_result=True, fetch_token=True, fetch_source_occurrences=1)
-        self.assertTrue(verdict(cell, evidence))
+        self.assertTrue(witnessed_verdict(cell, evidence))
         evidence["rows_while_fetch_result_held"] = 1
         evidence["fetch_trailer_complete"] = True
         evidence["attempts"] = [dict(e, transport="fetch") for e in self.evidence()["attempts"]]
-        self.assertEqual(verdict(cell, evidence), [])
+        self.assertEqual(witnessed_verdict(cell, evidence), [])
 
     def test_fetch_trailer_sidecar_expectations(self):
         trailer = "[C3_FETCH_RECEIPT_V1]\ngroup group-1\nmember row-1 " + "a" * 64 + "\nmember row-2 " + "b" * 64 + "\n[/C3_FETCH_RECEIPT_V1]"
@@ -338,10 +359,28 @@ class MatrixTests(unittest.TestCase):
         self.assertFalse(classify_fetch(record(trailer, True), expected, {"call-1"})["accept"])
         self.assertFalse(classify_fetch(record(trailer, call="wrong"), expected, {"call-1"})["accept"])
         ids = [m["record_id"] for m in expected["members"]]
-        clean = sanitize(good, {"group-1"}, receipt_ids=ids)
-        sidecar = sanitize(expectation, {"group-1"}, receipt_ids=ids)
+        wrong_call = record(trailer, call="wrong-call")
+        wrong_revision = record(trailer.replace("b" * 64, "c" * 64))
+        call = {"type": "tool_use", "id": "call-1"}
+        context = RedactionContext(tokens={"group-1"}, receipt_ids=ids)
+        context.discover([good, wrong_call, wrong_revision, call], schema="host")
+        context.discover([expected, expectation]).seal()
+        clean = sanitize(good, context=context, schema="host")
+        sidecar = sanitize(expectation, context=context)
+        clean_expected = sanitize(expected, context=context)
+        mapped_call = sanitize(call, context=context, schema="host")["id"]
         self.assertEqual([m["record_id"] for m in sidecar["members"]], ["ROW1", "ROW2"])
-        self.assertTrue(classify_fetch(clean, sidecar, {"ID"})["accept"])
+        self.assertEqual(sidecar["members"], clean_expected["members"])
+        revisions = [m["revision"] for m in sidecar["members"]]
+        self.assertNotEqual(revisions[0], revisions[1])
+        for revision in revisions:
+            self.assertRegex(revision, r"^[0-9a-f]{64}$")
+        self.assertTrue(classify_fetch(clean, sidecar, {mapped_call})["accept"])
+        self.assertEqual(sidecar["tool_use_id"], mapped_call)
+        for bad in (wrong_call, wrong_revision):
+            self.assertFalse(classify_fetch(sanitize(bad, context=context, schema="host"), clean_expected, {mapped_call})["accept"])
+        for secret in ("group-1", "row-1", "row-2", "call-1", "wrong-call", "a" * 64, "b" * 64, "c" * 64):
+            self.assertNotIn(secret, json.dumps(sanitize([good, wrong_call, wrong_revision, call], context=context, schema="host")))
 
     def test_startup_detects_legacy_and_negotiated_offers(self):
         from unittest.mock import Mock

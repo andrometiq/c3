@@ -1,0 +1,52 @@
+[
+  {
+    "artifact_id": "queue",
+    "code": "conflicting row revision source membership",
+    "locator": "line:2"
+  },
+  {
+    "artifact_id": "queue",
+    "code": "delivery evidence identity mismatch: source_ids correlation conflict",
+    "locator": "line:2/block:0"
+  },
+  {
+    "artifact_id": "broker",
+    "code": "row revision source binding unavailable",
+    "locator": "line:5"
+  },
+  {
+    "artifact_id": "broker",
+    "code": "row revision source binding unavailable",
+    "locator": "line:6"
+  },
+  {
+    "artifact_id": "host-records",
+    "code": "host candidate rejected",
+    "locator": "line:1"
+  },
+  {
+    "artifact_id": "host-records",
+    "code": "row revision source binding unavailable",
+    "locator": "line:3"
+  },
+  {
+    "artifact_id": "host-records",
+    "code": "host source membership conflict",
+    "locator": "line:3"
+  },
+  {
+    "artifact_id": "host-records",
+    "code": "delivery evidence identity mismatch: source_ids correlation conflict",
+    "locator": "line:3/block:0"
+  },
+  {
+    "artifact_id": "host-records",
+    "code": "delivery evidence identity mismatch: members correlation conflict",
+    "locator": "line:3/block:0"
+  },
+  {
+    "artifact_id": "receipt-observers",
+    "code": "row revision source binding unavailable",
+    "locator": "line:2"
+  }
+]

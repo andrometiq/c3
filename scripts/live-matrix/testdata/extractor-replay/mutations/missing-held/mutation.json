@@ -1,0 +1,13 @@
+{
+  "base": "healthy-fetch-double",
+  "changes": [
+    {
+      "after": null,
+      "before": "d76f7e2f970010eede6a6c50976685d5ef55f22680d3f31bf9946fb0949cec42",
+      "file": "held-fetch/response-1.json"
+    }
+  ],
+  "required_reasons": [
+    "evidence collection incomplete"
+  ]
+}

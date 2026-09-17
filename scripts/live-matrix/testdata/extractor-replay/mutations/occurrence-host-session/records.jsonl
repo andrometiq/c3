@@ -1,0 +1,3 @@
+{"message": {"content": "seed conversation", "role": "assistant"}, "sessionId": "session-host-original", "type": "assistant", "uuid": "11111111-2222-4333-8444-000000000090"}
+{"message": {"content": "<channel source=\"plugin:c3:c3\" message_id=\"41001\" c3_delivery_id=\"token-original-one\" c3_attempt=\"channel:1\">MATRIX_SAMPLE</channel>", "role": "user"}, "sessionId": "session-occurrence-wrong", "type": "user", "uuid": "11111111-2222-4333-8444-000000000001"}
+{"message": {"content": "<channel source=\"plugin:c3:c3\" message_id=\"41002\" c3_delivery_id=\"token-original-two\" c3_attempt=\"channel:2\">MATRIX_SAMPLE</channel>", "role": "user"}, "sessionId": "session-host-original", "type": "user", "uuid": "11111111-2222-4333-8444-000000000002"}

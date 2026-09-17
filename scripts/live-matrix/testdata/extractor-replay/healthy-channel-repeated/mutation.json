@@ -1,0 +1,26 @@
+{
+  "base": "healthy-channel-double",
+  "changes": [
+    {
+      "after": "408c097afdba676dcc1cd62b5caa940a6f203eb5c2da22741d241f11a27d82b6",
+      "before": "40b88f10c6c8ffcee24e8d23d2b93f1a13c2130acc1648900b75730e071cdaee",
+      "file": "records.jsonl"
+    },
+    {
+      "after": "ff650dd2448363029be73a504d26c9f0383b63e3ee0f2b057d6ce76ce0957bea",
+      "before": "1d499375eb8dc5192c3803eded3602dbef883d5f82d8f36d4037154e4d6007ad",
+      "file": "context/attempts.jsonl"
+    },
+    {
+      "after": "ccd510b2a0717747e28a3489a3965e7aa1aeab3d2473bee1039cb10e1ea86eed",
+      "before": "d94ba7d2676c3a65f53a5abc41dd2cc70b27802c9ce6cce34b3079e309481630",
+      "file": "context/driver.jsonl"
+    },
+    {
+      "after": "31d5d9e1ffb39d16a8a13b4913d7411cf1a6512ccd260897fc2d2102115dfdb4",
+      "before": "bdc1efd144e03f2ba10fea220a233da24c61579694851821d1a06a1b201ff46e",
+      "file": "context/ownership.json"
+    }
+  ],
+  "required_reasons": []
+}

@@ -1,0 +1,13 @@
+{
+  "base": "healthy-channel-double",
+  "changes": [
+    {
+      "after": "2f31e2b66a21fe33e1505c6e7b1cdf574fdfd5cc5440f9b3e62e3eb05d3154c0",
+      "before": "d94ba7d2676c3a65f53a5abc41dd2cc70b27802c9ce6cce34b3079e309481630",
+      "file": "context/driver.jsonl"
+    }
+  ],
+  "required_reasons": [
+    "evidence collection incomplete"
+  ]
+}

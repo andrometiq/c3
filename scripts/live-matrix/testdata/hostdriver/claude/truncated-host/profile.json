@@ -1,0 +1,84 @@
+{
+  "cell": {
+    "burst": "double",
+    "kind": "text",
+    "session": "resumed",
+    "state": "idle",
+    "transport": "channel"
+  },
+  "contract": {
+    "axes": {
+      "accepted_modes": [
+        "channel",
+        "fetch_receipt"
+      ],
+      "fetch_policy": "receipt",
+      "live_eligibility": {
+        "channel": true,
+        "inbox": false
+      },
+      "negotiation": "v1",
+      "receipt_type": "transcript"
+    },
+    "capability_id": "matrix-v1",
+    "contract_barrier_names": [
+      "injection",
+      "final"
+    ],
+    "id": "matrix-channel-ungated",
+    "milestones": {
+      "fetch": "fetch_result_recorded",
+      "live": "transcript_recorded"
+    },
+    "readiness_boundary": null,
+    "schema_version": 1,
+    "timing": {
+      "fetch": {
+        "basis": "terminal_confirmation",
+        "limit_ms": 60000
+      },
+      "live": {
+        "basis": "terminal_confirmation",
+        "limit_ms": 15000
+      }
+    }
+  },
+  "evidence": {
+    "host_session_id": "session-host-original",
+    "route_id": "-771/881",
+    "run_id": "run-synthetic-original",
+    "session_id": "session-broker-original"
+  },
+  "expected_session": "session-host-original",
+  "host_version": "2.1.267",
+  "mode": "matrix",
+  "previous_host": "initial-records.jsonl",
+  "provenance": "raw_replay",
+  "reference": "healthy-channel-double",
+  "scenario": {
+    "burst": "double",
+    "count": 2,
+    "evaluation_mode": "verify",
+    "final_barrier_id": "final",
+    "final_dispositions": [
+      "delivered",
+      "delivered"
+    ],
+    "freshness": "not_applicable",
+    "health_class": "healthy",
+    "host_session_id": "session-host-original",
+    "id": "channel-idle-resumed-text-double",
+    "injection_barrier_id": "injection",
+    "kind": "text",
+    "observation_duration_ms": 15000,
+    "readiness_barrier_id": null,
+    "resume_requirement": "delivery_only",
+    "route_id": "-771/881",
+    "run_id": "run-synthetic-original",
+    "schema_version": 1,
+    "session": "resumed",
+    "session_id": "session-broker-original",
+    "state": "idle",
+    "transport": "channel"
+  }
+}

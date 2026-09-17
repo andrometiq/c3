@@ -1,0 +1,27 @@
+{
+  "base": "healthy-fetch-double",
+  "changes": [
+    {
+      "after": "240303bf44a349b1c36a8fe3530404e3703eb69e1ea3c89e58d46f4fa0aca094",
+      "before": "21f949a89ff5c71d9068162aa24d319622f6686e52180de3662246cf1f9f82e6",
+      "file": "context/receipts.jsonl"
+    }
+  ],
+  "identity": {
+    "bad": "call-receipt-wrong",
+    "canonical_path": [
+      "operation_id"
+    ],
+    "contains": false,
+    "field": "operation_id",
+    "file": "context/receipts.jsonl",
+    "line": 1,
+    "milestone": "receipt_accepted",
+    "path": [
+      "operation_id"
+    ]
+  },
+  "required_reasons": [
+    "evidence collection incomplete"
+  ]
+}

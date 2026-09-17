@@ -1,0 +1,13 @@
+{
+  "base": "healthy-channel-double",
+  "changes": [
+    {
+      "after": "8f9302f65614f26c0ac129b3a69b2617d858989920ca60be65da649dc4b34118",
+      "before": "40b88f10c6c8ffcee24e8d23d2b93f1a13c2130acc1648900b75730e071cdaee",
+      "file": "records.jsonl"
+    }
+  ],
+  "required_reasons": [
+    "evidence collection incomplete"
+  ]
+}

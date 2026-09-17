@@ -1,0 +1,27 @@
+[
+  {
+    "artifact_id": "held-fetch-response",
+    "code": "file missing",
+    "locator": "read"
+  },
+  {
+    "artifact_id": "state",
+    "code": "fetch release correlation rejected",
+    "locator": "line:7"
+  },
+  {
+    "artifact_id": "host-records",
+    "code": "fetch candidate rejected",
+    "locator": "line:3"
+  },
+  {
+    "artifact_id": "state",
+    "code": "stream cutoff outside observed extent",
+    "locator": "line:6"
+  },
+  {
+    "artifact_id": "state",
+    "code": "stream cutoff outside observed extent",
+    "locator": "line:9"
+  }
+]

@@ -1,0 +1,22 @@
+{
+  "not_evaluated": [],
+  "reasons": [
+    "injection was not completed",
+    "durable rows remain",
+    "no false Held assertion failed or missing",
+    "route line count assertion failed or missing",
+    "rows retired before host tool-result receipt (baseline consume-on-fetch)",
+    "no successful fetch tool-result record",
+    "fetch group confirmation missing or outside 60-second window",
+    "fetch group retirement count differs from injected sources",
+    "fetch tool result lacks the complete matching receipt trailer",
+    "fetch result has no broker receipt token",
+    "fetch did not return each injected source exactly once",
+    "observed delivery contract does not match expected contract",
+    "requested host state was not proven at injection",
+    "requested session posture was not proven at injection",
+    "injected source lacks its required final disposition",
+    "evidence collection incomplete"
+  ],
+  "status": "FAIL"
+}

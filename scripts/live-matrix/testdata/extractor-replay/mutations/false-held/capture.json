@@ -1,0 +1,159 @@
+{
+  "artifacts": [
+    {
+      "artifact_id": "broker",
+      "file": "broker.log",
+      "format": "log",
+      "seal": {
+        "bytes": 679,
+        "lines": 7,
+        "read_state": "complete",
+        "sha256": "e20e6aefb252ed29bf63d0e2fbc314e4aa28d9c15908fad6063d8e5cf315a84e"
+      },
+      "table": "broker"
+    },
+    {
+      "artifact_id": "adapter",
+      "file": "adapter.log",
+      "format": "log",
+      "seal": {
+        "bytes": 20,
+        "lines": 1,
+        "read_state": "complete",
+        "sha256": "037352dc56de2be40c5607c8e24e2d2dd41342fcbef3e91122690aefaa12f30f"
+      },
+      "table": "adapter"
+    },
+    {
+      "artifact_id": "host-records",
+      "file": "records.jsonl",
+      "format": "jsonl",
+      "seal": {
+        "bytes": 748,
+        "lines": 3,
+        "read_state": "complete",
+        "sha256": "40b88f10c6c8ffcee24e8d23d2b93f1a13c2130acc1648900b75730e071cdaee"
+      },
+      "table": "host"
+    },
+    {
+      "artifact_id": "injection",
+      "file": "context/injection.json",
+      "format": "json",
+      "seal": {
+        "bytes": 104,
+        "lines": 1,
+        "read_state": "complete",
+        "sha256": "15f015856178c34a5fdf6bb88c5b2dad331b9a629bbf5eeb33f162d056b05e5e"
+      },
+      "table": "injection"
+    },
+    {
+      "artifact_id": "queue",
+      "file": "context/rows.jsonl",
+      "format": "jsonl",
+      "seal": {
+        "bytes": 268,
+        "lines": 2,
+        "read_state": "complete",
+        "sha256": "f4908c3f2f154409390b9969a5b17d5cb5088cb57b58d0c9217cbb151b1ce56e"
+      },
+      "table": "rows"
+    },
+    {
+      "artifact_id": "attempt-observers",
+      "file": "context/attempts.jsonl",
+      "format": "jsonl",
+      "seal": {
+        "bytes": 1716,
+        "lines": 6,
+        "read_state": "complete",
+        "sha256": "1d499375eb8dc5192c3803eded3602dbef883d5f82d8f36d4037154e4d6007ad"
+      },
+      "table": "attempts"
+    },
+    {
+      "artifact_id": "receipt-observers",
+      "file": "context/receipts.jsonl",
+      "format": "jsonl",
+      "seal": {
+        "bytes": 594,
+        "lines": 2,
+        "read_state": "complete",
+        "sha256": "97d0faddd060ac32eb0fdbed59402c283842c87a38157063a42f3cceed3632c6"
+      },
+      "table": "receipts"
+    },
+    {
+      "artifact_id": "sample-observers",
+      "file": "context/queue-samples.jsonl",
+      "format": "jsonl",
+      "seal": {
+        "bytes": 322,
+        "lines": 3,
+        "read_state": "complete",
+        "sha256": "b830f7d5f5238a5624364f9d2fd8470ed3536ea6d522a17184a2456b46147a31"
+      },
+      "table": "queue-samples"
+    },
+    {
+      "artifact_id": "contract",
+      "file": "context/contracts.jsonl",
+      "format": "jsonl",
+      "seal": {
+        "bytes": 370,
+        "lines": 2,
+        "read_state": "complete",
+        "sha256": "3c7fbed5067b9ab28ecc26b26dc0634a779a7b0e108fb9e7327aa763e7de299b"
+      },
+      "table": "contracts"
+    },
+    {
+      "artifact_id": "state",
+      "file": "context/driver.jsonl",
+      "format": "jsonl",
+      "seal": {
+        "bytes": 2167,
+        "lines": 7,
+        "read_state": "complete",
+        "sha256": "19fcbc1dbee0e6f29f1748d39c5cb751e49f6eff526f63c7539f5e7d9c9c658c"
+      },
+      "table": "driver"
+    },
+    {
+      "artifact_id": "ownership-observers",
+      "file": "context/ownership.json",
+      "format": "json",
+      "seal": {
+        "bytes": 12521,
+        "lines": 1,
+        "read_state": "complete",
+        "sha256": "8bb267b41c60140e491d6a2e084cd94e528b08e370ff5f0d16223e6c0eea2a24"
+      },
+      "table": "ownership"
+    }
+  ],
+  "cell": {
+    "burst": "double",
+    "kind": "text",
+    "session": "resumed",
+    "state": "idle",
+    "transport": "channel"
+  },
+  "context_version": 1,
+  "evidence": {
+    "host_session_id": "session-host-original",
+    "route_id": "-771/881",
+    "run_id": "run-synthetic-original",
+    "session_id": "session-broker-original"
+  },
+  "provenance": {
+    "adapter_build": "synthetic",
+    "broker_build": "synthetic",
+    "capture_id": "synthetic-channel",
+    "host_version": "synthetic",
+    "kind": "raw_replay",
+    "platform": "synthetic"
+  },
+  "schema_version": 1
+}

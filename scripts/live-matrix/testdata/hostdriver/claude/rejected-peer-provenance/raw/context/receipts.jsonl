@@ -1,0 +1,1 @@
+{"action": "accepted", "attempt_id": "inbox:1", "elapsed_ms": 30, "group_id": "group-original-1", "operation_id": null, "rows": [{"revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "row_id": "row-original-1"}], "token": "token-original-one", "transport": "inbox"}

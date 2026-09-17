@@ -26,7 +26,7 @@ Budget **2–4 hours per complete pass** (126 real cells, 216 conversational
 launches including resume seeds, roughly 1–2 minutes per cell;
 slow authentication/model setup can take longer). Foreground/background sleeps
 are 35 seconds, deliberately beyond the 15-second live receipt window. Every
-cell observes for another 45 seconds after injection, including after early
+cell then observes for 80 seconds by default (minimum 75), including after early
 retirement. Setup has a 90-second bound per checkpoint. Two passes cost roughly
 4–8 hours. Collection makes no delivery-success assertion; setup errors still
 exit nonzero. Assertion mode exits nonzero for any failed selected cell.
@@ -91,22 +91,98 @@ The development-channel warning has no saved acceptance setting in 2.1.266/267;
 only its exact, visibly selected local-development confirmation is acknowledged.
 
 `--keep-scratch` retains raw evidence **and copied credentials** in the private
-cache for local debugging; default cleanup removes them. Exported records replace
-all delivery tokens with TOKEN, textual identifiers with ID, numeric identifiers
-with 1, users with USER, and local paths with `/work/ID`. Attempt ordinals,
-transport framing and peer provenance remain intact. Receipt counts distinguish
+cache for local debugging; default cleanup removes them. The top-level
+`records.jsonl` / `records.expect.json` pair keeps the historical collapse format
+(`TOKEN`, `ID`, `USER`, numeric `1`, `/work/ID`). These are selected receipt-shape
+examples for Go compatibility, not whole-capture replay evidence. `--fixtures`
+copies only that pair. A fetch pair whose collapsed identities turn a rejected
+correlation into an accepted receipt is refused, as is a pair whose private
+identities the legacy renderer cannot remove; the rig bundle is retained.
+
+Rig exports use a single per-capture `RedactionContext` (`identity-v1`). Repeated
+identities share a pseudonym within their semantic domain; distinct identities
+remain distinct. Tokens, rows, host sessions, broker sessions, host records and
+delivery occurrences have separate maps. Numeric IDs keep their JSON types and
+match their decimal text aliases. Integral finite floats within the exact IEEE
+integer range are supported; other numeric encodings fail export. Integer
+candidates are 1, 2, … (negative originals use -1, -2, …), skipping original and
+allocated values. Revisions use distinct 64-character lowercase hex values.
+Counts, claim generations, sequence numbers, transport framing and peer
+provenance retain their meaning.
+
+The export-only bundle contains:
+
+```text
+replay/capture.json          # identity-v1, artifact states, byte extents/digests
+replay/context/             # live export stays empty until observers supply these facts
+replay/broker.log
+replay/adapter.log
+replay/records.jsonl         # complete captured stream, including rejected records
+replay/held-fetch/           # held responses in capture order
+replay/control/             # allowlisted controls and contained transcripts
+replay/verdict-inputs.json   # scenario, contract and observation together
+```
+
+The top-level summary, observation, logs, events and failure diagnostics share
+those maps. Failure cleanup projects already-sanitized controls and never copies
+raw files over them. Missing artifacts remain missing; malformed JSONL lines
+become invalid JSON stubs, and partial tails keep their missing newline. The
+descriptor retains their read states. No reverse maps or individual-secret
+hashes are exported. Ambiguous embedded identities or unsupported identity fields
+stop export with a locator-only diagnostic. Discovery covers the descriptor and
+scenario, broker log, adapter log, complete host stream, held responses, sorted
+controls, and canonical/report projections before allocation. New private
+grammars require registry coverage.
+
+Diagnostic strings and identity-valued map keys use the same capture-wide
+inventory, including decimal numeric identities. Embedded short identities use
+lexical boundaries; the peer prefix and recognized public grammar values remain
+unchanged. Long secret-shaped canaries are scrubbed even within larger runs.
+Local paths, UUIDs and long token-like runs receive generic identity mappings.
+Every serialized export is audited before publication, including diagnostics and
+exporter-built metadata. Arbitrary non-identity, non-secret-shaped natural
+language still requires registry coverage; this is not general prose anonymization.
+
+The Phase 2B production loader is `capture_context.load_capture(directory)`.
+It reads a versioned descriptor and raw observer tables, then calls
+`capture_observation(..., capture_context=...)` and `build_verdict_inputs()`.
+The frozen [extractor-replay corpus](testdata/extractor-replay/README.md) supplies
+explicitly synthetic ownership, row membership, receipts, queue samples,
+contract samples and collection boundaries. Today's live driver does not collect
+all those facts: `collect()` supplies no authored context, and live captures stay
+incomplete. A synthetic replay context is never live-run evidence. Existing
+collapsed fixtures cannot recover lost distinctions.
+
+The replay suite checks raw extraction, canonical export round trips, and
+sanitized raw extraction in a fresh interpreter. It compares complete semantic
+observations, with only representation digests excluded, plus complete verdicts,
+classification decisions and source/occurrence projections. Every logical
+mutation has updated byte seals; truncation controls retain the original seal.
+
+Receipt counts distinguish
 intake enqueues from delivered user/queued-command records, and deduplicate only
-identical record UUIDs, so a real second delivery is still counted.
+identical re-observations of one UUID. Conflicting contents under one UUID fail
+integrity checks; distinct UUIDs remain separate delivery occurrences.
 
 Implementation concerns: `matrix.py` enumerates, `host.py` controls configuration
 and tmux, `proxy.py` records/barriers MCP, `hook.py` captures SessionStart,
-`collect.py` sanitizes and evaluates, `driver.py` orchestrates. Pure helper tests
+`collect.py` classifies and evaluates, `redaction.py` owns identity maps,
+`capture_export.py` writes live capture artifacts, `capture_context.py` loads
+raw observer context, `replay_export.py` exports checked replay bundles, and
+`driver.py` orchestrates. Pure helper tests
 run without Claude, tmux, a broker, or network:
 
 ```sh
 python3 -m unittest discover -s scripts/live-matrix -p 'test_*.py'
 bash -n scripts/live-matrix/run.sh
 ```
+
+Python discovery is a required Phase 2 gate in addition to the Go checks; the
+repository's `make ci` does not run it. The focused replay gate is
+`python3 -m unittest test_extractor_replay` from this directory. Other focused gates are
+`python3 -m unittest test_sanitize` and
+`python3 -m unittest test_harness test_verdict_core` from this directory, plus
+`go test ./cmd/c3-claude-adapter` and `go build ./...` from the repository root.
 
 Host CLI/plugin flags follow the [Claude Code CLI reference](https://code.claude.com/docs/en/cli-usage),
 [plugin reference](https://code.claude.com/docs/en/plugins-reference), and

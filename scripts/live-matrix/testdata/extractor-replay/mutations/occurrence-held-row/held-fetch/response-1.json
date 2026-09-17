@@ -1,0 +1,12 @@
+{
+  "id": "rpc-original",
+  "jsonrpc": "2.0",
+  "result": {
+    "content": [
+      {
+        "text": "MATRIX_SAMPLE\nMATRIX_SAMPLE\n[C3_FETCH_RECEIPT_V1]\ngroup token-original-one\nmember row-fetch-wrong aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\nmember row-original-2 bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n[/C3_FETCH_RECEIPT_V1]",
+        "type": "text"
+      }
+    ]
+  }
+}

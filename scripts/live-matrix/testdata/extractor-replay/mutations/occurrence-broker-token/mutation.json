@@ -1,0 +1,21 @@
+{
+  "base": "healthy-channel-double",
+  "changes": [
+    {
+      "after": "cb3a8cd96c28a622c04dd94b6048b09310b34697ce7f23e117a254306d9a3342",
+      "before": "9aa6877893efcb734712b1b33eaeb4dc13654f53e74802334158e8bcd7902f0e",
+      "file": "broker.log"
+    }
+  ],
+  "identity": {
+    "bad": "token=token-broker-wrong",
+    "contains": true,
+    "field": "token",
+    "file": "broker.log",
+    "line": 4,
+    "path": []
+  },
+  "required_reasons": [
+    "evidence collection incomplete"
+  ]
+}

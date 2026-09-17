@@ -42,4 +42,12 @@ GOOS=windows go vet ./...
 echo "==> test"
 go test ./...
 
+# The live-matrix Python suites (verdict core, sanitize, extractor-replay,
+# hostdriver) are slow (the extractor-replay suite alone runs minutes), so run
+# them in hosted CI and on demand, not on every local commit.
+if [ "${CI:-}" = "true" ] || [ "${RUN_PY_TESTS:-}" = "1" ]; then
+	echo "==> python live-matrix suites"
+	python3 -m unittest discover -s scripts/live-matrix -p 'test_*.py'
+fi
+
 echo "==> CI gate passed"

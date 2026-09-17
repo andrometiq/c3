@@ -1,0 +1,37 @@
+{
+  "base": "healthy-fetch-double",
+  "changes": [
+    {
+      "after": "bc0c16549d5c3041ab0d42fca32486f3567099133d7a8fbb721e6932ebabacd6",
+      "before": "5c3528c00ca1fdbb773fa5566f076549d1af5483d9f2daf85502b74dc26511a8",
+      "file": "records.jsonl"
+    },
+    {
+      "after": "dfd760097b6c3211dba258969f73a2b44ee8ec31a7fb7db4026456c8df04f29a",
+      "before": "d76f7e2f970010eede6a6c50976685d5ef55f22680d3f31bf9946fb0949cec42",
+      "file": "held-fetch/response-1.json"
+    }
+  ],
+  "identity": {
+    "bad": "row-fetch-wrong",
+    "canonical_path": [
+      "members",
+      1,
+      "row_id"
+    ],
+    "contains": true,
+    "field": "members",
+    "file": "records.jsonl",
+    "line": 3,
+    "milestone": "fetch_result_recorded",
+    "path": [
+      "message",
+      "content",
+      0,
+      "content"
+    ]
+  },
+  "required_reasons": [
+    "evidence collection incomplete"
+  ]
+}

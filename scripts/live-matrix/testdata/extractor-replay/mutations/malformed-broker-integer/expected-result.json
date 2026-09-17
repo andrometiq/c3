@@ -1,0 +1,15 @@
+{
+  "not_evaluated": [],
+  "reasons": [
+    "no false Held assertion failed or missing",
+    "route line count assertion failed or missing",
+    "no negotiated attempt observed",
+    "source attempted more or less than once",
+    "receipt missing or outside 15-second window",
+    "host did not receive each source exactly once",
+    "retired rows do not match authorized delivery members",
+    "injected source lacks its required final disposition",
+    "evidence collection incomplete"
+  ],
+  "status": "FAIL"
+}

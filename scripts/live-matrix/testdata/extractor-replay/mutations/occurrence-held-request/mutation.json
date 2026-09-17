@@ -1,0 +1,23 @@
+{
+  "base": "healthy-fetch-double",
+  "changes": [
+    {
+      "after": "ff752b7543c2313ae6a4f9a0cc9ec2b03624b87d7438ca292bf66133f79dbeeb",
+      "before": "d76f7e2f970010eede6a6c50976685d5ef55f22680d3f31bf9946fb0949cec42",
+      "file": "held-fetch/response-1.json"
+    }
+  ],
+  "identity": {
+    "bad": "rpc-occurrence-wrong",
+    "contains": false,
+    "field": "request_id",
+    "file": "held-fetch/response-1.json",
+    "line": null,
+    "path": [
+      "id"
+    ]
+  },
+  "required_reasons": [
+    "evidence collection incomplete"
+  ]
+}

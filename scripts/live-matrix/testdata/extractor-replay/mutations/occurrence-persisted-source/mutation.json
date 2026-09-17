@@ -1,0 +1,24 @@
+{
+  "base": "healthy-channel-double",
+  "changes": [
+    {
+      "after": "2d610d8465c81e4b37e2c38c9a5f34039d51bd1cda6b613dbeacd78e8af067e0",
+      "before": "f4908c3f2f154409390b9969a5b17d5cb5088cb57b58d0c9217cbb151b1ce56e",
+      "file": "context/rows.jsonl"
+    }
+  ],
+  "identity": {
+    "bad": "41002",
+    "contains": false,
+    "field": "source_ids",
+    "file": "context/rows.jsonl",
+    "line": 2,
+    "path": [
+      "source_ids",
+      0
+    ]
+  },
+  "required_reasons": [
+    "evidence collection incomplete"
+  ]
+}

@@ -1,0 +1,161 @@
+{
+  "id": "aggregate-only-incomplete",
+  "baseline_source": "test_verdict_legacy_oracle.py; original collect.py SHA-256 in oracle header",
+  "cell": {
+    "transport": "channel",
+    "state": "reconnect",
+    "session": "resumed",
+    "kind": "text",
+    "burst": "single"
+  },
+  "collect_only": false,
+  "legacy_evidence": {
+    "no_false_held": true,
+    "false_held": false,
+    "route_line_count": 0,
+    "injected": true,
+    "rows_final": 0,
+    "received": {
+      "1": 1
+    },
+    "message_ids": [
+      1
+    ],
+    "attempts": [
+      {
+        "phase": "reserved",
+        "token": "one",
+        "transport": "channel",
+        "members": "1"
+      },
+      {
+        "phase": "confirmed",
+        "token": "one",
+        "transport": "channel",
+        "retired": "1",
+        "elapsed_ms": "100"
+      }
+    ]
+  },
+  "synthetic_witness": {
+    "scenario": {
+      "schema_version": 1,
+      "id": "channel-reconnect-resumed-text-single",
+      "transport": "channel",
+      "kind": "text",
+      "burst": "single",
+      "count": 1,
+      "state": "reconnect",
+      "session": "resumed",
+      "freshness": "not_applicable",
+      "resume_requirement": "delivery_only",
+      "health_class": "healthy",
+      "final_dispositions": [
+        "delivered"
+      ],
+      "evaluation_mode": "verify",
+      "run_id": "unrecorded-run",
+      "route_id": "unrecorded-route",
+      "host_session_id": null,
+      "session_id": null,
+      "injection_barrier_id": "injection",
+      "readiness_barrier_id": "ready",
+      "final_barrier_id": "final",
+      "observation_duration_ms": 15000
+    },
+    "contract": {
+      "schema_version": 1,
+      "id": "matrix-negotiated-v1",
+      "capability_id": "matrix-v1",
+      "axes": {
+        "negotiation": "v1",
+        "live_eligibility": {
+          "channel": true,
+          "inbox": false
+        },
+        "receipt_type": "transcript",
+        "fetch_policy": "receipt",
+        "accepted_modes": [
+          "channel",
+          "fetch_receipt"
+        ]
+      },
+      "milestones": {
+        "live": "transcript_recorded",
+        "fetch": "fetch_result_recorded"
+      },
+      "timing": {
+        "live": {
+          "limit_ms": 15000,
+          "basis": "terminal_confirmation"
+        },
+        "fetch": {
+          "limit_ms": 60000,
+          "basis": "terminal_confirmation"
+        }
+      },
+      "readiness_boundary": "ready",
+      "contract_barrier_names": [
+        "injection",
+        "final"
+      ]
+    },
+    "observation": {
+      "schema_version": 1,
+      "provenance": {
+        "kind": "live_capture",
+        "capture_id": "channel-reconnect-resumed-text-single",
+        "schema_version": 1,
+        "extractor_version": "verdict-core-v1",
+        "contract_version": "matrix-negotiated-v1",
+        "broker_build": "unknown",
+        "adapter_build": "unknown",
+        "host_version": "unknown",
+        "platform": "unknown",
+        "mode": "matrix",
+        "known_defect_baselines": []
+      },
+      "setup_errors": [],
+      "run_errors": [],
+      "collection_complete": false,
+      "streams": [],
+      "artifacts": [],
+      "sources": [],
+      "events": [],
+      "barriers": [],
+      "queue_snapshots": [],
+      "contract_observations": [],
+      "state_proof": null,
+      "session_proof": null
+    }
+  },
+  "old_verdict_reasons": [],
+  "old_report": {
+    "status": "PASS",
+    "reasons": [],
+    "not_evaluated": []
+  },
+  "classification": "intentional-correction",
+  "defect_id": "accept-on-absence",
+  "expected_core": {
+    "status": "FAIL",
+    "reasons": [
+      "injection was not completed",
+      "durable rows remain",
+      "no false Held assertion failed or missing",
+      "route line count assertion failed or missing",
+      "no negotiated attempt observed",
+      "source attempted more or less than once",
+      "receipt missing or outside 15-second window",
+      "retirement count differs from injected source count",
+      "host did not receive each source exactly once",
+      "observed delivery contract does not match expected contract",
+      "requested host state was not proven at injection",
+      "requested session posture was not proven at injection",
+      "injected source lacks its required final disposition",
+      "evidence collection incomplete"
+    ],
+    "not_evaluated": []
+  },
+  "correction_note": "Positive binding and full queue reconciliation refine an already failing trace; the frozen oracle report is unchanged."
+}

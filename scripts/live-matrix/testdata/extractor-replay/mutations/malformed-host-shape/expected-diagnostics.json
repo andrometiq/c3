@@ -1,0 +1,12 @@
+[
+  {
+    "artifact_id": "host-records",
+    "code": "malformed recognized host record",
+    "locator": "line:1"
+  },
+  {
+    "artifact_id": "state",
+    "code": "stream cutoff outside observed extent",
+    "locator": "line:6"
+  }
+]

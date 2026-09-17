@@ -1,0 +1,11 @@
+{
+  "not_evaluated": [],
+  "reasons": [
+    "no false Held assertion failed or missing",
+    "route line count assertion failed or missing",
+    "retired rows do not match authorized delivery members",
+    "injected source lacks its required final disposition",
+    "evidence collection incomplete"
+  ],
+  "status": "FAIL"
+}

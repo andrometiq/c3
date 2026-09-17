@@ -1,0 +1,3 @@
+{"event": "proxy_started", "inbox_env": false, "pid": 45671, "time": 0}
+{"event": "attached", "pid": 45671, "time": 0}
+{"event": "fetch_result_waiting", "frame": {"id": "rpc-original", "jsonrpc": "2.0", "result": {"content": [{"text": "MATRIX_SAMPLE\nMATRIX_SAMPLE\n[C3_FETCH_RECEIPT_V1]\ngroup token-original-one\nmember row-original-1 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\nmember row-original-2 bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n[/C3_FETCH_RECEIPT_V1]", "type": "text"}]}}, "pid": 45671, "time": 0.22}

@@ -1,0 +1,22 @@
+[
+  {
+    "artifact_id": "broker",
+    "code": "extent: artifact shorter than captured seal",
+    "locator": "read"
+  },
+  {
+    "artifact_id": "broker",
+    "code": "extent: captured seal mismatch",
+    "locator": "read"
+  },
+  {
+    "artifact_id": "host-records",
+    "code": "host candidate rejected",
+    "locator": "line:1"
+  },
+  {
+    "artifact_id": "state",
+    "code": "stream cutoff outside observed extent",
+    "locator": "line:6"
+  }
+]

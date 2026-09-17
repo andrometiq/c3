@@ -1,0 +1,12 @@
+[
+  {
+    "artifact_id": "host-records",
+    "code": "host candidate rejected",
+    "locator": "line:1"
+  },
+  {
+    "artifact_id": "state",
+    "code": "final cut does not cover observed stream extent",
+    "locator": "line:6"
+  }
+]

@@ -1,0 +1,23 @@
+{
+  "base": "healthy-channel-double",
+  "changes": [
+    {
+      "after": "eb1195ef88a9bb003505136ebcb3cb2e272eef90cd76135daee3577f58d05be2",
+      "before": "d94ba7d2676c3a65f53a5abc41dd2cc70b27802c9ce6cce34b3079e309481630",
+      "file": "context/driver.jsonl"
+    }
+  ],
+  "identity": {
+    "bad": "selected-session-wrong",
+    "contains": false,
+    "field": "host_session_id",
+    "file": "context/driver.jsonl",
+    "line": 3,
+    "path": [
+      "host_session_ref"
+    ]
+  },
+  "required_reasons": [
+    "evidence collection incomplete"
+  ]
+}

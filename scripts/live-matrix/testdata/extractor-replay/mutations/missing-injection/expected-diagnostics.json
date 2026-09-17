@@ -1,0 +1,17 @@
+[
+  {
+    "artifact_id": "injection",
+    "code": "file missing",
+    "locator": "read"
+  },
+  {
+    "artifact_id": "state",
+    "code": "stream cutoff outside observed extent",
+    "locator": "line:6"
+  },
+  {
+    "artifact_id": "state",
+    "code": "stream cutoff outside observed extent",
+    "locator": "line:9"
+  }
+]

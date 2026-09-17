@@ -1,0 +1,10 @@
+{
+  "not_evaluated": [],
+  "reasons": [
+    "no successful fetch tool-result record",
+    "fetch tool result lacks the complete matching receipt trailer",
+    "fetch did not return each injected source exactly once",
+    "injected source lacks its required final disposition"
+  ],
+  "status": "FAIL"
+}

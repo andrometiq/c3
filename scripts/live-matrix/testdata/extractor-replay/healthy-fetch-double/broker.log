@@ -1,0 +1,4 @@
+TEST INJECT accepted topic=881 message_id=41001 kind=text source=test-inject
+TEST INJECT accepted topic=881 message_id=41002 kind=text source=test-inject
+TEST ATTEMPT token=token-original-one topic=881 transport=fetch phase=reserved members=2 retired=0 elapsed_ms=0
+TEST ATTEMPT token=token-original-one topic=881 transport=fetch phase=confirmed members=2 retired=2 elapsed_ms=40

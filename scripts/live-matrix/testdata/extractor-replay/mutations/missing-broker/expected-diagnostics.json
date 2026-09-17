@@ -1,0 +1,27 @@
+[
+  {
+    "artifact_id": "broker",
+    "code": "file missing",
+    "locator": "read"
+  },
+  {
+    "artifact_id": "injection",
+    "code": "injection result disagrees with broker acceptance",
+    "locator": "line:1"
+  },
+  {
+    "artifact_id": "held-fetch-response",
+    "code": "held response reservation correlation rejected",
+    "locator": "line:1"
+  },
+  {
+    "artifact_id": "state",
+    "code": "stream cutoff outside observed extent",
+    "locator": "line:6"
+  },
+  {
+    "artifact_id": "state",
+    "code": "stream cutoff outside observed extent",
+    "locator": "line:9"
+  }
+]

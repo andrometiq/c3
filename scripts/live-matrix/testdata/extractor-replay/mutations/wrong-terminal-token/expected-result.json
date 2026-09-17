@@ -1,0 +1,11 @@
+{
+  "not_evaluated": [],
+  "reasons": [
+    "receipt missing or outside 15-second window",
+    "delivery evidence identity mismatch",
+    "retired rows do not match authorized delivery members",
+    "injected source lacks its required final disposition",
+    "evidence collection incomplete"
+  ],
+  "status": "FAIL"
+}

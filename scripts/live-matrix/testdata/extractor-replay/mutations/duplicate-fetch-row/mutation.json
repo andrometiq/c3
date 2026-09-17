@@ -1,0 +1,14 @@
+{
+  "base": "healthy-fetch-double",
+  "changes": [
+    {
+      "after": "d3bf1ba14c6eb6683b60eeca96ede9fd8cbb58d6b670bcd03ac40abdc9834135",
+      "before": "5c3528c00ca1fdbb773fa5566f076549d1af5483d9f2daf85502b74dc26511a8",
+      "file": "records.jsonl"
+    }
+  ],
+  "required_reasons": [
+    "fetch tool result lacks the complete matching receipt trailer",
+    "no successful fetch tool-result record"
+  ]
+}

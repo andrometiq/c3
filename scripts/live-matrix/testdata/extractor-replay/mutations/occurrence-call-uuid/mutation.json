@@ -1,0 +1,24 @@
+{
+  "base": "healthy-fetch-double",
+  "changes": [
+    {
+      "after": "b06348a9179afe3e24cb51cfe1991fd2f42a89fec28179d82f646b6c3e9d72cd",
+      "before": "5c3528c00ca1fdbb773fa5566f076549d1af5483d9f2daf85502b74dc26511a8",
+      "file": "records.jsonl"
+    }
+  ],
+  "identity": {
+    "absent": "fetch_requested",
+    "bad": "11111111-2222-4333-8444-000000000098",
+    "contains": false,
+    "field": "host_record_id",
+    "file": "records.jsonl",
+    "line": 2,
+    "path": [
+      "uuid"
+    ]
+  },
+  "required_reasons": [
+    "evidence collection incomplete"
+  ]
+}

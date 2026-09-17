@@ -1,0 +1,16 @@
+{
+  "not_evaluated": [],
+  "reasons": [
+    "injection was not completed",
+    "rows retired before host tool-result receipt (baseline consume-on-fetch)",
+    "no successful fetch tool-result record",
+    "fetch tool result lacks the complete matching receipt trailer",
+    "fetch result has no broker receipt token",
+    "fetch did not return each injected source exactly once",
+    "delivery evidence identity mismatch",
+    "retired rows do not match authorized delivery members",
+    "injected source lacks its required final disposition",
+    "evidence collection incomplete"
+  ],
+  "status": "FAIL"
+}

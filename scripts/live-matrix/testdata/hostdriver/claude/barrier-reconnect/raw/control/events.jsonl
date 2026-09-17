@@ -1,0 +1,5 @@
+{"event": "proxy_started", "pid": 45670, "time": 0}
+{"event": "proxy_started", "pid": 45671, "time": 0.03}
+{"event": "initialized_waiting", "pid": 45671, "time": 0.05}
+{"event": "channel_notify", "pid": 45670, "time": 0.1}
+{"event": "initialized_released", "pid": 45671, "time": 0.16}

@@ -1,0 +1,116 @@
+[
+  {
+    "action": "cut",
+    "barrier_id": "pre_injection",
+    "cuts": [
+      {
+        "seq": 0,
+        "stream_id": "broker"
+      },
+      {
+        "seq": 0,
+        "stream_id": "adapter"
+      },
+      {
+        "seq": 1,
+        "stream_id": "host"
+      },
+      {
+        "seq": 0,
+        "stream_id": "injection"
+      },
+      {
+        "seq": 0,
+        "stream_id": "queue"
+      },
+      {
+        "seq": 0,
+        "stream_id": "attempt-observer-stream"
+      },
+      {
+        "seq": 0,
+        "stream_id": "receipt-stream"
+      },
+      {
+        "seq": 1,
+        "stream_id": "sample-stream"
+      },
+      {
+        "seq": 0,
+        "stream_id": "contract"
+      },
+      {
+        "seq": 1,
+        "stream_id": "driver"
+      },
+      {
+        "seq": 1,
+        "stream_id": "ownership-stream"
+      }
+    ]
+  },
+  {
+    "action": "state_sample",
+    "observed_state": "idle"
+  },
+  {
+    "action": "session_sample",
+    "host_session_ref": "session-host-original",
+    "operation": "resume",
+    "transcript_records": 1
+  },
+  {
+    "action": "cut",
+    "barrier_id": "injection",
+    "cuts": [
+      {
+        "seq": 0,
+        "stream_id": "broker"
+      },
+      {
+        "seq": 0,
+        "stream_id": "adapter"
+      },
+      {
+        "seq": 1,
+        "stream_id": "host"
+      },
+      {
+        "seq": 0,
+        "stream_id": "injection"
+      },
+      {
+        "seq": 0,
+        "stream_id": "queue"
+      },
+      {
+        "seq": 0,
+        "stream_id": "attempt-observer-stream"
+      },
+      {
+        "seq": 0,
+        "stream_id": "receipt-stream"
+      },
+      {
+        "seq": 1,
+        "stream_id": "sample-stream"
+      },
+      {
+        "seq": 1,
+        "stream_id": "contract"
+      },
+      {
+        "seq": 4,
+        "stream_id": "driver"
+      },
+      {
+        "seq": 1,
+        "stream_id": "ownership-stream"
+      }
+    ]
+  },
+  {
+    "action": "window_end",
+    "observed_state": "idle"
+  }
+]

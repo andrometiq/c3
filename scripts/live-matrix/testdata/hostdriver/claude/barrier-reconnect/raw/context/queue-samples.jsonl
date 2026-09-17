@@ -1,0 +1,3 @@
+{"barrier_id": "pre_injection", "read_state": "complete", "rows": [], "snapshot_id": "sample-pre"}
+{"barrier_id": "before_ready", "read_state": "complete", "rows": [{"revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "row_id": "row-original-1"}, {"revision": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "row_id": "row-original-2"}], "snapshot_id": "snapshot-before-ready"}
+{"barrier_id": "final", "read_state": "complete", "rows": [], "snapshot_id": "sample-final"}

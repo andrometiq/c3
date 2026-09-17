@@ -1,0 +1,27 @@
+{
+  "base": "healthy-fetch-double",
+  "changes": [
+    {
+      "after": "d52203fba8fca737f0786de595a0854176a862986551299cfaf69ea10205d54b",
+      "before": "5c3528c00ca1fdbb773fa5566f076549d1af5483d9f2daf85502b74dc26511a8",
+      "file": "records.jsonl"
+    }
+  ],
+  "identity": {
+    "absent": "fetch_result_recorded",
+    "bad": "call-recorded-wrong",
+    "contains": false,
+    "field": "operation_id",
+    "file": "records.jsonl",
+    "line": 3,
+    "path": [
+      "message",
+      "content",
+      0,
+      "tool_use_id"
+    ]
+  },
+  "required_reasons": [
+    "evidence collection incomplete"
+  ]
+}

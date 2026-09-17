@@ -1,0 +1,9 @@
+{
+  "not_evaluated": [],
+  "reasons": [
+    "retired rows do not match authorized delivery members",
+    "injected source lacks its required final disposition",
+    "evidence collection incomplete"
+  ],
+  "status": "FAIL"
+}

@@ -1,0 +1,24 @@
+{
+  "base": "healthy-channel-double",
+  "changes": [
+    {
+      "after": "e0ed0907c81c222f154ea01cdbcdd1ee5076bfd5eb9849314b8ac4157e84e19c",
+      "before": "40b88f10c6c8ffcee24e8d23d2b93f1a13c2130acc1648900b75730e071cdaee",
+      "file": "records.jsonl"
+    }
+  ],
+  "identity": {
+    "bad": "882",
+    "contains": true,
+    "field": "route_id",
+    "file": "records.jsonl",
+    "line": 2,
+    "path": [
+      "message",
+      "content"
+    ]
+  },
+  "required_reasons": [
+    "evidence collection incomplete"
+  ]
+}

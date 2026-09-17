@@ -1,0 +1,32 @@
+[
+  {
+    "artifact_id": "host-records",
+    "code": "byte:0: invalid UTF-8",
+    "locator": "read"
+  },
+  {
+    "artifact_id": "host-records",
+    "code": "seal: non-complete captured read",
+    "locator": "read"
+  },
+  {
+    "artifact_id": "driver-observations",
+    "code": "host-records: malformed: byte:0: invalid UTF-8",
+    "locator": "producer"
+  },
+  {
+    "artifact_id": "state",
+    "code": "stream cutoff outside observed extent",
+    "locator": "line:1"
+  },
+  {
+    "artifact_id": "state",
+    "code": "stream cutoff outside observed extent",
+    "locator": "line:4"
+  },
+  {
+    "artifact_id": "state",
+    "code": "stream cutoff outside observed extent",
+    "locator": "line:6"
+  }
+]
