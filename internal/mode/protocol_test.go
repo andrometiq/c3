@@ -94,6 +94,9 @@ func TestCombined_ContainsBothProtocols(t *testing.T) {
 	if !strings.Contains(got, MultipartProtocol) {
 		t.Error("Combined() missing MultipartProtocol body")
 	}
+	if !strings.Contains(got, SwarmProtocol) {
+		t.Error("Combined() missing SwarmProtocol body")
+	}
 }
 
 // TestCombined_FoldsInCapabilityGuidance is the P4 contract: the channel

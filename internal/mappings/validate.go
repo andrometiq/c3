@@ -1,6 +1,9 @@
 package mappings
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 // Validate returns nil if the MappingsFile is internally consistent, or a
 // concrete error describing the first inconsistency found.
@@ -34,9 +37,17 @@ func (mf *MappingsFile) Validate() error {
 				return fmt.Errorf("mappings: channel %q topic %q references unknown group %q", chanName, tp.Name, tp.Group)
 			}
 		}
+		for botName, bot := range cc.Bots {
+			if strings.TrimSpace(botName) == "" {
+				return fmt.Errorf("mappings: channel %q has an empty bots key", chanName)
+			}
+			if strings.TrimSpace(bot.BotToken) == "" {
+				return fmt.Errorf("mappings: channel %q bots.%s missing bot_token", chanName, botName)
+			}
+		}
 	}
 	for cwd, m := range mf.Mappings {
-		if _, ok := mf.Channels[m.Channel]; !ok {
+		if _, ok := mf.Channel(m.Channel); !ok {
 			return fmt.Errorf("mappings: cwd %q maps to unknown channel %q", cwd, m.Channel)
 		}
 	}

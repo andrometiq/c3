@@ -87,17 +87,13 @@ type Broker struct {
 	mappings   atomic.Pointer[mappings.MappingsFile]
 	mutationMu sync.Mutex
 
-	// persistedCB is invoked (best-effort, off the hot path is fine) when an
-	// inbound's source update_id has been durably appended to the queue. The
-	// telegram channel registers this to advance its persisted-offset tracker.
-	// nil ⇒ no-op (non-telegram / unit tests).
-	persistedMu sync.RWMutex
-	persistedCB func(in *c3types.Inbound)
-	// persistFailedCB mirrors persistedCB for the FAILURE case: invoked when an
-	// inbound's durable Append FAILED so the telegram channel can evict that
-	// update's poll-side dedup entry and let the held Telegram offset redeliver +
-	// genuinely retry (item 1). Guarded by the same persistedMu. nil ⇒ no-op.
-	persistFailedCB func(in *c3types.Inbound)
+	// persistedCBs are invoked (best-effort) when an inbound's source update_id
+	// has been durably appended. Each telegram poller registers its own callback
+	// (Swarm: several bots); each callback ignores other channels' inbounds.
+	// Empty ⇒ no-op (non-telegram / unit tests).
+	persistedMu      sync.RWMutex
+	persistedCBs     []func(in *c3types.Inbound)
+	persistFailedCBs []func(in *c3types.Inbound)
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -436,41 +432,45 @@ func (b *Broker) SetMappings(mf *mappings.MappingsFile) {
 	}
 }
 
-// SetPersistedCallback registers the durable-persist notifier (the telegram
-// channel sets this to advance its persisted-offset tracker). Safe to call once
-// at channel start.
+// SetPersistedCallback registers a durable-persist notifier. Swarm starts
+// one telegram poller per bot; each Start appends its callback. Safe to call
+// at channel start. fn == nil is ignored.
 func (b *Broker) SetPersistedCallback(fn func(in *c3types.Inbound)) {
+	if fn == nil {
+		return
+	}
 	b.persistedMu.Lock()
 	defer b.persistedMu.Unlock()
-	b.persistedCB = fn
+	b.persistedCBs = append(b.persistedCBs, fn)
 }
 
-// notifyPersisted invokes the registered persist callback, if any.
+// notifyPersisted invokes every registered persist callback.
 func (b *Broker) notifyPersisted(in *c3types.Inbound) {
 	b.persistedMu.RLock()
-	fn := b.persistedCB
+	fns := make([]func(*c3types.Inbound), len(b.persistedCBs))
+	copy(fns, b.persistedCBs)
 	b.persistedMu.RUnlock()
-	if fn != nil {
+	for _, fn := range fns {
 		fn(in)
 	}
 }
 
-// SetPersistFailedCallback registers the durable-persist-FAILURE notifier (the
-// telegram channel sets this to evict a poll-side dedup entry on Append failure
-// so the held offset's redelivery genuinely retries — item 1). Safe to call once
-// at channel start.
+// SetPersistFailedCallback registers a durable-persist-FAILURE notifier.
 func (b *Broker) SetPersistFailedCallback(fn func(in *c3types.Inbound)) {
+	if fn == nil {
+		return
+	}
 	b.persistedMu.Lock()
 	defer b.persistedMu.Unlock()
-	b.persistFailedCB = fn
+	b.persistFailedCBs = append(b.persistFailedCBs, fn)
 }
 
-// notifyPersistFailed invokes the registered persist-failure callback, if any.
 func (b *Broker) notifyPersistFailed(in *c3types.Inbound) {
 	b.persistedMu.RLock()
-	fn := b.persistFailedCB
+	fns := make([]func(*c3types.Inbound), len(b.persistFailedCBs))
+	copy(fns, b.persistFailedCBs)
 	b.persistedMu.RUnlock()
-	if fn != nil {
+	for _, fn := range fns {
 		fn(in)
 	}
 }

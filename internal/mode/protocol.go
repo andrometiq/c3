@@ -61,6 +61,15 @@ const MultipartProtocol = "MULTI-PART REPLY PROTOCOL:\n" +
 	"• Process and respond to ALL collected messages at once when the user says \"end of multi-part reply\".\n" +
 	"• Reason: lets the user dictate complex thoughts as short voice bursts without intermediate interruption."
 
+// SwarmProtocol overrides the CLI-default output mode after a swarm attach.
+// Combined() keeps ModeProtocol first (wire tests); this block is last so it
+// wins when the attach result reports swarm=true.
+const SwarmProtocol = "SWARM MODE PROTOCOL (overrides CLI-default AFTER a swarm attach):\n" +
+	"• When attach reports swarm=true (or the channel is telegram:<bot>), you are in Telegram mode by default. ALL substantive replies go to Telegram via the `reply` tool. Do not wait for the user to say \"switch to Telegram\". Announce \"currently in Telegram mode (swarm)\".\n" +
+	"• Address another swarm agent by tagging its Telegram bot (@username) in the reply. That delivers the message to that agent and arms it.\n" +
+	"• A user (or agent) /mute in the topic stops THIS bot listening until it is tagged again. You stay attached.\n" +
+	"• Switch to CLI mode only if the user explicitly asks. Never answer untagged traffic meant for another bot."
+
 // Combined returns the concatenation that adapters splice onto the tail
 // of their MCP-initialize `instructions` string. Leading "\n\n" preserves
 // the historical wire shape — every adapter previously hard-coded its
@@ -84,5 +93,5 @@ const MultipartProtocol = "MULTI-PART REPLY PROTOCOL:\n" +
 // the narrow MultipartProtocol voice-burst convention moves LAST. The leading
 // "\n\n" + ModeProtocol byte-shape is preserved for the existing wire tests.
 func Combined(c c3types.Capabilities) string {
-	return "\n\n" + ModeProtocol + "\n\n" + capability.GuidanceFor(c) + "\n\n" + MultipartProtocol
+	return "\n\n" + ModeProtocol + "\n\n" + capability.GuidanceFor(c) + "\n\n" + MultipartProtocol + "\n\n" + SwarmProtocol
 }

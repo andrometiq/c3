@@ -1166,6 +1166,23 @@ func (c *Channel) dispatchMessage(updateID int64, msg *gotgbot.Message, edited b
 		c.markUpdateDone(updateID)
 		return
 	}
+	// Swarm /mute: stay attached, go deaf until tagged again. Channel-local
+	// (sticky state lives on this bot), after the allowlist gate.
+	if c.swarmActive() && len(in.Attachments) == 0 && isMuteCommand(in.Text) {
+		c.swarmStore.Disarm(swarmKey(in))
+		if _, err := c.SendReply(c3types.ReplyArgs{
+			Channel: c.Name(), ChatID: in.ChatID, TopicID: in.TopicID,
+			Text:   "Listening stopped. Tag me to talk again.",
+			Markup: c3types.MarkupNone,
+		}); err != nil {
+			c.logf("telegram: /mute reply send failed update=%d chat=%d: %v", updateID, in.ChatID, err)
+		}
+		c.host.Logf("telegram: swarm mute update=%d chat=%d thread=%d channel=%s",
+			updateID, in.ChatID, msg.MessageThreadId, c.Name())
+		c.markUpdateDone(updateID)
+		return
+	}
+
 	// Gate ALLOWED (allowlisted sender). Broker-owned command intercept: a
 	// "/status", "/queue" or "/drain" inbound from an allowlisted sender is
 	// handled by the broker directly (it answers + is NEVER queued or routed to
@@ -1200,6 +1217,20 @@ func (c *Channel) dispatchMessage(updateID int64, msg *gotgbot.Message, edited b
 				c.host.Logf("telegram: command reply sent update=%d chat=%d thread=%d (not routed)", updateID, in.ChatID, msg.MessageThreadId)
 			}
 			// Handled, never persisted — unblock the offset over this update.
+			c.markUpdateDone(updateID)
+			return
+		}
+	}
+	// Swarm: with extra bots configured, this bot is deaf until tagged
+	// (or replied-to) and stays armed until /mute. Untagged traffic is
+	// marked done, not queued — it belongs to another bot or to nobody.
+	if c.swarmActive() {
+		addressed := c.addressedToMe(msg, in.Text)
+		if addressed {
+			c.swarmStore.Arm(swarmKey(in))
+		} else if !c.swarmStore.Armed(swarmKey(in)) {
+			c.host.Logf("telegram: swarm drop update=%d msg=%d chat=%d thread=%d channel=%s (not mentioned, not listening)",
+				updateID, msg.MessageId, msg.Chat.Id, msg.MessageThreadId, c.Name())
 			c.markUpdateDone(updateID)
 			return
 		}

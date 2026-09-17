@@ -90,3 +90,4 @@ The first is cleaner; the second is far easier to reason about when it misbehave
 
 - Whether a typed free-text answer is also queued as a normal message, or consumed only as the answer.
 - Grant UX for operator authorization (per-action prompt vs standing grant).
+- **Swarm mode** (several agents in one topic, mention-addressed, sticky listen until mute): see [docs/future/swarm-mode.md](docs/future/swarm-mode.md). Blocks on callsign-vs-extra-bots, the disarm verb, and exclusive-claim conversion.

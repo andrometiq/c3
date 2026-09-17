@@ -419,6 +419,12 @@ func runDaemon() (err error) {
 		if err := br.RegisterChannel(telegram.New()); err != nil {
 			return fmt.Errorf("register telegram channel: %w", err)
 		}
+		for botName := range cc.Bots {
+			if err := br.RegisterChannel(telegram.NewNamed(botName)); err != nil {
+				return fmt.Errorf("register swarm bot %q: %w", botName, err)
+			}
+			fmt.Fprintf(os.Stderr, "c3-broker: swarm bot telegram:%s registered\n", botName)
+		}
 	} else {
 		fmt.Fprintln(os.Stderr, "c3-broker: no telegram bot_token in mappings.json — running without inbound transport")
 	}

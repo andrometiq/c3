@@ -122,6 +122,22 @@ func (b *Broker) handleAttach(conn *ipc.Conn, stub *Stub, raw []byte) {
 		return
 	}
 
+	resolved, err := b.resolveSwarmChannel(chanName, req.Bot, stub.CLI)
+	if err != nil {
+		_ = conn.WriteJSON(ipc.AttachedMsg{Op: ipc.OpAttached, OK: false, Err: err.Error()})
+		return
+	}
+	if resolved != chanName {
+		if _, err := b.Channel(resolved); err != nil {
+			_ = conn.WriteJSON(ipc.AttachedMsg{
+				Op: ipc.OpAttached, OK: false,
+				Err: fmt.Sprintf("swarm bot channel %q is configured but not running (%v)", resolved, err),
+			})
+			return
+		}
+		chanName = resolved
+	}
+
 	// If the caller passed a freeform Expr, parse it into structured fields
 	// before dispatching. This is the shared parser every CLI's slash-command
 	// wrapper invokes via `attach(expr=$ARGUMENTS)` — keeps each CLI's
@@ -188,13 +204,15 @@ func (b *Broker) attachBare(conn *ipc.Conn, stub *Stub, chanName, cwd, group str
 				name = fmt.Sprintf("topic-%d", cur.TopicID)
 			}
 		}
-		_ = conn.WriteJSON(ipc.AttachedMsg{
+		msg := ipc.AttachedMsg{
 			Op: ipc.OpAttached, OK: true,
 			Status:  ipc.AttachStatusOK,
 			Channel: cur.Channel, ChatID: cur.ChatID, TopicID: topicID,
 			Name: name, Group: groupName,
 			Capabilities: b.capsForChannel(cur.Channel),
-		})
+		}
+		b.stampSwarm(&msg)
+		_ = conn.WriteJSON(msg)
 		return
 	}
 
@@ -227,14 +245,16 @@ func (b *Broker) attachBare(conn *ipc.Conn, stub *Stub, chanName, cwd, group str
 			t := key.TopicID
 			topicID = &t
 		}
-		_ = conn.WriteJSON(ipc.AttachedMsg{
+		msg := ipc.AttachedMsg{
 			Op: ipc.OpAttached, OK: true,
 			Status:  ipc.AttachStatusOK,
 			Channel: key.Channel, ChatID: key.ChatID, TopicID: topicID,
 			Name: name, Group: groupName,
 			QueuedCount: cnt, QueuedSummary: preview,
 			Capabilities: b.capsForChannel(key.Channel),
-		})
+		}
+		b.stampSwarm(&msg)
+		_ = conn.WriteJSON(msg)
 		return
 	}
 
@@ -286,7 +306,7 @@ const maxPickOptions = 4
 func (b *Broker) buildPickTopic(stub *Stub, chanName, cwd string) *ipc.Proposal {
 	_ = stub
 	mf := b.Mappings()
-	cc, hasChan := mf.Channels[chanName]
+	cc, hasChan := mf.Channel(chanName)
 
 	var suggestions []ipc.PickSuggestion
 	seen := map[RouteKey]bool{}
@@ -546,7 +566,7 @@ func applyExprToAttachReq(req *ipc.AttachReq) {
 // or just agrees by sending steal=true to bypass. For now: agent re-issues
 // using the explicit form the user chose.
 func (b *Broker) attachDM(conn *ipc.Conn, stub *Stub, chanName string, steal, replay bool) {
-	cc, ok := b.Mappings().Channels[chanName]
+	cc, ok := b.Mappings().Channel(chanName)
 	if !ok {
 		_ = conn.WriteJSON(ipc.AttachedMsg{
 			Op: ipc.OpAttached, OK: false,
@@ -623,7 +643,7 @@ func (b *Broker) attachDM(conn *ipc.Conn, stub *Stub, chanName string, steal, re
 // stops an id-addressed replay with a mismatched/absent group from binding a
 // same-id thread in the wrong chat (item 3).
 func (b *Broker) attachByTopicID(conn *ipc.Conn, stub *Stub, chanName string, chatID int64, topicID int64, groupName string, steal, replay bool) {
-	cc, ok := b.Mappings().Channels[chanName]
+	cc, ok := b.Mappings().Channel(chanName)
 	if !ok {
 		_ = conn.WriteJSON(ipc.AttachedMsg{
 			Op: ipc.OpAttached, OK: false,
@@ -715,7 +735,7 @@ func (b *Broker) attachByTopicID(conn *ipc.Conn, stub *Stub, chanName string, ch
 // On any "propose" outcome the response carries needs_confirmation=true and
 // a Proposal payload; the agent re-calls attach with create=true to confirm.
 func (b *Broker) attachByName(conn *ipc.Conn, stub *Stub, chanName, name, cwd, groupName string, create, steal, replay bool) {
-	cc, ok := b.Mappings().Channels[chanName]
+	cc, ok := b.Mappings().Channel(chanName)
 	if !ok {
 		_ = conn.WriteJSON(ipc.AttachedMsg{Op: ipc.OpAttached, OK: false,
 			Err: fmt.Sprintf("attach: channel %q not in mappings.json", chanName)})
@@ -1542,5 +1562,57 @@ func (b *Broker) withBacklog(key RouteKey, msg ipc.AttachedMsg) ipc.AttachedMsg 
 	count, items := b.backlogSummary(key)
 	msg.QueuedCount = count
 	msg.QueuedSummary = items
+	b.stampSwarm(&msg)
 	return msg
+}
+
+func (b *Broker) stampSwarm(msg *ipc.AttachedMsg) {
+	if msg == nil || !msg.OK || msg.Channel == "" || b.Mappings() == nil {
+		return
+	}
+	cc, ok := b.Mappings().Channel(msg.Channel)
+	msg.Swarm = ok && len(cc.Bots) > 0
+}
+
+// resolveSwarmChannel maps attach onto a telegram:<bot> channel when Swarm
+// extra bots are configured. Explicit bot= wins; otherwise the session CLI
+// family (grok/claude/codex/…) is used when a bot of that name exists.
+func (b *Broker) resolveSwarmChannel(chanName, bot, cli string) (string, error) {
+	if chanName != "telegram" {
+		return chanName, nil
+	}
+	cc, ok := b.Mappings().Channel("telegram")
+	if !ok || len(cc.Bots) == 0 {
+		if strings.TrimSpace(bot) != "" {
+			return "", fmt.Errorf("attach: bot=%s but channels.telegram.bots is empty", bot)
+		}
+		return chanName, nil
+	}
+	want := strings.ToLower(strings.TrimSpace(bot))
+	explicit := want != ""
+	if want == "" {
+		want = strings.ToLower(strings.TrimSpace(cli))
+	}
+	if want == "" || want == "telegram" {
+		return "telegram", nil
+	}
+	if _, ok := lookupBot(cc.Bots, want); !ok {
+		if explicit {
+			return "", fmt.Errorf("attach: unknown swarm bot %q", bot)
+		}
+		return "telegram", nil
+	}
+	return "telegram:" + want, nil
+}
+
+func lookupBot(bots map[string]mappings.BotConfig, name string) (mappings.BotConfig, bool) {
+	if b, ok := bots[name]; ok {
+		return b, true
+	}
+	for k, v := range bots {
+		if strings.EqualFold(k, name) {
+			return v, true
+		}
+	}
+	return mappings.BotConfig{}, false
 }

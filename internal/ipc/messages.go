@@ -575,6 +575,11 @@ type AttachReq struct {
 	// field is plumbed for forward-compat.
 	Confirm *Proposal `json:"confirm,omitempty"`
 
+	// Bot selects a Swarm extra bot (mappings.json channels.telegram.bots.<name>).
+	// Empty ⇒ the broker maps this session's CLI family onto a bot of the same
+	// name when one exists, otherwise the primary telegram bot.
+	Bot string `json:"bot,omitempty"`
+
 	// PolicyRejected: hint set true by the calling agent on a re-invoke
 	// after observing the CLI host's policy layer reject a prior attach
 	// (e.g. Codex's approvals_reviewer="auto_review" surfacing an
@@ -631,6 +636,12 @@ type AttachedMsg struct {
 	// Additive + omitempty: zero/nil for an empty queue and for older brokers.
 	QueuedCount   int          `json:"queued_count,omitempty"`
 	QueuedSummary []QueuedItem `json:"queued_summary,omitempty"`
+
+	// Swarm is true when this attach landed on a topic that is running Swarm
+	// (channels.telegram.bots is non-empty). Additive + omitempty. The agent
+	// must then default to Telegram output mode: every substantive reply goes
+	// through the reply tool.
+	Swarm bool `json:"swarm,omitempty"`
 }
 
 // Proposal describes what the broker would do if the agent confirms.

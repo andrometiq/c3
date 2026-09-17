@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -412,5 +413,85 @@ func TestClose_UnblocksInflightInject(t *testing.T) {
 	}
 	if elapsed := time.Since(start); elapsed > 5*time.Second {
 		t.Fatalf("Close() took %v to unblock the inject — it must not wait behind leader I/O", elapsed)
+	}
+}
+
+// A follow-up that arrives while the previous C3-injected turn is still
+// running must wait for that turn to finish, then session/prompt as the NEXT
+// user message. The old Inject wrapped drain in defaultPromptTO and closed the
+// leader conn when that window expired, so a working Grok turn dropped the
+// Telegram follow-up as UNCERTAIN instead of delivering it next.
+func TestInject_FollowupWaitsForTurn(t *testing.T) {
+	old := defaultPromptTO
+	defaultPromptTO = 80 * time.Millisecond
+	t.Cleanup(func() { defaultPromptTO = old })
+
+	var mu sync.Mutex
+	var prompts []string
+	sock := startScriptedLeader(t, func(write func(v any), id any, text string) {
+		mu.Lock()
+		prompts = append(prompts, text)
+		n := len(prompts)
+		mu.Unlock()
+		write(userChunk("sess-test", text))
+		if n == 1 {
+			time.Sleep(250 * time.Millisecond) // longer than the landing window
+		}
+		write(acpResult(id, map[string]any{"stopReason": "end_turn"}))
+	})
+	c := &leaderClient{sessionID: "sess-test", cwd: t.TempDir(), sockPath: sock}
+	if err := c.Inject(context.Background(), "first"); err != nil {
+		t.Fatalf("first inject: %v", err)
+	}
+	if err := c.Inject(context.Background(), "second"); err != nil {
+		t.Fatalf("follow-up while the first turn is still running must wait then land as the next prompt, got %v", err)
+	}
+	mu.Lock()
+	got := append([]string(nil), prompts...)
+	mu.Unlock()
+	if len(got) != 2 || got[0] != "first" || got[1] != "second" {
+		t.Fatalf("prompts = %#v, want [first second] in order", got)
+	}
+}
+
+// While the previous turn has no terminal result yet, a second Inject must
+// not send another session/prompt. That is the "wait, then next message"
+// contract: no concurrent prompt, no silent drop.
+func TestInject_NoPromptUntilDrain(t *testing.T) {
+	release := make(chan struct{})
+	t.Cleanup(func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+	})
+	var mu sync.Mutex
+	var prompts []string
+	sock := startScriptedLeader(t, func(write func(v any), id any, text string) {
+		mu.Lock()
+		prompts = append(prompts, text)
+		n := len(prompts)
+		mu.Unlock()
+		write(userChunk("sess-test", text))
+		if n == 1 {
+			<-release
+		}
+		write(acpResult(id, map[string]any{"stopReason": "end_turn"}))
+	})
+	c := &leaderClient{sessionID: "sess-test", cwd: t.TempDir(), sockPath: sock}
+	if err := c.Inject(context.Background(), "first"); err != nil {
+		t.Fatalf("first inject: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	if err := c.Inject(ctx, "second"); err == nil {
+		t.Fatal("second inject must not succeed while the first turn is still running")
+	}
+	mu.Lock()
+	n := len(prompts)
+	mu.Unlock()
+	if n != 1 {
+		t.Fatalf("second session/prompt must not be sent while the first turn is in flight, got %d prompts", n)
 	}
 }

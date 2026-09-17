@@ -15,6 +15,22 @@ func TestRoutes_ClaimSucceedsOnFreeRoute(t *testing.T) {
 	}
 }
 
+func TestRoutes_SwarmBotsShareOneTopic(t *testing.T) {
+	r := NewRoutes()
+	tid := ptrI64(10848)
+	grok := &Stub{ConnID: 1, CLI: "grok", PID: 1, CWD: "/x"}
+	glm := &Stub{ConnID: 2, CLI: "glm", PID: 2, CWD: "/x"}
+	if _, ok := r.Claim(MakeRouteKey("telegram:grok", -100, tid), grok); !ok {
+		t.Fatal("grok bot should claim the shared topic")
+	}
+	if _, ok := r.Claim(MakeRouteKey("telegram:glm", -100, tid), glm); !ok {
+		t.Fatal("glm bot must claim the SAME chat/topic without colliding — different RouteKey.Channel")
+	}
+	if _, ok := r.Claim(MakeRouteKey("telegram:grok", -100, tid), glm); ok {
+		t.Fatal("same bot on the same topic must still collide")
+	}
+}
+
 func TestRoutes_ClaimFailsWhenHeld(t *testing.T) {
 	r := NewRoutes()
 	first := &Stub{ConnID: 1, CLI: "claude", PID: 1, CWD: "/x"}

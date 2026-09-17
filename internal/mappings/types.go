@@ -121,6 +121,17 @@ type ChannelConfig struct {
 	// would zero-value to false and silently disable decoding for everyone who
 	// never set it — the trap documented for notifications.invasive.
 	RichInbound *bool `json:"rich_inbound,omitempty"`
+	// Bots is the Swarm extra-bot set: each named bot is a second Telegram
+	// identity that can attach to the same forum topics as bot_token without
+	// colliding on the exclusive claim (route channel becomes telegram:<name>).
+	// Absent/empty ⇒ single-bot C3, no mention filter. See docs/future/swarm-mode.md.
+	Bots map[string]BotConfig `json:"bots,omitempty"`
+}
+
+// BotConfig is one extra Telegram bot used in Swarm mode.
+type BotConfig struct {
+	BotToken string `json:"bot_token"`
+	Username string `json:"username,omitempty"`
 }
 
 // GroupConfig identifies a Telegram supergroup the bot can create topics in.

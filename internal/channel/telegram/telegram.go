@@ -23,6 +23,7 @@ import (
 	"github.com/Andrometiq/c3/internal/c3types"
 	"github.com/Andrometiq/c3/internal/channel"
 	"github.com/Andrometiq/c3/internal/mappings"
+	"github.com/Andrometiq/c3/internal/swarm"
 )
 
 // longPollTimeoutSeconds is the server-side hold for getUpdates. Telegram
@@ -93,6 +94,8 @@ type Config struct {
 	// Bridged from mappings.ChannelConfig via host.Config (json.Marshal →
 	// json.Unmarshal); the json tag MUST match the mappings side.
 	RichInbound *bool `json:"rich_inbound,omitempty"`
+	// Bots is the Swarm extra-bot set (same json as mappings.ChannelConfig).
+	Bots map[string]mappings.BotConfig `json:"bots,omitempty"`
 }
 
 // RichInboundEnabled reports whether inbound rich-message decoding is on.
@@ -228,6 +231,13 @@ type Channel struct {
 
 	ctx    context.Context
 	cancel context.CancelFunc
+
+	// name is the Swarm bot key. Empty ⇒ primary channel "telegram".
+	// Non-empty ⇒ Name() is "telegram:<name>" and Start uses cfg.Bots[name].
+	name string
+	// botUsername is the @username without @, set from config or the first getMe.
+	botUsername atomic.Value // string
+	swarmStore  *swarm.Store
 }
 
 // primaryBaseFromEnv applies the C3_TELEGRAM_API_URL env override to a config
@@ -245,11 +255,36 @@ func primaryBaseFromEnv(cfgPrimary string) string {
 // New returns an unstarted Telegram Channel. The bot connection is established
 // in Start; New just allocates.
 func New() *Channel {
-	return &Channel{}
+	return &Channel{swarmStore: swarm.NewStore()}
+}
+
+// NewNamed returns a Swarm extra-bot channel. name is the bots map key
+// (e.g. "glm"); Name() is "telegram:glm".
+func NewNamed(name string) *Channel {
+	return &Channel{name: strings.TrimSpace(name), swarmStore: swarm.NewStore()}
 }
 
 // Name returns the channel identifier.
-func (c *Channel) Name() string { return Name }
+func (c *Channel) Name() string {
+	if c.name != "" {
+		return Name + ":" + c.name
+	}
+	return Name
+}
+
+func (c *Channel) swarmActive() bool {
+	return c != nil && len(c.cfg.Bots) > 0
+}
+
+func (c *Channel) myUsername() string {
+	if c == nil {
+		return ""
+	}
+	if v, ok := c.botUsername.Load().(string); ok {
+		return v
+	}
+	return ""
+}
 
 // Start reads config from host, creates the gotgbot.Bot, and returns once the
 // channel is ready to be polled. The actual getUpdates loop launches in a
@@ -259,7 +294,18 @@ func (c *Channel) Start(ctx context.Context, host channel.Host) error {
 	if err := host.Config(Name, &c.cfg); err != nil {
 		return fmt.Errorf("telegram: read config: %w", err)
 	}
-	if c.cfg.BotToken == "" {
+	token := c.cfg.BotToken
+	if c.name != "" {
+		bot, ok := c.cfg.Bots[c.name]
+		if !ok || strings.TrimSpace(bot.BotToken) == "" {
+			return fmt.Errorf("telegram: swarm bot %q missing bot_token in mappings.json:channels.telegram.bots", c.name)
+		}
+		token = bot.BotToken
+		if u := strings.TrimPrefix(strings.TrimSpace(bot.Username), "@"); u != "" {
+			c.botUsername.Store(u)
+		}
+	}
+	if token == "" {
 		return errors.New("telegram: bot_token missing in mappings.json:channels.telegram")
 	}
 
@@ -345,7 +391,7 @@ func (c *Channel) Start(ctx context.Context, host channel.Host) error {
 	// Unreachability is now handled by that machinery instead of aborting boot.
 	// Trade-off: Bot.User is "<missing>" until the first successful call, so the
 	// heartbeat logs the confirmed @username on its first success.
-	bot, err := gotgbot.NewBot(c.cfg.BotToken, &gotgbot.BotOpts{
+	bot, err := gotgbot.NewBot(token, &gotgbot.BotOpts{
 		BotClient:         botClient,
 		DisableTokenCheck: true,
 		RequestOpts:       c.requestOptsFor("getMe"),
@@ -365,7 +411,7 @@ func (c *Channel) Start(ctx context.Context, host channel.Host) error {
 	c.editSupp = newEditSuppressor(8192, userEditWindow)
 	c.rate = newRateLimiter()
 	c.sentPolls = newSentPollMap(2000)
-	if store, sErr := newOffsetStore(Name); sErr == nil {
+	if store, sErr := newOffsetStore(offsetFileName(c.Name())); sErr == nil {
 		c.offsets = store
 	} else {
 		host.Logf("telegram: offset store unavailable (%v); restarts will re-process the last 24h of updates", sErr)
@@ -399,7 +445,7 @@ func (c *Channel) Start(ctx context.Context, host channel.Host) error {
 	// Token check is deferred (offline-safe boot), so bot.Username is "<missing>"
 	// here. The heartbeat logs "connected as @<name>" once it confirms identity
 	// on its first successful getMe.
-	host.Logf("telegram: started (token-check deferred; identity confirmed on first successful call)")
+	host.Logf("telegram: started channel=%s (token-check deferred; identity confirmed on first successful call)", c.Name())
 
 	// Register the broker-owned bot commands so they autocomplete in Telegram's
 	// "/" menu (A8: menu hint only — the poll intercept needs no registration).
@@ -411,15 +457,16 @@ func (c *Channel) Start(ctx context.Context, host channel.Host) error {
 		// empty opts sends scope=null — which Telegram rejects with "can't parse
 		// BotCommandScope: BotCommandScope must be an Object". nil opts omits the
 		// scope param entirely, so Telegram applies the default scope (what we want).
-		if _, err := c.bot.SetMyCommands(
-			[]gotgbot.BotCommand{
-				{Command: "status", Description: "Show C3 broker + queue status"},
-				{Command: "queue", Description: "List pooled queues · /queue <name> peeks one (operator)"},
-				{Command: "drain", Description: "Move queued messages to a topic (operator)"},
-			},
-			nil,
-		); err != nil {
-			c.logf("telegram: setMyCommands(/status,/queue,/drain) failed (non-fatal): %v", err)
+		cmds := []gotgbot.BotCommand{
+			{Command: "status", Description: "Show C3 broker + queue status"},
+			{Command: "queue", Description: "List pooled queues · /queue <name> peeks one (operator)"},
+			{Command: "drain", Description: "Move queued messages to a topic (operator)"},
+		}
+		if c.swarmActive() {
+			cmds = append(cmds, gotgbot.BotCommand{Command: "mute", Description: "Stop listening until tagged again (Swarm)"})
+		}
+		if _, err := c.bot.SetMyCommands(cmds, nil); err != nil {
+			c.logf("telegram: setMyCommands failed (non-fatal): %v", err)
 		}
 	}()
 
@@ -501,6 +548,12 @@ func (c *Channel) seamRemoveLocked(chatID, msgID, updateID int64) bool {
 // resolve its update_id via the FIFO seam (pop-front) and MarkDone it, advancing
 // the committed offset over it.
 func (c *Channel) onPersisted(in *c3types.Inbound) {
+	if in == nil {
+		return
+	}
+	if in.Channel != "" && in.Channel != c.Name() {
+		return
+	}
 	c.mu.Lock()
 	uid, found := c.seamPopFrontLocked(in.ChatID, in.MessageID)
 	c.mu.Unlock()
@@ -518,6 +571,12 @@ func (c *Channel) onPersisted(in *c3types.Inbound) {
 // its dedup entry so the redelivery genuinely re-dispatches + re-Appends. The
 // committed offset is intentionally left un-advanced.
 func (c *Channel) onPersistFailed(in *c3types.Inbound) {
+	if in == nil {
+		return
+	}
+	if in.Channel != "" && in.Channel != c.Name() {
+		return
+	}
 	c.mu.Lock()
 	uid, found := c.seamPopFrontLocked(in.ChatID, in.MessageID)
 	c.mu.Unlock()
@@ -744,7 +803,10 @@ func (c *Channel) heartbeat() {
 		if err == nil && me != nil && c.identityLogged.CompareAndSwap(false, true) {
 			// First reachable getMe — confirm the bot identity (deferred from
 			// boot by DisableTokenCheck). Preserves the familiar log signal.
-			c.host.Logf("telegram: connected as @%s (identity confirmed)", me.Username)
+			if me.Username != "" {
+				c.botUsername.Store(me.Username)
+			}
+			c.host.Logf("telegram: connected as @%s channel=%s (identity confirmed)", me.Username, c.Name())
 		}
 		if err != nil {
 			class, _ := classifyError(err)

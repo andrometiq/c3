@@ -27,6 +27,9 @@ func FormatAttached(a *AttachedMsg) string {
 		} else {
 			s += fmt.Sprintf(" (chat %d, DM)", a.ChatID)
 		}
+		if a.Swarm {
+			s += " — swarm: Telegram mode. All replies go to Telegram via the reply tool. Tag other bots to address them. /mute stops this bot listening."
+		}
 		return s
 	}
 	if a.NeedsConfirmation && a.Proposal != nil {

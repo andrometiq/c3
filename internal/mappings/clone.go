@@ -110,5 +110,11 @@ func cloneChannelConfig(cc ChannelConfig) ChannelConfig {
 		v := *cc.RichInbound
 		out.RichInbound = &v
 	}
+	if cc.Bots != nil {
+		out.Bots = make(map[string]BotConfig, len(cc.Bots))
+		for k, v := range cc.Bots {
+			out.Bots[k] = v
+		}
+	}
 	return out
 }

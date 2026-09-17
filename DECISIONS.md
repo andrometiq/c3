@@ -3,6 +3,23 @@
 Entries are newest first. This is the public architecture record: it records
 rulings and rationale, never private operational details.
 
+## D020: Swarm — one Telegram bot per agent; Telegram mode by default
+
+**Date:** 2026-09-17
+
+**Decision:** Swarm extra bots live in `channels.telegram.bots`. Each bot is a
+telegram poller whose route channel is `telegram:<name>`, so exclusive claim
+stays per bot and two agents can share a forum topic. Inbound is delivered only
+when the message mentions that bot, replies to it, or arrives while sticky-armed
+(`/mute` disarms). A swarm attach reports `swarm=true` and the agent protocol
+defaults that session to Telegram output mode — every substantive reply uses the
+`reply` tool.
+
+**Why:** Tagging a single shared bot cannot tell Claude from GLM. Separate bot
+tokens are the Telegram-native address. Privacy-off + sticky is required for
+untagged follow-ups. CLI-default output mode would hide the collaboration from
+the human in the topic.
+
 ## D019: dcode adapter — live push via the external-event socket; slash commands as user skills
 
 **Date:** 2026-08-16

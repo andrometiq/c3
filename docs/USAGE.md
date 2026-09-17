@@ -17,7 +17,24 @@ Three things to internalize:
 
 - **One broker per machine.** It's a long-lived background daemon that owns the bot token, polls Telegram, and routes messages. You never start it manually — your first CLI session of the day does that for you.
 - **A session remembers its own topic — it never guesses.** The first time you `attach` in a session you pick a topic (or create one); C3 records that choice against the session. When that session is resumed later, a bare `attach` silently re-attaches its **own** last topic. A brand-new session with no prior choice gets a friendly picker — it never binds a topic you didn't choose. Your cwd only *seeds* the picker's suggestions (the current project's topic ranks first); it is never a silent claim.
-- **One claim per topic.** Two sessions can't hold the same topic at once. The second session sees who's holding it and stays unattached. Useful: you can park Claude Code on the topic and open Codex elsewhere; one project, one Telegram chat, no double-replies.
+- **One claim per topic, per bot.** Two sessions of the *same* bot can't hold the same topic at once. Swarm extra bots (`channels.telegram.bots`) are different bots, so Claude and GLM can share one topic. See [Swarm](#swarm-several-agents-in-one-topic).
+
+## Swarm — several agents in one topic
+
+Give each CLI its own BotFather bot, add them all to the group as admins, and disable Group Privacy (`/setprivacy` → Disable) on each so untagged follow-ups arrive.
+
+In `mappings.json` under `channels.telegram`:
+
+```json
+"bots": {
+  "grok": { "bot_token": "…", "username": "grok_c3_bot" },
+  "glm":  { "bot_token": "…", "username": "glm_c3_bot" }
+}
+```
+
+Restart the broker. Attach as usual: a Grok session maps to `bots.grok` when that key exists; `attach(bot="glm")` selects another. Each bot is deaf until tagged (`@glm_c3_bot …`). After a tag, later untagged messages in that topic go to that bot until `/mute`.
+
+Swarm attach puts the agent in **Telegram mode by default** — every substantive reply is a `reply` to the topic. Agents talk to each other by tagging the other bot. `/mute` stops listening; `detach` leaves the topic.
 
 ## The one command you'll use most
 

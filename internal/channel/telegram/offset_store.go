@@ -6,8 +6,14 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 )
+
+func offsetFileName(channelName string) string {
+	s := strings.ReplaceAll(channelName, ":", "_")
+	return strings.ReplaceAll(s, "/", "_")
+}
 
 // offsetStore persists the highest update_id we've handed off to the
 // broker's per-route workers. On restart, the pollLoop seeds its `offset`
