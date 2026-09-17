@@ -33,9 +33,19 @@ import (
 const (
 	leaderProtocolVersion = 1
 	defaultLeaderDialTO   = 5 * time.Second
-	defaultPromptTO       = 120 * time.Second
 	maxFrameBytes         = 64 << 20 // 64 MiB — matches Grok's advertised max
+	// drainReadSlice is the per-read wait while a previous turn is still
+	// running. Re-armed until the turn ends or ctx is cancelled — never an
+	// overall "give up and prompt anyway" deadline.
+	drainReadSlice = 30 * time.Second
 )
+
+// defaultPromptTO bounds landing confirmation for THIS prompt (echo or
+// terminal result). It must NOT cover drain of a previous in-flight turn:
+// wrapping drain in this window closed the leader conn mid-turn and left
+// Telegram follow-ups as UNCERTAIN instead of the next user message.
+// Var so tests can reproduce that race with a short window.
+var defaultPromptTO = 120 * time.Second
 
 // errLeaderUnavailable means no leader socket / connect failed. Callers must
 // NOT ack the inbound as delivered (content stays in the durable queue).
@@ -476,6 +486,21 @@ func (c *leaderClient) Inject(ctx context.Context, text string) error {
 		return errLeaderUnavailable // Close() raced ensure
 	}
 
+	// Finish the prior turn before starting a new prompt. A Telegram message
+	// that arrives while Grok is working must become the NEXT user turn, not
+	// a concurrent session/prompt (the leader does not queue those; a 120s
+	// landing timer around drain closed the conn and classified the follow-up
+	// UNCERTAIN — adapter.log inbound 11058). Interrupt drain only when the
+	// caller ctx is cancelled (adapter shutdown), never because THIS prompt's
+	// landing window expired.
+	stopDrain := context.AfterFunc(ctx, func() { _ = conn.Close() })
+	err := c.drainPending(ctx, conn)
+	stopDrain()
+	if err != nil {
+		c.dropConn(conn)
+		return err
+	}
+
 	to := defaultPromptTO
 	if deadline, ok := ctx.Deadline(); ok {
 		if rem := time.Until(deadline); rem > 0 && rem < to {
@@ -491,12 +516,6 @@ func (c *leaderClient) Inject(ctx context.Context, text string) error {
 	// cancel/timeout every error path below drops the conn anyway.
 	stop := context.AfterFunc(promptCtx, func() { _ = conn.Close() })
 	defer stop()
-
-	// Finish the prior turn's ACP response before starting a new prompt.
-	if err := c.drainPending(promptCtx, conn); err != nil {
-		c.dropConn(conn)
-		return err
-	}
 
 	// Ack C3 as soon as the user text lands in the session — NOT when the
 	// agent turn finishes. Waiting for end-of-turn left orphans in the durable
@@ -536,7 +555,10 @@ func (c *leaderClient) dropConn(conn net.Conn) {
 }
 
 // drainPending waits for a previously-landed session/prompt result. Requires
-// c.ioMu; conn is the Inject-time snapshot.
+// c.ioMu; conn is the Inject-time snapshot. Waits until that turn's terminal
+// ACP result arrives or ctx is cancelled — a long agent turn is not a
+// failure, and giving up to send the next session/prompt while it is still
+// running drops the follow-up instead of delivering it as the next message.
 func (c *leaderClient) drainPending(ctx context.Context, conn net.Conn) error {
 	c.mu.Lock()
 	id := c.pendingDrainID
@@ -551,23 +573,28 @@ func (c *leaderClient) drainPending(ctx context.Context, conn net.Conn) error {
 		}
 		c.mu.Unlock()
 	}
-	deadline := time.Now().Add(defaultPromptTO)
-	if d, ok := ctx.Deadline(); ok && d.Before(deadline) {
-		deadline = d
-	}
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		rem := time.Until(deadline)
-		if rem <= 0 {
-			// Don't fail inject forever — drop and re-register next time.
-			clearPending()
-			return nil
+		slice := drainReadSlice
+		if d, ok := ctx.Deadline(); ok {
+			rem := time.Until(d)
+			if rem <= 0 {
+				return ctx.Err()
+			}
+			if rem < slice {
+				slice = rem
+			}
 		}
-		frame, err := c.readJSON(conn, rem)
+		frame, err := c.readJSON(conn, slice)
 		if err != nil {
-			clearPending()
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			if isReadTimeout(err) {
+				continue
+			}
 			return err
 		}
 		if frame["type"] != "acp" {
@@ -586,6 +613,17 @@ func (c *leaderClient) drainPending(ctx context.Context, conn net.Conn) error {
 			return nil
 		}
 	}
+}
+
+func isReadTimeout(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, os.ErrDeadlineExceeded) {
+		return true
+	}
+	var ne net.Error
+	return errors.As(err, &ne) && ne.Timeout()
 }
 
 type promptLand struct {

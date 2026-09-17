@@ -785,22 +785,24 @@ func capRunes(s string, n int) string {
 
 // eventInjectBudget bounds the WHOLE inject attempt (retries included) for a
 // best-effort channel event. Events ride the same single serial consumer as
-// durable messages, so the full injectWithRetry budget (~2min of mid-turn
-// backoff) on a never-acked event would head-of-line-block real durable
-// traffic behind a busy TUI. An event that can't land inside this budget is
-// dropped — by design it has no durable copy broker-side (worker.go forces
-// Covered=0 and never queues events), so there is nothing to recover.
+// durable messages, so waiting out a long agent turn on a never-acked event
+// would head-of-line-block real durable traffic behind a busy TUI. An event
+// that can't land inside this budget is dropped — by design it has no durable
+// copy broker-side (worker.go forces Covered=0 and never queues events), so
+// there is nothing to recover.
 const eventInjectBudget = 10 * time.Second
 
 // grokForwardLoop is the SINGLE consumer of forwardCh. It injects each inbound
 // as a Grok turn via the leader ACP client (session/prompt), strictly in enqueue
 // order, and is the ONLY path that sends OpInboundDelivered.
 //
-// Mid-turn: session/prompt may fail while a turn is in flight. We retry with
-// backoff (Grok will queue or accept once free). The forwardBlocked latch fires
-// only after retries are exhausted, and holds until a full fetch_queue(ack=true)
-// drain re-syncs the queue head (clearForwardBlocked) — NOT for the process
-// lifetime, which froze acks forever after one hiccup (task #43).
+// Mid-turn: Inject drains the previous turn first, then session/prompt so a
+// Telegram follow-up becomes the NEXT user message after the agent is free.
+// A definite busy JSON-RPC error (TUI-originated turn we did not start) retries
+// until the session is idle. The forwardBlocked latch fires only after a
+// non-retryable failure, and holds until a full fetch_queue(ack=true) drain
+// re-syncs the queue head (clearForwardBlocked) — NOT for the process lifetime,
+// which froze acks forever after one hiccup (task #43).
 //
 // M2: count-off-HEAD acks require serial, head-first delivery and never-ack-past-gap.
 func (a *adapter) grokForwardLoop() {
@@ -986,7 +988,7 @@ func (a *adapter) baseCtx() context.Context {
 }
 
 // injectRetryBaseWait / injectRetryMaxWait shape injectWithRetry's mid-turn
-// backoff (2s doubling to 15s, ~2min worst case over 12 attempts). They are
+// backoff (2s doubling to 15s, then 15s until idle or ctx cancel). They are
 // vars (not consts) only so tests can shorten the schedule; production never
 // reassigns them (same convention as broker.workerJobTimeout).
 var (
@@ -995,18 +997,19 @@ var (
 )
 
 // injectWithRetry retries session/prompt when Grok is mid-turn. Transient
-// errors (turn in flight / busy) wait and retry; other errors fail fast —
-// including errInjectUncertain, which must NEVER be retried: the prompt may
-// already have landed, so a retry could double-deliver into the TUI (see the
-// Inject contract in leader.go).
+// errors (turn in flight / busy) wait until the session is idle — a working
+// turn often lasts longer than a fixed attempt budget, and giving up left
+// Telegram follow-ups stuck in the durable queue instead of becoming the next
+// user message. Other errors fail fast, including errInjectUncertain, which
+// must NEVER be retried: the prompt may already have landed, so a retry could
+// double-deliver into the TUI (see the Inject contract in leader.go).
 func (a *adapter) injectWithRetry(ctx context.Context, text string, msgID int64) error {
 	if a.leader == nil {
 		return errLeaderUnavailable
 	}
-	const maxAttempts = 12
 	var last error
 	wait := injectRetryBaseWait
-	for attempt := 1; attempt <= maxAttempts; attempt++ {
+	for attempt := 1; ; attempt++ {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -1017,7 +1020,7 @@ func (a *adapter) injectWithRetry(ctx context.Context, text string, msgID int64)
 			}
 			return nil
 		}
-		if !isTransientInjectErr(last) || attempt == maxAttempts {
+		if !isTransientInjectErr(last) {
 			return last
 		}
 		log.Printf("grok inject id=%d attempt %d: %v — retry in %v (mid-turn/busy)", msgID, attempt, last, wait)
@@ -1033,7 +1036,6 @@ func (a *adapter) injectWithRetry(ctx context.Context, text string, msgID int64)
 			}
 		}
 	}
-	return last
 }
 
 func isTransientInjectErr(err error) bool {
