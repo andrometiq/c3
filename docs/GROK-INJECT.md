@@ -88,15 +88,18 @@ Probe evidence:
 - `x.ai/queue/interject` as an ACP request returned **Method not found** on the
   agent (0.2.93). That name is used on the **pager** side for UI send-now; it is
   not the agent method we need.
-- While a turn is in flight, a second `session/prompt` is expected to **queue**
-  (prompt queue / `QueueAdd` semantics in the binary), not hard-fail forever —
-  confirm under a real TUI before relying on mid-turn behaviour.
-- True mid-turn *interject* (merge into current turn without waiting) still
-  needs a follow-up probe against a busy session (likely queue front-insert /
-  interjection flags, not a separate documented public method).
-
-**First cut acceptance:** idle session gets a Telegram message → new turn
-starts without the human typing. Mid-turn polish can trail.
+- A second `session/prompt` while a turn is in flight is **not** treated as a
+  Grok prompt-queue add. The adapter waits for the previous turn's ACP result
+  (`drainPending`), then issues `session/prompt` so the Telegram follow-up
+  becomes the **next** user message after the agent is free. A 120s landing
+  timer must cover only that new prompt's echo — wrapping drain in it closed
+  the leader conn mid-turn and left the follow-up as UNCERTAIN (never the next
+  turn).
+- Definite busy JSON-RPC errors (a TUI-originated turn the adapter did not
+  start) retry until idle. Post-write silence stays UNCERTAIN and is never
+  retried.
+- True mid-turn *interject* (merge into the current turn without waiting) is
+  still out of scope. C3 follow-ups wait for the turn boundary.
 
 ## What does *not* work (ruled out / weak)
 
@@ -224,11 +227,12 @@ Grok’s leader model is **one shared agent process** + N TUI clients:
 | **Host setup** | `c3-broker install-grok` → `use_leader=true` + pin `c3-grok-adapter` + print plugin steps. |
 | **SessionStart hook** | Grok-aware `session-hook` (`C3_GROK_SESSION_ID` primary / `GROK_SESSION_ID` fallback / sessionId camelCase). |
 | **Queue ack** | Ack only on a landing confirm bound to the prompted session whose `user_message_chunk` echoes a prefix of our injected text. Post-write silence/timeouts classify as UNCERTAIN: never acked, never blind-retried — the line stays in the durable queue (double-delivery over loss). A failed inject latches acks off until a full `fetch_queue` drain (`Remaining==0`) re-syncs the head. |
+| **Mid-turn follow-up** | Drain the previous turn's ACP result, then `session/prompt` so a Telegram message sent while Grok is working becomes the next user turn. Do not wrap that drain in the 120s landing timer. Busy JSON-RPC errors retry until idle. |
 
 ## Still worth a soak test
 
 - 2 concurrent Grok sessions, two topics, no cross-inject.
-- Mid-turn second `session/prompt` while tools are running.
+- Live: Telegram follow-up while a long tool-using turn is running — must appear as the next user message after the turn ends, not vanish as UNCERTAIN.
 - Permission prompts: out of scope (Codex-tier).
 
 ## Decision for implementers

@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -412,5 +413,198 @@ func TestClose_UnblocksInflightInject(t *testing.T) {
 	}
 	if elapsed := time.Since(start); elapsed > 5*time.Second {
 		t.Fatalf("Close() took %v to unblock the inject — it must not wait behind leader I/O", elapsed)
+	}
+}
+
+// A follow-up that arrives while the previous C3-injected turn is still
+// running must wait for that turn to finish, then session/prompt as the NEXT
+// user message. The old Inject wrapped drain in defaultPromptTO and closed the
+// leader conn when that window expired, so a working Grok turn dropped the
+// Telegram follow-up as UNCERTAIN instead of delivering it next.
+func TestInject_FollowupWaitsForTurn(t *testing.T) {
+	old := defaultPromptTO
+	defaultPromptTO = 80 * time.Millisecond
+	t.Cleanup(func() { defaultPromptTO = old })
+
+	var mu sync.Mutex
+	var prompts []string
+	sock := startScriptedLeader(t, func(write func(v any), id any, text string) {
+		mu.Lock()
+		prompts = append(prompts, text)
+		n := len(prompts)
+		mu.Unlock()
+		write(userChunk("sess-test", text))
+		if n == 1 {
+			time.Sleep(250 * time.Millisecond) // longer than the landing window
+		}
+		write(acpResult(id, map[string]any{"stopReason": "end_turn"}))
+	})
+	c := &leaderClient{sessionID: "sess-test", cwd: t.TempDir(), sockPath: sock}
+	if err := c.Inject(context.Background(), "first"); err != nil {
+		t.Fatalf("first inject: %v", err)
+	}
+	if err := c.Inject(context.Background(), "second"); err != nil {
+		t.Fatalf("follow-up while the first turn is still running must wait then land as the next prompt, got %v", err)
+	}
+	mu.Lock()
+	got := append([]string(nil), prompts...)
+	mu.Unlock()
+	if len(got) != 2 || got[0] != "first" || got[1] != "second" {
+		t.Fatalf("prompts = %#v, want [first second] in order", got)
+	}
+}
+
+// While the previous turn has no terminal result yet, a second Inject must
+// not even WRITE another session/prompt to the wire. That is the "wait, then
+// next message" contract: no concurrent prompt, no silent drop.
+//
+// The blocking scripted leader (startScriptedLeader) stops READING while a
+// turn is held, so a prematurely-written second frame would sit unread in the
+// socket buffer and go unobserved — counting onPrompt callbacks proves
+// nothing about the wire. startRecordingLeader keeps reading and records
+// every prompt frame as it arrives, so the wire itself is the assertion.
+func startRecordingLeader(t *testing.T, serveTurn func(write func(v any), id any, text string)) (string, func() []string) {
+	t.Helper()
+	var mu sync.Mutex
+	var seen []string
+	sock := startScriptedLeader(t, func(write func(v any), id any, text string) {
+		mu.Lock()
+		seen = append(seen, text)
+		mu.Unlock()
+		// Serve this turn off-loop so scriptedServe keeps reading: the
+		// terminal result may be withheld while later frames still arrive.
+		go serveTurn(write, id, text)
+	})
+	return sock, func() []string {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]string(nil), seen...)
+	}
+}
+
+func TestInject_NoPromptUntilDrain(t *testing.T) {
+	release := make(chan struct{})
+	t.Cleanup(func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+	})
+	sock, wirePrompts := startRecordingLeader(t, func(write func(v any), id any, text string) {
+		write(userChunk("sess-test", text))
+		if text == "first" {
+			<-release // withhold the first turn's terminal result
+		}
+		write(acpResult(id, map[string]any{"stopReason": "end_turn"}))
+	})
+	c := &leaderClient{sessionID: "sess-test", cwd: t.TempDir(), sockPath: sock}
+	if err := c.Inject(context.Background(), "first"); err != nil {
+		t.Fatalf("first inject: %v", err)
+	}
+	// While the first turn is held, the second Inject must fail (wait, not
+	// send) — and the wire must show exactly ONE prompt frame, observed over
+	// a bounded window: a premature second frame would show up here.
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	if err := c.Inject(ctx, "second"); err == nil {
+		t.Fatal("second inject must not succeed while the first turn is still running")
+	}
+	deadline := time.Now().Add(300 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if got := wirePrompts(); len(got) != 1 {
+			t.Fatalf("second session/prompt must not be WRITTEN while the first turn is in flight, wire shows %d: %#v", len(got), got)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if got := wirePrompts(); len(got) != 1 || got[0] != "first" {
+		t.Fatalf("wire prompts = %#v, want exactly [first] while the first turn is held", got)
+	}
+	// Release: the follow-up must then land exactly once, in order.
+	close(release)
+	if err := c.Inject(context.Background(), "second"); err != nil {
+		t.Fatalf("follow-up after the first turn finishes must land as the next prompt, got %v", err)
+	}
+	if got := wirePrompts(); len(got) != 2 || got[0] != "first" || got[1] != "second" {
+		t.Fatalf("wire prompts = %#v, want [first second] in order", got)
+	}
+}
+
+// ─── Mid-turn retry wall-clock backstop ──────────────────────────────────────
+
+// The long-turn fix made injectWithRetry's mid-turn loop unbounded; since
+// isTransientInjectErr matches broad substrings, a stuck or misclassified
+// transient error would otherwise retry FOREVER and wedge grokForwardLoop —
+// the SINGLE serial forward consumer — head-of-line-blocking ALL durable
+// Telegram delivery until adapter shutdown. The injectMaxTotalWait backstop
+// must make the loop RETURN the transient error (grokForwardLoop then latches
+// forwardBlocked; recoverable via fetch_queue) instead of hanging.
+func TestInjectWithRetry_BackstopBailsOnNeverClearingTransient(t *testing.T) {
+	oldBase, oldMax := injectRetryBaseWait, injectRetryMaxWait
+	oldBackstop := injectMaxTotalWait
+	injectRetryBaseWait, injectRetryMaxWait = 10*time.Millisecond, 10*time.Millisecond
+	injectMaxTotalWait = 60 * time.Millisecond
+	t.Cleanup(func() {
+		injectRetryBaseWait, injectRetryMaxWait = oldBase, oldMax
+		injectMaxTotalWait = oldBackstop
+	})
+
+	sock := startScriptedLeader(t, func(write func(v any), id any, text string) {
+		write(acpError(id, "session/prompt: turn in flight — try again")) // never clears
+	})
+	c := &leaderClient{sessionID: "sess-test", cwd: t.TempDir(), sockPath: sock}
+	a := &adapter{leader: c}
+
+	start := time.Now()
+	err := a.injectWithRetry(context.Background(), "retry me", 42)
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatal("a never-clearing transient error must not report success")
+	}
+	if !isTransientInjectErr(err) || !strings.Contains(err.Error(), "turn in flight") {
+		t.Fatalf("must return the transient error itself (caller latches forwardBlocked), got %v", err)
+	}
+	if elapsed >= 2*time.Second {
+		t.Fatalf("injectWithRetry returned after %v — the backstop must bound the retry loop, not hang", elapsed)
+	}
+}
+
+// POSITIVE guard: with the same shortened schedule, a genuine mid-turn
+// transient that clears after a couple of attempts still succeeds — the
+// backstop must not reintroduce the "give up on a real turn" bug.
+func TestInjectWithRetry_BackstopAllowsTransientThatClears(t *testing.T) {
+	oldBase, oldMax := injectRetryBaseWait, injectRetryMaxWait
+	oldBackstop := injectMaxTotalWait
+	injectRetryBaseWait, injectRetryMaxWait = 10*time.Millisecond, 10*time.Millisecond
+	injectMaxTotalWait = 60 * time.Millisecond
+	t.Cleanup(func() {
+		injectRetryBaseWait, injectRetryMaxWait = oldBase, oldMax
+		injectMaxTotalWait = oldBackstop
+	})
+
+	var mu sync.Mutex
+	attempts := 0
+	sock := startScriptedLeader(t, func(write func(v any), id any, text string) {
+		mu.Lock()
+		attempts++
+		n := attempts
+		mu.Unlock()
+		if n <= 2 {
+			write(acpError(id, "session/prompt: turn in flight — try again"))
+			return
+		}
+		write(userChunk("sess-test", text))
+		write(acpResult(id, map[string]any{"stopReason": "end_turn"}))
+	})
+	c := &leaderClient{sessionID: "sess-test", cwd: t.TempDir(), sockPath: sock}
+	a := &adapter{leader: c}
+
+	if err := a.injectWithRetry(context.Background(), "retry me", 42); err != nil {
+		t.Fatalf("a transient that clears after 2 attempts must still succeed within the backstop, got %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if attempts != 3 {
+		t.Fatalf("prompt attempts = %d, want 3 (two transient failures + one success)", attempts)
 	}
 }
