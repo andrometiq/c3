@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/Andrometiq/c3/internal/broker"
+	"github.com/Andrometiq/c3/internal/hostid"
 	"github.com/Andrometiq/c3/internal/ipc"
 )
 
@@ -47,50 +48,11 @@ func startupCrossSessionTransport() (*crossSessionTransport, string) {
 	if err != nil {
 		return nil, "cross-session runtime directory unavailable"
 	}
-	tx := &crossSessionTransport{runtimeDir: filepath.Dir(socket), socketPath: path, token: token, hostPID: owningClaudePID(os.Getppid(), platformProcReaders())}
+	tx := &crossSessionTransport{runtimeDir: filepath.Dir(socket), socketPath: path, token: token, hostPID: hostid.OwningClaudePID(os.Getppid(), hostid.PlatformProcReaders())}
 	if _, err := tx.validatedSocket(); err != nil {
 		return tx, err.Error() // keep captured config for attach/reconnect revalidation
 	}
 	return tx, ""
-}
-
-// The direct parent is eligible, or the nearest positively identified Claude
-// ancestor when a wrapper sits between host and adapter. Never skip a Claude
-// host to reach another session farther up the tree. Read argv only, never env.
-func owningClaudePID(parent int, r procReaders) int {
-	if parent <= 1 || r.cmdline == nil || r.ppid == nil {
-		return 0
-	}
-	pid := parent
-	seen := map[int]bool{}
-	for depth := 0; depth < 40 && pid > 1; depth++ {
-		if seen[pid] {
-			return 0
-		}
-		seen[pid] = true
-		args, ok := r.cmdline(pid)
-		if !ok {
-			return 0
-		}
-		if isNode(args) {
-			args, ok = nodeScript(args)
-			if !ok {
-				return 0
-			}
-		}
-		if isClaudeHost(args) {
-			return pid
-		}
-		pid, ok = r.ppid(pid)
-		if !ok {
-			return 0
-		}
-	}
-	// No identified host: only the immediate parent can own the inherited inbox.
-	if pid <= 1 {
-		return parent
-	}
-	return 0
 }
 
 func (t *crossSessionTransport) validatedSocket() (string, error) {

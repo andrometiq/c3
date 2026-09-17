@@ -61,6 +61,7 @@ import (
 	"github.com/Andrometiq/c3/internal/buildidentity"
 	"github.com/Andrometiq/c3/internal/c3types"
 	"github.com/Andrometiq/c3/internal/capability"
+	"github.com/Andrometiq/c3/internal/hostid"
 	"github.com/Andrometiq/c3/internal/ipc"
 	"github.com/Andrometiq/c3/internal/mcptools"
 	"github.com/Andrometiq/c3/internal/mode"
@@ -101,6 +102,8 @@ func main() {
 }
 
 func run() error {
+	a := newAdapter()
+	a.ownerKey, a.ownerKeyOK = hostid.OwnerKey(os.Getppid(), hostid.PlatformProcReaders())
 	if os.Getenv("C3_DEBUG") == "1" {
 		slog.SetLogLoggerLevel(slog.LevelDebug)
 	}
@@ -117,7 +120,6 @@ func run() error {
 	defer cancel()
 	installSignalHandlers(cancel)
 
-	a := newAdapter()
 	a.runCtx = ctx
 	transport, err := upgradeStdio(a)
 	if err != nil {
@@ -345,11 +347,15 @@ type adapter struct {
 	// An in-app conversation switch and every broker reconnect reopen it. The
 	// connection pointer is part of the same snapshot so an attach that waited
 	// on an older gate can never wake and jump onto a newer, unidentified stub.
-	idmu                sync.Mutex
-	identitySettled     chan struct{}
-	identityConn        *ipc.Conn
-	identityReconnect   bool
-	idEpoch             uint64
+	idmu              sync.Mutex
+	identitySettled   chan struct{}
+	identityConn      *ipc.Conn
+	identityReconnect bool
+	idEpoch           uint64
+	// Frozen at startup: wrapper exit can change our parent before recovery.
+	ownerKey            string
+	ownerKeyOK          bool
+	ownerResolved       atomic.Bool
 	currentStableID     string
 	currentHandoffEntry sessionhandoff.Entry
 	// recoverRechecked makes the first-tools/call belt-and-suspenders recheck run
@@ -508,12 +514,10 @@ func spawnBroker() error {
 	return spawn.Detached(exec.Command("c3-broker"))
 }
 
-// instanceIDFromEnv returns Claude Code's EPHEMERAL per-MCP-spawn id, exported
-// to stdio MCP servers as CLAUDE_CODE_SESSION_ID. Despite the name, this is NOT
-// the stable --resume id — it equals the UUID directory in the SessionStart
-// hook's $CLAUDE_ENV_FILE path, so the adapter uses it to look up its own
-// SessionStart-hook handoff (which carries the real stable id). Empty when unset
-// (non-Claude-Code host / no hook) → recovery is skipped (fail-closed).
+// instanceIDFromEnv returns the MCP child's inherited id, which may be stable
+// or a pre-selection resume id. Exact-key recovery always wins; the frozen owner
+// alias repairs a mismatch with the SessionStart hook's selected conversation.
+// Empty (non-Claude-Code host / no hook) skips resume recovery as before.
 func instanceIDFromEnv() string { return os.Getenv("CLAUDE_CODE_SESSION_ID") }
 
 func (a *adapter) hello() error {
@@ -2710,43 +2714,46 @@ func (a *adapter) advanceIdentityHandoff(stableID string, entry sessionhandoff.E
 	a.observePermissionTranscriptPath(transcriptPath)
 }
 
-// checkForIdentitySwitch performs the cheap per-tools-call probe: exactly one
-// stat of <currentStableID>.json. Only a hit is read, required to be newer than
-// the entry that established the settled identity, and chain-walked to its
-// terminal handoff.
+// checkForIdentitySwitch probes the current stable alias, plus the frozen owner
+// alias only when recovery used it. Exact-id sessions never read the owner file.
 func (a *adapter) checkForIdentitySwitch(ctx context.Context) {
 	current, settled := a.currentStableIdentity()
 	if !settled {
 		return
 	}
-	path, err := sessionhandoff.Path(current.StableSessionID)
-	if err != nil {
-		return
+	keys := []string{current.StableSessionID}
+	if a.ownerResolved.Load() && a.ownerKeyOK {
+		keys = append(keys, a.ownerKey)
 	}
-	if _, err := os.Stat(path); err != nil {
-		return
-	}
-	first, ok := sessionhandoff.Read(current.StableSessionID)
-	if !ok || first.UnixNano <= current.UnixNano {
-		return
-	}
-	terminal, ok := resolveTerminalHandoff(current.StableSessionID)
-	if !ok || terminal.StableSessionID == current.StableSessionID {
-		// Same identity, just a newer handoff for it (e.g. a compact rewrote the
-		// self-referential <stable>.json alias, or a stale prior-generation alias
-		// was consumed at resume). Advance the high-water mark so the next probe
-		// early-returns at the not-newer guard above instead of re-reading and
-		// re-resolving the alias on every tools/call for the rest of the session.
-		if ok {
-			a.advanceIdentityHandoff(current.StableSessionID, terminal)
+	for _, key := range keys {
+		path, err := sessionhandoff.Path(key)
+		if err != nil {
+			continue
 		}
+		if _, err := os.Stat(path); err != nil {
+			continue
+		}
+		first, ok := sessionhandoff.Read(key)
+		if !ok || first.UnixNano <= current.UnixNano {
+			continue
+		}
+		terminal, ok := resolveTerminalHandoff(key)
+		if !ok {
+			continue
+		}
+		if terminal.StableSessionID == current.StableSessionID {
+			// Compact may update the path without changing the stable identity.
+			a.advanceIdentityHandoff(current.StableSessionID, terminal)
+			current.UnixNano = terminal.UnixNano
+			continue
+		}
+		a.beginIdentitySwitch(ctx, current.StableSessionID, terminal)
 		return
 	}
-	a.beginIdentitySwitch(ctx, current.StableSessionID, terminal)
 }
 
 // watchForIdentitySwitch keeps the post-recovery handoff watch alive for the
-// process lifetime. The no-switch cost is one absent-file stat every tick.
+// process lifetime. Owner-resolved sessions also probe their frozen owner alias.
 func (a *adapter) watchForIdentitySwitch(ctx context.Context, interval time.Duration) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
@@ -2866,7 +2873,7 @@ func (a *adapter) beginIdentitySwitchMode(ctx context.Context, expectedCurrent s
 
 // recoverSessionOnResume runs in a goroutine after hello. It WATCHES (in the
 // background, for recoverWatchBudget) for this adapter's SessionStart-hook
-// handoff (keyed on the ephemeral instance id), and the instant it appears asks
+// handoff (exact instance id first, frozen owner key last), and when it appears asks
 // the broker to re-attach the resumed session to its last topic (keyed on the
 // STABLE session id from the handoff).
 //
@@ -2892,7 +2899,7 @@ func (a *adapter) recoverSessionOnResume(ctx context.Context) {
 	}
 }
 
-// watchForHandoff polls for the handoff entry for inst every interval, up to
+// watchForHandoff polls the exact key first, then the frozen owner key, up to
 // budget, returning it the instant it appears. It returns (zero, false) when the
 // budget expires or ctx is cancelled — the non-resume case, which simply costs a
 // few cheap file stats. Reads the handoff once up front (it may already exist
@@ -2903,7 +2910,17 @@ func (a *adapter) watchForHandoff(ctx context.Context, inst string, interval, bu
 	deadline := start.Add(budget)
 	log.Printf("recover-session: watching for handoff key %q (from CLAUDE_CODE_SESSION_ID) for up to %s", inst, budget)
 	for {
-		if e, ok := resolveTerminalHandoff(inst); ok {
+		key := inst
+		e, ok := resolveTerminalHandoff(inst)
+		resolvedOwner := false
+		if !ok && a.ownerKeyOK {
+			key = a.ownerKey
+			e, ok = resolveTerminalHandoff(key)
+			resolvedOwner = ok
+		}
+		if ok {
+			a.ownerResolved.Store(resolvedOwner)
+			log.Printf("recover-session: resolved handoff key %q", key)
 			if elapsed := time.Since(start); elapsed > recoverLateThreshold {
 				log.Printf("recover-session: handoff appeared late (+%s after hello, past the old %s window) — recovering now",
 					elapsed.Round(time.Millisecond), recoverLateThreshold)
@@ -2911,12 +2928,8 @@ func (a *adapter) watchForHandoff(ctx context.Context, inst string, interval, bu
 			return e, true
 		}
 		if !time.Now().Before(deadline) {
-			// Name the key AND the dir state: a resumed session whose host exports a
-			// CLAUDE_CODE_SESSION_ID that no longer matches the hook's handoff filename
-			// would otherwise look identical to a genuine non-resume here. The hook now
-			// writes both the ephemeral and stable keys, so this should be reachable only
-			// for true non-resumes — but if a THIRD id convention appears, this line makes
-			// it diagnosable instead of silent.
+			// Include directory state to distinguish missing hook output from a
+			// resume-id mismatch without scanning for another session's entry.
 			log.Printf("recover-session: no handoff for key %q within %s — not a resumed session, or the host's CLAUDE_CODE_SESSION_ID does not match the hook's handoff key (%s)",
 				inst, budget, handoffDirSummary())
 			return sessionhandoff.Entry{}, false

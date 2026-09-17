@@ -1,4 +1,4 @@
-package main
+package hostid
 
 import (
 	"bytes"
@@ -9,9 +9,9 @@ import (
 // followed by argc NUL-terminated argv strings. Never inspect the environment.
 // Both supported Darwin architectures are little endian. Layout reference:
 // https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/kern_sysctl.c
-func darwinProcReaders(args func(int) ([]byte, error), parent func(int) (int, error)) procReaders {
-	return procReaders{
-		cmdline: func(pid int) ([]string, bool) {
+func DarwinProcReaders(args func(int) ([]byte, error), parent func(int) (int, error)) ProcReaders {
+	return ProcReaders{
+		Cmdline: func(pid int) ([]string, bool) {
 			data, err := args(pid)
 			if err != nil || len(data) < 4 {
 				return nil, false
@@ -37,6 +37,6 @@ func darwinProcReaders(args func(int) ([]byte, error), parent func(int) (int, er
 			}
 			return argv, true
 		},
-		ppid: func(pid int) (int, bool) { p, err := parent(pid); return p, err == nil },
+		PPID: func(pid int) (int, bool) { p, err := parent(pid); return p, err == nil },
 	}
 }

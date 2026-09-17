@@ -22,9 +22,9 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"strconv"
 	"strings"
 
+	"github.com/Andrometiq/c3/internal/hostid"
 	"github.com/Andrometiq/c3/internal/ipc"
 )
 
@@ -33,49 +33,39 @@ import (
 // channel push notifications.
 const devChannelsFlag = "--dangerously-load-development-channels"
 
-// procReaders abstracts the /proc reads so detectRenderRoute is unit-testable
-// against a synthetic process tree. On a real host these are backed by
-// /proc/<pid>/cmdline and /proc/<pid>/stat.
-type procReaders struct {
-	// cmdline returns the argv of pid and whether it could be read.
-	cmdline func(pid int) ([]string, bool)
-	// ppid returns the parent pid of pid and whether it could be read.
-	ppid func(pid int) (int, bool)
-}
-
 // Detection fails closed: a false queue-only costs a fetch; a false capable
 // can lose a message. Only the NEAREST positively identified host counts.
 func hostRenderRoute() ipc.RenderRoute {
-	return detectRenderRoute(runtime.GOOS, os.Getpid(), platformProcReaders())
+	return detectRenderRoute(runtime.GOOS, os.Getpid(), hostid.PlatformProcReaders())
 }
 
-func detectRenderRoute(goos string, startPID int, r procReaders) ipc.RenderRoute {
+func detectRenderRoute(goos string, startPID int, r hostid.ProcReaders) ipc.RenderRoute {
 	queue := func(reason string) ipc.RenderRoute {
 		return ipc.RenderRoute{State: ipc.RenderQueueOnly, Reason: reason}
 	}
 	if goos == "windows" {
 		return queue("windows")
 	}
-	if r.cmdline == nil || r.ppid == nil {
+	if r.Cmdline == nil || r.PPID == nil {
 		return queue("process tree unreadable")
 	}
-	pid, ok := r.ppid(startPID)
+	pid, ok := r.PPID(startPID)
 	if !ok {
 		return queue("process tree unreadable")
 	}
 	for depth := 0; depth < 40 && pid > 1; depth++ {
-		args, readable := r.cmdline(pid)
+		args, readable := r.Cmdline(pid)
 		if !readable {
 			return queue("process tree unreadable")
 		}
-		if isNode(args) {
-			script, certain := nodeScript(args)
+		if hostid.IsNode(args) {
+			script, certain := hostid.NodeScript(args)
 			if !certain {
 				return queue("node script uncertain")
 			}
 			args = script
 		}
-		if isClaudeHost(args) {
+		if hostid.IsClaudeHost(args) {
 			if cmdlineHasDevChannelForC3(args) {
 				return ipc.RenderRoute{State: ipc.RenderCapable}
 			}
@@ -84,7 +74,7 @@ func detectRenderRoute(goos string, startPID int, r procReaders) ipc.RenderRoute
 			}
 			return queue("no dev-channels flag on host")
 		}
-		parent, readable := r.ppid(pid)
+		parent, readable := r.PPID(pid)
 		if !readable {
 			return queue("process tree unreadable")
 		}
@@ -148,70 +138,6 @@ func pluginTokenMatchesC3(tok string) bool {
 	return false
 }
 
-// isClaudeHost reports whether argv looks like the Claude Code CLI host process:
-// an arg0 basename of "claude", a native binary directly under claude/versions/,
-// or the CLI package script (npm/node install: node .../@anthropic-ai/claude-code/cli.js).
-// Native installs may execute the resolved versioned path instead of the symlink.
-// A bare version-number basename alone is insufficient. The adapter's
-// own "c3-claude-adapter" arg0 does NOT match, so self is never taken for a host.
-func isClaudeHost(args []string) bool {
-	if len(args) == 0 {
-		return false
-	}
-	if filepath.Base(args[0]) == "claude" {
-		return true
-	}
-	dir := filepath.Dir(args[0])
-	if filepath.Base(dir) == "versions" && filepath.Base(filepath.Dir(dir)) == "claude" {
-		return true
-	}
-	if isNode(args) {
-		script, certain := nodeScript(args)
-		return certain && len(script) > 0 && strings.HasSuffix(script[0], "/@anthropic-ai/claude-code/cli.js")
-	}
-	if strings.HasSuffix(args[0], "/@anthropic-ai/claude-code/cli.js") {
-		return true
-	}
-	return false
-}
-
-func isNode(args []string) bool {
-	return len(args) > 0 && (filepath.Base(args[0]) == "node" || filepath.Base(args[0]) == "nodejs")
-}
-
-// Stop at the script operand: flags in script arguments belong to the host.
-// Unknown bare options may take a value, so cannot justify walking past Node.
-func nodeScript(args []string) ([]string, bool) {
-	for i := 1; i < len(args); i++ {
-		arg := args[i]
-		if arg == "--" {
-			return args[i+1:], i+1 < len(args)
-		}
-		if !strings.HasPrefix(arg, "-") {
-			return args[i:], true
-		}
-		option, _, _ := strings.Cut(arg, "=")
-		switch option {
-		case "--eval", "--print", "--check", "--run", "-e", "-p", "-c":
-			return nil, false // these modes do not execute a script operand
-		}
-		if strings.HasPrefix(arg, "--") && strings.Contains(arg, "=") {
-			continue
-		}
-		switch arg {
-		case "--require", "-r", "--import", "--loader", "--experimental-loader", "--max-old-space-size":
-			i++
-			if i >= len(args) || strings.HasPrefix(args[i], "-") {
-				return nil, false
-			}
-		case "--no-warnings", "--trace-warnings", "--enable-source-maps", "--experimental-strip-types":
-		default:
-			return nil, false
-		}
-	}
-	return nil, false
-}
-
 // isCursorHost reports whether argv looks like Cursor Agent CLI. Cursor loads
 // Claude Code plugins from ~/.claude/plugins, so this adapter can be spawned
 // under `agent` / `cursor-agent` alongside c3-cursor-adapter — a dual-MCP
@@ -240,73 +166,25 @@ func hostIsCursorAgent() bool {
 	if runtime.GOOS == "windows" {
 		return false // no /proc walk; Cursor-on-Windows dual-load is rarer today
 	}
-	return detectCursorHost(os.Getpid(), platformProcReaders())
+	return detectCursorHost(os.Getpid(), hostid.PlatformProcReaders())
 }
 
-func detectCursorHost(startPID int, r procReaders) bool {
+func detectCursorHost(startPID int, r hostid.ProcReaders) bool {
 	const maxDepth = 40
 	pid := startPID
 	for depth := 0; depth < maxDepth; depth++ {
-		args, ok := r.cmdline(pid)
+		args, ok := r.Cmdline(pid)
 		if !ok {
 			break
 		}
 		if isCursorHost(args) {
 			return true
 		}
-		parent, ok := r.ppid(pid)
+		parent, ok := r.PPID(pid)
 		if !ok || parent <= 1 || parent == pid {
 			break
 		}
 		pid = parent
 	}
 	return false
-}
-
-// readProcCmdline reads /proc/<pid>/cmdline (NUL-separated argv). Returns ok=false
-// when the file is absent (non-Linux) or unreadable. A process with an empty
-// cmdline (kernel threads, zombies) yields ok=false so the walk treats it as
-// unknown rather than a host.
-func readProcCmdline(pid int) ([]string, bool) {
-	data, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/cmdline")
-	if err != nil || len(data) == 0 {
-		return nil, false
-	}
-	parts := strings.Split(strings.TrimRight(string(data), "\x00"), "\x00")
-	out := parts[:0]
-	for _, p := range parts {
-		if p != "" {
-			out = append(out, p)
-		}
-	}
-	if len(out) == 0 {
-		return nil, false
-	}
-	return out, true
-}
-
-// readProcPPID parses the parent pid from /proc/<pid>/stat. The stat format is
-// `pid (comm) state ppid ...`; comm can contain spaces and parentheses, so we
-// split after the LAST ')' — ppid is the second whitespace field beyond it.
-// Returns ok=false on any read/parse failure (non-Linux, gone process).
-func readProcPPID(pid int) (int, bool) {
-	data, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/stat")
-	if err != nil {
-		return 0, false
-	}
-	s := string(data)
-	rp := strings.LastIndexByte(s, ')')
-	if rp < 0 || rp+1 >= len(s) {
-		return 0, false
-	}
-	fields := strings.Fields(s[rp+1:])
-	// fields[0] = state, fields[1] = ppid.
-	if len(fields) < 2 {
-		return 0, false
-	}
-	ppid, err := strconv.Atoi(fields[1])
-	if err != nil {
-		return 0, false
-	}
-	return ppid, true
 }

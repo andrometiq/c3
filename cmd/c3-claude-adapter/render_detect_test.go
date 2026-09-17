@@ -6,19 +6,20 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Andrometiq/c3/internal/hostid"
 	"github.com/Andrometiq/c3/internal/ipc"
 )
 
-// fakeTree builds procReaders over a synthetic process tree: cmdlines maps a pid
+// fakeTree builds hostid.ProcReaders over a synthetic process tree: cmdlines maps a pid
 // to its argv, parents maps a pid to its ppid. A missing pid in cmdlines reads as
 // unreadable (ok=false); a missing pid in parents ends the walk.
-func fakeTree(cmdlines map[int][]string, parents map[int]int) procReaders {
-	return procReaders{
-		cmdline: func(pid int) ([]string, bool) {
+func fakeTree(cmdlines map[int][]string, parents map[int]int) hostid.ProcReaders {
+	return hostid.ProcReaders{
+		Cmdline: func(pid int) ([]string, bool) {
 			args, ok := cmdlines[pid]
 			return args, ok
 		},
-		ppid: func(pid int) (int, bool) {
+		PPID: func(pid int) (int, bool) {
 			p, ok := parents[pid]
 			return p, ok
 		},
@@ -191,7 +192,7 @@ func TestIsClaudeHost(t *testing.T) {
 		{"node", "/x/@anthropic-ai/claude-code/cli.js"},
 	}
 	for _, a := range hosts {
-		if !isClaudeHost(a) {
+		if !hostid.IsClaudeHost(a) {
 			t.Errorf("expected host for %v", a)
 		}
 	}
@@ -208,7 +209,7 @@ func TestIsClaudeHost(t *testing.T) {
 		{},
 	}
 	for _, a := range notHosts {
-		if isClaudeHost(a) {
+		if hostid.IsClaudeHost(a) {
 			t.Errorf("expected NOT host for %v", a)
 		}
 	}
@@ -247,12 +248,12 @@ func TestDetectCursorHost_AncestorWalk(t *testing.T) {
 		10: {args: []string{"c3-claude-adapter"}, ppid: 20},
 		20: {args: []string{"agent", "--use-system-ca", "/x/cursor-agent/versions/1/index.js"}, ppid: 1},
 	}
-	r := procReaders{
-		cmdline: func(pid int) ([]string, bool) {
+	r := hostid.ProcReaders{
+		Cmdline: func(pid int) ([]string, bool) {
 			n, ok := tree[pid]
 			return n.args, ok
 		},
-		ppid: func(pid int) (int, bool) {
+		PPID: func(pid int) (int, bool) {
 			n, ok := tree[pid]
 			return n.ppid, ok
 		},

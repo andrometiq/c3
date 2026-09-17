@@ -1,9 +1,9 @@
-package main
+package hostid
 
 import "golang.org/x/sys/unix"
 
-func platformProcReaders() procReaders {
-	return darwinProcReaders(func(pid int) ([]byte, error) {
+func PlatformProcReaders() ProcReaders {
+	return DarwinProcReaders(func(pid int) ([]byte, error) {
 		return unix.SysctlRaw("kern.procargs2", pid)
 	}, func(pid int) (int, error) {
 		info, err := unix.SysctlKinfoProc("kern.proc.pid", pid)

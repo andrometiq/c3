@@ -1,16 +1,19 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/Andrometiq/c3/internal/c3types"
+	"github.com/Andrometiq/c3/internal/hostid"
 	"github.com/Andrometiq/c3/internal/mappings"
 	"github.com/Andrometiq/c3/internal/queue"
 	"github.com/Andrometiq/c3/internal/sessionhandoff"
@@ -194,6 +197,9 @@ func withStdin(t *testing.T, data string, fn func()) {
 
 func setupTestEnv(t *testing.T) string {
 	t.Helper()
+	originalOwnerKey := sessionHookOwnerKey
+	sessionHookOwnerKey = func() (string, bool) { return "", false }
+	t.Cleanup(func() { sessionHookOwnerKey = originalOwnerKey })
 	t.Setenv("ANTIGRAVITY_CONVERSATION_ID", "")
 	t.Setenv("GROK_SESSION_ID", "")
 	state := t.TempDir()
@@ -367,5 +373,111 @@ func TestRunSessionHook_GarbageStdinNoOp(t *testing.T) {
 	})
 	if _, ok := sessionhandoff.Read("inst-garbage"); ok {
 		t.Fatal("no handoff should be written on garbage stdin")
+	}
+}
+
+func TestRunSessionHook_OwnerAlias(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("Linux owner keys")
+	}
+	for _, tc := range []struct {
+		name                  string
+		noHost, noStart, grok bool
+		wantFiles             int
+	}{
+		{name: "three identical aliases", wantFiles: 3},
+		{name: "no Claude host", noHost: true, wantFiles: 2},
+		{name: "start time unreadable", noStart: true, wantFiles: 2},
+		{name: "nested Grok", grok: true, wantFiles: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			setupTestEnv(t)
+			t.Setenv("GROK_HOOK_EVENT", "")
+			t.Setenv("CLAUDE_ENV_FILE", filepath.Join(t.TempDir(), "A", "hook.sh"))
+			if tc.grok {
+				t.Setenv("CLAUDE_ENV_FILE", "")
+				t.Setenv("GROK_SESSION_ID", "B")
+			}
+			readers := hostid.ProcReaders{
+				Cmdline: func(pid int) ([]string, bool) {
+					if pid == 10 {
+						return []string{"sh"}, true
+					}
+					if pid == 20 && !tc.noHost {
+						return []string{"claude"}, true
+					}
+					return []string{"sh"}, true
+				},
+				PPID: func(pid int) (int, bool) {
+					if pid == 10 {
+						return 20, true
+					}
+					return 1, true
+				},
+				ReadFile: func(path string) ([]byte, error) {
+					switch path {
+					case "/proc/20/stat":
+						if tc.noStart {
+							return nil, os.ErrNotExist
+						}
+						return []byte("20 (claude) S 1 " + strings.Repeat("0 ", 17) + "12345 0"), nil
+					case "/proc/sys/kernel/random/boot_id":
+						return []byte("abcdef12-3456-7890-abcd-ef1234567890"), nil
+					default:
+						t.Fatalf("unexpected read: %s", path)
+						return nil, os.ErrNotExist
+					}
+				},
+			}
+			sessionHookOwnerKey = func() (string, bool) {
+				if tc.grok {
+					t.Fatal("Grok consulted Claude owner resolver")
+				}
+				return hostid.OwnerKey(10, readers)
+			}
+			withStdin(t, `{"session_id":"B","cwd":"/workspace/project","source":"startup","transcript_path":"/state/B.jsonl"}`, func() {
+				if err := runSessionHook(); err != nil {
+					t.Fatalf("hook must exit zero: %v", err)
+				}
+			})
+			dir, err := sessionhandoff.Dir()
+			if err != nil {
+				t.Fatal(err)
+			}
+			files, err := os.ReadDir(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(files) != tc.wantFiles {
+				t.Fatalf("files=%v, want %d", files, tc.wantFiles)
+			}
+			stable, err := os.ReadFile(filepath.Join(dir, "B.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantNames := map[string]bool{"B.json": true}
+			if !tc.grok {
+				wantNames["A.json"] = true
+			}
+			if tc.wantFiles == 3 {
+				wantNames["host_abcdef12_20_12345.json"] = true
+			}
+			for _, file := range files {
+				if !wantNames[file.Name()] {
+					t.Fatalf("unexpected alias: %s", file.Name())
+				}
+				data, err := os.ReadFile(filepath.Join(dir, file.Name()))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !bytes.Equal(data, stable) {
+					t.Fatalf("alias %s differs from stable entry", file.Name())
+				}
+			}
+			entry, ok := sessionhandoff.Read("B")
+			if !ok || entry.UnixNano == 0 || entry.TranscriptPath != "/state/B.jsonl" {
+				t.Fatalf("entry=%+v ok=%v", entry, ok)
+			}
+		})
 	}
 }

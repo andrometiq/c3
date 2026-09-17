@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Andrometiq/c3/internal/hostid"
 	"github.com/Andrometiq/c3/internal/ipc"
 )
 
@@ -37,7 +38,7 @@ func TestRenderRouteNearestHostAcrossPlatforms(t *testing.T) {
 				parents := map[int]int{10: 20, 20: 30, 30: 1}
 				readers := fakeTree(argv, parents)
 				if platform == "darwin" {
-					readers = darwinProcReaders(func(pid int) ([]byte, error) {
+					readers = hostid.DarwinProcReaders(func(pid int) ([]byte, error) {
 						args, ok := argv[pid]
 						if !ok {
 							return nil, errors.New("unreadable")
@@ -99,7 +100,7 @@ func TestRenderDetectionRejectsHostNamesInPrompt(t *testing.T) {
 	if cmdlineHasDevChannelForC3([]string{"claude", "--", devChannelsFlag, "plugin:c3@c3"}) {
 		t.Fatal("prompt after option terminator qualified host")
 	}
-	if isClaudeHost([]string{"sh", "-c", "echo @anthropic-ai/claude-code"}) {
+	if hostid.IsClaudeHost([]string{"sh", "-c", "echo @anthropic-ai/claude-code"}) {
 		t.Fatal("prompt text mistaken for host")
 	}
 	for _, parents := range []map[int]int{{10: 20, 20: 20}, {10: 20}, {10: 1}} {

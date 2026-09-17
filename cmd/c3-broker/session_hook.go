@@ -8,10 +8,15 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/Andrometiq/c3/internal/hostid"
 	"github.com/Andrometiq/c3/internal/mappings"
 	"github.com/Andrometiq/c3/internal/queue"
 	"github.com/Andrometiq/c3/internal/sessionhandoff"
 )
+
+var sessionHookOwnerKey = func() (string, bool) {
+	return hostid.OwnerKey(os.Getppid(), hostid.PlatformProcReaders())
+}
 
 // sessionHookInput is the subset of the SessionStart hook's stdin JSON we use.
 // Claude Code sends {session_id, cwd, source, transcript_path, hook_event_name};
@@ -27,7 +32,9 @@ type sessionHookInput struct {
 // hooks for Claude Code and Grok Build.
 //
 // Claude: maps EPHEMERAL per-MCP-spawn instance id (UUID dir in $CLAUDE_ENV_FILE
-// == CLAUDE_CODE_SESSION_ID) → STABLE session id (stdin session_id).
+// usually matches CLAUDE_CODE_SESSION_ID) → STABLE session id (stdin session_id).
+// On Linux a positively identified Claude owner adds a third alias for resumes
+// whose MCP child inherited a pre-selection id. All aliases share one timestamp.
 //
 // Grok: stdin/env already carry the stable UUID (session_id / GROK_SESSION_ID).
 // We write a handoff keyed by that stable id so tools can re-read it; the Grok
@@ -92,14 +99,17 @@ func runSessionHook() error {
 	}
 
 	instanceID := ""
+	claudeEnvInstance := false
 	if env := os.Getenv("CLAUDE_ENV_FILE"); env != "" {
 		instanceID = filepath.Base(filepath.Dir(env))
+		claudeEnvInstance = true
 	}
 	// Grok: no CLAUDE_ENV_FILE — key the handoff by the stable session id itself.
 	// Only take this path when Grok env is present so Claude hooks without
 	// CLAUDE_ENV_FILE still no-op (TestRunSessionHook_EmptyEnvFileNoOp).
 	if (instanceID == "" || instanceID == "." || instanceID == string(filepath.Separator)) &&
 		(os.Getenv("GROK_SESSION_ID") != "" || os.Getenv("GROK_HOOK_EVENT") != "") {
+		claudeEnvInstance = false
 		// The Grok session id arrives straight from hook stdin, so any same-user
 		// process can set it. Only trust it as the handoff filename stem when it
 		// is a clean base name — no path separators, no "."/".." — mirroring the
@@ -117,15 +127,15 @@ func runSessionHook() error {
 		return nil
 	}
 
-	// One entry, written under BOTH keys the adapter might poll for. The adapter
+	// One entry, written under the instance, stable, and (on Linux) owner keys. The adapter
 	// derives its lookup key from CLAUDE_CODE_SESSION_ID (instanceIDFromEnv):
 	//   - Claude Code ≤2.1.241 exports the EPHEMERAL per-MCP-spawn id there — the
 	//     same id we get from CLAUDE_ENV_FILE (instanceID). <instance>.json matches.
 	//   - Claude Code ≥2.1.245 exports the STABLE (resumed) session id there
 	//     instead, so the adapter polls <stable>.json. Without the alias below,
 	//     that file never existed and auto-reattach silently never fired.
-	// Writing both keys makes recovery robust to either host convention. The two
-	// aliases SHARE one UnixNano so the adapter's terminal-handoff walk terminates
+	// The owner alias also covers pre-selection resume ids. All aliases
+	// SHARE one UnixNano so the adapter's terminal-handoff walk terminates
 	// on its not-newer guard instead of chasing between them; <stable>.json is
 	// self-referential (StableSessionID == its own filename) and resolveTerminalHandoff
 	// treats that as terminal. Each write is fail-closed (Path rejects an unsafe id);
@@ -150,6 +160,17 @@ func runSessionHook() error {
 			fmt.Fprintf(os.Stderr, "c3-broker session-hook: write handoff (stable key %q): %v (ignoring)\n", in.SessionID, err)
 		} else {
 			wroteAny = true
+		}
+	}
+	// Only the Claude-env branch may publish an owner alias: a nested Grok hook
+	// can have an outer Claude ancestor without belonging to its conversation.
+	if claudeEnvInstance {
+		if key, ok := sessionHookOwnerKey(); ok && key != instanceID && key != in.SessionID {
+			if err := sessionhandoff.Write(key, entry); err != nil {
+				fmt.Fprintf(os.Stderr, "c3-broker session-hook: write handoff (owner key %q): %v (ignoring)\n", key, err)
+			} else {
+				wroteAny = true
+			}
 		}
 	}
 	if !wroteAny {

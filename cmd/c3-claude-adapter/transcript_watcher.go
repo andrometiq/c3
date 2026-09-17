@@ -68,13 +68,22 @@ func (a *adapter) capturePermissionSnapshot() permissionSnapshot {
 }
 
 func (a *adapter) permissionTranscriptPath() string {
+	exactFound := false
 	if instanceID := instanceIDFromEnv(); instanceID != "" {
-		if entry, ok := resolveTerminalHandoff(instanceID); ok && entry.TranscriptPath != "" {
+		entry, ok := resolveTerminalHandoff(instanceID)
+		exactFound = ok
+		if ok && entry.TranscriptPath != "" {
 			return entry.TranscriptPath
 		}
 	}
 	if entry, ok := a.currentStableIdentity(); ok {
 		return entry.TranscriptPath
+	}
+	// Startup-only fallback until recovery registers the stable identity.
+	if !exactFound && a.ownerKeyOK {
+		if entry, ok := resolveTerminalHandoff(a.ownerKey); ok {
+			return entry.TranscriptPath
+		}
 	}
 	return ""
 }

@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Andrometiq/c3/internal/hostid"
 	"github.com/Andrometiq/c3/internal/ipc"
 	"github.com/Andrometiq/c3/internal/sessionhandoff"
 )
@@ -126,7 +127,7 @@ func TestCrossSessionOwningAncestor(t *testing.T) {
 		{"direct parent only", map[int][]string{10: {"host-wrapper"}}, map[int]int{10: 1}, 10},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := owningClaudePID(10, fakeTree(tc.args, tc.parents)); got != tc.want {
+			if got := hostid.OwningClaudePID(10, fakeTree(tc.args, tc.parents)); got != tc.want {
 				t.Fatalf("owner=%d, want %d", got, tc.want)
 			}
 		})
