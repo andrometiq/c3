@@ -17,6 +17,40 @@ func rbTGErr(code int) error {
 	return &gotgbot.TelegramError{Code: code, Description: "test"}
 }
 
+// TestReadbackAmbiguousTimeoutIsNotRetried pins the double-post fix: a send that
+// times out with no server response is ambiguous — Telegram may have already
+// created the echo before the deadline — so retryReadbackSend must NOT repost
+// it. It stops after a single send. A 5xx, by contrast, means Telegram
+// responded and the message was not created, so it still retries to the cap.
+func TestReadbackAmbiguousTimeoutIsNotRetried(t *testing.T) {
+	c, _ := newWiredChannel()
+	c.ctx = context.Background()
+
+	// Ambiguous post-send timeout: exactly one send, no repost.
+	calls := 0
+	if _, err := c.retryReadbackSend(func() (int64, error) {
+		calls++
+		return 0, context.DeadlineExceeded
+	}); err == nil {
+		t.Fatal("ambiguous timeout should surface as an error")
+	}
+	if calls != 1 {
+		t.Fatalf("ambiguous timeout must not be retried (double-post risk); sends=%d, want 1", calls)
+	}
+
+	// Contrast: a 5xx (server responded, message not created) retries to the cap.
+	calls = 0
+	if _, err := c.retryReadbackSend(func() (int64, error) {
+		calls++
+		return 0, rbTGErr(500)
+	}); err == nil {
+		t.Fatal("exhausted 5xx retries should surface an error")
+	}
+	if calls != readbackRetryMaxAttempts {
+		t.Fatalf("5xx should retry to the cap; sends=%d, want %d", calls, readbackRetryMaxAttempts)
+	}
+}
+
 // TestIsRetryableSendErr pins the retry classification used by the readback
 // send: transient (network/5xx) and 429 are retryable; permanent (4xx other
 // than 429) and nil are not.

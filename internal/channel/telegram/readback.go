@@ -465,6 +465,16 @@ func (c *Channel) retryReadbackSend(send func() (int64, error)) (int64, error) {
 			return id, nil
 		}
 		lastErr = err
+		if isAmbiguousSendTimeout(err) {
+			// The request may have reached Telegram and created the echo before
+			// the deadline; reposting would duplicate it. Hold, do not retry —
+			// the agent already has the transcript, so a rare lost echo is the
+			// safe trade against a visible double-post.
+			c.logf("telegram: readback attempt %d/%d hit an ambiguous send timeout; "+
+				"not reposting to avoid duplicating an echo Telegram may have accepted: %v",
+				attempt, readbackRetryMaxAttempts, err)
+			return 0, err
+		}
 		class, retryAfter := classifyError(err)
 		if class != errClassTransient && class != errClassRateLimited {
 			return 0, err // deterministic — retrying won't help

@@ -86,6 +86,24 @@ func classifyError(err error) (errClass, int) {
 // isTransientNetworkError matches the kinds of errors gotgbot+net/http surface
 // when the wire is flaky. Inspired by the predecessor bot's
 // FALLBACK_RETRY_ERROR_CODES (`extensions/telegram/src/fetch.ts`).
+// isAmbiguousSendTimeout reports whether err is a send that timed out with no
+// server response: the request may have reached Telegram and been applied
+// before the deadline, so a non-idempotent send (a readback echo) must NOT be
+// blindly retried, or it can duplicate a message Telegram already accepted. A
+// gotgbot.TelegramError means the server responded and the message was not
+// created, so it is never ambiguous; only a bare timeout / deadline is.
+func isAmbiguousSendTimeout(err error) bool {
+	var tg *gotgbot.TelegramError
+	if errors.As(err, &tg) {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	var netErr net.Error
+	return errors.As(err, &netErr) && netErr.Timeout()
+}
+
 func isTransientNetworkError(err error) bool {
 	if errors.Is(err, context.DeadlineExceeded) ||
 		errors.Is(err, context.Canceled) {
