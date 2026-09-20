@@ -55,7 +55,7 @@ func TestFetchReturnsOnlyConsumedRecordIdentities(t *testing.T) {
 			// Preserve the snapshot in the stolen case: the worker must enforce ownership.
 			var resp ipc.FetchQueueResp
 			if mode == "stolen" {
-				resp = b.fetchSelectedRoutes(owner, req, []RouteKey{tg, web})
+				resp = b.fetchSelectedRoutes(owner, req, []RouteKey{tg, web}).FetchQueueResp
 			} else {
 				resp = fetchForTest(t, b, owner, req)
 			}

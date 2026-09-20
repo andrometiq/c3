@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/Andrometiq/c3/internal/c3types"
+	"github.com/Andrometiq/c3/internal/intake"
 )
 
 // Status is a per-route snapshot for /status and /queue. Pending is lines after
@@ -39,7 +40,8 @@ type Status struct {
 // the file ops hold no per-file locks. Only the cheap cross-route status index
 // is mutex-guarded — it touches no files.
 type Store struct {
-	dir string
+	dir      string
+	sourceMu sync.Mutex // serializes source-bearing appends across destination routes
 
 	mu sync.Mutex // guards idx ONLY (the cross-route status counters)
 	// idx is keyed by the canonical RouteKey.File() string, NOT by RouteKey:
@@ -66,6 +68,10 @@ type Store struct {
 	// rewriteTestHook injects a failure immediately before rewrite mutates the
 	// JSONL. Tests use it to pin cursor-first crash semantics.
 	rewriteTestHook func() error
+
+	// SyncDirTestHook injects a failure after file bytes land, before directory fsync.
+	// Tests set it only while the route owner is idle.
+	SyncDirTestHook func() error
 }
 
 // storedInbound is the queue's private on-disk envelope. Embedding keeps every
@@ -77,23 +83,29 @@ type Store struct {
 //     drain. It lets a retry distinguish later edits that reuse MessageID.
 //   - VoicePending is the only authority for which voice attachments still need
 //     enrichment. Agent-visible placeholder text is deliberately not state.
+//   - Source preserves the original provider occurrence independently of Inbound.
+//   - AttachmentsState holds raw STT outcomes by source attachment index.
 type storedInbound struct {
 	c3types.Inbound
-	Origin         string   `json:"origin,omitempty"`
-	RecordID       string   `json:"_c3_queue_id,omitempty"`
-	SourceRecordID string   `json:"_c3_drained_record_id,omitempty"`
-	VoicePending   []string `json:"_c3_voice_pending,omitempty"`
+	Origin           string                  `json:"origin,omitempty"`
+	RecordID         string                  `json:"_c3_queue_id,omitempty"`
+	SourceRecordID   string                  `json:"_c3_drained_record_id,omitempty"`
+	VoicePending     []string                `json:"_c3_voice_pending,omitempty"`
+	Source           *intake.Source          `json:"_c3_source,omitempty"`
+	AttachmentsState intake.AttachmentsState `json:"_c3_attachments_state,omitempty"`
 }
 
 // TrackedInbound exposes queue-private identity only to broker internals. The
-// public Inbound remains unchanged, so neither private field can leak over IPC.
+// public Inbound remains unchanged, so private fields cannot leak over IPC.
 // Empty IDs identify legacy lines written before the private envelope existed.
 type TrackedInbound struct {
-	Origin         string
-	Inbound        c3types.Inbound
-	RecordID       string
-	SourceRecordID string
-	VoicePending   []string
+	Origin           string
+	Inbound          c3types.Inbound
+	RecordID         string
+	SourceRecordID   string
+	VoicePending     []string
+	Source           *intake.Source
+	AttachmentsState intake.AttachmentsState
 }
 
 // NewStore creates the queue dir (0700) and returns a Store. Call
@@ -123,8 +135,8 @@ func (s *Store) curPath(rk RouteKey) string   { return filepath.Join(s.dir, rk.F
 // Append writes one JSON line and fsyncs it (data + parent dir), then refreshes
 // the status index. The caller (worker) only treats the source update_id as
 // offset-eligible AFTER this returns nil.
-func (s *Store) Append(rk RouteKey, in *c3types.Inbound) error {
-	_, err := s.AppendTracked(rk, in)
+func (s *Store) Append(rk RouteKey, in *c3types.Inbound, sources ...*intake.Source) error {
+	_, err := s.AppendTrackedSource(rk, in, intake.Optional(sources))
 	return err
 }
 
@@ -132,18 +144,37 @@ func (s *Store) Append(rk RouteKey, in *c3types.Inbound) error {
 // The identity survives queue rewrites and lets a live-delivery ack remove that
 // line even when another pending edit has the same channel MessageID.
 func (s *Store) AppendTracked(rk RouteKey, in *c3types.Inbound, voicePending ...string) (string, error) {
-	return s.appendTracked(rk, in, "", voicePending)
+	return s.AppendTrackedSource(rk, in, nil, voicePending...)
 }
 
 // AppendDrainedTracked appends a drain copy and privately records the immutable
 // source-line identity it represents. An empty sourceRecordID is accepted for a
 // legacy untracked source: retries then fail toward another copy, never toward
 // mistaking an unrelated same-MessageID line for the landed record.
-func (s *Store) AppendDrainedTracked(rk RouteKey, in *c3types.Inbound, sourceRecordID string) (string, error) {
-	return s.appendTracked(rk, in, sourceRecordID, nil, "drain")
+func (s *Store) AppendDrainedTracked(rk RouteKey, in *c3types.Inbound, sourceRecordID string, sources ...*intake.Source) (string, error) {
+	return s.appendTracked(rk, in, sourceRecordID, nil, intake.Optional(sources), nil, "drain")
 }
 
-func (s *Store) appendTracked(rk RouteKey, in *c3types.Inbound, sourceRecordID string, voicePending []string, origin ...string) (string, error) {
+func (s *Store) appendTracked(rk RouteKey, in *c3types.Inbound, sourceRecordID string, voicePending []string, source *intake.Source, states intake.AttachmentsState, origin ...string) (string, error) {
+	return s.appendTrackedPrepared(rk, in, sourceRecordID, voicePending, source, states, nil, origin...)
+}
+
+func (s *Store) appendTrackedPrepared(rk RouteKey, in *c3types.Inbound, sourceRecordID string, voicePending []string, source *intake.Source, states intake.AttachmentsState, prepare func(*storedInbound) error, origin ...string) (string, error) {
+	if source != nil {
+		s.sourceMu.Lock()
+		defer s.sourceMu.Unlock()
+		var err error
+		source, err = s.firstSource(source)
+		if err != nil {
+			return "", err
+		}
+	}
+	if states == nil {
+		states = intake.NewAttachmentsState(attachmentSource(source, in), voicePending)
+	}
+	if err := states.Validate(attachmentSource(source, in)); err != nil {
+		return "", err
+	}
 	// Stamp the record format version on the way to disk. Append is the ONLY
 	// place a record enters the queue, so it is the only place that has to do
 	// this — rewrite() and snapshotDropped() re-serialize records that were
@@ -189,9 +220,16 @@ func (s *Store) appendTracked(rk RouteKey, in *c3types.Inbound, sourceRecordID s
 				}
 				return ""
 			}(),
-			RecordID:       rand.Text(),
-			SourceRecordID: sourceRecordID,
-			VoicePending:   append([]string(nil), voicePending...),
+			RecordID:         rand.Text(),
+			SourceRecordID:   sourceRecordID,
+			VoicePending:     append([]string(nil), voicePending...),
+			Source:           source.Clone(),
+			AttachmentsState: states.Clone(),
+		}
+	}
+	if prepare != nil {
+		if err := prepare(rec); err != nil {
+			return "", err
 		}
 	}
 	data, err := json.Marshal(rec)
@@ -350,6 +388,11 @@ func (s *Store) retainOversize(rk RouteKey, data []byte) error {
 // .jsonl on first Append, renamed .cur/.jsonl on writeCursor/rewrite) are
 // durable across a crash. Mirrors offset_store.go's dir-fsync.
 func (s *Store) syncDir() error {
+	if s.SyncDirTestHook != nil {
+		if err := s.SyncDirTestHook(); err != nil {
+			return err
+		}
+	}
 	// Windows disallows fsync on a directory handle (FlushFileBuffers returns
 	// ERROR_ACCESS_DENIED). Skipping it here is REQUIRED for correctness, not
 	// just durability polish: Append() propagates this error, the poll loop
@@ -489,11 +532,13 @@ func pendingTrackedFrom(lines []storedInbound, cursor int) []TrackedInbound {
 			continue
 		}
 		out = append(out, TrackedInbound{
-			Inbound:        in.Inbound,
-			Origin:         in.Origin,
-			RecordID:       in.RecordID,
-			SourceRecordID: in.SourceRecordID,
-			VoicePending:   append([]string(nil), in.VoicePending...),
+			Inbound:          in.Inbound,
+			Origin:           in.Origin,
+			RecordID:         in.RecordID,
+			SourceRecordID:   in.SourceRecordID,
+			VoicePending:     append([]string(nil), in.VoicePending...),
+			Source:           in.Source.Clone(),
+			AttachmentsState: storedAttachmentsState(in),
 		})
 	}
 	return out
@@ -801,34 +846,67 @@ func (s *Store) EvictOverCap(rk RouteKey) (aged, overCount int, err error) {
 // row, or a row already consumed/evicted is a clean no-op; callers can then use
 // the revision-line path without ever inferring state from agent-visible text.
 func (s *Store) ResolveVoiceText(rk RouteKey, recordID, fileID, newText string) (resolved, allDone bool, err error) {
-	if recordID == "" || fileID == "" {
-		return false, false, nil
+	resolved, allDone, _, err = s.ResolveVoiceOutcome(rk, recordID, fileID, newText, newText, intake.STTOutcome{STT: intake.STTFailed, Error: "metadata_unavailable"}, nil)
+	return
+}
+
+// ResolveVoiceOutcome budgets the complete mutated row before its atomic rewrite.
+// Both text variants are broker presentations of the same voice segment.
+func (s *Store) ResolveVoiceOutcome(rk RouteKey, recordID, fileID, newText, oversizeText string, outcome intake.STTOutcome, snapshot intake.AttachmentsState) (resolved, allDone bool, final intake.STTOutcome, err error) {
+	if err := outcome.Validate(); err != nil {
+		return false, false, final, err
 	}
+	if err := snapshot.Validate(nil); err != nil {
+		return false, false, final, err
+	}
+	if recordID == "" || fileID == "" {
+		return false, false, final, nil
+	}
+	var candidate storedInbound
+	var stateErr error
 	resolved, err = s.rewritePending(rk, func(in storedInbound) bool {
 		if in.RecordID != recordID || in.DrainedFrom != "" {
 			return false
 		}
-		for _, pending := range in.VoicePending {
-			if pending == fileID {
-				return true
+		stateSource := attachmentSource(in.Source, &in.Inbound)
+		states := storedAttachmentsState(in)
+		if stateErr = states.Validate(stateSource); stateErr != nil {
+			return false
+		}
+		if snapshot != nil {
+			if stateErr = snapshot.Validate(stateSource); stateErr != nil {
+				return false
 			}
 		}
-		return false
-	}, func(in *storedInbound) {
-		in.Text = newText
-		pending := in.VoicePending[:0]
+		pending := false
+		for _, id := range in.VoicePending {
+			pending = pending || id == fileID
+		}
+		if !pending {
+			return false
+		}
+		candidate = in
+		candidate.VoicePending = nil
 		for _, id := range in.VoicePending {
 			if id != fileID {
-				pending = append(pending, id)
+				candidate.VoicePending = append(candidate.VoicePending, id)
 			}
 		}
-		in.VoicePending = pending
+		// Pending siblings are budgeted by their own completion, not a scheduler snapshot.
+		candidate.AttachmentsState = states
+		final, stateErr = completeVoiceRecord(&candidate, fileID, newText, oversizeText, outcome)
+		return stateErr == nil
+	}, func(in *storedInbound) {
+		*in = candidate
 		allDone = len(in.VoicePending) == 0
 	})
 	if err != nil {
-		return false, false, err
+		return false, false, intake.STTOutcome{}, err
 	}
-	return resolved, allDone, err
+	if stateErr != nil {
+		return false, false, intake.STTOutcome{}, stateErr
+	}
+	return resolved, allDone, final, nil
 }
 
 // rewritePending is the crash-safe voice-row mutation composite: readLines,

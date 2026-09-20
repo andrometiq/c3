@@ -26,6 +26,7 @@ type Stub struct {
 	ResumeContract   string
 	deliveryReady    atomic.Bool
 	deliveryModes    atomic.Pointer[ipc.DeliveryAcceptance]
+	intakeActive     atomic.Bool
 	deliveryPrevious *Stub
 	deliveryRefused  atomic.Bool
 	delivery         *negotiatedSession
@@ -55,9 +56,10 @@ type Stub struct {
 	// It lives on the per-connection Stub (NOT the per-RouteKey RouteWorker,
 	// which outlives sessions) so it resets naturally on reconnect. Guarded by
 	// stubMu.
-	stubMu sync.Mutex
-	routes []RouteKey
-	output *RouteKey
+	stubMu            sync.Mutex
+	helloAcceptedCaps []string // stubMu; set once by buildHelloAck
+	routes            []RouteKey
+	output            *RouteKey
 	// confirmed records that each held route was set by a
 	// LEGITIMATE claim site — an explicit/own-recover attach through tryClaim or
 	// recoverSession — as opposed to any future code path that might bind a route

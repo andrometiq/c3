@@ -35,6 +35,7 @@ import (
 	"time"
 
 	"github.com/Andrometiq/c3/internal/c3types"
+	"github.com/Andrometiq/c3/internal/intake"
 	"github.com/Andrometiq/c3/internal/ipc"
 	"github.com/Andrometiq/c3/internal/queue"
 )
@@ -373,7 +374,7 @@ func (b *Broker) Drain(spec DrainSpec) (DrainResult, error) {
 			m.TopicID = nil
 		}
 		m.Text = banner + m.Text
-		moved[i] = DrainAppendMessage{Inbound: m, SourceRecordID: sourceRecordIDs[i]}
+		moved[i] = DrainAppendMessage{Inbound: m, SourceRecordID: sourceRecordIDs[i], source: pendingTracked[lo-1+i].Source.Clone(), attachmentsState: pendingTracked[lo-1+i].AttachmentsState.Clone()}
 	}
 	appendCh := make(chan DrainAppendResult, 1)
 	if !b.Workers.Submit(spec.Target, Job{Kind: JobDrainAppend, DrainAppend: &DrainAppendJob{From: srcKey, Messages: moved, ResultCh: appendCh}}) {
@@ -605,8 +606,10 @@ type DrainPeekResult struct {
 // presence, so uncertainty fails toward a duplicate. Convergence holds only
 // while the prior copy is still pending in the target (B6).
 type DrainAppendMessage struct {
-	Inbound        c3types.Inbound
-	SourceRecordID string
+	source           *intake.Source
+	attachmentsState intake.AttachmentsState
+	Inbound          c3types.Inbound
+	SourceRecordID   string
 }
 
 type DrainAppendJob struct {
@@ -716,7 +719,7 @@ func (w *RouteWorker) handleDrainAppend(job *DrainAppendJob) {
 			skipped++
 			continue
 		}
-		if _, aerr := w.broker.Queue.AppendDrainedTracked(qrk, &m.Inbound, m.SourceRecordID); aerr != nil {
+		if _, aerr := w.broker.Queue.AppendDrainedIntake(qrk, &m.Inbound, m.SourceRecordID, m.source, m.attachmentsState); aerr != nil {
 			total, _ := w.broker.Queue.Pending(qrk)
 			job.ResultCh <- DrainAppendResult{Appended: appended, Skipped: skipped, Pending: total,
 				Err: fmt.Errorf("append line %d of %d: %w", i+1, len(job.Messages), aerr)}

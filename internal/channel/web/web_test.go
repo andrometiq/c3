@@ -20,6 +20,7 @@ import (
 
 	"github.com/Andrometiq/c3/internal/c3types"
 	"github.com/Andrometiq/c3/internal/channel"
+	"github.com/Andrometiq/c3/internal/intake"
 )
 
 type fakeHost struct {
@@ -52,7 +53,7 @@ func (host *fakeHost) Config(name string, target any) error {
 	return nil
 }
 
-func (host *fakeHost) Emit(inbound *c3types.Inbound) bool {
+func (host *fakeHost) Emit(inbound *c3types.Inbound, sources ...*intake.Source) bool {
 	host.mu.Lock()
 	defer host.mu.Unlock()
 	copy := *inbound

@@ -81,6 +81,14 @@ func (b *Broker) handleFetchQueue(conn *ipc.Conn, stub *Stub, raw []byte) {
 				len(req.ID), maxFetchIDBytes, ipc.MaxFrameSize)})
 		return
 	}
+	if err := fetchModeError(req.Mode, stub); err != nil {
+		_ = conn.WriteJSON(struct {
+			Op  ipc.Op `json:"op"`
+			ID  string `json:"id"`
+			Err string `json:"err"`
+		}{ipc.OpFetchQueueResult, req.ID, err.Error()})
+		return
+	}
 	var routes []RouteKey
 	if req.Channel != "" {
 		route, err := b.resolveHeldRoute(stub, req.Channel)
@@ -130,8 +138,13 @@ func (b *Broker) handleFetchQueue(conn *ipc.Conn, stub *Stub, raw []byte) {
 // snapshot. The worker applies the authoritative ownership + confirmation gate
 // immediately around every destructive queue mutation. A stale or unconfirmed
 // route is skipped and counted in Remaining; valid siblings continue.
-func (b *Broker) fetchSelectedRoutes(stub *Stub, req ipc.FetchQueueReq, routes []RouteKey) ipc.FetchQueueResp {
-	resp := ipc.FetchQueueResp{Op: ipc.OpFetchQueueResult, ID: req.ID}
+func (b *Broker) fetchSelectedRoutes(stub *Stub, req ipc.FetchQueueReq, routes []RouteKey) fetchQueueResponse {
+	resp := fetchQueueResponse{FetchQueueResp: ipc.FetchQueueResp{Op: ipc.OpFetchQueueResult, ID: req.ID}}
+	readyPrefix := req.Mode == "ready_prefix"
+	if readyPrefix && req.Ack && !stub.acceptsDeliveryMode("fetch_receipt") {
+		resp.Err = "ready_prefix ack:true requires accepted fetch_receipt mode"
+		return resp
+	}
 	var group *attemptFetchGroup
 	if stub.acceptsDeliveryMode("fetch_receipt") && req.Ack {
 		if string(req.Lease) != "true" {
@@ -139,6 +152,9 @@ func (b *Broker) fetchSelectedRoutes(stub *Stub, req ipc.FetchQueueReq, routes [
 			return resp
 		}
 		group = &attemptFetchGroup{token: b.mintDeliveryToken()}
+	}
+	if readyPrefix {
+		resp.intakeMessages = []intakeFetchMessage{}
 	}
 	remainingLimit := req.Limit
 	authorizedRoutes := 0
@@ -148,22 +164,33 @@ func (b *Broker) fetchSelectedRoutes(stub *Stub, req ipc.FetchQueueReq, routes [
 			limit = -1
 		}
 		frameReserve := 0
-		if group != nil {
+		if group != nil || readyPrefix {
 			frameReserve = 32
 		} // width of the final multi-route remaining count
 		if len(resp.Messages) > 0 {
 			if encoded, err := json.Marshal(resp); err == nil {
 				frameReserve = len(encoded)
-				if group != nil {
+				if group != nil || readyPrefix {
 					frameReserve += 32
 				}
 			}
+		}
+		if readyPrefix && routeIndex+1 < len(routes) {
+			// Leave room for a later route's zero-ready blocker (26-byte queue ID).
+			frameReserve += 128
 		}
 		res, err := b.fetchHeldRoute(stub, route, req, limit, frameReserve, group)
 		if res.SkipReason != "" {
 			pending, _ := b.Queue.Pending(queueRouteKey(route))
 			resp.Remaining += pending
 			log.Printf("fetch_queue conn=%d: SKIPPED route %s: %s", stub.ConnID, b.routeLabel(route), res.SkipReason)
+			if readyPrefix {
+				for _, pendingRoute := range routes[routeIndex+1:] {
+					pending, _ := b.Queue.Pending(queueRouteKey(pendingRoute))
+					resp.Remaining += pending
+				}
+				break
+			}
 			continue
 		}
 		authorizedRoutes++
@@ -188,6 +215,7 @@ func (b *Broker) fetchSelectedRoutes(stub *Stub, req ipc.FetchQueueReq, routes [
 		// Codex invalidates only matching pending pushes; neither the combined
 		// Remaining count nor this response's frame order is a drain boundary.
 		resp.Messages = append(resp.Messages, res.Messages...)
+		resp.intakeMessages = append(resp.intakeMessages, res.intakeMessages...)
 		if group != nil {
 			resp.Members = append(resp.Members, res.Members...)
 			if len(resp.Members) > 0 {
@@ -196,6 +224,14 @@ func (b *Broker) fetchSelectedRoutes(stub *Stub, req ipc.FetchQueueReq, routes [
 			}
 		}
 		resp.Remaining += res.Remaining
+		if readyPrefix && res.Remaining > 0 {
+			resp.BlockedOn = res.BlockedOn
+			for _, pendingRoute := range routes[routeIndex+1:] {
+				pending, _ := b.Queue.Pending(queueRouteKey(pendingRoute))
+				resp.Remaining += pending
+			}
+			break
+		}
 		if !req.All && remainingLimit > 0 {
 			remainingLimit -= len(res.Messages)
 			if remainingLimit < 0 {
@@ -225,7 +261,7 @@ func (b *Broker) fetchHeldRoute(stub *Stub, route RouteKey, req ipc.FetchQueueRe
 	}
 	job := Job{Kind: JobFetch, Fetch: &FetchJob{
 		ReceiptGroup: group,
-		Limit:        limit, All: req.All, Ack: req.Ack,
+		Limit:        limit, All: req.All, Ack: req.Ack, Mode: req.Mode,
 		RespID: req.ID, FrameReserve: frameReserve,
 		Owner: stub, Lease: lease, ResultCh: resultCh,
 	}}

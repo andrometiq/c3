@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/Andrometiq/c3/internal/c3types"
+	"github.com/Andrometiq/c3/internal/intake"
 	"github.com/Andrometiq/c3/internal/mappings"
 )
 
@@ -77,6 +78,7 @@ type FetchQueueReq struct {
 	// channel name or held Telegram topic name. Absent drains all held routes.
 	// Additive + omitempty: older callers retain the broker's default behavior.
 	Channel string `json:"channel,omitempty"`
+	Mode    string `json:"mode,omitempty"`
 	Limit   int    `json:"limit,omitempty"`
 	All     bool   `json:"all,omitempty"`
 	Ack     bool   `json:"ack"`
@@ -97,6 +99,17 @@ type FetchQueueResp struct {
 	LeaseToken     string               `json:"lease_token,omitempty"`
 	Members        []FetchReceiptMember `json:"members,omitempty"`
 	ReceiptTrailer string               `json:"receipt_trailer,omitempty"`
+	BlockedOn      *BlockedOn           `json:"blocked_on,omitempty"`
+}
+
+type BlockedOn struct {
+	RecordID string `json:"record_id"`
+	Reason   string `json:"reason"`
+}
+
+type IntakeMetadata struct {
+	Source           *intake.Source          `json:"source"`
+	AttachmentsState intake.AttachmentsState `json:"attachments_state"`
 }
 
 // ObserveReq is the adapter → broker READ-ONLY peek of a topic's held inbound,
@@ -360,16 +373,17 @@ type RecoverSessionResp struct {
 
 // HelloAckMsg is the broker's response to HelloMsg.
 type HelloAckMsg struct {
-	Build        string              `json:"build,omitempty"`
-	Upgrade      *UpgradeHint        `json:"upgrade,omitempty"`
-	Delivery     *DeliveryAcceptance `json:"delivery,omitempty"`
-	Op           Op                  `json:"op"` // = OpHelloAck
-	ConnID       uint64              `json:"conn_id"`
-	AutoAttached bool                `json:"auto_attached"`
-	Mapping      *Mapping            `json:"mapping,omitempty"`
-	ClaimHolder  *Holder             `json:"claim_holder,omitempty"`
-	NoConfig     bool                `json:"no_config,omitempty"`
-	NoMapping    bool                `json:"no_mapping,omitempty"`
+	AcceptedCapabilities []string            `json:"accepted_capabilities,omitempty"`
+	Build                string              `json:"build,omitempty"`
+	Upgrade              *UpgradeHint        `json:"upgrade,omitempty"`
+	Delivery             *DeliveryAcceptance `json:"delivery,omitempty"`
+	Op                   Op                  `json:"op"` // = OpHelloAck
+	ConnID               uint64              `json:"conn_id"`
+	AutoAttached         bool                `json:"auto_attached"`
+	Mapping              *Mapping            `json:"mapping,omitempty"`
+	ClaimHolder          *Holder             `json:"claim_holder,omitempty"`
+	NoConfig             bool                `json:"no_config,omitempty"`
+	NoMapping            bool                `json:"no_mapping,omitempty"`
 
 	// Capabilities carries the resolvable channel's static capability
 	// manifest so the adapter can fold GuidanceFor(caps) into the agent's

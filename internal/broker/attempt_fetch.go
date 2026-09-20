@@ -80,37 +80,68 @@ func (w *RouteWorker) handleAttemptFetch(ctx context.Context, job *FetchJob) {
 				result.Err = err
 				return
 			}
-			rows, err := w.visibleAttemptRows(-1)
+			rows, total, blocked, err := w.intakeFetchRows(job.Mode)
 			if err != nil {
 				result.Err = err
 				return
 			}
-			result.Remaining = len(rows)
+			result.Remaining = total
 			limit := len(rows)
 			if !job.All && job.Limit >= 0 {
 				limit = min(limit, job.Limit)
 			}
 			var members []attemptMember
-			fits := func(messages []c3types.Inbound, receipts []ipc.FetchReceiptMember, reserve int) bool {
+			active := job.Owner.intakeMetadataActive()
+			fits := func(messages []c3types.Inbound, metadata []intakeFetchMessage, receipts []ipc.FetchReceiptMember, reserve int) bool {
+				if active {
+					frame := fetchQueueResponse{attemptFetchResponse(job.RespID, job.ReceiptGroup.token, messages, receipts, total), metadata}
+					if len(messages) == len(rows) {
+						frame.BlockedOn = blocked
+					}
+					encoded, err := json.Marshal(frame)
+					if err != nil {
+						result.Err = err
+					}
+					return err == nil && len(encoded)+reserve+1 <= ipc.MaxFrameSize
+				}
 				encoded, err := json.Marshal(attemptFetchResponse(job.RespID, job.ReceiptGroup.token, messages, receipts, len(rows)))
 				return err == nil && len(encoded)+reserve+1 <= ipc.MaxFrameSize
 			}
 			for _, row := range rows[:limit] {
 				member := ipc.FetchReceiptMember{RecordID: row.RecordID, Revision: rowRevision(row)}
 				in := row.Inbound
-				if !fits([]c3types.Inbound{in}, []ipc.FetchReceiptMember{member}, 0) {
+				var metadata []intakeFetchMessage
+				if active {
+					metadata = []intakeFetchMessage{intakeMessage(row)}
+				}
+				if !fits([]c3types.Inbound{in}, metadata, []ipc.FetchReceiptMember{member}, 0) {
+					if result.Err != nil {
+						return
+					}
 					// The original stays durable until this replacement is receipted.
 					in = oversizeNotice(in, encodedSize(in), "", false)
+					if active {
+						metadata[0].Inbound = in
+						if !fits([]c3types.Inbound{in}, metadata, []ipc.FetchReceiptMember{member}, 0) {
+							result.Err = fmt.Errorf("fetch_queue: intake head exceeds frame size; row remains queued")
+							return
+						}
+					}
 				}
 				messages := append(slices.Clone(result.Messages), in)
+				metadata = append(slices.Clone(result.intakeMessages), metadata...)
 				receipts := append(slices.Clone(result.Members), member)
-				if !fits(messages, receipts, job.FrameReserve) {
+				if !fits(messages, metadata, receipts, job.FrameReserve) {
 					break
 				}
 				result.Messages, result.Members = messages, receipts
+				result.intakeMessages = metadata
 				members = append(members, attemptMember{ID: member.RecordID, Revision: member.Revision})
 			}
-			if len(members) == 0 {
+			if len(result.Messages) == len(rows) {
+				result.BlockedOn = blocked
+			}
+			if result.Err != nil || len(members) == 0 {
 				return
 			}
 			holder := shadowHolder(job.Owner)
@@ -119,6 +150,7 @@ func (w *RouteWorker) handleAttemptFetch(ctx context.Context, job *FetchJob) {
 				Route: w.key, Transport: "fetch", Holder: holder, Members: members}, time.Now())
 			if w.attempt(job.ReceiptGroup.token) == nil {
 				result.Messages, result.Members = nil, nil
+				result.intakeMessages = nil
 				result.Err = fmt.Errorf("fetch reservation admission full")
 				return
 			}

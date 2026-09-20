@@ -1041,7 +1041,7 @@ func reactionTypeString(r gotgbot.ReactionType) string {
 // case-insensitive, after trimming. Only the FIRST token decides (and the
 // "@botname" strip applies to that token ONLY — amendment A5: truncating at
 // the first '@' anywhere would amputate /drain arguments containing '@').
-// "/statusly" and "please /status" are NOT matched; "/drain genie all" is.
+// "/statusly" and "please /status" are NOT matched; "/drain acme all" is.
 // The broker's HandleCommand does the real parsing — a matched-but-malformed
 // command it declines ("", false) falls through to normal routing.
 func (c *Channel) isBrokerCommand(text string) bool {
@@ -1119,6 +1119,8 @@ func topicPtrFromThread(threadID int64) *int64 {
 // code is consumed by the broker (allowlist updated + persisted) and
 // the message itself is not forwarded.
 func (c *Channel) dispatchMessage(updateID int64, msg *gotgbot.Message, edited bool, richRaw json.RawMessage) {
+	// Snapshot provider values before conversion; materialize source only after admission.
+	providerMessage := *msg
 	if !c.cfg.RichInboundEnabled() {
 		richRaw = nil // toggle off ⇒ rich messages surface as today (empty)
 	}
@@ -1262,7 +1264,7 @@ func (c *Channel) dispatchMessage(updateID int64, msg *gotgbot.Message, edited b
 	// a message the user sent — silently, and only visible in broker.log. The
 	// maintainer's call (v0.1.0 release audit) reverses that trade: redelivery
 	// churn under overload is preferable to deliberate loss.
-	if !c.host.Emit(in) && c.offTrk != nil {
+	if !c.host.Emit(in, captureSource(c.Name(), updateID, &providerMessage, in.Attachments)) && c.offTrk != nil {
 		// The route worker is saturated and this message was NOT persisted anywhere.
 		//
 		// Do NOT mark the update done. Leaving it in-flight holds the

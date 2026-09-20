@@ -9,6 +9,7 @@ import (
 
 	"github.com/Andrometiq/c3/internal/c3types"
 	"github.com/Andrometiq/c3/internal/channel"
+	"github.com/Andrometiq/c3/internal/intake"
 )
 
 // fakeHost is a test double for channel.Host. Records every call so the
@@ -16,6 +17,7 @@ import (
 type fakeHost struct {
 	mu       sync.Mutex
 	emitted  []*c3types.Inbound
+	sources  []*intake.Source
 	decision channel.GateInboundDecision
 	logs     []string
 	health   []c3types.HealthEvent
@@ -43,10 +45,11 @@ type fakeHost struct {
 
 func (h *fakeHost) Config(name string, target any) error { return nil }
 
-func (h *fakeHost) Emit(in *c3types.Inbound) bool {
+func (h *fakeHost) Emit(in *c3types.Inbound, sources ...*intake.Source) bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.emitted = append(h.emitted, in)
+	h.sources = append(h.sources, intake.Optional(sources))
 	return !h.emitDrops
 }
 

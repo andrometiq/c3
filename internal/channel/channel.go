@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/Andrometiq/c3/internal/c3types"
+	"github.com/Andrometiq/c3/internal/intake"
 )
 
 // ErrAttachmentTooLarge marks a failure whose cause is SIZE: the attachment is
@@ -118,7 +119,7 @@ type Host interface {
 	// append can lose it. False means it was not accepted or persisted; the
 	// channel remains the retry authority and must leave the source available for
 	// redelivery (an HTTP channel should return a retryable failure).
-	Emit(in *c3types.Inbound) bool
+	Emit(in *c3types.Inbound, sources ...*intake.Source) bool
 	Logf(format string, args ...any)
 	Done() <-chan struct{}
 
