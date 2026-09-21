@@ -78,7 +78,7 @@ func TestForwardInboundToCodexAppServerStartsTurn(t *testing.T) {
 			methods = append(methods, method)
 		}
 	}
-	wantMethods := []string{"initialize", "initialized", "thread/loaded/list", "thread/queue/add", "thread/resume", "turn/start"}
+	wantMethods := []string{"initialize", "initialized", "thread/loaded/list", "thread/turns/list", "thread/queue/add", "thread/resume", "turn/start"}
 	if len(methods) != len(wantMethods) {
 		t.Fatalf("methods = %#v, want %#v", methods, wantMethods)
 	}

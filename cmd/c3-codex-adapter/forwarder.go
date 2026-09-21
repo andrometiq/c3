@@ -74,6 +74,15 @@ func forwardInboundToCodexAppServer(ctx context.Context, in *c3types.Inbound, cf
 	if threadID == "" {
 		return fmt.Errorf("no loaded Codex thread found")
 	}
+	// Follow-up messages should reach ongoing work, not wait behind an entire
+	// agent turn. Read only the newest turn summary for this pinned thread.
+	// If steering is explicitly rejected (including a turn-completion race),
+	// the durable queue below remains the fallback. An ambiguous transport
+	// failure must not submit a second copy or acknowledge the broker's copy.
+	steered, err := client.steerActiveTurn(ctx, threadID, in)
+	if err != nil || steered {
+		return err
+	}
 	// Modern Codex accepts durable input while the visible TUI is busy. Only
 	// an explicit method-not-found permits the legacy turn/start fallback:
 	// a timeout may mean the queue accepted the message but its reply was lost.
@@ -109,6 +118,44 @@ func forwardInboundToCodexAppServer(ctx context.Context, in *c3types.Inbound, cf
 		}},
 	})
 	return err
+}
+
+func (c *codexWSClient) steerActiveTurn(ctx context.Context, threadID string, in *c3types.Inbound) (bool, error) {
+	page, err := c.request(ctx, "thread/turns/list", map[string]any{
+		"threadId": threadID, "limit": 1, "sortDirection": "desc", "itemsView": "notLoaded",
+	})
+	if err != nil {
+		var rpcErr *codexRPCError
+		if errors.As(err, &rpcErr) {
+			return false, nil // Older servers may not expose turn pagination.
+		}
+		return false, err
+	}
+	turns, _ := page["data"].([]any)
+	if len(turns) != 1 {
+		return false, nil
+	}
+	turn, _ := turns[0].(map[string]any)
+	turnID, _ := turn["id"].(string)
+	if turn["status"] != "inProgress" || turnID == "" {
+		return false, nil
+	}
+	result, err := c.request(ctx, "turn/steer", map[string]any{
+		"threadId": threadID, "expectedTurnId": turnID,
+		"clientUserMessageId": codexInboundMessageID(threadID, in),
+		"input":               []map[string]any{{"type": "text", "text": formatInboundTurnText(in), "text_elements": []any{}}},
+	})
+	if err != nil {
+		var rpcErr *codexRPCError
+		if errors.As(err, &rpcErr) {
+			return false, nil // Explicit rejection: input was not accepted.
+		}
+		return false, err
+	}
+	if result["turnId"] != turnID {
+		return false, errors.New("Codex steer did not confirm the expected active turn")
+	}
+	return true, nil
 }
 
 func codexInboundMessageID(threadID string, in *c3types.Inbound) string {

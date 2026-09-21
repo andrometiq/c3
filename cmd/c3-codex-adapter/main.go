@@ -1086,7 +1086,7 @@ func (a *adapter) buildInstructions() string {
 		head = "C3 connected. Use `attach` to claim a Telegram topic, `fetch_queue` to recover held inbound, and `reply` to send."
 	}
 	if codexForwardingAllowed() {
-		head += " Live delivery is enabled. Codex queues inbound during active work for a subsequent turn. Do not fetch_queue concurrently with healthy live delivery; use it when a recovery notice requests it."
+		head += " Live delivery is enabled. Follow-up messages steer the active Codex turn; idle input uses the durable queue. Do not fetch_queue concurrently with healthy live delivery; use it when a recovery notice requests it."
 	} else {
 		head += " Live delivery is NOT configured: topic attachment alone does not wake Codex. Start with the C3 launcher, or configure native queue delivery for this exact session."
 	}
