@@ -10,14 +10,6 @@ and more) through one broker daemon plus a set of per-CLI MCP adapters, with
 topic-based routing so many sessions can share one chat. Written in Go. See `README.md`
 and `docs/` for the architecture.
 
-## Session start
-
-1. `README.md` — what C3 is and the architecture.
-2. `ROADMAP.md` — future and not-yet-built work.
-3. `DECISIONS.md` — decisions taken and their rationale.
-4. `WORKLOG.md` — `sed -n 1,12p WORKLOG.md; grep '^## ' WORKLOG.md | tail -5`, then read
-   only the last entry. Never read the whole file.
-
 ## Build · test · check
 
 - Build:   `go build ./...`   (or `make`)
@@ -31,15 +23,11 @@ Keep the tree green: build + `go test ./...` must pass before a change is consid
 
 ## Where to read
 
+- `README.md` — what C3 is + the architecture
 - `docs/` — deeper design: `CHANNELS.md`, `PLUGINS.md`, `COMMANDS.md`, `DESKTOP.md`, `INSTALL.md`
-- `TODO.md` — the v0.1 release record (closed)
-
-## Launching Claude Code with C3
-
-Inbound Telegram messages render live only when Claude Code starts with
-`claude --dangerously-load-development-channels=plugin:c3@c3` (append `--resume` or
-`--resume <id>` to resume). Why, and the settings it needs: `docs/INSTALL.md` Step 4.
-Give the maintainer the full command; never suggest an alias for it.
+- `DECISIONS.md` — decisions taken + rationale
+- `ROADMAP.md` — future / not-yet-built work
+- `TODO.md` — the current finish-line checklist
 
 ## Conventions
 
