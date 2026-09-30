@@ -425,5 +425,40 @@ class TestImportCreatesParentDirs(unittest.TestCase):
         )
 
 
+class TestIPv4First(unittest.TestCase):
+    """A stalled IPv6 path to the Bot API must not make every fetch time out:
+    the handler resolves IPv4 addresses first, keeps IPv6 as the fallback, and
+    only patches socket when main() installs it (never on import)."""
+
+    def setUp(self):
+        import socket
+        self.socket = socket
+        self.saved = socket.getaddrinfo
+        self.handler = load_handler()
+
+    def tearDown(self):
+        self.socket.getaddrinfo = self.saved
+
+    def test_import_does_not_patch_socket(self):
+        self.assertIs(self.socket.getaddrinfo, self.saved)
+
+    def test_ipv4_sorted_first_order_kept_within_family(self):
+        s = self.socket
+        v6a = (s.AF_INET6, s.SOCK_STREAM, 6, "", ("2001:db8::1", 443, 0, 0))
+        v6b = (s.AF_INET6, s.SOCK_STREAM, 6, "", ("2001:db8::2", 443, 0, 0))
+        v4a = (s.AF_INET, s.SOCK_STREAM, 6, "", ("192.0.2.1", 443))
+        v4b = (s.AF_INET, s.SOCK_STREAM, 6, "", ("192.0.2.2", 443))
+        self.handler._system_getaddrinfo = lambda *a, **k: [v6a, v4a, v6b, v4b]
+        self.handler.install_ipv4_first()
+        self.assertEqual(s.getaddrinfo("api.telegram.org", 443), [v4a, v4b, v6a, v6b])
+
+    def test_ipv6_only_host_still_resolves(self):
+        s = self.socket
+        v6 = (s.AF_INET6, s.SOCK_STREAM, 6, "", ("2001:db8::1", 443, 0, 0))
+        self.handler._system_getaddrinfo = lambda *a, **k: [v6]
+        self.handler.install_ipv4_first()
+        self.assertEqual(s.getaddrinfo("h", 443), [v6])
+
+
 if __name__ == "__main__":
     unittest.main()

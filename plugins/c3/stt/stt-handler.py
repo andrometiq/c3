@@ -37,6 +37,7 @@ import importlib.util
 import logging
 import secrets
 import shutil
+import socket
 import stat
 
 # ── Config ────────────────────────────────────────────────────────────────────
@@ -123,6 +124,27 @@ def load_env(path):
 # api.telegram.org is IP-blocked in some networks (e.g. India), which made the
 # download time out (`<urlopen error timed out>`) even though the proxy was live.
 API_BASE = os.environ.get('C3_TELEGRAM_API_URL', 'https://api.telegram.org').rstrip('/')
+
+# Try IPv4 addresses before IPv6 ones. On networks where the IPv6 route to the
+# Bot API opens but the TLS handshake then stalls (seen 2026-09-30: IPv4 handshake
+# <1s, IPv6 timing out every time), Python's resolver order put IPv6 first and
+# every getFile timed out, so voice notes sat parked in the retry loop. The
+# stable sort keeps the resolver's order within each family, and
+# socket.create_connection still falls through to the next address when a
+# connect fails, so an IPv6-only host keeps working. Installed from main() only:
+# this process talks to nothing but the Bot API (STT providers run in a
+# subprocess), and importing the module (tests) must not patch socket.
+_system_getaddrinfo = socket.getaddrinfo
+
+
+def _ipv4_first_getaddrinfo(*args, **kwargs):
+    infos = _system_getaddrinfo(*args, **kwargs)
+    return sorted(infos, key=lambda info: info[0] != socket.AF_INET)
+
+
+def install_ipv4_first():
+    socket.getaddrinfo = _ipv4_first_getaddrinfo
+
 
 def tg(token, method, **params):
     url = f'{API_BASE}/bot{token}/{method}'
@@ -383,6 +405,7 @@ def find_cached_audio(file_id):
 def main():
     if len(sys.argv) < 4:
         sys.exit(1)
+    install_ipv4_first()
 
     # Bot token is supplied on stdin (line 1) — never via argv — so it
     # doesn't appear in /proc/<pid>/cmdline, ps, or audit logs. The Go
