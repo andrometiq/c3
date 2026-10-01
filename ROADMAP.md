@@ -61,6 +61,28 @@ The first is cleaner; the second is far easier to reason about when it misbehave
   `session/request_permission` relayed to the channel).
 - Consider migrating the Grok adapter's inject path from the leader socket (an
   undocumented internal surface) to the documented ACP `grok agent stdio` protocol.
+- Wake policy: once C3 can bring an agent up, decide per topic when an inbound message (or a
+  monitor event) wakes the agent and hands it the queue, and when it only queues. Control it with
+  slash commands.
+
+## Managed monitors
+
+An agent hands C3 a monitor through MCP, and C3 owns it from then on. The agent doesn't need to be
+running: something deterministic watches, tells the human, and the human decides whether to bring
+the agent in.
+
+- C3 starts the registered monitors whenever the broker starts. A monitor is one-shot or perpetual.
+- Each monitor run emits one event and exits; C3 decides when to run it again.
+- An event posts to the monitor's assigned topic (the registering agent's topic by default), in one
+  of two modes:
+  - **human only:** the post carries a button, and only a tap forwards the event to the agent;
+  - **human and agent:** the post also enters the agent's queue (injected if the session is live,
+    queued otherwise).
+- Once C3 can wake agents (Reach), a third mode wakes the agent and passes the event in.
+- One global rate limit with stepped backoff, so a runaway monitor can't flood a topic: for example
+  10 events at 1 s spacing, then 10 at 2 s, then 10 at 4 s, and so on.
+- Open: the registration shape, persistence across broker restarts, and how a human lists, pauses
+  and removes monitors.
 
 ## Web surface
 
@@ -208,3 +230,6 @@ honestly, over trying to resurrect it.
 
 - Whether a typed free-text answer is also queued as a normal message, or consumed only as the answer.
 - Grant UX for operator authorization (per-action prompt vs standing grant).
+- Whether a native mobile app is worth building, or Telegram plus a web link when a richer view is
+  needed (transcript, tool calls), or the installable web app covers it. Settle what a native app
+  actually buys first.
