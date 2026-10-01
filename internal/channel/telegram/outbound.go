@@ -63,14 +63,22 @@ func (c *Channel) SendReply(args c3types.ReplyArgs) (int64, error) {
 	// Native rich-message table route (Bot API 10.1 sendRichMessage), gated on the
 	// richTablesEnabled switch (now ENABLED). When the reply is rich-eligible (a
 	// detected GFM table within caps on a markdown reply), send the WHOLE reply as
-	// native markdown so Telegram renders real tables. On ANY error fall through to
-	// the existing monospace/plaintext path so a message is never lost.
+	// native markdown so Telegram renders real tables. Fall through to the
+	// monospace/plaintext path only on a typed rejection that proves nothing was
+	// sent: 400 (format) or 404 (a self-hosted Bot API server without the
+	// method). Any other failure may have posted the message, so it is returned,
+	// not resent.
 	if richTableEligible(richTablesEnabled, args.Markup, args.Text) {
-		if id, err := c.sendRich(args); err == nil {
+		id, err := c.sendRich(args)
+		if err == nil {
 			return id, nil
-		} else {
-			c.logf("telegram: sendRichMessage failed, falling back to monospace path: %v", err)
 		}
+		var tg *gotgbot.TelegramError
+		if !errors.As(err, &tg) || (tg.Code != 400 && tg.Code != 404) {
+			c.feedOutboundFailure(err, "SendReply rich send error")
+			return 0, c.scrubToken(err)
+		}
+		c.logf("telegram: sendRichMessage rejected, falling back to monospace path: %v", err)
 	}
 
 	// Empty/zero-value Markup is the MARKDOWN DEFAULT (see doc comment).
@@ -141,9 +149,11 @@ func (c *Channel) SendReply(args c3types.ReplyArgs) (int64, error) {
 // rejected the entities we sent (malformed HTML or MarkdownV2). On these we
 // retry plain-text rather than drop the message — pattern from a prior
 // TypeScript Telegram bot's extensions/telegram/src/bot/delivery.send.ts
-// (sub-agent research 2026-05-09).
+// (sub-agent research 2026-05-09). Only a typed 400 qualifies: the matching
+// text on a 5xx or an untyped error proves nothing about whether it was sent.
 func isParseEntityError(err error) bool {
-	if err == nil {
+	var tg *gotgbot.TelegramError
+	if !errors.As(err, &tg) || tg.Code != 400 {
 		return false
 	}
 	s := err.Error()

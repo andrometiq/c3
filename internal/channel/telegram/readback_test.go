@@ -17,37 +17,40 @@ func rbTGErr(code int) error {
 	return &gotgbot.TelegramError{Code: code, Description: "test"}
 }
 
-// TestReadbackAmbiguousTimeoutIsNotRetried pins the double-post fix: a send that
-// times out with no server response is ambiguous — Telegram may have already
-// created the echo before the deadline — so retryReadbackSend must NOT repost
-// it. It stops after a single send. A 5xx, by contrast, means Telegram
-// responded and the message was not created, so it still retries to the cap.
-func TestReadbackAmbiguousTimeoutIsNotRetried(t *testing.T) {
+// TestReadbackUncertainFailureIsNotRetried pins the double-post fix: a failure
+// that may have reached Telegram (a deadline, a 5xx, an untyped error) is held
+// after a single send, never reposted. Only a failure that provably sent
+// nothing (a connection-setup error, a 429) retries to the cap.
+func TestReadbackUncertainFailureIsNotRetried(t *testing.T) {
 	c, _ := newWiredChannel()
 	c.ctx = context.Background()
 
-	// Ambiguous post-send timeout: exactly one send, no repost.
+	for name, sendErr := range map[string]error{
+		"deadline": context.DeadlineExceeded,
+		"5xx":      rbTGErr(502),
+		"untyped":  errors.New("read tcp: connection reset by peer"),
+	} {
+		calls := 0
+		if _, err := c.retryReadbackSend(func() (int64, error) {
+			calls++
+			return 0, sendErr
+		}); err == nil {
+			t.Fatalf("%s: uncertain failure should surface as an error", name)
+		}
+		if calls != 1 {
+			t.Fatalf("%s: uncertain failure must not be retried (double-post risk); sends=%d, want 1", name, calls)
+		}
+	}
+
 	calls := 0
 	if _, err := c.retryReadbackSend(func() (int64, error) {
 		calls++
-		return 0, context.DeadlineExceeded
+		return 0, setupErr()
 	}); err == nil {
-		t.Fatal("ambiguous timeout should surface as an error")
-	}
-	if calls != 1 {
-		t.Fatalf("ambiguous timeout must not be retried (double-post risk); sends=%d, want 1", calls)
-	}
-
-	// Contrast: a 5xx (server responded, message not created) retries to the cap.
-	calls = 0
-	if _, err := c.retryReadbackSend(func() (int64, error) {
-		calls++
-		return 0, rbTGErr(500)
-	}); err == nil {
-		t.Fatal("exhausted 5xx retries should surface an error")
+		t.Fatal("exhausted setup retries should surface an error")
 	}
 	if calls != readbackRetryMaxAttempts {
-		t.Fatalf("5xx should retry to the cap; sends=%d, want %d", calls, readbackRetryMaxAttempts)
+		t.Fatalf("setup error should retry to the cap; sends=%d, want %d", calls, readbackRetryMaxAttempts)
 	}
 }
 
@@ -97,7 +100,7 @@ func TestIsRetryableSendErr_WrappedErrors(t *testing.T) {
 	}
 }
 
-// TestRetryReadbackSend_TransientThenSuccess: a transient blip is retried and the
+// TestRetryReadbackSend_TransientThenSuccess: a setup failure (nothing sent) is retried and the
 // echo IS delivered — the exact silent-drop this fix closes (a dogfood tester saw
 // transcripts vanish from the chat during transient telegram-fetch-DOWN windows).
 func TestRetryReadbackSend_TransientThenSuccess(t *testing.T) {
@@ -106,7 +109,7 @@ func TestRetryReadbackSend_TransientThenSuccess(t *testing.T) {
 	id, err := c.retryReadbackSend(func() (int64, error) {
 		calls++
 		if calls < 2 {
-			return 0, rbTGErr(500)
+			return 0, setupErr()
 		}
 		return 42, nil
 	})
@@ -142,7 +145,7 @@ func TestRetryReadbackSend_ExhaustsAndGivesUp(t *testing.T) {
 	calls := 0
 	_, err := c.retryReadbackSend(func() (int64, error) {
 		calls++
-		return 0, rbTGErr(500)
+		return 0, setupErr()
 	})
 	if err == nil {
 		t.Fatal("want error after exhausting retries")
@@ -161,7 +164,7 @@ func TestRetryReadbackSend_CtxCancelAborts(t *testing.T) {
 	calls := 0
 	_, err := c.retryReadbackSend(func() (int64, error) {
 		calls++
-		return 0, rbTGErr(500)
+		return 0, setupErr()
 	})
 	if err == nil {
 		t.Fatal("want ctx error on cancel")

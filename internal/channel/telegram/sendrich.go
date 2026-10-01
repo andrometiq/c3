@@ -33,7 +33,7 @@ import (
 // ENABLED: the route is gated behind richTablesEnabled (capabilities.go), which
 // is true (live-verified 2026-06-17), so detected GFM tables send as native rich
 // tables. See SendReply for the routing branch and the monospace fallback (used
-// for over-cap tables, send errors, and old clients).
+// for over-cap tables, a typed 400 rejection, and servers without the method).
 
 // richTableEligible reports whether a reply should be sent as a native rich
 // message (sendRichMessage) instead of the existing monospace path. It is a PURE
@@ -138,9 +138,9 @@ func buildRichParams(chatID int64, md string, topicID, replyTo *int64) map[strin
 // requestOptsFor.
 //
 // The reply text is sent UNCHANGED as GFM markdown (rich_message.markdown);
-// Telegram converts the pipe table(s) into native RichBlockTable(s). On any
-// error the caller (SendReply) falls back to the existing monospace path so a
-// message is never lost.
+// Telegram converts the pipe table(s) into native RichBlockTable(s). On a typed
+// 400 or 404 the caller (SendReply) falls back to the existing monospace path;
+// any other error may have posted the message, so it is returned.
 func (c *Channel) sendRich(args c3types.ReplyArgs) (int64, error) {
 	if c.bot == nil {
 		return 0, errors.New("telegram: channel not started")

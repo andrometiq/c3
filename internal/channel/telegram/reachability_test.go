@@ -338,7 +338,7 @@ func TestReach_CtxCancelReadbackGiveUp_NoOutboundDown(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	c.ctx = ctx
-	_, err := c.retryReadbackSend(func() (int64, error) { return 0, rbTGErr(500) })
+	_, err := c.retryReadbackSend(func() (int64, error) { return 0, setupErr() })
 	if err == nil {
 		t.Fatal("want ctx error on cancelled readback")
 	}

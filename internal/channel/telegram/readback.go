@@ -398,10 +398,10 @@ func readbackCaptionWithSuffix(transcript, suffix string) string {
 	return caption + suffix
 }
 
-// Readback outbound-retry budget. A transient outbound blip (network/timeout/
-// 5xx, or a 429) must not silently DROP the transcript echo — that echo is the
-// sender's only confirmation of what the agent received. We retry the whole send
-// a few times with short exponential backoff, bounded so a persistently-down
+// Readback outbound-retry budget. A failure that provably sent nothing (a
+// connection-setup error or a 429) must not silently DROP the transcript echo —
+// that echo is the sender's only confirmation of what the agent received. We
+// retry the whole send a few times with short exponential backoff, bounded so a persistently-down
 // wire gives up within a couple of seconds rather than stalling the worker's
 // synchronous flush loop. Format/permanent errors are NOT retried here — they
 // either cascade to a smaller format (inside sendReadbackOnce) or fail fast.
@@ -434,8 +434,9 @@ type readbackArgs struct {
 // Resilience (fixes a silent-drop): sendReadbackOnce degrades TINY/SHORT/LONG/
 // DEADZONE → .txt document → short notice ONLY on FORMAT/permanent errors — a
 // smaller message can't help when the wire is down. A TRANSIENT error (network/
-// timeout/5xx/429) short-circuits that cascade and bubbles here, where we retry
-// the whole send with bounded backoff. Only a persistently-unhealthy outbound
+// timeout/5xx/429) short-circuits that cascade and bubbles here: one that
+// provably sent nothing (setup error, 429) is retried with bounded backoff; any
+// other is held, never reposted (retryReadbackSend). Only a persistently-unhealthy outbound
 // path makes us give up — loudly logged, still non-fatal upstream (the agent
 // already has the transcript; only the chat echo is lost). The transcript is
 // NEVER truncated or summarized.
@@ -452,7 +453,8 @@ func (c *Channel) SendReadbackWithHeld(args c3types.ReadbackArgs, heldCount int)
 }
 
 // retryReadbackSend runs send with bounded exponential backoff, retrying ONLY
-// retryable (transient/429) failures. A deterministic failure (permanent/format)
+// failures that provably sent nothing (setup error, 429). An uncertain failure
+// is held and returned; a deterministic one (permanent/format)
 // returns immediately; exhausting the retries returns the last error after a
 // loud log. Aborts promptly if the channel context is cancelled. send is a seam
 // so the retry policy is unit-testable without a live bot.
@@ -465,12 +467,12 @@ func (c *Channel) retryReadbackSend(send func() (int64, error)) (int64, error) {
 			return id, nil
 		}
 		lastErr = err
-		if isAmbiguousSendTimeout(err) {
-			// The request may have reached Telegram and created the echo before
-			// the deadline; reposting would duplicate it. Hold, do not retry —
-			// the agent already has the transcript, so a rare lost echo is the
-			// safe trade against a visible double-post.
-			c.logf("telegram: readback attempt %d/%d hit an ambiguous send timeout; "+
+		if !definitelyNotSent(err) {
+			// The request may have reached Telegram and created the echo;
+			// reposting would duplicate it. Hold, do not retry — the agent
+			// already has the transcript, so a rare lost echo is the safe trade
+			// against a visible double-post.
+			c.logf("telegram: readback attempt %d/%d failed with an uncertain outcome; "+
 				"not reposting to avoid duplicating an echo Telegram may have accepted: %v",
 				attempt, readbackRetryMaxAttempts, err)
 			c.feedOutboundFailure(err, "readback send uncertain; held")

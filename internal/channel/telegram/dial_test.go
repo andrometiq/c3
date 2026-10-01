@@ -457,8 +457,8 @@ func TestSetupRaceAllStallReturnsSetupError(t *testing.T) {
 			t.Fatalf("setup error %q contains %q", msg, banned)
 		}
 	}
-	if isAmbiguousSendTimeout(err) {
-		t.Fatal("a setup error must not be an ambiguous send timeout")
+	if !definitelyNotSent(err) {
+		t.Fatal("a setup error must count as definitely not sent")
 	}
 	if class, _ := classifyError(err); class != errClassTransient {
 		t.Fatalf("class = %v, want transient", class)
