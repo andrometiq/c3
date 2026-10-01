@@ -473,6 +473,7 @@ func (c *Channel) retryReadbackSend(send func() (int64, error)) (int64, error) {
 			c.logf("telegram: readback attempt %d/%d hit an ambiguous send timeout; "+
 				"not reposting to avoid duplicating an echo Telegram may have accepted: %v",
 				attempt, readbackRetryMaxAttempts, err)
+			c.feedOutboundFailure(err, "readback send uncertain; held")
 			return 0, err
 		}
 		class, retryAfter := classifyError(err)

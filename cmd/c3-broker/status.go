@@ -178,10 +178,10 @@ func runStatus() error {
 					if reason == "" {
 						reason = "transport failures"
 					}
-					fmt.Fprintf(&b, "  • %s fetch: DOWN since %s (%d consecutive %s, down %s)\n",
+					fmt.Fprintf(&b, "  • %s: DOWN since %s (%d consecutive %s, down %s)\n",
 						ch, since, h.Consec, reason, (time.Duration(h.DownForSec) * time.Second).String())
 				} else {
-					fmt.Fprintf(&b, "  • %s fetch: UP\n", ch)
+					fmt.Fprintf(&b, "  • %s: UP\n", ch)
 				}
 			}
 		}

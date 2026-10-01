@@ -110,3 +110,35 @@ func TestRunStatusShowsCrossSession(t *testing.T) {
 		t.Fatalf("status: %s", out)
 	}
 }
+
+// Channel health is combined reachability, not fetch health: the status line
+// names the channel only.
+func TestRunStatus_HealthLineNamesChannel(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	oldHealth, oldClaims := statusFetchHealth, statusFetchClaims
+	statusFetchHealth = func() (*ipc.HealthListMsg, error) {
+		return &ipc.HealthListMsg{Op: ipc.OpHealthList, Health: []ipc.HealthEntry{
+			{Channel: "telegram", State: "down", Consec: 2, Reason: "outbound send failing"},
+			{Channel: "web", State: "up"},
+		}}, nil
+	}
+	statusFetchClaims = func() (*ipc.ClaimsListMsg, error) {
+		return &ipc.ClaimsListMsg{Op: ipc.OpClaimsList}, nil
+	}
+	t.Cleanup(func() {
+		statusFetchHealth, statusFetchClaims = oldHealth, oldClaims
+	})
+
+	out := captureStdout(t, func() {
+		if err := runStatus(); err != nil {
+			t.Errorf("runStatus: %v", err)
+		}
+	})
+	if !strings.Contains(out, "• telegram: DOWN since") || !strings.Contains(out, "outbound send failing") ||
+		!strings.Contains(out, "• web: UP") || strings.Contains(out, "fetch:") {
+		t.Fatalf("health lines should name the channel, not fetch. Output:\n%s", out)
+	}
+}

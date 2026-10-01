@@ -197,19 +197,16 @@ func (h *BrokerHost) NotifyHealth(ev c3types.HealthEvent) {
 	// (c) status cache for `c3-broker status`.
 	h.broker.setLastHealth(ev)
 
-	// (d) broker log — one loud edge line.
+	// (d) broker log — one loud edge line. Health only reports: it gates no
+	// work. An UP edge pulls parked voice retries for this channel to now.
 	if ev.State == c3types.HealthStateDown {
-		log.Printf("HEALTH chan=%s state=DOWN since=%s consec=%d reason=%q — inbound offline; surfaced on the status line",
+		log.Printf("HEALTH chan=%s state=DOWN since=%s consec=%d reason=%q — surfaced on the status line",
 			ev.Channel, ev.Since.Format("15:04:05"), ev.Consec, ev.Reason)
 	} else {
-		log.Printf("HEALTH chan=%s state=UP (recovered, was down %s) — inbound restored",
+		log.Printf("HEALTH chan=%s state=UP (recovered, was down %s)",
 			ev.Channel, ev.DownFor.Round(time.Second))
+		h.broker.Voice.RetryNow(ev.Channel)
 	}
-	// The scheduler reads the cached state above before starting work. A
-	// non-blocking wake on every edge both stops prompt dispatch after DOWN and
-	// makes DOWN→UP recovery immediate; the periodic scheduler timer remains the
-	// edge-independent backstop for STT-only failures.
-	h.broker.Voice.Wake()
 
 	// (e) status file the Claude Code status line reads.
 	h.broker.WriteHealthFile()

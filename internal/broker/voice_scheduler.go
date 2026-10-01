@@ -181,7 +181,6 @@ type VoiceScheduler struct {
 	stopped   chan struct{}
 
 	clock        voiceSchedulerClock
-	healthDown   func(string) bool
 	runAttempt   func(context.Context, voiceAttempt) voiceAttemptResult
 	submit       func(RouteKey, Job) bool
 	jitter       func(time.Duration) time.Duration
@@ -213,7 +212,6 @@ func newVoiceScheduler(b *Broker, clock voiceSchedulerClock) *VoiceScheduler {
 		retryExpiry:  configuredVoiceRetryExpiry(b),
 		resolveDelay: voiceResolveRetryDelay,
 	}
-	s.healthDown = b.channelHealthDown
 	s.runAttempt = s.transcribe
 	s.submit = b.Workers.Submit
 	s.jitter = func(d time.Duration) time.Duration {
@@ -277,13 +275,6 @@ func (s *VoiceScheduler) setRetryExpiry(expiry time.Duration) {
 	s.Wake()
 }
 
-func (b *Broker) channelHealthDown(channel string) bool {
-	b.healthMu.RLock()
-	defer b.healthMu.RUnlock()
-	ev, ok := b.lastHealth[channel]
-	return ok && ev.State == c3types.HealthStateDown
-}
-
 func cloneVoiceInbound(in c3types.Inbound) c3types.Inbound {
 	in.Attachments = append([]c3types.Attachment(nil), in.Attachments...)
 	if in.TopicID != nil {
@@ -320,7 +311,6 @@ func (s *VoiceScheduler) schedule(route RouteKey, recordID string, in c3types.In
 		return err
 	}
 	now := s.clock.Now()
-	manualDeferred := manual && s.healthDown(route.Channel) && !s.broker.voiceCachedLocally(route.Channel, firstVoiceFileID(voices))
 	s.mu.Lock()
 	if !s.accepting {
 		s.mu.Unlock()
@@ -353,15 +343,12 @@ func (s *VoiceScheduler) schedule(route RouteKey, recordID string, in c3types.In
 		}
 		seen[key] = true
 		if existing := s.entries[key]; existing != nil {
-			if hook != nil && !manualDeferred {
+			if hook != nil {
 				existing.hooks = append(existing.hooks, hook)
 			}
-			if manual && !manualDeferred && existing.state == voiceWaiting {
+			if manual && existing.state == voiceWaiting {
 				existing.manual = true
 				existing.nextAttempt = now
-			}
-			if manualDeferred && existing.firstFailure.IsZero() {
-				existing.firstFailure = now
 			}
 			if !manual {
 				s.addTargetLocked(existing, recordID, group, false, false, in, source, states)
@@ -371,13 +358,10 @@ func (s *VoiceScheduler) schedule(route RouteKey, recordID string, in c3types.In
 		}
 		entry := &voiceEntry{
 			key: key, inbound: cloneVoiceInbound(in), attachment: att,
-			nextAttempt: now, backoff: s.retryBase, manual: manual && !manualDeferred, state: voiceWaiting,
+			nextAttempt: now, backoff: s.retryBase, manual: manual, state: voiceWaiting,
 			targets: make(map[string]voiceResolveTarget), applied: make(map[string]bool),
 		}
-		if manualDeferred {
-			entry.firstFailure = now
-		}
-		if hook != nil && !manualDeferred {
+		if hook != nil {
 			entry.hooks = append(entry.hooks, hook)
 		}
 		s.entries[key] = entry
@@ -395,19 +379,7 @@ func (s *VoiceScheduler) schedule(route RouteKey, recordID string, in c3types.In
 	if !added {
 		return errors.New("voice scheduler received no keyed voice attachment")
 	}
-	if manualDeferred {
-		return fmt.Errorf("fetch health for %s is DOWN and audio is not cached; automatic retry continues", route.Channel)
-	}
 	return nil
-}
-
-func firstVoiceFileID(voices []c3types.Attachment) string {
-	for _, att := range voices {
-		if att.Kind == "voice" {
-			return att.FileID
-		}
-	}
-	return ""
 }
 
 func (s *VoiceScheduler) addTargetLocked(entry *voiceEntry, recordID string, group *voiceGroup, findPending, transcriptOnly bool, in c3types.Inbound, source *intake.Source, states intake.AttachmentsState) {
@@ -510,6 +482,24 @@ func (s *VoiceScheduler) Wake() {
 	}
 }
 
+// RetryNow pulls every waiting entry on channel forward to now. It does not
+// reset backoff or the retry expiry; it only stops a recovered channel from
+// waiting out a long backoff.
+func (s *VoiceScheduler) RetryNow(channel string) {
+	if s == nil {
+		return
+	}
+	now := s.clock.Now()
+	s.mu.Lock()
+	for _, entry := range s.entries {
+		if entry.state == voiceWaiting && entry.key.route.Channel == channel && entry.nextAttempt.After(now) {
+			entry.nextAttempt = now
+		}
+	}
+	s.mu.Unlock()
+	s.Wake()
+}
+
 func (s *VoiceScheduler) dispatch() {
 	defer s.wg.Done()
 	timer := s.clock.NewTimer(s.sweepEvery)
@@ -560,12 +550,6 @@ func (s *VoiceScheduler) dispatchDue(now time.Time) []voiceScheduleKey {
 	var due []*voiceEntry
 	for _, entry := range s.entries {
 		if entry.state != voiceWaiting || now.Before(entry.nextAttempt) {
-			continue
-		}
-		if s.healthDown(entry.key.route.Channel) && !s.broker.voiceCachedLocally(entry.key.route.Channel, entry.key.fileID) {
-			if entry.firstFailure.IsZero() {
-				entry.firstFailure = now
-			}
 			continue
 		}
 		due = append(due, entry)
@@ -646,8 +630,7 @@ func (s *VoiceScheduler) nextDelay(now, nextSweep time.Time) time.Duration {
 			if !entry.firstFailure.IsZero() {
 				candidate = entry.firstFailure.Add(s.retryExpiry)
 			}
-			gated := s.healthDown(entry.key.route.Channel) && !s.broker.voiceCachedLocally(entry.key.route.Channel, entry.key.fileID)
-			if !gated && (candidate.IsZero() || entry.nextAttempt.Before(candidate)) {
+			if candidate.IsZero() || entry.nextAttempt.Before(candidate) {
 				candidate = entry.nextAttempt
 			}
 		case voiceResolveReady:
@@ -721,16 +704,6 @@ func (s *VoiceScheduler) attemptSnapshot(key voiceScheduleKey) (voiceAttempt, bo
 	defer s.mu.Unlock()
 	entry := s.entries[key]
 	if entry == nil || entry.state != voiceRunning {
-		return voiceAttempt{}, false
-	}
-	// A DOWN edge can land after dispatch queued this key but before a runner
-	// snapshots it. Re-check at the actual attempt boundary so known-down health
-	// never burns a provider/fetch attempt from the bounded runner queue.
-	if s.healthDown(entry.key.route.Channel) && !s.broker.voiceCachedLocally(entry.key.route.Channel, entry.key.fileID) {
-		if entry.firstFailure.IsZero() {
-			entry.firstFailure = s.clock.Now()
-		}
-		entry.state = voiceWaiting
 		return voiceAttempt{}, false
 	}
 	return voiceAttempt{key: key, inbound: cloneVoiceInbound(entry.inbound), attachment: entry.attachment}, true

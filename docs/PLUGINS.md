@@ -235,11 +235,10 @@ unparseable failure return.
 
 Voice intake is persist-first: the route worker stores a row carrying an honest
 pending placeholder and advances the source offset before any network call. The
-two-runner scheduler resolves that row after STT. Known-DOWN channel health gates
-only work that still needs a fetch; cached audio continues offline. An uncached
-manual `retranscribe` during DOWN returns the outage immediately while its entry
-stays parked for automatic recovery. Transient download failures retry with
-bounded backoff, and a broker restart reconstructs pending work from the queue.
+two-runner scheduler resolves that row after STT. Channel health gates no voice
+work; a recovery edge only pulls parked retries forward. Transient download
+failures retry with bounded backoff, and a broker restart reconstructs pending
+work from the queue.
 Manual `retranscribe` joins the same single-flight lease. If a pending row was
 consumed while STT ran, the result is an additive transcript-update row rather
 than a rewrite of consumed history.

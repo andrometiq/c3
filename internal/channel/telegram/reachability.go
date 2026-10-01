@@ -23,8 +23,7 @@ import (
 //
 // Locking (single-lock, single-source-of-truth — 2026-07-07 review fix): the
 // combiner OWNS the outboundHealth machine (r.out) and drives EVERY outbound op
-// (outboundFailure/outboundSuccess and the wire-proof reset in recordInbound)
-// while holding r.mu, so the machine op and the combiner recompute are ATOMIC
+// (outboundFailure/outboundSuccess/probeSuccess) while holding r.mu, so the machine op and the combiner recompute are ATOMIC
 // and r.outboundDown is ALWAYS set `= r.out.down` (authoritative — from the
 // machine's state, never from a transition edge). This is what makes the two
 // impossible to diverge: the previous design kept outbound down-state in TWO
@@ -66,23 +65,13 @@ func newReachabilityWithClock(now func() time.Time) *reachability {
 }
 
 // recordInbound updates the inbound sub-state and returns the combined edge (if
-// any). On inbound RECOVERY (down=false) it ALSO clears outbound: a successful
-// getUpdates proves the wire+token work, so the combined state must not stay DOWN
-// waiting for a send to confirm outbound. The wire-proof reset now happens INSIDE
-// this lock — r.out.ForceReset() + r.outboundDown=false are ATOMIC with any
-// concurrent outboundFailure/outboundSuccess (they all take r.mu). This is the F2
-// fix: previously ForceReset (under outboundHealth.mu) and the outboundDown clear
-// (under r.mu) were non-atomic, so two failures in the window could leave the
-// machine down while the combiner read up, masking a genuine outage. consec is
-// the driving side's failure count, copied into the combined event.
+// any). It never touches outbound: a warm poll says nothing about whether a
+// fresh connection or a send works. consec is the driving side's failure count,
+// copied into the combined event.
 func (r *reachability) recordInbound(down bool, consec int) (bool, c3types.HealthEvent) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.inboundDown = down
-	if !down {
-		r.out.ForceReset()     // wire-proof: a healthy fetch clears the outbound MACHINE
-		r.outboundDown = false // and the combiner bool — atomically, under r.mu
-	}
 	return r.recomputeLocked(consec)
 }
 
@@ -92,13 +81,31 @@ func (r *reachability) recordInbound(down bool, consec int) (bool, c3types.Healt
 // — that is the F1 fix (a stale failure can no longer wedge outboundDown=true
 // against a machine that a concurrent success already flipped down=false, because
 // both ops run under r.mu and the last writer always reconciles outboundDown to
-// the machine). reason is the failure cause for the DOWN event.
-func (r *reachability) outboundFailure(reason string) (bool, c3types.HealthEvent) {
+// the machine). reason is the failure cause for the DOWN event; isSetup marks
+// setup evidence (see outboundHealth).
+func (r *reachability) outboundFailure(reason string, isSetup bool) (bool, c3types.HealthEvent) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.out.RecordFailure(reason)
+	r.out.RecordFailure(reason, isSetup)
 	r.outboundDown = r.out.down // AUTHORITATIVE — from the machine, not the transition
 	return r.recomputeLocked(r.out.consecFails)
+}
+
+// probeSuccess records a fresh-connection probe success: it clears outbound
+// setup evidence (never send evidence) and returns the combined edge (if any).
+func (r *reachability) probeSuccess() (bool, c3types.HealthEvent) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.out.ClearSetupEvidence()
+	r.outboundDown = r.out.down
+	return r.recomputeLocked(r.out.consecFails)
+}
+
+// isDown reports the combined state.
+func (r *reachability) isDown() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.combinedDown
 }
 
 // outboundSuccess drives the owned outbound machine's RecordSuccess and returns

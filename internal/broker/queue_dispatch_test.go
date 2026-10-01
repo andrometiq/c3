@@ -162,7 +162,9 @@ func TestHandleRetranscribe_DownHealthCachedSucceedsOffline(t *testing.T) {
 	}
 }
 
-func TestHandleRetranscribe_DownHealthUncachedFailsFastAndParks(t *testing.T) {
+// Plan test (h): a manual retranscribe of uncached audio while health is DOWN
+// runs; health gates nothing.
+func TestHandleRetranscribe_DownHealthUncachedRuns(t *testing.T) {
 	t.Setenv("C3_QUEUE_DIR", t.TempDir())
 	ch := &probeChannel{fakeChannel: &fakeChannel{}, size: 100}
 	b := brokerWithProbe(t, ch)
@@ -171,32 +173,17 @@ func TestHandleRetranscribe_DownHealthUncachedFailsFastAndParks(t *testing.T) {
 	var calls atomic.Int64
 	b.Plugins.OnVoiceReceived(func(context.Context, c3types.VoicePayload) (string, error) {
 		calls.Add(1)
-		return "must not run", nil
+		return "manual while down", nil
 	})
 	stub := &Stub{CLI: "claude"}
 	route := MakeRouteKey("telegram", -100, ptrI64(914))
 	bindOutputRouteForTest(stub, &route)
 	agentSide, brokerSide := newConnPair(t)
-	raw, _ := json.Marshal(ipc.RetranscribeReq{Op: ipc.OpRetranscribe, ID: "uncached-down", FileID: "uncached-voice", MessageID: 44})
-	started := time.Now()
+	raw, _ := json.Marshal(ipc.RetranscribeReq{Op: ipc.OpRetranscribe, ID: "uncached-down", FileID: "uncached-voice"})
 	go b.handleRetranscribe(brokerSide, stub, raw)
 	resp := readRetranscribeResp(t, agentSide)
-	if elapsed := time.Since(started); elapsed > 500*time.Millisecond {
-		t.Fatalf("uncached DOWN retranscribe blocked the IPC read loop for %s", elapsed)
-	}
-	if !strings.Contains(resp.Err, "DOWN") || !strings.Contains(resp.Err, "automatic retry continues") {
-		t.Fatalf("uncached DOWN response = %+v", resp)
-	}
-	if calls.Load() != 0 || ch.calls.Load() != 0 {
-		t.Fatalf("uncached DOWN path burned work: STT=%d probes=%d", calls.Load(), ch.calls.Load())
-	}
-	key := voiceScheduleKey{route: route, messageID: 44, fileID: "uncached-voice"}
-	b.Voice.mu.Lock()
-	entry := b.Voice.entries[key]
-	parked := entry != nil && entry.state == voiceWaiting && !entry.firstFailure.IsZero() && len(entry.hooks) == 0
-	b.Voice.mu.Unlock()
-	if !parked {
-		t.Fatal("uncached manual entry did not remain parked for automatic recovery")
+	if resp.Err != "" || resp.Text != "manual while down" || calls.Load() != 1 {
+		t.Fatalf("uncached retranscribe while DOWN = %+v (STT calls %d), want the transcript", resp, calls.Load())
 	}
 }
 

@@ -152,13 +152,9 @@ func (b *Broker) attachmentFetchRefusal(chanName, fileID string) (refusal string
 	return "", sz, false
 }
 
-// voiceCachedLocally reports whether the channel already has this file_id's audio in
-// its local cache (so retranscribe can skip the network preflight and the handler
-// can reuse the bytes — F11). Best-effort; false when the channel has no accessor.
-func (b *Broker) voiceCachedLocally(chanName, fileID string) bool {
-	return b.voiceCachedPath(chanName, fileID) != ""
-}
-
+// voiceCachedPath returns the channel's local cached copy of this file_id's audio
+// (so retranscribe can skip the network preflight and the handler can reuse the
+// bytes — F11), or "". Best-effort; "" when the channel has no accessor.
 func (b *Broker) voiceCachedPath(chanName, fileID string) string {
 	ch, err := b.Channel(chanName)
 	if err != nil {

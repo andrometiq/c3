@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"runtime"
 	"strings"
 	"sync"
@@ -160,17 +159,20 @@ func schedulerEntrySnapshot(s *VoiceScheduler, key voiceScheduleKey) (voiceEntry
 	return entry.state, entry.nextAttempt, true
 }
 
-func TestVoiceSchedulerHealthGateBackoffAndDueRetry(t *testing.T) {
-	_, scheduler, clock := schedulerHarness(t)
-	var down atomic.Bool
-	down.Store(true)
-	scheduler.healthDown = func(string) bool { return down.Load() }
+// Plan test (i): health gates nothing. With the channel DOWN the whole time, a
+// transient failure parks with backoff; expiry is anchored only by a real
+// failure; RetryNow pulls a 5-minute retry for that channel to now.
+func TestVoiceSchedulerBackoffParksAndRetryNowPullsForward(t *testing.T) {
+	b, scheduler, clock := schedulerHarness(t)
+	b.setLastHealth(c3types.HealthEvent{Channel: "telegram", State: c3types.HealthStateDown, Since: clock.Now()})
 	scheduler.jitter = func(d time.Duration) time.Duration { return d }
+	scheduler.retryBase = 5 * time.Minute
 
+	release := make(chan struct{})
 	var attempts atomic.Int64
 	scheduler.runAttempt = func(context.Context, voiceAttempt) voiceAttemptResult {
-		call := attempts.Add(1)
-		if call <= 2 {
+		if attempts.Add(1) == 1 {
+			<-release
 			return voiceAttemptResult{transient: true, detail: "network is unreachable"}
 		}
 		return voiceAttemptResult{success: true, transcript: "done", segmentText: "[Transcribed voice]: done"}
@@ -181,105 +183,38 @@ func TestVoiceSchedulerHealthGateBackoffAndDueRetry(t *testing.T) {
 	if !scheduler.ScheduleAuto(route, "record-1", in, []c3types.Attachment{att}, "", voiceEchoReservation{}) {
 		t.Fatal("schedule rejected")
 	}
-
-	for range 5 {
-		clock.Advance(10 * time.Minute)
-		time.Sleep(5 * time.Millisecond)
+	waitForVoiceCondition(t, "first attempt despite DOWN health", func() bool { return attempts.Load() == 1 })
+	firstFailure := func() time.Time {
+		scheduler.mu.Lock()
+		defer scheduler.mu.Unlock()
+		return scheduler.entries[key].firstFailure
 	}
-	if got := attempts.Load(); got != 0 {
-		t.Fatalf("health DOWN burned %d attempts; want zero", got)
+	clock.Advance(2 * time.Minute)
+	if !firstFailure().IsZero() {
+		t.Fatal("expiry was anchored before any real failure")
 	}
 
-	down.Store(false)
-	scheduler.Wake()
-	waitForVoiceCondition(t, "first attempt after UP edge", func() bool { return attempts.Load() == 1 })
-	waitForVoiceCondition(t, "first backoff park", func() bool {
+	close(release)
+	waitForVoiceCondition(t, "transient failure to park for 5 minutes", func() bool {
 		state, due, ok := schedulerEntrySnapshot(scheduler, key)
-		return ok && state == voiceWaiting && due.Equal(clock.Now().Add(30*time.Second))
+		return ok && state == voiceWaiting && due.Equal(clock.Now().Add(5*time.Minute))
 	})
-
-	clock.Advance(29 * time.Second)
+	if !firstFailure().Equal(clock.Now()) {
+		t.Fatalf("firstFailure=%v, want the failure time %v", firstFailure(), clock.Now())
+	}
+	clock.Advance(time.Minute)
+	scheduler.RetryNow("web")
 	time.Sleep(10 * time.Millisecond)
 	if got := attempts.Load(); got != 1 {
-		t.Fatalf("retry ran before its due time: attempts=%d", got)
+		t.Fatalf("parked retry ran early (or RetryNow crossed channels): attempts=%d", got)
 	}
-	clock.Advance(time.Second)
-	waitForVoiceCondition(t, "second attempt at due time without a health edge", func() bool { return attempts.Load() == 2 })
-	waitForVoiceCondition(t, "doubled backoff park", func() bool {
-		state, due, ok := schedulerEntrySnapshot(scheduler, key)
-		return ok && state == voiceWaiting && due.Equal(clock.Now().Add(time.Minute))
-	})
 
-	clock.Advance(time.Minute)
-	waitForVoiceCondition(t, "terminal third attempt", func() bool { return attempts.Load() == 3 })
-	waitForVoiceCondition(t, "terminal resolve completion", func() bool {
+	scheduler.RetryNow("telegram")
+	waitForVoiceCondition(t, "RetryNow to run the parked retry", func() bool { return attempts.Load() == 2 })
+	waitForVoiceCondition(t, "resolve completion", func() bool {
 		_, _, ok := schedulerEntrySnapshot(scheduler, key)
 		return !ok
 	})
-}
-
-func TestVoiceSchedulerHealthGateAllowsCachedAuto(t *testing.T) {
-	b, scheduler, _ := schedulerHarness(t)
-	cachePath := t.TempDir() + "/cached-auto.oga"
-	if err := os.WriteFile(cachePath, []byte("cached audio"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	ch := &cachedProbeChannel{probeChannel: &probeChannel{fakeChannel: &fakeChannel{}}, path: cachePath}
-	b.chMu.Lock()
-	b.channels["telegram"] = &channelRegistration{Channel: ch}
-	b.chMu.Unlock()
-	scheduler.healthDown = func(string) bool { return true }
-	var attempts atomic.Int64
-	scheduler.runAttempt = func(context.Context, voiceAttempt) voiceAttemptResult {
-		attempts.Add(1)
-		return voiceAttemptResult{success: true, transcript: "offline", segmentText: "[Transcribed voice]: offline"}
-	}
-	scheduler.submit = schedulerCompletingSubmit(scheduler, nil)
-	route, in, att := schedulerVoice(11, "cached-voice")
-	key := voiceScheduleKey{route: route, messageID: in.MessageID, fileID: att.FileID}
-	if !scheduler.ScheduleAuto(route, "cached-auto", in, []c3types.Attachment{att}, "", voiceEchoReservation{}) {
-		t.Fatal("cached auto schedule rejected")
-	}
-	waitForVoiceCondition(t, "cached auto attempt during DOWN", func() bool {
-		_, _, ok := schedulerEntrySnapshot(scheduler, key)
-		return attempts.Load() == 1 && !ok
-	})
-}
-
-func TestVoiceSchedulerHealthDeferredEntryExpires(t *testing.T) {
-	_, scheduler, clock := schedulerHarness(t)
-	scheduler.setRetryExpiry(time.Minute)
-	scheduler.healthDown = func(string) bool { return true }
-	var attempts atomic.Int64
-	scheduler.runAttempt = func(context.Context, voiceAttempt) voiceAttemptResult {
-		attempts.Add(1)
-		return voiceAttemptResult{success: true}
-	}
-	jobs := make(chan *ResolveVoiceJob, 1)
-	scheduler.submit = schedulerCompletingSubmit(scheduler, jobs)
-	route, in, att := schedulerVoice(12, "health-expiry")
-	key := voiceScheduleKey{route: route, messageID: in.MessageID, fileID: att.FileID}
-	if !scheduler.ScheduleAuto(route, "health-expiry", in, []c3types.Attachment{att}, "", voiceEchoReservation{}) {
-		t.Fatal("schedule rejected")
-	}
-	waitForVoiceCondition(t, "health deferral to anchor expiry", func() bool {
-		scheduler.mu.Lock()
-		defer scheduler.mu.Unlock()
-		entry := scheduler.entries[key]
-		return entry != nil && !entry.firstFailure.IsZero()
-	})
-	clock.Advance(time.Minute)
-	select {
-	case job := <-jobs:
-		if job.Success || !strings.Contains(job.SegmentText, "retry expired") {
-			t.Fatalf("health-deferred expiry resolve = %+v", job)
-		}
-	case <-time.After(3 * time.Second):
-		t.Fatal("health-deferred entry did not expire")
-	}
-	if got := attempts.Load(); got != 0 {
-		t.Fatalf("health-deferred expiry burned %d provider attempts", got)
-	}
 }
 
 func TestVoiceSchedulerExpiryResolvesExactlyOnce(t *testing.T) {
@@ -490,15 +425,31 @@ func TestVoiceSchedulerRunnerPanicRetriesEntryAndKeepsBothRunners(t *testing.T) 
 	close(release)
 }
 
-func TestVoiceSchedulerDispatcherPanicRecoversInLoop(t *testing.T) {
-	_, scheduler, _ := schedulerHarness(t)
-	var checks atomic.Int64
-	scheduler.healthDown = func(string) bool {
-		if checks.Add(1) == 1 {
-			panic("injected dispatcher health panic")
-		}
-		return false
+// panicOnceClock panics on its panicAt-th Now call. A fresh scheduler's
+// dispatcher makes call 1 when it starts and call 2 inside its first cycle.
+type panicOnceClock struct {
+	*fakeVoiceClock
+	panicAt int64
+	calls   atomic.Int64
+	fired   atomic.Bool
+}
+
+func (c *panicOnceClock) Now() time.Time {
+	if c.calls.Add(1) == c.panicAt {
+		c.fired.Store(true)
+		panic("injected dispatcher clock panic")
 	}
+	return c.fakeVoiceClock.Now()
+}
+
+func TestVoiceSchedulerDispatcherPanicRecoversInLoop(t *testing.T) {
+	b, _, _ := schedulerHarness(t)
+	b.Voice.Stop()
+	clock := &panicOnceClock{fakeVoiceClock: newFakeVoiceClock(), panicAt: 2}
+	scheduler := newVoiceScheduler(b, clock)
+	b.Voice = scheduler
+	waitForVoiceCondition(t, "dispatcher to hit the injected panic", clock.fired.Load)
+
 	var attempts atomic.Int64
 	scheduler.runAttempt = func(context.Context, voiceAttempt) voiceAttemptResult {
 		attempts.Add(1)

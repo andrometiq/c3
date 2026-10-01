@@ -3,6 +3,25 @@
 Entries are newest first. This is the public architecture record: it records
 rulings and rationale, never private operational details.
 
+## D041: Health only reports; outbound evidence has two kinds
+
+**Date:** 2026-10-01
+
+**Decision:** Health is observation-only; no health state gates work. Outbound
+failure evidence is setup (the dialer's typed error proves no HTTP request bytes
+were sent) or send. A fresh-connection probe clears setup evidence; only a real
+outbound success clears send evidence; inbound health never clears outbound; a
+timer clears nothing.
+
+A health gate on voice work could latch: work that needed the network waited for
+UP, while UP waited for an outbound success that only that work would produce.
+Without the gate, retries keep running on their own backoff, and an UP edge only
+pulls them forward. While DOWN, the heartbeat probes every 60 seconds over a
+connection that is never reused; the first probe starts within about 70 seconds
+of the DOWN edge, so a setup-only DOWN on a working network clears within about
+80 seconds. A warm poll proves nothing about fresh connections or sends,
+so it no longer resets outbound.
+
 ## D040: Controlled restart drains and cancels interactive requests
 
 **Date:** 2026-09-11

@@ -2,6 +2,8 @@ package telegram
 
 import (
 	"context"
+	"fmt"
+	"net/url"
 	"sync"
 	"testing"
 	"time"
@@ -27,6 +29,13 @@ func newWiredChannel() (*Channel, *fakeHost) {
 	return c, h
 }
 
+// setupErr is the racing dialer's typed error as a Bot API call returns it
+// (gotgbot wraps the transport's *url.Error with %w).
+func setupErr() error {
+	return fmt.Errorf("unable to getMe: %w", &url.Error{Op: "Post", URL: "https://api.example/bot<redacted>/getMe",
+		Err: &setupError{msg: "connection setup to api.example:443 failed: ipv6 [2001:db8::1]: tls: timed out after 2s"}})
+}
+
 // --- outboundHealth machine ---------------------------------------------------
 
 // downAfter=2 distinct failure EVENTS: the first is a no-op edge, the second
@@ -35,14 +44,14 @@ func newWiredChannel() (*Channel, *fakeHost) {
 func TestOutboundHealth_TwoEventsToDown(t *testing.T) {
 	clk := &fakeClock{t: time.Date(2026, 7, 7, 12, 0, 0, 0, time.UTC)}
 	o := newOutboundHealthWithClock(clk.now)
-	if tr := o.RecordFailure("a"); tr != healthNoChange {
+	if tr := o.RecordFailure("a", false); tr != healthNoChange {
 		t.Fatalf("fail #1 = %v, want healthNoChange (downAfter=2)", tr)
 	}
-	if tr := o.RecordFailure("a"); tr != healthWentDown {
+	if tr := o.RecordFailure("a", false); tr != healthWentDown {
 		t.Fatalf("fail #2 = %v, want healthWentDown", tr)
 	}
 	for i := 0; i < 3; i++ {
-		if tr := o.RecordFailure("a"); tr != healthNoChange {
+		if tr := o.RecordFailure("a", false); tr != healthNoChange {
 			t.Fatalf("fail while DOWN #%d = %v, want healthNoChange (de-spam)", i, tr)
 		}
 	}
@@ -54,22 +63,51 @@ func TestOutboundHealth_TwoEventsToDown(t *testing.T) {
 	}
 }
 
-// ForceReset clears a DOWN machine to UP WITHOUT an edge, and a fresh run of 2
-// failures is needed to re-trip (the counter really reset, not left at 2).
-func TestOutboundHealth_ForceResetClears(t *testing.T) {
+// Setup-only evidence: a probe success clears a DOWN machine and really resets
+// the counter (a fresh run of 2 failures is needed to re-trip).
+func TestOutboundHealth_ClearSetupEvidenceClearsSetupOnly(t *testing.T) {
 	clk := &fakeClock{t: time.Date(2026, 7, 7, 12, 0, 0, 0, time.UTC)}
 	o := newOutboundHealthWithClock(clk.now)
-	o.RecordFailure("a")
-	o.RecordFailure("a") // DOWN
-	o.ForceReset()
+	o.RecordFailure("a", true)
+	o.RecordFailure("a", true) // DOWN
+	if tr := o.ClearSetupEvidence(); tr != healthRecovered {
+		t.Fatalf("probe success on setup-only DOWN = %v, want healthRecovered", tr)
+	}
 	if down, consec, _, _, _ := o.snapshot(); down || consec != 0 {
-		t.Fatalf("after ForceReset: down=%v consec=%d, want down=false consec=0", down, consec)
+		t.Fatalf("after ClearSetupEvidence: down=%v consec=%d, want down=false consec=0", down, consec)
 	}
-	if tr := o.RecordFailure("b"); tr != healthNoChange {
-		t.Fatalf("post-reset fail #1 = %v, want healthNoChange", tr)
+	if tr := o.RecordFailure("b", true); tr != healthNoChange {
+		t.Fatalf("post-clear fail #1 = %v, want healthNoChange", tr)
 	}
-	if tr := o.RecordFailure("b"); tr != healthWentDown {
-		t.Fatalf("post-reset fail #2 = %v, want healthWentDown", tr)
+	if tr := o.RecordFailure("b", true); tr != healthWentDown {
+		t.Fatalf("post-clear fail #2 = %v, want healthWentDown", tr)
+	}
+}
+
+// Any send evidence pins the machine until a real outbound success, whichever
+// order the kinds arrived in.
+func TestOutboundHealth_SendEvidenceSurvivesProbe(t *testing.T) {
+	for _, kinds := range [][2]bool{{false, false}, {true, false}, {false, true}} {
+		clk := &fakeClock{t: time.Date(2026, 7, 7, 12, 0, 0, 0, time.UTC)}
+		o := newOutboundHealthWithClock(clk.now)
+		o.RecordFailure("a", kinds[0])
+		o.RecordFailure("a", kinds[1]) // DOWN
+		if tr := o.ClearSetupEvidence(); tr != healthNoChange {
+			t.Fatalf("kinds %v: probe success = %v, want healthNoChange", kinds, tr)
+		}
+		if down, consec, _, _, _ := o.snapshot(); !down || consec != 2 {
+			t.Fatalf("kinds %v: after probe down=%v consec=%d, want DOWN consec=2", kinds, down, consec)
+		}
+		if tr := o.RecordSuccess(); tr != healthRecovered {
+			t.Fatalf("kinds %v: real success = %v, want healthRecovered", kinds, tr)
+		}
+		// The success cleared the send evidence too: setup-only failures are
+		// probe-clearable again.
+		o.RecordFailure("b", true)
+		o.RecordFailure("b", true)
+		if tr := o.ClearSetupEvidence(); tr != healthRecovered {
+			t.Fatalf("kinds %v: send evidence outlived a real success", kinds)
+		}
 	}
 }
 
@@ -95,8 +133,8 @@ func TestReachReason(t *testing.T) {
 // --- combiner edges (direct) --------------------------------------------------
 
 // The combined edge fires on the FIRST sub going down and stays silent while a
-// second sub flips down under it; inbound recovery is wire-proof (it clears
-// outbound too), so it fires the UP edge even with outbound still nominally down.
+// second sub flips down under it; inbound recovery never touches outbound, so
+// the UP edge fires only when the last sub clears.
 func TestReachability_CombinedEdges(t *testing.T) {
 	clk := &fakeClock{t: time.Date(2026, 7, 7, 12, 0, 0, 0, time.UTC)}
 	r := newReachabilityWithClock(clk.now)
@@ -107,16 +145,18 @@ func TestReachability_CombinedEdges(t *testing.T) {
 	}
 	// Outbound now goes down (2 failure events, downAfter=2) while combined is
 	// already DOWN → the machine flips down but no combined edge fires.
-	if fire, _ := r.outboundFailure("x"); fire {
+	if fire, _ := r.outboundFailure("x", false); fire {
 		t.Fatal("outbound failure while already combined-DOWN must NOT fire")
 	}
-	if fire, _ := r.outboundFailure("x"); fire {
+	if fire, _ := r.outboundFailure("x", false); fire {
 		t.Fatal("outbound going down while already combined-DOWN must NOT fire")
 	}
-	// Inbound recovers → wire-proof clears outbound too → combined UP edge fires.
-	fire, ev = r.recordInbound(false, 0)
+	if fire, _ := r.recordInbound(false, 0); fire {
+		t.Fatal("inbound recovery fired UP while outbound is still DOWN")
+	}
+	fire, ev = r.outboundSuccess()
 	if !fire || ev.State != c3types.HealthStateUp {
-		t.Fatalf("inbound recovery (wire-proof) edge = (%v, %+v), want fire UP", fire, ev)
+		t.Fatalf("outbound recovery edge = (%v, %+v), want fire UP", fire, ev)
 	}
 }
 
@@ -126,11 +166,11 @@ func TestReachability_OutboundOnlyDownRecovers(t *testing.T) {
 	clk := &fakeClock{t: time.Date(2026, 7, 7, 12, 0, 0, 0, time.UTC)}
 	r := newReachabilityWithClock(clk.now)
 	// First failure event: machine still up (downAfter=2), no combined edge.
-	if fire, _ := r.outboundFailure("x"); fire {
+	if fire, _ := r.outboundFailure("x", false); fire {
 		t.Fatal("first outbound failure must not fire (downAfter=2)")
 	}
 	// Second failure event: machine flips down → combined DOWN edge, consec=2.
-	fire, ev := r.outboundFailure("x")
+	fire, ev := r.outboundFailure("x", false)
 	if !fire || ev.State != c3types.HealthStateDown || ev.Reason != "outbound send failing" || ev.Consec != 2 {
 		t.Fatalf("outbound-down edge = (%v, %+v), want fire DOWN reason='outbound send failing' consec=2", fire, ev)
 	}
@@ -182,30 +222,94 @@ func TestReach_OutboundOnly_SingleNotify(t *testing.T) {
 	}
 }
 
-// (iii) Recovery: inbound success clears BOTH (wire-proof) → combined RECOVERED
-// fires once; and the outbound machine is genuinely reset (a lone post-recovery
-// failure does not immediately re-trip).
-func TestReach_InboundRecoveryClearsBoth(t *testing.T) {
+// (iii) / plan test (d): outbound DOWN on setup evidence, then a warm-poll
+// inbound recovery while fresh connections keep failing ⇒ outbound and combined
+// stay DOWN; only a later successful probe clears.
+func TestReach_WarmPollRecoveryDoesNotClearOutbound(t *testing.T) {
 	c, h := newWiredChannel()
 	for i := 0; i < 3; i++ {
 		c.reportHealth(c.health.RecordFailure("transient (network/timeout/5xx)"))
 	}
-	c.feedOutboundFailure(rbTGErr(500), "x")
-	c.feedOutboundFailure(rbTGErr(500), "x")
+	c.feedOutboundFailure(setupErr(), "x")
+	c.feedOutboundFailure(setupErr(), "x")
 	if n := len(h.healthEvents()); n != 1 {
 		t.Fatalf("precondition: exactly one combined DOWN, got %d", n)
 	}
-	// Inbound recovers → wire-proof → combined RECOVERED once.
-	c.reportHealth(c.health.RecordSuccess())
+	c.reportHealth(c.health.RecordSuccess()) // warm poll recovers inbound
+	c.feedOutboundFailure(setupErr(), "x")   // fresh connections still failing
+	if n := len(h.healthEvents()); n != 1 {
+		t.Fatalf("warm-poll inbound recovery changed combined state: events=%+v", h.healthEvents())
+	}
+	if down, _, _, _, _ := c.reach.out.snapshot(); !down || !c.reach.isDown() {
+		t.Fatalf("outbound down=%v combined down=%v after warm-poll recovery, want both DOWN", down, c.reach.isDown())
+	}
+	c.recordProbeSuccess()
 	evs := h.healthEvents()
 	if len(evs) != 2 || evs[1].State != c3types.HealthStateUp {
-		t.Fatalf("after recovery, events = %+v, want [DOWN, UP]", evs)
+		t.Fatalf("after probe success, events = %+v, want [DOWN, UP]", evs)
 	}
-	// The outbound machine was reset (consec cleared): a single failure now must
-	// NOT re-trip (it would if consec had been left at 2).
-	c.feedOutboundFailure(rbTGErr(500), "x")
-	if n := len(h.healthEvents()); n != 2 {
-		t.Fatalf("outbound machine not reset by wire-proof; a lone post-recovery failure re-fired: calls=%d, want 2", n)
+}
+
+// Plan test (a): setup-only DOWN + probe success ⇒ exactly one RECOVERED edge.
+func TestReach_SetupOnlyDownProbeRecovers(t *testing.T) {
+	c, h := newWiredChannel()
+	c.feedOutboundFailure(setupErr(), "SendReply transient send error")
+	c.feedOutboundFailure(setupErr(), "SendReply transient send error")
+	c.recordProbeSuccess()
+	c.recordProbeSuccess()
+	evs := h.healthEvents()
+	if len(evs) != 2 || evs[0].State != c3types.HealthStateDown || evs[1].State != c3types.HealthStateUp {
+		t.Fatalf("events = %+v, want exactly [DOWN, UP]", evs)
+	}
+}
+
+// Plan tests (b) and (c): send-kind or mixed DOWN + probe success ⇒ stays DOWN;
+// a real send success ⇒ RECOVERED.
+func TestReach_SendEvidenceDownNeedsRealSuccess(t *testing.T) {
+	cases := map[string][2]error{
+		"send":         {rbTGErr(500), rbTGErr(500)},
+		"setup, send":  {setupErr(), rbTGErr(500)},
+		"send, setup":  {rbTGErr(500), setupErr()},
+		"held timeout": {context.DeadlineExceeded, context.DeadlineExceeded},
+	}
+	for name, errs := range cases {
+		t.Run(name, func(t *testing.T) {
+			c, h := newWiredChannel()
+			c.feedOutboundFailure(errs[0], "x")
+			c.feedOutboundFailure(errs[1], "x")
+			c.recordProbeSuccess()
+			if evs := h.healthEvents(); len(evs) != 1 || evs[0].State != c3types.HealthStateDown {
+				t.Fatalf("after probe success, events = %+v, want only DOWN", evs)
+			}
+			c.recordOutboundSuccess()
+			evs := h.healthEvents()
+			if len(evs) != 2 || evs[1].State != c3types.HealthStateUp {
+				t.Fatalf("after real send success, events = %+v, want [DOWN, UP]", evs)
+			}
+		})
+	}
+}
+
+// Plan test (e): a probe success during an active 409 clears outbound, but
+// inbound (conflict-dead) stays DOWN.
+func TestReach_ProbeSuccessDuringConflictClearsOutboundOnly(t *testing.T) {
+	c, h := newWiredChannel()
+	for i := 0; i < 3; i++ {
+		c.reportHealth(c.health.RecordFailure("409 conflict"))
+	}
+	c.conflictActive.Store(true)
+	c.feedOutboundFailure(setupErr(), "x")
+	c.feedOutboundFailure(setupErr(), "x")
+	c.recordHeartbeatSuccess()
+	c.recordProbeSuccess()
+	if down, _, _, _, _ := c.reach.out.snapshot(); down {
+		t.Fatal("probe success during a 409 left outbound DOWN")
+	}
+	if inDown, _, _, _, _, _ := c.health.snapshot(); !inDown || !c.reach.isDown() {
+		t.Fatalf("inbound down=%v combined down=%v, want both DOWN during the conflict", inDown, c.reach.isDown())
+	}
+	if evs := h.healthEvents(); len(evs) != 1 {
+		t.Fatalf("events = %+v, want only the DOWN edge", evs)
 	}
 }
 
@@ -257,6 +361,7 @@ func TestReach_SingleTelegramEntryCombinedState(t *testing.T) {
 	c.feedOutboundFailure(rbTGErr(500), "x")
 	c.feedOutboundFailure(rbTGErr(500), "x")
 	c.reportHealth(c.health.RecordSuccess())
+	c.recordOutboundSuccess()
 	evs := h.healthEvents()
 	if len(evs) != 2 || evs[0].State != c3types.HealthStateDown || evs[1].State != c3types.HealthStateUp {
 		t.Fatalf("want exactly [DOWN, UP] on the combined state, got %+v", evs)
@@ -282,9 +387,14 @@ func TestReachability_ConcurrentRecords_NoRace(t *testing.T) {
 		go func(n int) { defer wg.Done(); r.recordInbound(n%2 == 0, n) }(i)
 		go func(n int) {
 			defer wg.Done()
-			if n%3 == 0 {
-				r.outboundFailure("x")
-			} else {
+			switch n % 4 {
+			case 0:
+				r.outboundFailure("x", false)
+			case 1:
+				r.outboundFailure("x", true)
+			case 2:
+				r.probeSuccess()
+			default:
 				r.outboundSuccess()
 			}
 		}(i)
@@ -349,7 +459,7 @@ func TestReach_RestStateConsistency_NoDivergence(t *testing.T) {
 		go func(id int) {
 			defer wg.Done()
 			for i := 0; i < iters; i++ {
-				switch (id + i) % 4 {
+				switch (id + i) % 6 {
 				case 0:
 					c.feedOutboundFailure(rbTGErr(500), "stress transient")
 				case 1:
@@ -358,6 +468,10 @@ func TestReach_RestStateConsistency_NoDivergence(t *testing.T) {
 					c.reportHealth(c.health.RecordFailure("stress inbound"))
 				case 3:
 					c.reportHealth(c.health.RecordSuccess())
+				case 4:
+					c.feedOutboundFailure(setupErr(), "stress setup")
+				case 5:
+					c.recordProbeSuccess()
 				}
 			}
 		}(w)

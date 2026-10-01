@@ -128,6 +128,7 @@ type seamKey struct {
 // via the broker's channel registry.
 type Channel struct {
 	bot        *gotgbot.Bot
+	probeBot   *gotgbot.Bot // heartbeat getMe; keep-alives off, so always a fresh connection
 	host       channel.Host
 	cfg        Config
 	authBrk    *authBreaker
@@ -197,10 +198,15 @@ type Channel struct {
 	// place NotifyHealth is fired for this channel, so inbound-down and
 	// outbound-down for one root cause produce ONE notification, not two. The
 	// combiner owns the outbound machine (single lock, single source of truth —
-	// see reachability.go); outbound is fed at exactly two failure sites (SendReply
-	// transient error + readback give-up) and the shared success hook, never the
-	// per-attempt recordOutboundErr (see feedOutboundFailure).
+	// see reachability.go); outbound failures are fed by the SendReply text error
+	// path and the readback give-up and ambiguous hold, successes by the shared
+	// success hook and the heartbeat probe — never by the per-attempt
+	// recordOutboundErr (see feedOutboundFailure).
 	reach *reachability
+
+	// hbKick wakes the heartbeat on a combined DOWN edge so the first
+	// fresh-connection probe starts within downProbeInterval (buffered 1).
+	hbKick chan struct{}
 
 	// pollDone is closed when pollLoop returns. pollLoop now exits ONLY on
 	// ctx-cancel (shutdown) — a 409 conflict no longer terminates it (it backs
@@ -251,6 +257,43 @@ func newBotTransport(getenv func(string) string, dialer *setupDialer) *http.Tran
 		transport.DialTLSContext = dialer.DialTLSContext
 	}
 	return transport
+}
+
+// newProbeTransport clones the Bot API transport for the heartbeat probe. The
+// clone shares the setup dialer (and its preference map) but never reuses a
+// connection, so every probe proves a fresh connection can be set up.
+func newProbeTransport(transport *http.Transport) *http.Transport {
+	probe := transport.Clone()
+	probe.DisableKeepAlives = true
+	return probe
+}
+
+// newBot builds a gotgbot.Bot over transport.
+//
+// DefaultRequestOpts carries the "send" budget (20s); per-call sites pass
+// method-specific timeouts via requestOptsFor, and the default prevents falling
+// back to gotgbot's 5s. Its APIURL is the client-level fallback base (the active
+// endpoint at start); per-call requestOptsFor takes precedence, so failover still
+// works.
+//
+// DisableTokenCheck makes construction OFFLINE-SAFE: gotgbot otherwise does a
+// blocking GetMe here, so on a flaky-wake / IP-blocked network the broker would
+// fail to start at all. Unreachability is handled by the poll/heartbeat
+// machinery instead. Trade-off: Bot.User is "<missing>" until the first
+// successful call, so the heartbeat logs the confirmed @username on its first
+// success.
+func (c *Channel) newBot(transport *http.Transport) (*gotgbot.Bot, error) {
+	return gotgbot.NewBot(c.cfg.BotToken, &gotgbot.BotOpts{
+		BotClient: &gotgbot.BaseBotClient{
+			Client: botAPIClient(transport),
+			DefaultRequestOpts: &gotgbot.RequestOpts{
+				Timeout: 20 * time.Second,
+				APIURL:  c.activeEndpointURL(),
+			},
+		},
+		DisableTokenCheck: true,
+		RequestOpts:       c.requestOptsFor("getMe"),
+	})
 }
 
 // primaryBaseFromEnv applies the C3_TELEGRAM_API_URL env override to a config
@@ -324,24 +367,6 @@ func (c *Channel) Start(ctx context.Context, host channel.Host) error {
 	httpTransport := newBotTransport(os.Getenv, newSetupDialer(host.Logf))
 	c.transport = httpTransport
 
-	// Custom BaseBotClient with DefaultRequestOpts set to the "send" budget
-	// (20s). Per-call sites pass RequestOpts with method-specific timeouts via
-	// requestOptsFor — getUpdates gets the long-poll budget, getMe gets a
-	// short control budget, etc. The default catches anything we forget to
-	// override and prevents falling back to gotgbot's 5s.
-	//
-	// APIURL on DefaultRequestOpts is the client-level fallback base (the active
-	// endpoint at start). Per-call requestOptsFor sets APIURL too and takes
-	// precedence (GetAPIURL: per-call → default → DefaultAPIURL), so failover
-	// still works; this just ensures any call that ever forgets a per-call APIURL
-	// still honors the configured proxy. "" stays gotgbot's default.
-	botClient := &gotgbot.BaseBotClient{
-		Client: botAPIClient(httpTransport),
-		DefaultRequestOpts: &gotgbot.RequestOpts{
-			Timeout: 20 * time.Second,
-			APIURL:  c.activeEndpointURL(),
-		},
-	}
 	// Reuse the same transport for file downloads (DownloadAttachment).
 	// http.DefaultClient has Timeout: 0 (infinite) and no transport-layer
 	// timeouts; relying on it would bypass the entire timeout discipline
@@ -350,22 +375,16 @@ func (c *Channel) Start(ctx context.Context, host channel.Host) error {
 		Transport: httpTransport,
 		Timeout:   60 * time.Second, // Bot API caps at 20MB; a healthy download is seconds.
 	}
-	// DisableTokenCheck makes NewBot construction OFFLINE-SAFE: gotgbot otherwise
-	// does a blocking GetMe at construction, so on a flaky-wake / IP-blocked
-	// network the broker would fail to start at all (RegisterChannel → runDaemon
-	// → exit) — the exact incident class the poll-loop 409 fix addresses, but one
-	// beat earlier, before the resilient poll/heartbeat machinery even exists.
-	// Unreachability is now handled by that machinery instead of aborting boot.
-	// Trade-off: Bot.User is "<missing>" until the first successful call, so the
-	// heartbeat logs the confirmed @username on its first success.
-	bot, err := gotgbot.NewBot(c.cfg.BotToken, &gotgbot.BotOpts{
-		BotClient:         botClient,
-		DisableTokenCheck: true,
-		RequestOpts:       c.requestOptsFor("getMe"),
-	})
+	bot, err := c.newBot(httpTransport)
 	if err != nil {
 		return c.scrubTokenf("telegram: NewBot: %w", err)
 	}
+	probeBot, err := c.newBot(newProbeTransport(c.transport))
+	if err != nil {
+		return c.scrubTokenf("telegram: NewBot (probe): %w", err)
+	}
+	c.probeBot = probeBot
+	c.hbKick = make(chan struct{}, 1)
 	c.bot = bot
 	c.host = host
 	c.authBrk = newAuthBreaker(auth401Threshold)
@@ -627,9 +646,7 @@ func (c *Channel) reportHealth(tr healthTransition) {
 	// (snapshot().down) — NOT a bool derived from the transition edge — to the
 	// combiner, so the last writer always reconciles inbound state and no stale
 	// edge can wedge it. The combiner recomputes the COMBINED telegram state and
-	// fires only on the combined edge. On recovery the wire-proof outbound reset
-	// now lives INSIDE recordInbound (atomic under r.mu), so there is no separate
-	// ForceReset call here.
+	// fires only on the combined edge. Inbound recovery never clears outbound.
 	down, consec, _, reason, _, lastSuccess := c.health.snapshot()
 	// Key the log to the AUTHORITATIVE `down`, not the transition, for honesty: a
 	// concurrent edge could have flipped the machine back by the time we snapshot,
@@ -676,12 +693,14 @@ func (c *Channel) notifyInboundDirect(tr healthTransition) {
 // outbound-health machine, but ONLY for a genuine transient (network/timeout/5xx)
 // failure. A permanent error (401/403/4xx — the token breaker's job), a format
 // error, and a 429 rate-limit (a reachable server pushing back, mirroring
-// inbound's 429 handling) are NOT outbound-DOWN signals and are skipped. It is
-// called at EXACTLY two sites — the SendReply text error path and the readback
-// give-up — NEVER inside the shared per-attempt recordOutboundErr (CRITIQUE FOLD
-// #2: that would multi-count a single give-up's retries and defeat the downAfter
-// debounce). The combiner drives the machine + recompute atomically under r.mu,
-// firing host.NotifyHealth only on the COMBINED edge.
+// inbound's 429 handling) are NOT outbound-DOWN signals and are skipped. The
+// dialer's typed setup error is recorded as setup evidence, anything else as
+// send evidence. It is called once per failure event — the SendReply text error
+// path, the readback give-up and the readback ambiguous hold — NEVER inside the
+// shared per-attempt recordOutboundErr (CRITIQUE FOLD #2: that would multi-count
+// a single give-up's retries and defeat the downAfter debounce). The combiner
+// drives the machine + recompute atomically under r.mu, firing
+// host.NotifyHealth only on the COMBINED edge.
 func (c *Channel) feedOutboundFailure(err error, reason string) {
 	if c.reach == nil || err == nil {
 		return
@@ -689,7 +708,7 @@ func (c *Channel) feedOutboundFailure(err error, reason string) {
 	if class, _ := classifyError(err); class != errClassTransient {
 		return
 	}
-	if fire, ev := c.reach.outboundFailure(reason); fire {
+	if fire, ev := c.reach.outboundFailure(reason, isSetupError(err)); fire {
 		c.fireCombined(ev)
 	}
 }
@@ -703,6 +722,10 @@ func (c *Channel) fireCombined(ev c3types.HealthEvent) {
 	case c3types.HealthStateDown:
 		c.host.Logf("telegram: REACHABILITY DOWN — %s (consec=%d). Surfacing on the status line.",
 			ev.Reason, ev.Consec)
+		select {
+		case c.hbKick <- struct{}{}:
+		default:
+		}
 	case c3types.HealthStateUp:
 		c.host.Logf("telegram: REACHABILITY RECOVERED — Telegram reachable again; status line cleared.")
 	}
@@ -737,23 +760,27 @@ func (c *Channel) silenceWatchdog() {
 	}
 }
 
-// heartbeat pings getMe at a fixed interval as an independent liveness
-// probe. If the bot is "silently dead" (Telegram-side rotated us off, or
-// our token revoked, or our network broke in a way pollLoop hasn't
-// surfaced), this catches it within a few minutes regardless of whether
-// any users are sending messages.
+// heartbeat pings getMe as an independent liveness probe. If the bot is
+// "silently dead" (Telegram-side rotated us off, or our token revoked, or our
+// network broke in a way pollLoop hasn't surfaced), this catches it within a few
+// minutes regardless of whether any users are sending messages.
 //
-// Single-notification-path change (2026-06-17): the heartbeat no longer keeps
-// its OWN consecutive-fail count or emits a separate "HEARTBEAT FAILED" line —
-// that was a second competing dead-bot signal that produced false-positive
-// spam alongside the poll loop. Instead it feeds the SAME fetch-health machine:
+// Every getMe runs on probeBot, whose transport never reuses a connection, so a
+// success proves a fresh connection can be set up: it clears outbound setup
+// evidence (recordProbeSuccess). It feeds the SAME fetch-health machine as the
+// poll loop:
 //   - getMe error => health.RecordFailure (a transport-class failure to reach
 //     Telegram, EXCEPT a 429, which is the server pushing back — reachable, so
 //     it is NOT recorded as down), and
-//   - getMe success => health.RecordSuccess (proof Telegram is reachable),
+//   - getMe success => health.RecordSuccess (proof Telegram is reachable).
 //
-// routing any edge through the same reportHealth fan-out.
-const heartbeatInterval = 5 * time.Minute
+// While the combined state is DOWN it probes every downProbeInterval; a DOWN
+// edge kicks it (hbKick) so the first probe starts within that interval, or when
+// an in-flight getMe returns.
+const (
+	heartbeatInterval = 5 * time.Minute
+	downProbeInterval = 60 * time.Second
+)
 
 func (c *Channel) heartbeat() {
 	// Wait one full interval before the first probe so startup races
@@ -764,9 +791,12 @@ func (c *Channel) heartbeat() {
 		select {
 		case <-c.ctx.Done():
 			return
+		case <-c.hbKick:
+			timer.Reset(downProbeInterval)
+			continue
 		case <-timer.C:
 		}
-		me, err := c.bot.GetMe(&gotgbot.GetMeOpts{
+		me, err := c.probeBot.GetMe(&gotgbot.GetMeOpts{
 			RequestOpts: c.requestOptsFor("getMe"),
 		})
 		if err == nil && me != nil && c.identityLogged.CompareAndSwap(false, true) {
@@ -787,8 +817,22 @@ func (c *Channel) heartbeat() {
 			}
 		} else {
 			c.recordHeartbeatSuccess()
+			c.recordProbeSuccess()
 		}
-		timer.Reset(heartbeatInterval)
+		if c.reach.isDown() {
+			timer.Reset(downProbeInterval)
+		} else {
+			timer.Reset(heartbeatInterval)
+		}
+	}
+}
+
+// recordProbeSuccess clears outbound setup evidence after a fresh-connection
+// getMe succeeded. It runs even during a 409 conflict: the conflict is an
+// inbound condition and says nothing about connection setup.
+func (c *Channel) recordProbeSuccess() {
+	if fire, ev := c.reach.probeSuccess(); fire {
+		c.fireCombined(ev)
 	}
 }
 

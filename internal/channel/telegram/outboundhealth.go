@@ -31,9 +31,15 @@ import (
 // de-spam contract: RecordFailure/RecordSuccess return the edge (if any) so the
 // caller fires the combined notification EXACTLY ONCE per edge — never while
 // already DOWN, never on a repeated success while already UP.
+//
+// Evidence has two kinds. Setup evidence (the racing dialer's typed error: no
+// HTTP request bytes were sent) is cleared by a fresh-connection probe success
+// (ClearSetupEvidence). Send evidence (anything else) is cleared only by a real
+// outbound success (RecordSuccess).
 type outboundHealth struct {
 	down        bool
 	consecFails int
+	sendFailed  bool      // a non-setup failure is part of the current evidence
 	since       time.Time // when the current state was entered
 	lastReason  string    // cause of the most recent failure (for the DOWN edge)
 	downAfter   int
@@ -59,11 +65,15 @@ func newOutboundHealthWithClock(now func() time.Time) *outboundHealth {
 
 // RecordFailure records ONE distinct outbound failure EVENT (a give-up or a
 // single un-retried send error), already filtered to genuine transient failures
-// by the caller. Returns healthWentDown only on the UP→DOWN edge; further
+// by the caller. isSetup marks the dialer's typed setup error; anything else is
+// send evidence. Returns healthWentDown only on the UP→DOWN edge; further
 // failures while DOWN return healthNoChange (de-spam).
-func (o *outboundHealth) RecordFailure(reason string) healthTransition {
+func (o *outboundHealth) RecordFailure(reason string, isSetup bool) healthTransition {
 	o.consecFails++
 	o.lastReason = reason
+	if !isSetup {
+		o.sendFailed = true
+	}
 	if o.down {
 		return healthNoChange
 	}
@@ -75,10 +85,21 @@ func (o *outboundHealth) RecordFailure(reason string) healthTransition {
 	return healthNoChange
 }
 
-// RecordSuccess records a successful send. It clears the failure counter and, if
-// currently DOWN, returns healthRecovered (the first success wins recovery — no
-// debounce). A success while UP is healthNoChange.
+// RecordSuccess records a real outbound success, which clears all evidence. If
+// currently DOWN it returns healthRecovered (the first success wins recovery —
+// no debounce). A success while UP is healthNoChange.
 func (o *outboundHealth) RecordSuccess() healthTransition {
+	o.sendFailed = false
+	return o.ClearSetupEvidence()
+}
+
+// ClearSetupEvidence records a fresh-connection probe success. It clears the
+// machine only when every recorded failure was a setup failure; any send
+// evidence stays until a real outbound success.
+func (o *outboundHealth) ClearSetupEvidence() healthTransition {
+	if o.sendFailed {
+		return healthNoChange
+	}
 	o.consecFails = 0
 	if o.down {
 		o.down = false
@@ -87,19 +108,6 @@ func (o *outboundHealth) RecordSuccess() healthTransition {
 		return healthRecovered
 	}
 	return healthNoChange
-}
-
-// ForceReset unconditionally returns the machine to a clean UP state (counter
-// zeroed, reason cleared) WITHOUT producing a transition edge. It backs the
-// wire-proof link: a successful getUpdates proves the wire+token work, so the
-// inbound-recovery path resets outbound rather than leaving it stuck DOWN
-// waiting for a send to confirm. It NEVER fires a notification itself — the
-// combiner owns the combined edge.
-func (o *outboundHealth) ForceReset() {
-	o.down = false
-	o.consecFails = 0
-	o.lastReason = ""
-	o.since = o.now()
 }
 
 // snapshot returns the current state for building a combined HealthEvent /

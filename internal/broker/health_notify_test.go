@@ -5,6 +5,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -118,6 +119,24 @@ func TestNotifyHealth_DownEdge_AmbientOnly(t *testing.T) {
 		t.Error("status cache not set")
 	}
 	assertHealthFileState(t, hf, "down")
+}
+
+// Plan test (k): the HEALTH log line carries the channel's reason, not a
+// hard-coded direction.
+func TestNotifyHealth_LogCarriesReason(t *testing.T) {
+	t.Setenv("C3_HEALTH_FILE", filepath.Join(t.TempDir(), "health.json"))
+	b, _, _ := brokerWithAgent(t)
+	host := NewBrokerHost(b, "telegram")
+	out := captureLog(t, func() {
+		host.NotifyHealth(c3types.HealthEvent{Channel: "telegram", State: c3types.HealthStateDown, Since: time.Now(), Consec: 2, Reason: "outbound send failing"})
+		host.NotifyHealth(c3types.HealthEvent{Channel: "telegram", State: c3types.HealthStateUp, Since: time.Now(), DownFor: time.Minute})
+	})
+	if !strings.Contains(out, `state=DOWN`) || !strings.Contains(out, `reason="outbound send failing"`) {
+		t.Fatalf("DOWN log lacks the reason:\n%s", out)
+	}
+	if strings.Contains(out, "inbound offline") || strings.Contains(out, "inbound restored") {
+		t.Fatalf("HEALTH log still claims a direction:\n%s", out)
+	}
 }
 
 // TestNotifyHealth_RecoveryEdge_AmbientOnly asserts a recovery (UP) edge writes

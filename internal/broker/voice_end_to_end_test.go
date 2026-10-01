@@ -13,14 +13,53 @@ import (
 	"github.com/Andrometiq/c3/internal/mappings"
 )
 
-func TestVoiceEndToEndTransientParksUntilHealthUpThenPushesOnce(t *testing.T) {
+// Plan test (h), deadlock regression: cached DOWN health must not hold an
+// uncached voice note. The attempt runs, resolves and enqueues its readback,
+// which is the outbound success that could clear the DOWN.
+func TestVoiceEndToEndDownHealthDoesNotHoldVoice(t *testing.T) {
 	g := newGateChannel(100, nil)
 	b := gateBroker(t, g)
 	defer b.Shutdown()
 	setFastVoiceDebounce(b)
 	t.Setenv("C3_HEALTH_FILE", t.TempDir()+"/health.json")
-	b.Voice.retryBase = 500 * time.Millisecond
-	b.Voice.retryCap = time.Second
+	NewBrokerHost(b, "telegram").NotifyHealth(c3types.HealthEvent{
+		Channel: "telegram", State: c3types.HealthStateDown, Since: time.Now(),
+		Consec: 2, Reason: "outbound send failing",
+	})
+	var attempts atomic.Int64
+	b.Plugins.OnVoiceReceived(func(context.Context, c3types.VoicePayload) (string, error) {
+		attempts.Add(1)
+		return "words while down", nil
+	})
+	route, in, _ := schedulerVoice(8301, "voice-down-uncached")
+	_, pushes := liveHolderFrames(t, b, route)
+	if !b.Workers.Submit(route, Job{Kind: JobInbound, Inbound: &in}) {
+		t.Fatal("voice inbound submit rejected")
+	}
+	push := waitInboundPush(t, pushes)
+	if !strings.Contains(push.Inbound.Text, "words while down") || attempts.Load() != 1 {
+		t.Fatalf("push=%+v attempts=%d; want the transcript from one attempt", push, attempts.Load())
+	}
+	waitForVoiceCondition(t, "readback enqueued while DOWN", func() bool {
+		for _, rb := range g.readbackSnapshot() {
+			if strings.Contains(rb.Transcript, "words while down") {
+				return true
+			}
+		}
+		return false
+	})
+}
+
+// An UP edge pulls a parked voice retry forward instead of leaving it to wait out
+// its backoff, and the note still resolves exactly once.
+func TestVoiceEndToEndUpEdgeRetriesParkedVoiceOnce(t *testing.T) {
+	g := newGateChannel(100, nil)
+	b := gateBroker(t, g)
+	defer b.Shutdown()
+	setFastVoiceDebounce(b)
+	t.Setenv("C3_HEALTH_FILE", t.TempDir()+"/health.json")
+	b.Voice.retryBase = time.Hour
+	b.Voice.retryCap = time.Hour
 	b.Voice.jitter = func(d time.Duration) time.Duration { return d }
 
 	var attempts atomic.Int64
@@ -30,7 +69,7 @@ func TestVoiceEndToEndTransientParksUntilHealthUpThenPushesOnce(t *testing.T) {
 		}
 		return "recovered words", nil
 	})
-	route, in, _ := schedulerVoice(8301, "voice-health")
+	route, in, _ := schedulerVoice(8302, "voice-health")
 	_, pushes := liveHolderFrames(t, b, route)
 	if !b.Workers.Submit(route, Job{Kind: JobInbound, Inbound: &in}) {
 		t.Fatal("voice inbound submit rejected")
@@ -41,24 +80,9 @@ func TestVoiceEndToEndTransientParksUntilHealthUpThenPushesOnce(t *testing.T) {
 		return attempts.Load() == 1 && ok && state == voiceWaiting
 	})
 
-	host := NewBrokerHost(b, "telegram")
-	host.NotifyHealth(c3types.HealthEvent{
-		Channel: "telegram", State: c3types.HealthStateDown, Since: time.Now(),
-		Consec: 1, Reason: "network is unreachable",
-	})
-	time.Sleep(600 * time.Millisecond) // retry is due, but known-DOWN health gates it
-	if got := attempts.Load(); got != 1 {
-		t.Fatalf("known-DOWN health burned another attempt: %d", got)
-	}
-	select {
-	case push := <-pushes:
-		t.Fatalf("pending placeholder was pushed before terminal resolve: %+v", push)
-	default:
-	}
-
-	host.NotifyHealth(c3types.HealthEvent{
+	NewBrokerHost(b, "telegram").NotifyHealth(c3types.HealthEvent{
 		Channel: "telegram", State: c3types.HealthStateUp, Since: time.Now(),
-		DownFor: 600 * time.Millisecond,
+		DownFor: time.Minute,
 	})
 	push := waitInboundPush(t, pushes)
 	if push.Inbound.MessageID != in.MessageID || !strings.Contains(push.Inbound.Text, "recovered words") || push.Covered != 1 {
