@@ -358,3 +358,25 @@ func TestVoiceSlowNotice_BlockingChannelDoesNotStallScheduler(t *testing.T) {
 		t.Fatalf("STT calls = %d; want 1", rec.count())
 	}
 }
+
+// A note recovered after a restart keeps its original age: arrival moves back
+// to when the message was received, never forward.
+func TestVoicePending_RecoveredNoteKeepsItsAge(t *testing.T) {
+	_, scheduler, clock := schedulerHarness(t)
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	scheduler.runAttempt = func(context.Context, voiceAttempt) voiceAttemptResult {
+		<-release
+		return voiceAttemptResult{transient: true}
+	}
+	route, in, att := schedulerVoice(9101, "voice-recovered")
+	if !scheduler.ScheduleAuto(route, "record-recovered", in, []c3types.Attachment{att}, "", voiceEchoReservation{}) {
+		t.Fatal("schedule rejected")
+	}
+	received := clock.Now().Add(-3 * time.Hour)
+	scheduler.backdateArrival(route, in.MessageID, []c3types.Attachment{att}, received)
+	requirePendingSummary(t, scheduler, received, false)
+
+	scheduler.backdateArrival(route, in.MessageID, []c3types.Attachment{att}, clock.Now().Add(time.Hour))
+	requirePendingSummary(t, scheduler, received, false)
+}

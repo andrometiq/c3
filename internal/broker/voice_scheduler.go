@@ -469,11 +469,29 @@ func (s *VoiceScheduler) RecoverPending() {
 			}
 			if s.scheduleAutoIntake(route, row.RecordID, row.Inbound, voices, "", voiceEchoReservation{}, row.Source, row.AttachmentsState) {
 				recovered++
+				s.backdateArrival(route, row.Inbound.MessageID, voices, row.Inbound.Timestamp)
 			}
 		}
 	}
 	if recovered > 0 {
 		log.Printf("voice scheduler: recovered %d pending queue row(s) for immediate enrichment", recovered)
+	}
+}
+
+// backdateArrival moves a recovered note's arrival back to when the message was
+// received, so a note that was already waiting before a restart keeps its age
+// for the pending status and the slow-note reply.
+func (s *VoiceScheduler) backdateArrival(route RouteKey, messageID int64, voices []c3types.Attachment, receivedAt time.Time) {
+	if receivedAt.IsZero() {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, att := range voices {
+		entry := s.entries[voiceScheduleKey{route: route, messageID: messageID, fileID: att.FileID}]
+		if entry != nil && receivedAt.Before(entry.arrived) {
+			entry.arrived = receivedAt
+		}
 	}
 }
 

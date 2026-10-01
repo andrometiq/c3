@@ -234,7 +234,8 @@ audio itself, it instead returns `[STT FETCH FAILED: <server cause>]`.
 
 When the broker fetches, the channel's typed error decides: network and
 deadline failures, server 5xx and 429 are transient and park the note for
-retry (a 429 waits at least the server's `retry_after`); any other refusal,
+retry (a 429's ordinary backoff waits at least the server's `retry_after`,
+though Telegram recovering or a manual retranscribe can retry sooner); any other refusal,
 including "file is too big", is terminal and STT never runs. While STT is
 enabled but no handler can be found, the broker fetches nothing and parks the
 note; an unconfigured `handler_path` is re-discovered on each retry, so a
