@@ -47,6 +47,11 @@ type healthFile struct {
 	// the current version sees a byte-identical file to before this field existed.
 	UpdateAvailable bool   `json:"update_available,omitempty"`
 	LatestVersion   string `json:"latest_version,omitempty"`
+	// VoicePendingSinceUnix is the arrival of the oldest voice note whose
+	// fetch/transcription is still waiting or running; VoiceRetrying is whether
+	// that note has failed at least once. Both omitted while idle.
+	VoicePendingSinceUnix int64 `json:"voice_pending_since_unix,omitempty"`
+	VoiceRetrying         bool  `json:"voice_retrying,omitempty"`
 }
 
 // healthRefreshInterval is the slow refresh cadence for the liveness ticker
@@ -89,6 +94,9 @@ func (b *Broker) WriteHealthFile() {
 		Version:         version.Current(),
 		UpdateAvailable: updateAvail,
 		LatestVersion:   latest,
+	}
+	if oldest, retrying := b.Voice.PendingSummary(); !oldest.IsZero() {
+		out.VoicePendingSinceUnix, out.VoiceRetrying = oldest.Unix(), retrying
 	}
 	data, err := json.Marshal(out)
 	if err != nil {

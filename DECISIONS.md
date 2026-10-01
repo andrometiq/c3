@@ -22,6 +22,13 @@ of the DOWN edge, so a setup-only DOWN on a working network clears within about
 80 seconds. A warm poll proves nothing about fresh connections or sends,
 so it no longer resets outbound.
 
+A voice note held this way is visible instead of silent: `health.json` carries
+the oldest waiting note for the status line. On Telegram, a note still waiting
+2 minutes after arrival gets one short reply on its next retry, saying the
+transcription is taking longer and C3 is retrying. That reply is a deliberate
+exception to D038's silent-chat rule: it is sent at most once per note, never
+retried, and only after a real failure parked the note.
+
 ## D040: Controlled restart drains and cancels interactive requests
 
 **Date:** 2026-09-11

@@ -27,6 +27,8 @@ const (
 	voiceDispatchBackoff    = 50 * time.Millisecond
 	defaultVoiceRetryExpiry = 24 * time.Hour
 	maxVoiceResultHooks     = 32
+	voiceSlowNoticeAfter    = 2 * time.Minute
+	voiceSlowNoticeText     = "Got this voice note. Transcription is taking longer than usual; C3 is retrying."
 )
 
 var (
@@ -63,6 +65,8 @@ type voiceEntry struct {
 	applied      map[string]bool
 	resolve      voiceResolve
 	hooks        []chan<- voiceScheduleResult
+	arrived      time.Time
+	slowNoticed  bool // the one "taking longer" reply was attempted
 }
 
 type voiceGroup struct {
@@ -359,7 +363,7 @@ func (s *VoiceScheduler) schedule(route RouteKey, recordID string, in c3types.In
 		}
 		entry := &voiceEntry{
 			key: key, inbound: cloneVoiceInbound(in), attachment: att,
-			nextAttempt: now, backoff: s.retryBase, manual: manual, state: voiceWaiting,
+			nextAttempt: now, arrived: now, backoff: s.retryBase, manual: manual, state: voiceWaiting,
 			targets: make(map[string]voiceResolveTarget), applied: make(map[string]bool),
 		}
 		if hook != nil {
@@ -499,6 +503,26 @@ func (s *VoiceScheduler) RetryNow(channel string) {
 	}
 	s.mu.Unlock()
 	s.Wake()
+}
+
+// PendingSummary reports the arrival of the oldest note whose fetch or
+// transcription is still waiting or running (resolution retries are not
+// counted), and whether that note has already failed once. Zero when idle.
+func (s *VoiceScheduler) PendingSummary() (oldest time.Time, retrying bool) {
+	if s == nil {
+		return time.Time{}, false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, entry := range s.entries {
+		if entry.state != voiceWaiting && entry.state != voiceRunning {
+			continue
+		}
+		if oldest.IsZero() || entry.arrived.Before(oldest) {
+			oldest, retrying = entry.arrived, !entry.firstFailure.IsZero()
+		}
+	}
+	return oldest, retrying
 }
 
 func (s *VoiceScheduler) dispatch() {
@@ -712,6 +736,7 @@ func (s *VoiceScheduler) attemptSnapshot(key voiceScheduleKey) (voiceAttempt, bo
 
 func (s *VoiceScheduler) finishAttempt(key voiceScheduleKey, out voiceAttemptResult) {
 	now := s.clock.Now()
+	var slowNotice *c3types.Inbound
 	s.mu.Lock()
 	entry := s.entries[key]
 	if entry == nil || entry.state != voiceRunning {
@@ -737,12 +762,50 @@ func (s *VoiceScheduler) finishAttempt(key voiceScheduleKey, out voiceAttemptRes
 			}
 			entry.state = voiceWaiting
 			log.Printf("voice scheduler: parked chan=%s chat=%d topic=%s msg=%d file_id=%s retry_in=%s", key.route.Channel, key.route.ChatID, TopicKeyStr(key.route), key.messageID, key.fileID, delay.Round(time.Second))
+			slowNotice = s.takeSlowNoticeLocked(entry, now)
 		}
 	} else {
 		s.finishTerminalLocked(entry, out)
 	}
 	s.mu.Unlock()
+	if slowNotice != nil {
+		go s.sendSlowNotice(*slowNotice)
+	}
 	s.Wake()
+}
+
+// takeSlowNoticeLocked claims the entry's one "taking longer" Telegram reply
+// once the note has waited voiceSlowNoticeAfter since arrival. It returns the
+// message to reply to, or nil. Transcript-only (manual, no chat message)
+// targets never get one.
+func (s *VoiceScheduler) takeSlowNoticeLocked(entry *voiceEntry, now time.Time) *c3types.Inbound {
+	if entry.slowNoticed || entry.key.route.Channel != "telegram" || now.Sub(entry.arrived) < voiceSlowNoticeAfter {
+		return nil
+	}
+	for _, target := range entry.targets {
+		if !target.transcriptOnly {
+			entry.slowNoticed = true
+			in := cloneVoiceInbound(target.inbound)
+			return &in
+		}
+	}
+	return nil
+}
+
+// sendSlowNotice runs outside s.mu so a slow channel never stalls the
+// scheduler. Best-effort and never retried.
+func (s *VoiceScheduler) sendSlowNotice(in c3types.Inbound) {
+	defer recoverGoroutine("voiceScheduler.slowNotice")
+	ch, err := s.broker.Channel(in.Channel)
+	if err != nil {
+		return
+	}
+	if _, err := ch.SendReply(c3types.ReplyArgs{
+		Channel: in.Channel, ChatID: in.ChatID, TopicID: in.TopicID, ReplyTo: &in.MessageID,
+		Text: c3types.WithTestInjectionMarker(&in, voiceSlowNoticeText),
+	}); err != nil {
+		log.Printf("voice scheduler: slow-note reply chan=%s chat=%d msg=%d failed (not retried): %v", in.Channel, in.ChatID, in.MessageID, err)
+	}
 }
 
 func (s *VoiceScheduler) finishTerminalLocked(entry *voiceEntry, out voiceAttemptResult) {
