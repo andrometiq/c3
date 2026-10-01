@@ -375,9 +375,7 @@ func (c *Channel) Start(ctx context.Context, host channel.Host) error {
 		Transport: httpTransport,
 		Timeout:   60 * time.Second, // Bot API caps at 20MB; a healthy download is seconds.
 	}
-	if dir, err := attachmentsCacheDir(); err == nil {
-		channel.SweepStaleTemps(dir) // temporaries a dead process left behind
-	}
+	_, _ = attachmentsDir() // sweeps temporaries a dead process left behind
 	bot, err := c.newBot(httpTransport)
 	if err != nil {
 		return c.scrubTokenf("telegram: NewBot: %w", err)
@@ -703,9 +701,11 @@ func (c *Channel) notifyInboundDirect(tr healthTransition) {
 // shared per-attempt recordOutboundErr (CRITIQUE FOLD #2: that would multi-count
 // a single give-up's retries and defeat the downAfter debounce). The combiner
 // drives the machine + recompute atomically under r.mu, firing
-// host.NotifyHealth only on the COMBINED edge.
+// host.NotifyHealth only on the COMBINED edge. Once the channel context is
+// cancelled, a failure (a local rate-wait or request aborted by shutdown) says
+// nothing about the network and is not fed.
 func (c *Channel) feedOutboundFailure(err error, reason string) {
-	if c.reach == nil || err == nil {
+	if c.reach == nil || err == nil || (c.ctx != nil && c.ctx.Err() != nil) {
 		return
 	}
 	if class, _ := classifyError(err); class != errClassTransient {

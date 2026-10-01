@@ -540,13 +540,22 @@ func TestSetupRaceSimultaneousWinnersReturnOne(t *testing.T) {
 	fn.route(v4a, b)
 	d := newTestDialer(fn, &logSink{}, v6a, v4a)
 	d.stagger = 0
+	// Neither attempt reports until both handshakes have completed, so the
+	// winner is chosen with a second finished connection already in hand.
+	var both sync.WaitGroup
+	both.Add(2)
+	d.afterHandshake = func() {
+		both.Done()
+		both.Wait()
+	}
 
 	conn, err := dialTest(d)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !waitUntil(time.Second, func() bool { return a.accepts.Load()+b.accepts.Load() == 2 && a.open()+b.open() == 1 }) {
-		t.Fatalf("accepts=%d open=%d, want 2 dialed and only the winner open", a.accepts.Load()+b.accepts.Load(), a.open()+b.open())
+	if !waitUntil(time.Second, func() bool { return a.handshakes.Load()+b.handshakes.Load() == 2 && a.open()+b.open() == 1 }) {
+		t.Fatalf("handshakes=%d open=%d, want 2 completed and only the winner open",
+			a.handshakes.Load()+b.handshakes.Load(), a.open()+b.open())
 	}
 	conn.Close()
 	if !waitUntil(time.Second, func() bool { return a.open()+b.open() == 0 }) {

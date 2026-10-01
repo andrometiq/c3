@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -386,5 +387,136 @@ func TestFetchVoice_TransientErrorNeverCarriesToken(t *testing.T) {
 	requireTransient(t, err)
 	if strings.Contains(err.Error(), fakeToken) {
 		t.Fatalf("BOT TOKEN LEAKED to the broker: %q", err.Error())
+	}
+}
+
+// A download redirect (a self-hosted Bot API server fronted by a CDN) must not
+// hand the token to the destination: net/http would send the /file/bot<token>/
+// URL as Referer.
+func TestDownloads_RedirectDestinationNeverSeesToken(t *testing.T) {
+	var mu sync.Mutex
+	var seen []string
+	destination := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var dump bytes.Buffer
+		_ = r.Header.Write(&dump)
+		mu.Lock()
+		seen = append(seen, r.URL.String()+"\n"+dump.String())
+		mu.Unlock()
+		_, _ = w.Write([]byte("OGGDATA"))
+	}))
+	t.Cleanup(destination.Close)
+
+	fetchVoiceEnv(t)
+	c := voiceServerChannel(t, func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, destination.URL+"/cdn/file_1.oga", http.StatusFound)
+	})
+	c.cfg.BotToken = fakeToken
+
+	path, _, err := c.FetchVoice(context.Background(), "F")
+	if err != nil {
+		t.Fatalf("FetchVoice: %v", err)
+	}
+	_ = os.Remove(path)
+	if _, err := c.DownloadAttachment("F"); err != nil {
+		t.Fatalf("DownloadAttachment: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(seen) != 2 {
+		t.Fatalf("destination saw %d request(s), want 2", len(seen))
+	}
+	for _, request := range seen {
+		if strings.Contains(request, fakeToken) || strings.Contains(request, "Referer") {
+			t.Fatalf("BOT TOKEN LEAKED to the redirect destination:\n%s", request)
+		}
+	}
+}
+
+func TestRetryAfter_SecondsAndHTTPDate(t *testing.T) {
+	now := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
+	cases := map[string]time.Duration{
+		"7": 7 * time.Second,
+		now.Add(5 * time.Minute).Format(http.TimeFormat): 5 * time.Minute,
+		now.Add(-time.Minute).Format(http.TimeFormat):    0,
+		"-3":   0,
+		"soon": 0,
+		"":     0,
+	}
+	for header, want := range cases {
+		if got := retryAfter(header, now); got != want {
+			t.Errorf("retryAfter(%q) = %v, want %v", header, got, want)
+		}
+	}
+}
+
+// The HTTP-date form reaches the broker through a real 429 body answer.
+func TestFetchVoice_Body429HonoursHTTPDateRetryAfter(t *testing.T) {
+	fetchVoiceEnv(t)
+	c := voiceServerChannel(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Retry-After", time.Now().Add(5*time.Minute).UTC().Format(http.TimeFormat))
+		w.WriteHeader(http.StatusTooManyRequests)
+	})
+
+	_, _, err := c.FetchVoice(context.Background(), "F")
+	if after := requireTransient(t, err).After; after < 4*time.Minute || after > 5*time.Minute {
+		t.Fatalf("After = %v, want about five minutes", after)
+	}
+}
+
+// The stale-temp sweep runs at each operation's entry, so a fetch that fails at
+// getFile or is served from a cache still cleans up after a dead process.
+func TestDownloads_SweepBeforeEarlyReturns(t *testing.T) {
+	refuseGetFile := func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"ok":false,"error_code":403,"description":"Forbidden"}`))
+	}
+	cases := []struct {
+		name    string
+		handler http.HandlerFunc
+		cached  bool
+		run     func(*Channel) error
+	}{
+		{name: "FetchVoice getFile failure", handler: refuseGetFile, run: func(c *Channel) error {
+			_, _, err := c.FetchVoice(context.Background(), "F")
+			return err
+		}},
+		{name: "DownloadAttachment getFile failure", handler: refuseGetFile, run: func(c *Channel) error {
+			_, err := c.DownloadAttachment("F")
+			return err
+		}},
+		{name: "DownloadAttachment inbox cache hit", handler: refuseGetFile, cached: true, run: func(c *Channel) error {
+			_, err := c.DownloadAttachment("F")
+			return err
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			attachments, inbox := fetchVoiceEnv(t)
+			if err := os.MkdirAll(attachments, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			stale := filepath.Join(attachments, channel.TempPrefix+"orphan.part")
+			if err := os.WriteFile(stale, nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			old := time.Now().Add(-5 * time.Hour)
+			if err := os.Chtimes(stale, old, old); err != nil {
+				t.Fatal(err)
+			}
+			if tc.cached {
+				if err := os.WriteFile(filepath.Join(inbox, "1700000000000-F.oga"), []byte("audio"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			c := getFileChannelHandler(t, tc.handler)
+
+			err := tc.run(c)
+			if tc.cached != (err == nil) {
+				t.Fatalf("err = %v", err)
+			}
+			if _, err := os.Stat(stale); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("stale temp survived: %v", err)
+			}
+		})
 	}
 }

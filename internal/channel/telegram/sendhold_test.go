@@ -272,3 +272,30 @@ func TestParseEntityFallbackNeedsTypedRejection(t *testing.T) {
 		})
 	}
 }
+
+// A send cancelled in the local rate wait during channel shutdown sent nothing
+// and proves nothing about the network: it must not feed outbound health.
+func TestShutdownCancelledSendsDoNotFeedOutboundHealth(t *testing.T) {
+	c, ss, _ := newSendChannel(t, func(w http.ResponseWriter, _ *http.Request, _ string, _ int) { replyOK(w) })
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	c.ctx = ctx
+
+	for range 3 {
+		if _, err := c.SendReadback(c3types.ReadbackArgs{ChatID: 42, Transcript: "short note"}); !errors.Is(err, context.Canceled) {
+			t.Fatalf("readback err = %v, want context.Canceled from the rate wait", err)
+		}
+		if _, err := c.SendReply(c3types.ReplyArgs{ChatID: 42, Text: "plain"}); !errors.Is(err, context.Canceled) {
+			t.Fatalf("reply err = %v, want context.Canceled from the rate wait", err)
+		}
+	}
+	if got := ss.methods(); len(got) != 0 {
+		t.Fatalf("requests = %v; a cancelled rate wait must send nothing", got)
+	}
+	c.reach.mu.Lock()
+	consec, down := c.reach.out.consecFails, c.reach.outboundDown
+	c.reach.mu.Unlock()
+	if consec != 0 || down {
+		t.Fatalf("outbound health fed by shutdown cancellation: consecFails=%d down=%v", consec, down)
+	}
+}

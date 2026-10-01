@@ -46,6 +46,9 @@ type setupDialer struct {
 	dialContext func(ctx context.Context, network, addr string) (net.Conn, error)
 	rootCAs     *x509.CertPool // nil = system roots
 	logf        func(format string, args ...any)
+	// afterHandshake, when set, runs after a successful handshake and before
+	// the attempt reports it. A test seam only.
+	afterHandshake func()
 
 	budget  time.Duration
 	stagger time.Duration
@@ -227,6 +230,9 @@ func (d *setupDialer) attempt(ctx context.Context, network, addr, host string, i
 		raw.Close()
 		out <- attemptResult{index: index, stage: "tls", err: err, took: time.Since(begin)}
 		return
+	}
+	if d.afterHandshake != nil {
+		d.afterHandshake()
 	}
 	out <- attemptResult{index: index, conn: conn}
 }

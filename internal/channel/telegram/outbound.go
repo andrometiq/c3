@@ -423,7 +423,7 @@ func (c *Channel) FetchVoice(ctx context.Context, fileID string) (string, int64,
 	if c.bot == nil {
 		return "", 0, errors.New("telegram: channel not started")
 	}
-	dir, err := attachmentsCacheDir()
+	dir, err := attachmentsDir()
 	if err != nil {
 		return "", 0, err
 	}
@@ -481,8 +481,8 @@ func (c *Channel) voiceGetFileErr(err error) error {
 
 // fetchBody downloads the Bot API file at filePath into out and returns the
 // byte count. The download URL carries the bot token, so every error is
-// scrubbed. A failed request, a cut body, HTTP 5xx and HTTP 429 (honouring a
-// Retry-After in seconds) are transient; any other status is permanent.
+// scrubbed. A failed request, a cut body, HTTP 5xx and HTTP 429 (honouring its
+// Retry-After) are transient; any other status is permanent.
 func (c *Channel) fetchBody(ctx context.Context, client *http.Client, filePath string, out io.Writer) (int64, error) {
 	// fileDownloadURL builds it against the ACTIVE endpoint (P2), so downloads
 	// follow the same reverse proxy as every other call.
@@ -492,7 +492,9 @@ func (c *Channel) fetchBody(ctx context.Context, client *http.Client, filePath s
 		// net/url errors quote the offending URL, which carries the token.
 		return 0, c.scrubTokenf("telegram: build download request for %q: %w", filePath, err)
 	}
-	resp, err := client.Do(req)
+	downloader := *client
+	downloader.CheckRedirect = dropRefererOnRedirect
+	resp, err := downloader.Do(req)
 	if err != nil {
 		// *url.Error prints the FULL request URL, token and all.
 		return 0, &channel.AttachmentTransientError{Err: c.scrubTokenf("telegram: download %q: %w", filePath, err)}
@@ -501,8 +503,7 @@ func (c *Channel) fetchBody(ctx context.Context, client *http.Client, filePath s
 	if resp.StatusCode != http.StatusOK {
 		err := fmt.Errorf("telegram: download %q: HTTP %d", filePath, resp.StatusCode)
 		if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500 {
-			after, _ := strconv.Atoi(resp.Header.Get("Retry-After"))
-			return 0, &channel.AttachmentTransientError{After: time.Duration(after) * time.Second, Err: err}
+			return 0, &channel.AttachmentTransientError{After: retryAfter(resp.Header.Get("Retry-After"), time.Now()), Err: err}
 		}
 		return 0, err
 	}
@@ -511,6 +512,30 @@ func (c *Channel) fetchBody(ctx context.Context, client *http.Client, filePath s
 		return 0, &channel.AttachmentTransientError{Err: c.scrubTokenf("telegram: download %q: %w", filePath, err)}
 	}
 	return n, nil
+}
+
+// dropRefererOnRedirect keeps net/http's 10-redirect limit but removes the
+// Referer it sets on a redirect: the previous URL is /file/bot<token>/..., and a
+// redirect target (a CDN in front of a self-hosted Bot API server) must never
+// receive the token.
+func dropRefererOnRedirect(req *http.Request, via []*http.Request) error {
+	req.Header.Del("Referer")
+	if len(via) >= 10 {
+		return errors.New("stopped after 10 redirects")
+	}
+	return nil
+}
+
+// retryAfter reads a Retry-After header in either form RFC 9110 allows: delay
+// seconds or an HTTP-date. A date already past, or an unreadable value, is zero.
+func retryAfter(header string, now time.Time) time.Duration {
+	if seconds, err := strconv.Atoi(header); err == nil {
+		return max(time.Duration(seconds)*time.Second, 0)
+	}
+	if at, err := http.ParseTime(header); err == nil {
+		return max(at.Sub(now), 0)
+	}
+	return 0
 }
 
 // DownloadAttachment fetches a Telegram file by file_id and saves it to a local
@@ -525,6 +550,10 @@ func (c *Channel) fetchBody(ctx context.Context, client *http.Client, filePath s
 func (c *Channel) DownloadAttachment(fileID string) (string, error) {
 	if c.bot == nil {
 		return "", errors.New("telegram: channel not started")
+	}
+	cacheDir, err := attachmentsDir()
+	if err != nil {
+		return "", err
 	}
 	// Cache-first: a voice note the STT handler already downloaded lives in its
 	// inbox as "<millis>-<file_id>.oga". Serving it skips a re-fetch that, over a
@@ -553,11 +582,6 @@ func (c *Channel) DownloadAttachment(fileID string) (string, error) {
 	// hand means the server has already agreed to serve it. Re-judging that
 	// answer against a number of our own could only ever refuse a file that was
 	// about to work.
-
-	cacheDir, err := attachmentsCacheDir()
-	if err != nil {
-		return "", err
-	}
 
 	// Local filename: keep the file_unique_id stable across redownloads + the
 	// upstream basename for human-friendliness.
@@ -700,13 +724,19 @@ func (c *Channel) ValidateTopic(chatID int64, threadID int64) error {
 	return c.SendTyping(chatID, &threadID)
 }
 
-func attachmentsCacheDir() (string, error) {
-	if x := os.Getenv("XDG_CACHE_HOME"); x != "" {
-		return filepath.Join(x, "c3", "telegram", "attachments"), nil
+// attachmentsDir resolves the attachment cache dir and sweeps the stale
+// temporaries a dead process left there. Every download operation starts here,
+// before any cache or network early return.
+func attachmentsDir() (string, error) {
+	cache := os.Getenv("XDG_CACHE_HOME")
+	if cache == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", fmt.Errorf("telegram: resolve home: %w", err)
+		}
+		cache = filepath.Join(home, ".cache")
 	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", fmt.Errorf("telegram: resolve home: %w", err)
-	}
-	return filepath.Join(home, ".cache", "c3", "telegram", "attachments"), nil
+	dir := filepath.Join(cache, "c3", "telegram", "attachments")
+	channel.SweepStaleTemps(dir)
+	return dir, nil
 }
