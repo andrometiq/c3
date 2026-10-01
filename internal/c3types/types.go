@@ -433,7 +433,9 @@ type ReadbackArgs struct {
 // VoicePayload is the input the plugin host passes to OnVoiceReceived
 // callbacks (the STT plugin's entry point). FileID identifies the
 // voice attachment on the source channel; MIME and Size are hints
-// for choosing the right transcription provider.
+// for choosing the right transcription provider. LocalPath, when set, is an
+// attempt-owned local copy of the audio that the callback must transcribe
+// instead of fetching; the broker removes it when the callback returns.
 type VoicePayload struct {
 	Channel   string `json:"Channel"`
 	ChatID    int64  `json:"ChatID"`
@@ -442,4 +444,5 @@ type VoicePayload struct {
 	FileID    string `json:"FileID"`
 	MIME      string `json:"MIME"`
 	Size      int64  `json:"Size"`
+	LocalPath string `json:"LocalPath"`
 }

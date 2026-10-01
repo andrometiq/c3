@@ -356,8 +356,8 @@ The broker logs explicit failure lines now (no more silent empty transcripts).
 | `stt: msg=N error after Ns (...): exit status 1 \| stderr-tail=...` | Python handler errored. stderr-tail (last 240 chars) shows the cause.                 |
 | `stt: msg=N empty transcript after Ns (no provider returned text)` | All providers returned empty. Token expired? Provider down?                        |
 | `stt: token read failed for msg=N: ...`                         | mappings.json missing or `bot_token` empty.                                            |
-| `stt: msg=N handler missing at <path> (...)`                    | Handler script went missing between broker start and this message. Marker = `handler_missing`. Restoring the script makes the NEXT voice message transcribe — no broker restart needed. |
-| `stt: handler <path> missing at startup (...); voice messages will surface [STT FAILED: handler_missing] ...` | Startup-time notice that the script is absent. The plugin still registers; per-message check inside the callback decides each time. |
+| `stt: msg=N handler missing at "<path>"`                        | Handler script went missing between the broker's readiness check and this call. Marker = `handler_missing`. |
+| `stt: handler "<path>" missing at startup (...); voice notes wait and retry until a handler is available` | Startup-time notice that the script is absent. The plugin still registers. While no handler is found, the broker downloads nothing and parks each voice note (`voice scheduler: parked ...`); restoring or installing the script makes the NEXT retry transcribe — no broker restart needed. An unconfigured `handler_path` is re-discovered on each retry. |
 
 When transcription fails, the inbound text becomes `[STT FAILED: <reason>]`
 instead of the silent `(voice message)` placeholder — the receiver
@@ -551,6 +551,6 @@ Resolution order and fallbacks:
 3. Else if `$C3_SRC_DIR` is set → use `$C3_SRC_DIR/plugins/c3/stt/stt-handler.py`.
 4. Else use `plugins/c3/stt/stt-handler.py` beside the resolved broker executable, if the release bundle is valid.
 5. Else use `~/.local/share/c3/plugins/c3/stt/stt-handler.py`, if the release bundle is valid.
-6. Else use `~/src/c3/plugins/c3/stt/stt-handler.py`, if it exists. If no candidate resolves, voice messages surface `[STT FAILED: handler_missing]` per call.
+6. Else use `~/src/c3/plugins/c3/stt/stt-handler.py`, if it exists. If no candidate resolves, voice notes wait and retry; the order is re-run on each retry, so a handler installed later is found.
 
 If you run `c3-broker` outside Claude Code (manual daemon, systemd unit, debugging), `$CLAUDE_PLUGIN_ROOT` won't be set; the remaining automatic fallbacks still apply, and `plugins.stt.handler_path` remains the explicit user override.

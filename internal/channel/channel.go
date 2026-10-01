@@ -21,6 +21,17 @@ import (
 // clause.)
 var ErrAttachmentTooLarge = errors.New("attachment over the channel's download limit")
 
+// AttachmentTransientError marks a fetch failure worth retrying: a network or
+// deadline failure, a server 5xx, or a rate limit. After is the wait the server
+// asked for (429 retry_after), or zero. Any other fetch error is permanent.
+type AttachmentTransientError struct {
+	After time.Duration
+	Err   error
+}
+
+func (e *AttachmentTransientError) Error() string { return e.Err.Error() }
+func (e *AttachmentTransientError) Unwrap() error { return e.Err }
+
 // Channel is the contract every transport implements. Methods are called by
 // the broker on its own goroutine — implementations must be safe for
 // concurrent use, except Start/Stop which are sequenced.

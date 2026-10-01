@@ -273,9 +273,9 @@ func wireGoldens() []wireGolden {
 			name: "VoicePayload",
 			value: VoicePayload{
 				Channel: "telegram", ChatID: -1001, TopicID: ptrInt64(7),
-				MessageID: 42, FileID: "F", MIME: "audio/ogg", Size: 1024,
+				MessageID: 42, FileID: "F", MIME: "audio/ogg", Size: 1024, LocalPath: "/tmp/v.oga",
 			},
-			keys:      []string{"Channel", "ChatID", "TopicID", "MessageID", "FileID", "MIME", "Size"},
+			keys:      []string{"Channel", "ChatID", "TopicID", "MessageID", "FileID", "MIME", "Size", "LocalPath"},
 			omitEmpty: nil,
 		},
 

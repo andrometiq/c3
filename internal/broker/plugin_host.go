@@ -28,6 +28,7 @@ type PluginHost struct {
 	mu          sync.RWMutex
 	onInbound   []func(context.Context, *c3types.Inbound) (*c3types.Inbound, bool)
 	onVoice     []func(context.Context, c3types.VoicePayload) (string, error)
+	voiceReady  []func() bool
 	onOutbound  []func(context.Context, *c3types.Outbound) (*c3types.Outbound, bool)
 	onAttach    []func(*plugin.Stub, *plugin.Mapping)
 	synthesizer func(context.Context, c3types.SpeechRequest) (c3types.SpeechResult, error)
@@ -53,6 +54,12 @@ func (h *PluginHost) OnVoiceReceived(fn func(context.Context, c3types.VoicePaylo
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.onVoice = append(h.onVoice, fn)
+}
+
+func (h *PluginHost) OnVoiceReady(fn func() bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.voiceReady = append(h.voiceReady, fn)
 }
 
 func (h *PluginHost) OnOutbound(fn func(context.Context, *c3types.Outbound) (*c3types.Outbound, bool)) {
@@ -153,6 +160,24 @@ func (h *PluginHost) FireOnVoiceReceived(ctx context.Context, p c3types.VoicePay
 		}
 	}
 	return ""
+}
+
+// VoiceReady reports whether any voice callback is registered (enabled) and
+// whether every registered readiness check passes (ready).
+func (h *PluginHost) VoiceReady() (enabled, ready bool) {
+	if h == nil {
+		return false, false
+	}
+	h.mu.RLock()
+	enabled = len(h.onVoice) > 0
+	checks := append([]func() bool{}, h.voiceReady...)
+	h.mu.RUnlock()
+	for _, check := range checks {
+		if !check() {
+			return enabled, false
+		}
+	}
+	return enabled, true
 }
 
 // Synthesize calls the registered TTS plugin without holding the host mutex

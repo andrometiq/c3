@@ -76,18 +76,24 @@ func TestWorker_SubmitAfterStopReturnsFalse(t *testing.T) {
 	}
 }
 
-// P2-5: when the audio was downloaded before STT failed, the recovery text names
-// the cached path (recovery is a no-brainer); with no cached path the text is the
-// same actionable guidance, minus the caching clause.
+// P2-5: when the audio was retained before STT failed, the recovery text names
+// the cached path (recovery is a no-brainer). R17-1: with no retained copy the
+// text never says the audio is saved; it says recovery needs a fresh fetch.
 func TestSttFailureText_NamesCachedPathWhenPresent(t *testing.T) {
 	att := c3types.Attachment{FileID: "F1", MIME: "audio/ogg", Kind: "voice"}
 	with := sttFailureText(att, "timeout", "/inbox/123-F1.oga")
 	if !strings.Contains(with, "/inbox/123-F1.oga") || !strings.Contains(with, "cached locally") {
 		t.Fatalf("cached path not named: %q", with)
 	}
+	if !strings.Contains(with, "saved and recoverable") {
+		t.Fatalf("a retained copy must be reported as saved: %q", with)
+	}
 	without := sttFailureText(att, "timeout", "")
-	if strings.Contains(without, "cached locally") {
-		t.Fatalf("no-cache text must not mention caching: %q", without)
+	if strings.Contains(without, "cached locally") || strings.Contains(without, "saved and recoverable") || strings.Contains(without, "does not need to resend") {
+		t.Fatalf("with no retained copy the text must not claim the audio is saved (R17-1): %q", without)
+	}
+	if !strings.Contains(without, "No local copy") || !strings.Contains(without, "fresh fetch") {
+		t.Fatalf("with no retained copy the text must say recovery needs a fresh fetch: %q", without)
 	}
 	for _, want := range []string{"download_attachment", "retranscribe", "F1"} {
 		if !strings.Contains(without, want) {
@@ -177,8 +183,9 @@ func TestShutdown_DroppedEventNotRecovered(t *testing.T) {
 // the plugin silently disabled itself at startup and voice messages reached
 // the agent as a bare "(voice message)" with no indication anything was
 // wrong. The broker now surfaces a self-documenting recovery message: the
-// agent learns the audio exists, the exact file_id, and that it can fetch
-// (download_attachment) or retry (retranscribe) without the user resending.
+// agent learns the exact file_id and that it can fetch (download_attachment) or
+// retry (retranscribe). No retained copy exists here, so it must not claim the
+// audio is saved (R17-1).
 func TestFlushInbounds_VoiceWithoutSTTPluginGetsSelfDocumentingFailure(t *testing.T) {
 	t.Setenv("C3_QUEUE_DIR", t.TempDir())
 	b := newTestBroker(t, &mappings.MappingsFile{SchemaVersion: 1})
@@ -196,7 +203,7 @@ func TestFlushInbounds_VoiceWithoutSTTPluginGetsSelfDocumentingFailure(t *testin
 		return strings.Contains(text, "transcription failed")
 	})
 
-	for _, want := range []string{"transcription failed", "VFILE", "download_attachment", "retranscribe", "does not need to resend"} {
+	for _, want := range []string{"transcription failed", "VFILE", "download_attachment", "retranscribe", "No local copy"} {
 		if !strings.Contains(text, want) {
 			t.Errorf("STT failure text missing %q; got %q", want, text)
 		}
@@ -316,7 +323,7 @@ func TestFlushInbounds_VoiceSTTTimeout_FallsBackToPlaceholder(t *testing.T) {
 	text := waitForVoiceQueueText(t, b, w.key, in.MessageID, func(text string) bool {
 		return strings.Contains(text, "transcription failed")
 	})
-	for _, want := range []string{"transcription failed", "HUNGFILE", "download_attachment", "retranscribe", "does not need to resend"} {
+	for _, want := range []string{"transcription failed", "HUNGFILE", "download_attachment", "retranscribe", "No local copy"} {
 		if !strings.Contains(text, want) {
 			t.Errorf("STT-timeout fallback text missing %q; got %q", want, text)
 		}

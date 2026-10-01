@@ -32,6 +32,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Andrometiq/c3/internal/c3types"
@@ -183,7 +184,8 @@ func Register(host plugin.Host) error {
 		host.Logf("stt: plugin disabled via mappings.json:plugins.stt.enabled=false")
 		return nil
 	}
-	if cfg.HandlerPath == "" {
+	isHandlerConfigured := cfg.HandlerPath != ""
+	if !isHandlerConfigured {
 		cfg.HandlerPath = defaultHandlerPath()
 	}
 	if cfg.Timeout <= 0 {
@@ -196,16 +198,17 @@ func Register(host plugin.Host) error {
 	if cfg.AudioRetention == 0 {
 		cfg.AudioRetention = defaultAudioRetention
 	}
-	// Handler existence is checked PER-CALL (inside the callback) rather than
+	// Handler existence is checked PER-CALL (handlerResolver) rather than
 	// once at startup. Two reasons:
 	//   1. A missing handler at startup used to silently disable transcription,
 	//      so voice messages reached the agent as a bare "(voice message)"
 	//      placeholder with no indication anything had gone wrong.
 	//   2. With the per-call check, if the user restores the script, the very
-	//      next voice message transcribes — no broker restart required.
-	// We still log once at startup so the operator knows the current state.
+	//      next voice attempt transcribes — no broker restart required.
+	// The same check is the readiness hook: while it fails, the broker fetches
+	// nothing and retries the note later. We still log once at startup.
 	if _, err := os.Stat(cfg.HandlerPath); err != nil {
-		host.Logf("stt: handler %s missing at startup (%v); voice messages will surface [STT FAILED: handler_missing] until the handler is restored",
+		host.Logf("stt: handler %q missing at startup (%v); voice notes wait and retry until a handler is available",
 			cfg.HandlerPath, err)
 	} else {
 		host.Logf("stt: registered with handler=%s timeout=%ds", cfg.HandlerPath, cfg.Timeout)
@@ -226,36 +229,81 @@ func Register(host plugin.Host) error {
 	// authoritative for handler-side paths.
 	ensureSTTDefaultDirs(host)
 
-	// Resolve telegram channel for the bot token. We need the token because
-	// the POC handler shells out to Telegram's getFile API itself; the channel
-	// owns the only authoritative copy of the token.
+	handlerPath := handlerResolver(cfg.HandlerPath, isHandlerConfigured)
+	host.OnVoiceReady(func() bool { return handlerPath() != "" })
 	host.OnVoiceReceived(func(ctx context.Context, p c3types.VoicePayload) (string, error) {
-		if _, err := os.Stat(cfg.HandlerPath); err != nil {
-			host.Logf("stt: msg=%d handler missing at %s (%v)", p.MessageID, cfg.HandlerPath, err)
+		c := cfg // per call: the registration config stays immutable
+		c.HandlerPath = handlerPath()
+		if c.HandlerPath == "" {
+			host.Logf("stt: msg=%d handler missing at %q", p.MessageID, cfg.HandlerPath)
 			return sttFailureMarker("handler_missing"), nil
 		}
-		if p.Channel != "telegram" {
-			registered, err := host.Channel(p.Channel)
-			provider, ok := registered.(channel.LocalAudioProvider)
-			if err != nil || !ok {
-				host.Logf("stt: local audio unavailable for channel=%s msg=%d", p.Channel, p.MessageID)
-				return sttFailureMarker("local_audio_unavailable"), nil
-			}
-			path, err := provider.LocalAudioPath(p.FileID)
-			if err != nil || path == "" {
-				host.Logf("stt: local audio unavailable for channel=%s msg=%d file_id=%s: %v", p.Channel, p.MessageID, p.FileID, err)
-				return sttFailureMarker("local_audio_unavailable"), nil
-			}
-			return runHandler(ctx, host, cfg, "", "", false, path, p)
+		// The broker fetched the audio into an attempt-owned file it removes
+		// after this call: the handler needs no token and no network.
+		if p.LocalPath != "" {
+			return runHandler(ctx, host, c, "", "", false, p.LocalPath, p)
 		}
+		if p.Channel != "telegram" {
+			return runLocalAudio(ctx, host, c, p)
+		}
+		// Legacy: a Telegram channel that cannot fetch voice itself. The
+		// handler performs its own getFile, so it needs the token.
 		token, apiBaseURL, answered, err := readTelegramConn(host)
 		if err != nil {
 			host.Logf("stt: token read failed for msg=%d: %v", p.MessageID, err)
 			return sttFailureMarker("token_unavailable"), nil
 		}
-		return runHandler(ctx, host, cfg, token, apiBaseURL, answered, "", p)
+		return runHandler(ctx, host, c, token, apiBaseURL, answered, "", p)
 	})
 	return nil
+}
+
+// runLocalAudio transcribes audio a channel retains on local disk
+// (channel.LocalAudioProvider). That retained file can be pruned at any time,
+// so the handler gets its own copy in the plugin cache dir, removed when the
+// run ends.
+func runLocalAudio(ctx context.Context, host plugin.Host, cfg Config, p c3types.VoicePayload) (string, error) {
+	registered, err := host.Channel(p.Channel)
+	provider, ok := registered.(channel.LocalAudioProvider)
+	if err != nil || !ok {
+		host.Logf("stt: local audio unavailable for channel=%s msg=%d", p.Channel, p.MessageID)
+		return sttFailureMarker("local_audio_unavailable"), nil
+	}
+	path, err := provider.LocalAudioPath(p.FileID)
+	if err != nil || path == "" {
+		host.Logf("stt: local audio unavailable for channel=%s msg=%d file_id=%s: %v", p.Channel, p.MessageID, p.FileID, err)
+		return sttFailureMarker("local_audio_unavailable"), nil
+	}
+	owned, _, err := channel.CopyToTemp(path, host.CacheDir(Name), "voice-*.oga")
+	if err != nil {
+		host.Logf("stt: local audio copy failed for channel=%s msg=%d: %v", p.Channel, p.MessageID, err)
+		return sttFailureMarker("local_audio_unavailable"), nil
+	}
+	defer os.Remove(owned)
+	return runHandler(ctx, host, cfg, "", "", false, owned, p)
+}
+
+// handlerResolver returns the handler path to run now, or "" when there is
+// none. A configured path counts only while it exists. An unconfigured one is
+// re-discovered whenever the last answer is gone, so a handler installed after
+// startup is used on the next attempt without a restart.
+func handlerResolver(initial string, isConfigured bool) func() string {
+	var mu sync.Mutex
+	current := initial
+	return func() string {
+		mu.Lock()
+		defer mu.Unlock()
+		if current != "" {
+			if _, err := os.Stat(current); err == nil {
+				return current
+			}
+		}
+		if isConfigured {
+			return ""
+		}
+		current = defaultHandlerPath()
+		return current
+	}
 }
 
 // sttFailureMarker is the stand-in transcript text the broker forwards when

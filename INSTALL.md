@@ -572,7 +572,7 @@ It coexists with adapter auto-spawn (the broker is a flock singleton). See
 
 **STT caveat:** a systemd-supervised broker has no `$CLAUDE_PLUGIN_ROOT`, so set
 `plugins.stt.handler_path` in `~/.config/c3/mappings.json` to your cloned repo's
-`plugins/c3/stt/stt-handler.py` or voice transcription silently turns off. (STT
+`plugins/c3/stt/stt-handler.py` or voice notes wait untranscribed until a handler is found. (STT
 needs only system `python3` + ffmpeg (`ffprobe`); no Python packages, no venv.)
 Details in `docs/systemd/README.md`.
 

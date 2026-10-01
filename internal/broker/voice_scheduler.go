@@ -122,6 +122,7 @@ type voiceAttempt struct {
 
 type voiceAttemptResult struct {
 	transient   bool
+	retryAfter  time.Duration // a transient's server-requested minimum wait
 	success     bool
 	segmentText string
 	transcript  string
@@ -725,7 +726,7 @@ func (s *VoiceScheduler) finishAttempt(key voiceScheduleKey, out voiceAttemptRes
 			out = s.retryExpiredOutcome(entry)
 			s.finishTerminalLocked(entry, out)
 		} else {
-			delay := s.jitter(entry.backoff)
+			delay := max(s.jitter(entry.backoff), out.retryAfter)
 			if delay <= 0 {
 				delay = time.Millisecond
 			}
@@ -1029,34 +1030,44 @@ func (s *VoiceScheduler) StopWithin(timeout time.Duration) bool {
 	}
 }
 
+// transcribe runs one STT attempt. When the channel can fetch voice, every
+// attempt that reaches the plugin carries a fresh attempt-owned local file
+// (removed when the attempt ends), so the handler never fetches: no audio is
+// fetched while STT is off, and a missing handler parks the note instead of
+// failing it. Fetch and readiness come before the STT deadline starts.
 func (s *VoiceScheduler) transcribe(ctx context.Context, attempt voiceAttempt) voiceAttemptResult {
 	att := attempt.attachment
-	cachedPath := s.broker.voiceCachedPath(attempt.key.route.Channel, att.FileID)
-	effectiveSize := att.Size
-	if cachedPath != "" {
-		if info, err := os.Stat(cachedPath); err == nil {
-			effectiveSize = info.Size()
-		} else {
-			log.Printf("voice scheduler: cached audio stat failed chan=%s msg=%d file_id=%s path=%s: %v — using inbound size=%d", attempt.key.route.Channel, attempt.key.messageID, att.FileID, cachedPath, err, effectiveSize)
-		}
-	} else if attempt.key.route.Channel == "telegram" {
-		agent, notice, refuse, retryable, probedSize := s.broker.voiceFetchRefusal(attempt.key.route.Channel, att)
-		if refuse {
-			if retryable {
-				return voiceAttemptResult{transient: true, detail: agent}
+	chanName := attempt.key.route.Channel
+	payload := c3types.VoicePayload{
+		Channel: attempt.inbound.Channel, ChatID: attempt.inbound.ChatID, TopicID: attempt.inbound.TopicID,
+		MessageID: attempt.inbound.MessageID, FileID: att.FileID, MIME: att.MIME, Size: att.Size,
+	}
+	ch, _ := s.broker.Channel(chanName)
+	if fetcher, ok := ch.(voiceFetcher); ok {
+		if enabled, ready := s.broker.Plugins.VoiceReady(); enabled {
+			if !ready {
+				return voiceAttemptResult{transient: true, detail: "stt handler unavailable"}
 			}
-			return voiceAttemptResult{segmentText: agent, notice: notice, detail: agent}
+			path, size, refusal := voiceFetchRefusal(ctx, fetcher, att)
+			if refusal != nil {
+				return *refusal
+			}
+			defer os.Remove(path)
+			payload.LocalPath = path
+			if size > 0 {
+				payload.Size = size
+			}
 		}
-		if effectiveSize == 0 {
-			effectiveSize = probedSize
+	} else if cachedPath := s.broker.voiceCachedPath(chanName, att.FileID); cachedPath != "" {
+		if info, err := os.Stat(cachedPath); err == nil {
+			payload.Size = info.Size()
+		} else {
+			log.Printf("voice scheduler: cached audio stat failed chan=%s msg=%d file_id=%s path=%s: %v — using inbound size=%d", chanName, attempt.key.messageID, att.FileID, cachedPath, err, payload.Size)
 		}
 	}
 
 	sttCtx, cancel := context.WithTimeout(ctx, sttFlushTimeout)
-	raw := s.broker.Plugins.FireOnVoiceReceived(sttCtx, c3types.VoicePayload{
-		Channel: attempt.inbound.Channel, ChatID: attempt.inbound.ChatID, TopicID: attempt.inbound.TopicID,
-		MessageID: attempt.inbound.MessageID, FileID: att.FileID, MIME: att.MIME, Size: effectiveSize,
-	})
+	raw := s.broker.Plugins.FireOnVoiceReceived(sttCtx, payload)
 	cancel()
 	if detail, ok := sttFetchFailure(raw); ok {
 		if isNetworkTransient(detail) {
@@ -1069,8 +1080,11 @@ func (s *VoiceScheduler) transcribe(ctx context.Context, attempt voiceAttempt) v
 	}
 	if raw == "" || isSTTFailureMarker(raw) {
 		reason := sttFailureReason(raw)
+		// The handler's retained copy, looked up now: it decides whether the
+		// recovery text may say the audio is saved.
+		retained := s.broker.voiceCachedPath(chanName, att.FileID)
 		return voiceAttemptResult{
-			segmentText: sttFailureText(att, reason, cachedPath), notice: sttFailureNotice, detail: reason,
+			segmentText: sttFailureText(att, reason, retained), notice: sttFailureNotice, detail: reason,
 		}
 	}
 	return voiceAttemptResult{
@@ -1097,8 +1111,9 @@ func voicePendingText(fileID string) string {
 // network condition worth auto-retrying once connectivity returns. FAIL-CLOSED
 // allowlist: only recognized-transient signatures return true, so a permanent
 // failure (bad/expired file_id, too-big, a provider error) is never retry-looped.
-// Applied ONLY to fetch failures (download), never to provider/transcription
-// failures — a download that timed out IS a network condition.
+// Applied ONLY to the legacy handler's own fetch failures ([STT FETCH FAILED:),
+// never to provider/transcription failures; a broker fetch is classified by the
+// channel's typed error instead.
 func isNetworkTransient(s string) bool {
 	l := strings.ToLower(s)
 	for _, sig := range []string{

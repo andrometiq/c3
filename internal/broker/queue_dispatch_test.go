@@ -15,8 +15,10 @@ import (
 	"github.com/Andrometiq/c3/internal/queue"
 )
 
+// cachedProbeChannel cannot fetch voice itself (no FetchVoice) but reports a
+// retained copy: the legacy cache-first path.
 type cachedProbeChannel struct {
-	*probeChannel
+	*fakeChannel
 	path string
 }
 
@@ -138,7 +140,7 @@ func TestHandleRetranscribe_DownHealthCachedSucceedsOffline(t *testing.T) {
 	if err := os.WriteFile(cachePath, []byte("cached audio"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	ch := &cachedProbeChannel{probeChannel: &probeChannel{fakeChannel: &fakeChannel{}}, path: cachePath}
+	ch := &cachedProbeChannel{fakeChannel: &fakeChannel{}, path: cachePath}
 	b := brokerWithGenericChannel(t, mfWithTelegram(), ch)
 	defer b.Shutdown()
 	b.setLastHealth(c3types.HealthEvent{Channel: "telegram", State: c3types.HealthStateDown, Since: time.Now()})
@@ -157,8 +159,8 @@ func TestHandleRetranscribe_DownHealthCachedSucceedsOffline(t *testing.T) {
 	if resp.Err != "" || resp.Text != "offline transcript" {
 		t.Fatalf("cached retranscribe while DOWN = %+v", resp)
 	}
-	if calls.Load() != 1 || ch.calls.Load() != 0 {
-		t.Fatalf("cached DOWN path calls: STT=%d network probes=%d; want 1,0", calls.Load(), ch.calls.Load())
+	if calls.Load() != 1 {
+		t.Fatalf("cached DOWN path made %d STT call(s); want 1", calls.Load())
 	}
 }
 

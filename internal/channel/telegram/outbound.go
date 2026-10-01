@@ -1,6 +1,7 @@
 package telegram
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -8,7 +9,9 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/PaulSonOfLars/gotgbot/v2"
 
@@ -382,35 +385,128 @@ func (c *Channel) getFileErr(err error) error {
 	return c.scrubTokenf("telegram: GetFile: %w", err)
 }
 
-// AttachmentSize reports a file's size in bytes WITHOUT downloading it: one
-// getFile call, no body transfer. It is the cheap probe the broker uses to
-// answer "is this too big to fetch?" before spending an STT run on a file the
-// Bot API will never hand over (2026-07-27 incident: retranscribe re-ran the
-// whole chain on a 21 MB voice note and reported "STT provider still failing",
-// hiding the real, permanent cause).
+// voiceFetchBudget bounds one voice fetch, getFile and body together. It is a
+// transfer policy, not a size limit: it carries 20 MB at about 115 KB/s, and a
+// slower transfer fails as transient and is retried later. A var only so tests
+// can shorten it.
+var voiceFetchBudget = 180 * time.Second
+
+// copyCachedVoice copies a retained inbox file into an attempt file. A var only
+// so a test can remove the source between lookup and copy.
+var copyCachedVoice = channel.CopyToTemp
+
+// voiceTempPattern names a voice attempt file. The .oga suffix keeps the name
+// and audio type STT providers have always seen.
+const voiceTempPattern = "voice-*.oga"
+
+// FetchVoice is the broker's single voice input path. It returns a fresh
+// attempt-owned file holding fileID's audio, which the caller must remove. A
+// copy of the STT inbox's retained file is used when one exists (never a link,
+// and the retained file is not touched); otherwise the audio is fetched over the
+// channel's own transport within voiceFetchBudget, bounded also by ctx.
 //
-// It is deliberately NOT on the channel.Channel interface — it is an optional
-// capability the broker type-asserts for, so channels without a size probe need
-// no change. A file already over the ceiling makes getFile itself fail, so the
-// too-big answer arrives as channel.ErrAttachmentTooLarge rather than a number.
-func (c *Channel) AttachmentSize(fileID string) (int64, error) {
+// Errors are classified on the raw error, then token-redacted: a size refusal
+// carries channel.ErrAttachmentTooLarge; network and deadline failures, server
+// 5xx and 429 are *channel.AttachmentTransientError (429 with its retry_after);
+// any other refusal is a plain, permanent error.
+func (c *Channel) FetchVoice(ctx context.Context, fileID string) (string, int64, error) {
 	if c.bot == nil {
-		return 0, errors.New("telegram: channel not started")
+		return "", 0, errors.New("telegram: channel not started")
 	}
-	f, err := c.bot.GetFile(fileID, &gotgbot.GetFileOpts{
+	dir, err := attachmentsCacheDir()
+	if err != nil {
+		return "", 0, err
+	}
+	if cached := inboxCachedVoicePath(fileID); cached != "" {
+		if path, size, err := copyCachedVoice(cached, dir, voiceTempPattern); err == nil {
+			return path, size, nil
+		}
+	}
+	ctx, cancel := context.WithTimeout(ctx, voiceFetchBudget)
+	defer cancel()
+	f, err := c.bot.GetFileWithContext(ctx, fileID, &gotgbot.GetFileOpts{
 		RequestOpts: c.requestOptsFor("getFile"),
 	})
 	if err != nil {
 		c.recordOutboundErr(err)
-		return 0, c.getFileErr(err)
+		return "", 0, c.voiceGetFileErr(err)
 	}
-	return f.FileSize, nil
+	if f.FilePath == "" {
+		return "", 0, errors.New("telegram: GetFile returned empty file_path (file may be too large or expired)")
+	}
+	out, err := channel.CreateTemp(dir, voiceTempPattern)
+	if err != nil {
+		return "", 0, fmt.Errorf("telegram: %w", err)
+	}
+	// Same transport, but no 60 s client timeout: voiceFetchBudget bounds it.
+	size, err := c.fetchBody(ctx, &http.Client{Transport: c.httpClient.Transport}, f.FilePath, out)
+	if closeErr := out.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		_ = os.Remove(out.Name())
+		return "", 0, err
+	}
+	return out.Name(), size, nil
+}
+
+// voiceGetFileErr classifies a getFile failure for FetchVoice: Telegram 4xx
+// other than 429 is permanent (getFileErr keeps the size sentinel); 429, 5xx
+// and every non-Telegram failure (network, deadline, setup, decode) is
+// transient.
+func (c *Channel) voiceGetFileErr(err error) error {
+	var tg *gotgbot.TelegramError
+	if !errors.As(err, &tg) {
+		return &channel.AttachmentTransientError{Err: c.scrubTokenf("telegram: GetFile: %w", err)}
+	}
+	if tg.Code >= 400 && tg.Code < 500 && tg.Code != http.StatusTooManyRequests {
+		return c.getFileErr(err)
+	}
+	var after time.Duration
+	if tg.ResponseParams != nil {
+		after = time.Duration(tg.ResponseParams.RetryAfter) * time.Second
+	}
+	return &channel.AttachmentTransientError{After: after, Err: c.scrubTokenf("telegram: GetFile: %w", err)}
+}
+
+// fetchBody downloads the Bot API file at filePath into out and returns the
+// byte count. The download URL carries the bot token, so every error is
+// scrubbed. A failed request, a cut body, HTTP 5xx and HTTP 429 (honouring a
+// Retry-After in seconds) are transient; any other status is permanent.
+func (c *Channel) fetchBody(ctx context.Context, client *http.Client, filePath string, out io.Writer) (int64, error) {
+	// fileDownloadURL builds it against the ACTIVE endpoint (P2), so downloads
+	// follow the same reverse proxy as every other call.
+	filePath = strings.TrimPrefix(filePath, "/")
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.fileDownloadURL(filePath), nil)
+	if err != nil {
+		// net/url errors quote the offending URL, which carries the token.
+		return 0, c.scrubTokenf("telegram: build download request for %q: %w", filePath, err)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		// *url.Error prints the FULL request URL, token and all.
+		return 0, &channel.AttachmentTransientError{Err: c.scrubTokenf("telegram: download %q: %w", filePath, err)}
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		err := fmt.Errorf("telegram: download %q: HTTP %d", filePath, resp.StatusCode)
+		if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500 {
+			after, _ := strconv.Atoi(resp.Header.Get("Retry-After"))
+			return 0, &channel.AttachmentTransientError{After: time.Duration(after) * time.Second, Err: err}
+		}
+		return 0, err
+	}
+	n, err := io.Copy(out, resp.Body)
+	if err != nil {
+		return 0, &channel.AttachmentTransientError{Err: c.scrubTokenf("telegram: download %q: %w", filePath, err)}
+	}
+	return n, nil
 }
 
 // DownloadAttachment fetches a Telegram file by file_id and saves it to a local
 // cache dir and returns the local path. It applies no size ceiling of its own —
-// getFile above is the size check, and whatever the bot server agreed to serve
-// is fetched (see getFileErr).
+// getFile is the size check, and whatever the bot server agreed to serve is
+// fetched (see getFileErr).
 //
 // Local cache layout:
 //
@@ -452,9 +548,6 @@ func (c *Channel) DownloadAttachment(fileID string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if err := os.MkdirAll(cacheDir, 0700); err != nil {
-		return "", fmt.Errorf("telegram: mkdir cache: %w", err)
-	}
 
 	// Local filename: keep the file_unique_id stable across redownloads + the
 	// upstream basename for human-friendliness.
@@ -464,36 +557,22 @@ func (c *Channel) DownloadAttachment(fileID string) (string, error) {
 		return localPath, nil // cached
 	}
 
-	// The download URL contains the bot token; we never include it in
-	// any error or log line. The relative file path is enough for
-	// debugging. fileDownloadURL builds it against the ACTIVE endpoint (P2) so
-	// downloads follow the same reverse proxy as every other call.
-	filePath := strings.TrimPrefix(f.FilePath, "/")
-	dlURL := c.fileDownloadURL(filePath)
-	req, err := http.NewRequestWithContext(c.ctx, http.MethodGet, dlURL, nil)
+	// Download into a reserved-prefix temporary and rename, so a cut transfer
+	// never leaves a truncated file that would later be served as cached.
+	out, err := channel.CreateTemp(cacheDir, "*.part")
 	if err != nil {
-		// net/url errors quote the offending URL, which carries the token.
-		return "", c.scrubTokenf("telegram: build download request for %q: %w", filePath, err)
+		return "", fmt.Errorf("telegram: %w", err)
 	}
-	resp, err := c.httpClient.Do(req)
+	_, err = c.fetchBody(c.ctx, c.httpClient, f.FilePath, out)
+	if closeErr := out.Close(); err == nil {
+		err = closeErr
+	}
+	if err == nil {
+		err = os.Rename(out.Name(), localPath)
+	}
 	if err != nil {
-		// *url.Error prints the FULL request URL — token and all — and this error
-		// is handed straight back to the agent as a tool result. Scrub it.
-		return "", c.scrubTokenf("telegram: download %q: %w", filePath, err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("telegram: download %q: HTTP %d", filePath, resp.StatusCode)
-	}
-
-	out, err := os.OpenFile(localPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
-	if err != nil {
-		return "", fmt.Errorf("telegram: create %s: %w", localPath, err)
-	}
-	defer out.Close()
-	if _, err := io.Copy(out, resp.Body); err != nil {
-		_ = os.Remove(localPath)
-		return "", fmt.Errorf("telegram: copy to %s: %w", localPath, err)
+		_ = os.Remove(out.Name())
+		return "", err
 	}
 	return localPath, nil
 }

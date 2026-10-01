@@ -223,6 +223,96 @@ class TestMainLocalAudio(unittest.TestCase):
         with open(os.path.join(self.handler.INBOX_DIR, copied[0]), "rb") as file:
             self.assertEqual(file.read(), b"OggS-local-audio")
 
+    def _run_local(self, source, extra_patches=()):
+        """Run main() with C3_STT_LOCAL_FILE=source, providers stubbed and the
+        network patched to fail the test. Returns the path run_stt received."""
+        from unittest import mock
+        import contextlib
+        import io
+
+        seen = []
+
+        def fake_run_stt(audio_path, _keys, timeout):
+            with open(audio_path, "rb") as audio:
+                seen.append((audio_path, audio.read()))
+            return "local transcript"
+
+        network = mock.Mock(side_effect=AssertionError("urlopen must not run with a local file"))
+        stdout = io.StringIO()
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(mock.patch.dict(os.environ, {"C3_STT_LOCAL_FILE": source}, clear=False))
+            stack.enter_context(mock.patch.object(self.handler.urllib.request, "urlopen", network))
+            stack.enter_context(mock.patch.object(self.handler, "run_stt", fake_run_stt))
+            stack.enter_context(mock.patch.object(sys, "argv", ["stt-handler.py", "42", "9", "LOCALID", ""]))
+            stack.enter_context(mock.patch.object(sys, "stdin", io.StringIO("\n")))
+            stack.enter_context(mock.patch.object(sys, "stdout", stdout))
+            for patch in extra_patches:
+                stack.enter_context(patch)
+            self.handler.main()
+        network.assert_not_called()
+        self.assertEqual(stdout.getvalue().strip(), "local transcript")
+        self.assertEqual(len(seen), 1)
+        return seen[0]
+
+    def _attempt_file(self, data=b"OggS-attempt"):
+        source = os.path.join(self.tmp, ".c3tmp-voice-1.oga")
+        with open(source, "wb") as file:
+            file.write(data)
+        return source
+
+    def test_local_file_is_transcribed_even_with_a_cached_inbox_copy(self):
+        source = self._attempt_file()
+        cached = os.path.join(self.handler.INBOX_DIR, "1700000000000-LOCALID.oga")
+        with open(cached, "wb") as file:
+            file.write(b"OggS-old-inbox")
+
+        path, data = self._run_local(source)
+
+        self.assertEqual(path, source)
+        self.assertTrue(path.endswith(".oga"))
+        self.assertEqual(data, b"OggS-attempt")
+
+    def test_inbox_copy_pruned_mid_run_does_not_fail_transcription(self):
+        from unittest import mock
+
+        source = self._attempt_file()
+        cached = os.path.join(self.handler.INBOX_DIR, "1700000000000-LOCALID.oga")
+        with open(cached, "wb") as file:
+            file.write(b"OggS-old-inbox")
+        real_find = self.handler.find_cached_audio
+
+        def find_then_prune(file_id):
+            found = real_find(file_id)
+            os.remove(found)  # a concurrent handler's prune_inbox wins the race
+            return found
+
+        path, data = self._run_local(source, [mock.patch.object(self.handler, "find_cached_audio", find_then_prune)])
+
+        self.assertEqual((path, data), (source, b"OggS-attempt"))
+
+    def test_no_cached_copy_retains_one_in_the_inbox(self):
+        source = self._attempt_file()
+
+        path, _ = self._run_local(source)
+
+        self.assertEqual(path, source)
+        retained = [n for n in os.listdir(self.handler.INBOX_DIR) if n.endswith("-LOCALID.oga")]
+        self.assertEqual(len(retained), 1)
+        with open(os.path.join(self.handler.INBOX_DIR, retained[0]), "rb") as file:
+            self.assertEqual(file.read(), b"OggS-attempt")
+
+    def test_failed_retention_copy_still_transcribes(self):
+        from unittest import mock
+
+        source = self._attempt_file()
+        broken = mock.patch.object(self.handler, "copy_local_file", side_effect=OSError("disk full"))
+
+        with self.assertLogs(level="WARNING") as logs:
+            path, data = self._run_local(source, [broken])
+
+        self.assertEqual((path, data), (source, b"OggS-attempt"))
+        self.assertTrue(any("retention copy failed" in line for line in logs.output))
+
     def test_local_symlink_is_refused_with_empty_stdout(self):
         from unittest import mock
         import io

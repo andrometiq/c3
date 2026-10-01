@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -23,13 +24,14 @@ import (
 // every clause.
 //
 // The rule these tests pin (maintainer, 2026-07-29): C3 owns NO size limit and
-// compares nothing against one. The bot server decides; C3 asks it with a
-// bodyless getFile before running STT, and reports what it hears.
+// compares nothing against one. The bot server decides; C3 asks it with the
+// fetch before running STT, and reports what it hears.
 
 const incidentVoiceBytes = int64(21226288) // msg 6994, 2026-07-27
 
-// probeChannel answers the fetchability ask. size/err are what the transport
-// says; calls counts how often it was asked.
+// probeChannel answers the voice fetch. size/err are what the transport says;
+// calls counts how often it was asked. A successful fetch writes a real attempt
+// file, which the broker must remove.
 type probeChannel struct {
 	*fakeChannel
 	size  int64
@@ -37,13 +39,29 @@ type probeChannel struct {
 	calls atomic.Int64
 }
 
-func (p *probeChannel) AttachmentSize(string) (int64, error) {
+func (p *probeChannel) FetchVoice(context.Context, string) (string, int64, error) {
 	p.calls.Add(1)
-	return p.size, p.err
+	if p.err != nil {
+		return "", 0, p.err
+	}
+	return fakeVoiceFile(p.size)
 }
 
-// gateChannel is a readback recorder that ALSO answers the fetchability ask, so
-// one double drives both the skip decision and the human notice it produces.
+// fakeVoiceFile writes an attempt file in the test's voice dir (TMPDIR).
+func fakeVoiceFile(size int64) (string, int64, error) {
+	f, err := os.CreateTemp("", channel.TempPrefix+"voice-fake-*.oga")
+	if err != nil {
+		return "", 0, err
+	}
+	_, err = f.WriteString("fake-audio")
+	if closeErr := f.Close(); err == nil {
+		err = closeErr
+	}
+	return f.Name(), size, err
+}
+
+// gateChannel is a readback recorder that ALSO fetches voice, so one double
+// drives both the skip decision and the human notice it produces.
 type gateChannel struct {
 	*readbackRecorderChannel
 	size  int64
@@ -52,15 +70,23 @@ type gateChannel struct {
 	// answer, when set, decides per file_id — for messages carrying several
 	// voice attachments with different fates.
 	answer func(fileID string) (int64, error)
+	// retained, when set, is the handler's inbox copy CachedVoicePath reports.
+	retained string
 }
 
-func (g *gateChannel) AttachmentSize(fileID string) (int64, error) {
+func (g *gateChannel) FetchVoice(_ context.Context, fileID string) (string, int64, error) {
 	g.calls.Add(1)
+	size, err := g.size, g.err
 	if g.answer != nil {
-		return g.answer(fileID)
+		size, err = g.answer(fileID)
 	}
-	return g.size, g.err
+	if err != nil {
+		return "", 0, err
+	}
+	return fakeVoiceFile(size)
 }
+
+func (g *gateChannel) CachedVoicePath(string) string { return g.retained }
 
 func newGateChannel(size int64, err error) *gateChannel {
 	return &gateChannel{
@@ -107,6 +133,7 @@ func countingSTT(b *Broker, transcript string) *atomic.Int64 {
 func gateBroker(t *testing.T, g *gateChannel) *Broker {
 	t.Helper()
 	t.Setenv("C3_QUEUE_DIR", t.TempDir())
+	t.Setenv("TMPDIR", t.TempDir()) // fake attempt files land here
 	b := newTestBroker(t, &mappings.MappingsFile{SchemaVersion: 1})
 	registerGateChannel(b, g)
 	return b
@@ -250,7 +277,7 @@ func TestFlushInbounds_NothingToAsk_StillTranscribes(t *testing.T) {
 	t.Setenv("C3_QUEUE_DIR", t.TempDir())
 	b := newTestBroker(t, &mappings.MappingsFile{SchemaVersion: 1})
 	defer b.Shutdown()
-	// readbackRecorderChannel has no AttachmentSize method.
+	// readbackRecorderChannel has no FetchVoice method.
 	registerReadbackChannel(b, &readbackRecorderChannel{fakeChannel: &fakeChannel{}})
 	calls := countingSTT(b, "no probe available")
 
@@ -294,6 +321,7 @@ func TestFlushInbounds_RefusalIsAppendedToExistingText(t *testing.T) {
 func brokerWithProbe(t *testing.T, pc *probeChannel) *Broker {
 	t.Helper()
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("TMPDIR", t.TempDir()) // fake attempt files land here
 	b := newTestBroker(t, mfWithTelegram())
 	b.chMu.Lock()
 	b.channels[pc.Name()] = &channelRegistration{Channel: pc}
@@ -349,17 +377,6 @@ func TestHandleRetranscribe_ServerServesFile_StillTranscribes(t *testing.T) {
 	}
 	if got := calls.Load(); got != 1 {
 		t.Fatalf("STT ran %d time(s) for a servable file; want 1", got)
-	}
-}
-
-// A channel with no probe cannot be asked, so retranscribe proceeds as before.
-func TestAttachmentFetchRefusal_ChannelWithoutProbe_NeverRefuses(t *testing.T) {
-	t.Setenv("C3_QUEUE_DIR", t.TempDir())
-	b := brokerWithChannel(t, mfWithTelegram(), &fakeChannel{})
-	defer b.Shutdown()
-
-	if got, _, _ := b.attachmentFetchRefusal("telegram", "F-BIG"); got != "" {
-		t.Fatalf("a channel that cannot be asked must not produce a refusal; got %q", got)
 	}
 }
 
@@ -898,5 +915,37 @@ func TestHandleRetranscribe_RepeatedManualRequestsAppendRevisions(t *testing.T) 
 	}
 	if !strings.Contains(fresp.Messages[1].Text, "first refresh") || !strings.Contains(fresp.Messages[2].Text, "second refresh") {
 		t.Fatalf("manual revisions out of order or missing: %+v", fresp.Messages)
+	}
+}
+
+// localAudioChannel retains its own audio (like web) and has no CachedVoicePath.
+type localAudioChannel struct {
+	*fakeChannel
+	path string
+}
+
+func (l *localAudioChannel) LocalAudioPath(string) (string, error) {
+	if l.path == "" {
+		return "", errors.New("not retained")
+	}
+	return l.path, nil
+}
+
+// A channel that retains audio itself must still get the "saved, no need to
+// resend" recovery text: voiceCachedPath answers from its store.
+func TestVoiceCachedPath_UsesLocalAudioProvider(t *testing.T) {
+	b := newTestBroker(t, nil)
+	lc := &localAudioChannel{fakeChannel: &fakeChannel{}, path: "/retained/voice.oga"}
+	b.channels[lc.Name()] = &channelRegistration{Channel: lc}
+	got := b.voiceCachedPath(lc.Name(), "file-1")
+	if got != "/retained/voice.oga" {
+		t.Fatalf("voiceCachedPath=%q, want the provider's retained path", got)
+	}
+	if text := sttFailureText(c3types.Attachment{FileID: "file-1"}, "boom", got); !strings.Contains(text, "does not need to resend") {
+		t.Fatalf("retained audio must read as saved: %q", text)
+	}
+	lc.path = ""
+	if got := b.voiceCachedPath(lc.Name(), "file-1"); got != "" {
+		t.Fatalf("unretained audio: voiceCachedPath=%q, want empty", got)
 	}
 }

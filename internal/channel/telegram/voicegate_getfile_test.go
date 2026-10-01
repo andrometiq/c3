@@ -5,6 +5,8 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -61,19 +63,35 @@ func getFileChannelHandler(t *testing.T, h http.HandlerFunc) *Channel {
 
 const tooBigGetFileBody = `{"ok":false,"error_code":400,"description":"Bad Request: file is too big"}`
 
+// fetchVoiceEnv points the voice cache and the STT inbox at fresh temp dirs and
+// returns the attachments dir, so FetchVoice never sees a real inbox.
+func fetchVoiceEnv(t *testing.T) (attachments, inbox string) {
+	t.Helper()
+	cache := t.TempDir()
+	inbox = t.TempDir()
+	t.Setenv("XDG_CACHE_HOME", cache)
+	t.Setenv("STT_INBOX_DIR", inbox)
+	return filepath.Join(cache, "c3", "telegram", "attachments"), inbox
+}
+
 // The server's size refusal must come back tagged with ErrAttachmentTooLarge AND
 // quoting the server. Without the tag the broker cannot tell a permanent refusal
 // from a transient failure, and goes on offering retranscribe / download_attachment
 // as recovery for a file that can never be fetched.
-func TestAttachmentSize_TooBigCarriesSentinelAndTheServersWords(t *testing.T) {
+func TestFetchVoice_TooBigCarriesSentinelAndTheServersWords(t *testing.T) {
+	fetchVoiceEnv(t)
 	c := getFileChannel(t, tooBigGetFileBody)
 
-	_, err := c.AttachmentSize("F-BIG")
+	_, _, err := c.FetchVoice(context.Background(), "F-BIG")
 	if err == nil {
-		t.Fatal("getFile refused the file as too big; AttachmentSize returned no error")
+		t.Fatal("getFile refused the file as too big; FetchVoice returned no error")
 	}
 	if !errors.Is(err, channel.ErrAttachmentTooLarge) {
 		t.Fatalf("a size refusal must be tagged ErrAttachmentTooLarge so callers stop offering a retry that cannot work; got %v", err)
+	}
+	var transient *channel.AttachmentTransientError
+	if errors.As(err, &transient) {
+		t.Fatalf("a size refusal is permanent, never transient; got %v", err)
 	}
 	if !strings.Contains(err.Error(), "file is too big") {
 		t.Fatalf("the refusal must quote the SERVER's own description, not a cause C3 decided; got %q", err.Error())
@@ -83,27 +101,32 @@ func TestAttachmentSize_TooBigCarriesSentinelAndTheServersWords(t *testing.T) {
 // C3 must not state a limit of its own — not even in the message. The number is
 // the server's to know, and inventing one is exactly the assumption that breaks
 // on a self-hosted server or the day Telegram moves its ceiling.
-func TestAttachmentSize_RefusalStatesNoLimitOfOurOwn(t *testing.T) {
+func TestFetchVoice_RefusalStatesNoLimitOfOurOwn(t *testing.T) {
+	fetchVoiceEnv(t)
 	c := getFileChannel(t, tooBigGetFileBody)
 
-	_, err := c.AttachmentSize("F-BIG")
+	_, _, err := c.FetchVoice(context.Background(), "F-BIG")
 	if msg := err.Error(); strings.Contains(msg, "20.0 MB") || strings.Contains(msg, "20 MB") || strings.Contains(msg, "20971520") {
 		t.Fatalf("the refusal quotes a ceiling C3 made up; only the server knows its limit. got %q", msg)
 	}
 }
 
-// The classifier must key on the SIZE description alone. A different 400 (or a
-// transport failure) is not permanent, and mislabelling it would tell the human
-// to re-share a message that would have transcribed fine on the next attempt.
-func TestAttachmentSize_OtherFailureIsNotTaggedAsSize(t *testing.T) {
+// The classifier must key on the SIZE description alone. A different 400 is a
+// permanent refusal of its own, neither too-big nor worth retrying.
+func TestFetchVoice_OtherFailureIsNotTaggedAsSize(t *testing.T) {
+	fetchVoiceEnv(t)
 	c := getFileChannel(t, `{"ok":false,"error_code":400,"description":"Bad Request: invalid file_id"}`)
 
-	_, err := c.AttachmentSize("F-BOGUS")
+	_, _, err := c.FetchVoice(context.Background(), "F-BOGUS")
 	if err == nil {
-		t.Fatal("getFile failed; AttachmentSize returned no error")
+		t.Fatal("getFile failed; FetchVoice returned no error")
 	}
 	if errors.Is(err, channel.ErrAttachmentTooLarge) {
 		t.Fatalf("a non-size getFile failure was tagged as too-large — the human would be told to re-share for a retryable error; got %v", err)
+	}
+	var transient *channel.AttachmentTransientError
+	if errors.As(err, &transient) {
+		t.Fatalf("a Telegram 400 is permanent; retrying cannot fix it. got %v", err)
 	}
 }
 
@@ -112,10 +135,11 @@ func TestAttachmentSize_OtherFailureIsNotTaggedAsSize(t *testing.T) {
 // human-readable string and can reword it; when it does, the caller still shows
 // the server's actual words, which satisfies the rule (transparent beats
 // classified) even though the too-big-specific recovery advice is lost.
-func TestAttachmentSize_RewordedRefusalDegradesToVerbatimPassthrough(t *testing.T) {
+func TestFetchVoice_RewordedRefusalDegradesToVerbatimPassthrough(t *testing.T) {
+	fetchVoiceEnv(t)
 	c := getFileChannel(t, `{"ok":false,"error_code":400,"description":"Bad Request: file is too large"}`)
 
-	_, err := c.AttachmentSize("F-BIG")
+	_, _, err := c.FetchVoice(context.Background(), "F-BIG")
 	if err == nil {
 		t.Fatal("a getFile failure must still be an error")
 	}
@@ -127,17 +151,24 @@ func TestAttachmentSize_RewordedRefusalDegradesToVerbatimPassthrough(t *testing.
 	}
 }
 
-// A file the API is willing to describe answers with its size and no error, so
-// the ask stays a cheap question and not a second failure path.
-func TestAttachmentSize_ReportsSizeWithoutDownloading(t *testing.T) {
-	c := getFileChannel(t, `{"ok":true,"result":{"file_id":"F-OK","file_unique_id":"U","file_size":1234,"file_path":"voice/file_1.oga"}}`)
+// A file the server serves comes back complete, in a fresh attempt file under
+// the reserved prefix with the .oga name providers expect.
+func TestFetchVoice_SuccessWritesTheCompleteFile(t *testing.T) {
+	attachments, _ := fetchVoiceEnv(t)
+	c := voiceServerChannel(t, func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("OGGDATA-complete"))
+	})
 
-	size, err := c.AttachmentSize("F-OK")
+	path, size, err := c.FetchVoice(context.Background(), "F-OK")
 	if err != nil {
-		t.Fatalf("AttachmentSize on a fetchable file: %v", err)
+		t.Fatalf("FetchVoice on a fetchable file: %v", err)
 	}
-	if size != 1234 {
-		t.Fatalf("AttachmentSize = %d, want the file_size the API reported (1234)", size)
+	got, err := os.ReadFile(path)
+	if err != nil || string(got) != "OGGDATA-complete" || size != int64(len(got)) {
+		t.Fatalf("attempt file = %q (size %d, err %v), want the whole body", got, size, err)
+	}
+	if filepath.Dir(path) != attachments || !strings.HasPrefix(filepath.Base(path), channel.TempPrefix+"voice-") || !strings.HasSuffix(path, ".oga") {
+		t.Fatalf("attempt file %q is not a reserved .c3tmp-voice-*.oga in %s", path, attachments)
 	}
 }
 

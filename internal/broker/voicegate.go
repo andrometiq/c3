@@ -1,6 +1,7 @@
 package broker
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strconv"
@@ -29,53 +30,36 @@ import (
 // a false refusal waiting to happen in both directions. C3 ASKS, and reports
 // what it hears.
 //
-// The ask is getFile: it is exactly the call the STT handler makes first, it
-// transfers no body, and it answers with either a file path or the server's
-// refusal. So the probe IS the attempt, run once up front instead of twice
-// inside a chain that cannot report what went wrong.
+// The ask is the fetch itself: the broker fetches the audio once over the
+// channel's own transport and hands the STT handler that local file, so the
+// handler never fetches and a refusal is reported in the server's terms before
+// STT runs.
 
-// attachmentSizer is the OPTIONAL channel capability that asks the transport
-// whether it will hand a file over, and how big it says the file is, without
-// downloading it. Channels that cannot ask do not implement it and are never
-// gated.
-type attachmentSizer interface {
-	AttachmentSize(fileID string) (int64, error)
+// voiceFetcher is the OPTIONAL channel capability that fetches a voice note into
+// a fresh attempt-owned local file the caller removes. Channels that cannot
+// fetch do not implement it, and their voice runs as before.
+type voiceFetcher interface {
+	FetchVoice(ctx context.Context, fileID string) (path string, size int64, err error)
 }
 
-// voiceFetchRefusal asks the channel whether in's voice attachment can be
-// fetched at all, and returns the agent-facing marker and human-facing notice
-// when it cannot. refuse=false means "run STT".
+// voiceFetchRefusal fetches att through fetcher. On success it returns the
+// attempt-owned path and its size; otherwise refusal is the attempt's outcome.
 //
-// Three outcomes, and none of them consults a number of C3's own:
-//
-//   - The server will serve the file ⇒ STT runs, whatever the size. A limit C3
-//     invented could only refuse a file that was about to work.
-//   - The server refuses it as too big ⇒ permanent. STT never runs, and both
-//     surfaces say so in the server's own terms.
-//   - The ask fails some other way ⇒ STT still does not run: the transcription
-//     chain opens with this same fetch, so it would fail identically and report
-//     a generic "transcription failed" over the top of a real error. The real
-//     error is passed through instead.
-func (b *Broker) voiceFetchRefusal(chanName string, att c3types.Attachment) (agentText, notice string, refuse, retryable bool, size int64) {
-	ch, err := b.Channel(chanName)
-	if err != nil {
-		return "", "", false, false, 0
+// The channel's typed error is authoritative: only a
+// *channel.AttachmentTransientError retries (parked for at least its After).
+// Anything else, a size refusal included, is terminal: STT does not run, and
+// both surfaces carry the server's own words.
+func voiceFetchRefusal(ctx context.Context, fetcher voiceFetcher, att c3types.Attachment) (path string, size int64, refusal *voiceAttemptResult) {
+	path, size, err := fetcher.FetchVoice(ctx, att.FileID)
+	if err == nil {
+		return path, size, nil
 	}
-	sizer, ok := ch.(attachmentSizer)
-	if !ok || att.FileID == "" {
-		return "", "", false, false, 0 // nothing to ask, or nobody to ask
+	agent, human := fetchFailureTexts(err, att.Size)
+	var transient *channel.AttachmentTransientError
+	if errors.As(err, &transient) {
+		return "", 0, &voiceAttemptResult{transient: true, retryAfter: transient.After, detail: agent}
 	}
-	sz, perr := sizer.AttachmentSize(att.FileID)
-	if perr != nil {
-		agent, human := fetchFailureTexts(perr, att.Size)
-		// Retryable ONLY for a transient network condition — never a too-big / bad-file
-		// refusal, which retrying can never fix (P0-2, fail-closed classification).
-		retry := !errors.Is(perr, channel.ErrAttachmentTooLarge) && isNetworkTransient(perr.Error())
-		return agent, human, true, retry, 0
-	}
-	// The probe succeeded: return the authoritative size so the live path can scale
-	// the STT budget even when Telegram omitted file_size (att.Size == 0) — F8.
-	return "", "", false, false, sz
+	return "", 0, &voiceAttemptResult{segmentText: agent, notice: human, detail: agent}
 }
 
 // sttFetchFailedPrefix mirrors stt.FetchFailedPrefix. It is duplicated rather
@@ -85,10 +69,9 @@ func (b *Broker) voiceFetchRefusal(chanName string, att c3types.Attachment) (age
 const sttFetchFailedPrefix = "[STT FETCH FAILED: "
 
 // sttFetchFailure reports the handler's own fetch error when a transcript
-// stand-in carries one. The STT handler performs its own getFile — the broker's
-// preflight cannot speak for it (a failover advance or plain TOCTOU between the
-// two calls), so when the handler's fetch is the thing that failed, its concrete
-// cause must survive into the scheduler's terminal recovery text.
+// stand-in carries one. Only a handler given no local file fetches (a channel
+// without voiceFetcher); when that fetch is what failed, its concrete cause must
+// survive into the scheduler's terminal recovery text.
 func sttFetchFailure(transcript string) (string, bool) {
 	detail, ok := strings.CutPrefix(transcript, sttFetchFailedPrefix)
 	if !ok {
@@ -126,45 +109,26 @@ func fetchFailureTexts(cause error, statedSize int64) (agentText, notice string)
 	return voiceFetchFailedAgentText(cause), voiceFetchFailedNotice(cause)
 }
 
-// attachmentFetchRefusal is the file_id-only entry point (retranscribe carries
-// no inbound), returning the agent-facing text for a file the server will not
-// hand over, or "" when it will. Same rule, same single source of truth.
-// It also returns the server-stated size on success (0 on refusal / unknown), so
-// the caller can size-scale the STT budget from the SAME getFile probe rather than
-// issuing a second one (P1-3).
-// It also returns the server-stated size on success (0 on refusal) and whether a
-// refusal is a TRANSIENT network condition worth re-parking a retry for (F4) — never
-// for a too-big / bad-file refusal, which retrying cannot fix.
-func (b *Broker) attachmentFetchRefusal(chanName, fileID string) (refusal string, size int64, retryable bool) {
-	ch, err := b.Channel(chanName)
-	if err != nil {
-		return "", 0, false
-	}
-	sizer, ok := ch.(attachmentSizer)
-	if !ok || fileID == "" {
-		return "", 0, false
-	}
-	sz, perr := sizer.AttachmentSize(fileID)
-	if perr != nil {
-		agent, _ := fetchFailureTexts(perr, 0)
-		return agent, 0, !errors.Is(perr, channel.ErrAttachmentTooLarge) && isNetworkTransient(perr.Error())
-	}
-	return "", sz, false
-}
-
-// voiceCachedPath returns the channel's local cached copy of this file_id's audio
-// (so retranscribe can skip the network preflight and the handler can reuse the
-// bytes — F11), or "". Best-effort; "" when the channel has no accessor.
+// voiceCachedPath returns the channel's retained local copy of this file_id's
+// audio, or "". The STT failure text names it (and claims the audio is saved
+// only when it exists), and a channel without voiceFetcher sizes the STT budget
+// from it. A channel that retains its own audio (channel.LocalAudioProvider,
+// e.g. web) answers from that store. Best-effort; "" when the channel has no
+// accessor.
 func (b *Broker) voiceCachedPath(chanName, fileID string) string {
 	ch, err := b.Channel(chanName)
 	if err != nil {
 		return ""
 	}
-	cp, ok := ch.(interface{ CachedVoicePath(string) string })
-	if !ok {
-		return ""
+	if cp, ok := ch.(interface{ CachedVoicePath(string) string }); ok {
+		return cp.CachedVoicePath(fileID)
 	}
-	return cp.CachedVoicePath(fileID)
+	if provider, ok := ch.(channel.LocalAudioProvider); ok {
+		if path, err := provider.LocalAudioPath(fileID); err == nil {
+			return path
+		}
+	}
+	return ""
 }
 
 // Stable openings for the agent-facing terminal voice outcomes.

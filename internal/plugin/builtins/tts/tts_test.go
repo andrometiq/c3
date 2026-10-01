@@ -28,6 +28,7 @@ func (h *fakeHost) OnInbound(func(context.Context, *c3types.Inbound) (*c3types.I
 }
 func (h *fakeHost) OnVoiceReceived(func(context.Context, c3types.VoicePayload) (string, error)) {
 }
+func (h *fakeHost) OnVoiceReady(func() bool) {}
 func (h *fakeHost) OnOutbound(func(context.Context, *c3types.Outbound) (*c3types.Outbound, bool)) {
 }
 func (h *fakeHost) OnAttach(func(*plugin.Stub, *plugin.Mapping)) {}

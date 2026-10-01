@@ -105,15 +105,16 @@ func schedulerVoice(messageID int64, fileID string) (RouteKey, c3types.Inbound, 
 	return route, in, att
 }
 
-type webProbeChannel struct{ *probeChannel }
+type webVoiceChannel struct{ *fakeChannel }
 
-func (*webProbeChannel) Name() string { return "web" }
+func (*webVoiceChannel) Name() string { return "web" }
 
-func TestVoiceSchedulerNonTelegramSkipsGetFileProbe(t *testing.T) {
+// A channel that cannot fetch voice gets no broker fetch and no local file; its
+// plugin resolves the audio itself (web: LocalAudioProvider).
+func TestVoiceSchedulerChannelWithoutFetcherPassesNoLocalFile(t *testing.T) {
 	b, scheduler, _ := schedulerHarness(t)
-	probe := &webProbeChannel{probeChannel: &probeChannel{fakeChannel: &fakeChannel{}, size: 999}}
 	b.chMu.Lock()
-	b.channels["web"] = &channelRegistration{Channel: probe}
+	b.channels["web"] = &channelRegistration{Channel: &webVoiceChannel{fakeChannel: &fakeChannel{}}}
 	b.chMu.Unlock()
 	var payload c3types.VoicePayload
 	b.Plugins.OnVoiceReceived(func(_ context.Context, current c3types.VoicePayload) (string, error) {
@@ -126,10 +127,7 @@ func TestVoiceSchedulerNonTelegramSkipsGetFileProbe(t *testing.T) {
 		key:     voiceScheduleKey{route: MakeRouteKey("web", 42, nil), messageID: 8, fileID: att.FileID},
 		inbound: inbound, attachment: att,
 	})
-	if probe.calls.Load() != 0 {
-		t.Fatalf("non-telegram transcription made %d getFile probe(s), want zero", probe.calls.Load())
-	}
-	if !result.success || payload.Size != att.Size || payload.Channel != "web" {
+	if !result.success || payload.Size != att.Size || payload.Channel != "web" || payload.LocalPath != "" {
 		t.Fatalf("result/payload=%+v/%+v", result, payload)
 	}
 }

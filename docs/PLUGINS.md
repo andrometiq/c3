@@ -192,21 +192,31 @@ stdin (line 1):  <bot_token>\n | \n for local audio
 argv:            <python> <handler_path> <chat_id> <reply_msg_id> <file_id> <message_thread_id|"">
 env:             C3_TELEGRAM_API_URL=<base url>   (only when a proxy base is configured)
                  C3_STT_FETCH_NONCE=<nonce>       (per-invocation shared secret for authenticated fetch-error reports)
-                 C3_STT_LOCAL_FILE=<path>         (non-Telegram local-audio channels only)
+                 C3_STT_LOCAL_FILE=<path>         (local audio: every Telegram voice note, and local-audio channels)
                  STT_AUDIO_RETENTION=<n>
                  C3_STT_DEADLINE_SECONDS=<n>      (scaled Go subprocess deadline in seconds)
 ```
 
 **The bot token is on stdin, not argv** — deliberately, so it never appears in `ps`, `/proc/<pid>/cmdline`, or audit logs. A handler that reads a token from `sys.argv` is both broken (every index is shifted by one) and a credential leak. Read line 1 of stdin.
 
-For a channel implementing `channel.LocalAudioProvider`, the shim resolves the
-channel-minted `file_id`, sends an empty first stdin line, and sets
-`C3_STT_LOCAL_FILE` to the trusted local path. The bundled handler requires a
-regular file, atomically copies it into the normal inbox as
-`<millis>-<file_id>.oga`, and skips Telegram `getFile`; cache lookup, provider
-execution, and inbox pruning are otherwise unchanged. The shim strips an
-inherited `C3_STT_LOCAL_FILE` from Telegram invocations so process environment
-cannot replace Telegram audio with an arbitrary local file.
+**Local audio is the normal path.** The broker fetches every Telegram voice
+note itself, over the channel's own connection, into a fresh attempt-owned
+`.c3tmp-voice-*.oga` file, passes it as `C3_STT_LOCAL_FILE` with an empty first
+stdin line, and deletes it when the attempt ends. For a channel implementing
+`channel.LocalAudioProvider` (web), the shim resolves the channel-minted
+`file_id` and copies that retained file into its own `.c3tmp-voice-*.oga` under
+the plugin cache dir, removed when the run ends, because the channel may prune
+the retained file at any time. Either way the handler receives a file nothing
+else deletes during the run. The bundled handler requires a regular file and
+transcribes **that path**; it also copies it into the inbox as
+`<millis>-<file_id>.oga` for retention when no copy exists there (a failed
+retention copy is a warning, not a failure). It never calls `getFile` when
+`C3_STT_LOCAL_FILE` is set. The shim strips an inherited `C3_STT_LOCAL_FILE`, so
+the process environment cannot substitute an arbitrary local file. Orphaned
+`.c3tmp-` files older than an hour are swept before new ones are created.
+
+The handler's own download (token on stdin, `getFile`, then the file) remains
+only for a Telegram channel that cannot fetch voice itself.
 
 Two more things a handler must tolerate: `C3_TELEGRAM_API_URL` should be honoured for `getFile` and the audio download, because direct `api.telegram.org` is blocked on some networks and ignoring it will simply time out; and on the deadline the shim SIGKILLs the handler's **entire process group**, so any grandchildren it spawned die with it.
 
@@ -219,16 +229,25 @@ Self-update replaces the shipped handler/runner/provider set but preserves regul
 Failures are never silent. A transcription-stage failure returns, *as the
 transcript*, `[STT FAILED: <reason> — see <broker log path>]`, with `<reason>`
 one of `handler_missing`, `token_unavailable`, `local_audio_unavailable`,
-`timeout`, `killed`, `error`, `empty`. If the handler cannot fetch the audio, it instead returns
-`[STT FETCH FAILED: <server cause>]`. The scheduler parks fail-closed transient
-network failures for automatic retry; permanent failures durably resolve to an
-agent-facing recovery message.
+`timeout`, `killed`, `error`, `empty`. If a legacy handler cannot fetch the
+audio itself, it instead returns `[STT FETCH FAILED: <server cause>]`.
+
+When the broker fetches, the channel's typed error decides: network and
+deadline failures, server 5xx and 429 are transient and park the note for
+retry (a 429 waits at least the server's `retry_after`); any other refusal,
+including "file is too big", is terminal and STT never runs. While STT is
+enabled but no handler can be found, the broker fetches nothing and parks the
+note; an unconfigured `handler_path` is re-discovered on each retry, so a
+handler installed later is picked up without a restart. Permanent failures
+durably resolve to an agent-facing recovery message.
 
 The scheduler replaces an ordinary provider-stage STT marker with an agent-facing
 recovery message that names the `file_id`, `download_attachment`, `retranscribe`,
-and broker log. It appends that message to any caption/rich text instead of
-clobbering the sender's words. A preflight or handler fetch refusal uses the
-server's cause and never claims unfetched audio was saved. Two ordinary reason
+and broker log. It says the audio is saved and recoverable only when the
+handler's retained inbox copy exists at failure time; otherwise it says no local
+copy was kept and recovery needs a fresh fetch. It appends that message to any
+caption/rich text instead of clobbering the sender's words. A fetch refusal uses
+the server's cause and never claims unfetched audio was saved. Two ordinary reason
 values come from the scheduler rather than the shim: `no_transcript` when no
 `OnVoiceReceived` subscriber returned anything, and `stt_failed` for an
 unparseable failure return.

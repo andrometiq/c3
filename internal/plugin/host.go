@@ -18,6 +18,9 @@ import (
 type Host interface {
 	OnInbound(fn func(ctx context.Context, msg *c3types.Inbound) (*c3types.Inbound, bool /*drop*/))
 	OnVoiceReceived(fn func(ctx context.Context, payload c3types.VoicePayload) (string, error))
+	// OnVoiceReady registers a readiness check for the voice callbacks. While
+	// any check reports false the broker fetches no audio and retries later.
+	OnVoiceReady(fn func() bool)
 	OnOutbound(fn func(ctx context.Context, msg *c3types.Outbound) (*c3types.Outbound, bool /*drop*/))
 	OnAttach(fn func(*Stub, *Mapping))
 

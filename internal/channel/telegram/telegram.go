@@ -375,6 +375,9 @@ func (c *Channel) Start(ctx context.Context, host channel.Host) error {
 		Transport: httpTransport,
 		Timeout:   60 * time.Second, // Bot API caps at 20MB; a healthy download is seconds.
 	}
+	if dir, err := attachmentsCacheDir(); err == nil {
+		channel.SweepStaleTemps(dir) // temporaries a dead process left behind
+	}
 	bot, err := c.newBot(httpTransport)
 	if err != nil {
 		return c.scrubTokenf("telegram: NewBot: %w", err)

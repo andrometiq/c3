@@ -23,6 +23,8 @@ type fakeHost struct {
 	cfg           Config
 	channelCfg    map[string]any
 	voiceCallback func(ctx context.Context, p c3types.VoicePayload) (string, error)
+	voiceReady    func() bool
+	cacheDir      string
 	logs          []string
 	// channel, when set, is what Channel() hands back. nil ⇒ "not registered",
 	// which is what a broker with no telegram channel really answers; returning
@@ -48,6 +50,7 @@ func (h *fakeHost) OnInbound(fn func(context.Context, *c3types.Inbound) (*c3type
 func (h *fakeHost) OnVoiceReceived(fn func(context.Context, c3types.VoicePayload) (string, error)) {
 	h.voiceCallback = fn
 }
+func (h *fakeHost) OnVoiceReady(fn func() bool) { h.voiceReady = fn }
 func (h *fakeHost) OnOutbound(fn func(context.Context, *c3types.Outbound) (*c3types.Outbound, bool)) {
 }
 func (h *fakeHost) OnAttach(fn func(*plugin.Stub, *plugin.Mapping)) {}
@@ -83,7 +86,7 @@ func (h *fakeHost) ChannelConfig(name string, target any) error {
 }
 
 func (h *fakeHost) State(name string) plugin.StateDir { return nil }
-func (h *fakeHost) CacheDir(name string) string       { return "" }
+func (h *fakeHost) CacheDir(name string) string       { return filepath.Join(h.cacheDir, name) }
 func (h *fakeHost) Channel(name string) (channel.Channel, error) {
 	if h.channel == nil {
 		return nil, errors.New("plugin host: channel not registered")
@@ -159,44 +162,133 @@ func TestRegister_HandlerAppearsAfterStartup_NextCallTranscribes(t *testing.T) {
 	}
 }
 
-func TestRegister_LocalAudioSetsPathAndEmptyTokenLine(t *testing.T) {
+// pathAndStdinHandler is a handler that reports what it was given: the local
+// file env var, the file's bytes, and stdin line 1. If C3_TEST_PRUNE is set it
+// deletes that path first, as a concurrent prune would.
+const pathAndStdinHandler = `import json, os, sys
+prune = os.environ.get("C3_TEST_PRUNE")
+if prune:
+    os.remove(prune)
+path = os.environ.get("C3_STT_LOCAL_FILE")
+print(json.dumps({"path": path, "audio": open(path).read(), "stdin": sys.stdin.readline()}))
+`
+
+type handlerSaw struct {
+	Path  string `json:"path"`
+	Audio string `json:"audio"`
+	Stdin string `json:"stdin"`
+}
+
+func registerPathAndStdinHandler(t *testing.T, host *fakeHost) {
+	t.Helper()
 	if _, err := exec.LookPath("python3"); err != nil {
-		t.Skip("python3 not available; local-audio handler contract needs a real interpreter")
+		t.Skip("python3 not available; the handler contract needs a real interpreter")
 	}
+	handler := filepath.Join(t.TempDir(), "handler.py")
+	if err := os.WriteFile(handler, []byte(pathAndStdinHandler), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	host.cfg = Config{Enabled: true, HandlerPath: handler, Timeout: 5}
+	if err := Register(host); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func callHandler(t *testing.T, host *fakeHost, p c3types.VoicePayload) handlerSaw {
+	t.Helper()
+	transcript, err := host.voiceCallback(context.Background(), p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var saw handlerSaw
+	if err := json.Unmarshal([]byte(transcript), &saw); err != nil {
+		t.Fatalf("handler output %q: %v", transcript, err)
+	}
+	return saw
+}
+
+// R12-1: web audio is a shared retained file that web pruning can delete at any
+// time. The handler gets its own copy in the plugin cache dir, so a prune of the
+// retained source mid-run cannot pull the input away, and the copy is removed
+// when the run ends. R14-2: the cache dir is created (0700) when missing.
+func TestRegister_LocalAudioGetsAnOwnedCopyThatSurvivesAPrune(t *testing.T) {
 	directory := t.TempDir()
 	audioPath := filepath.Join(directory, "voice.oga")
 	if err := os.WriteFile(audioPath, []byte("OggS-local"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	handler := filepath.Join(directory, "handler.py")
-	const script = `import json, os, sys
-print(json.dumps({"path": os.environ.get("C3_STT_LOCAL_FILE"), "stdin": sys.stdin.readline()}))
-`
-	if err := os.WriteFile(handler, []byte(script), 0o600); err != nil {
+	cacheRoot := filepath.Join(t.TempDir(), "not", "created", "yet")
+	host := &fakeHost{channel: &localAudioChannel{path: audioPath}, cacheDir: cacheRoot}
+	registerPathAndStdinHandler(t, host)
+	t.Setenv("C3_TEST_PRUNE", audioPath)
+
+	saw := callHandler(t, host, c3types.VoicePayload{Channel: "web", ChatID: 42, MessageID: 7, FileID: "local-file", Size: 10})
+
+	ownedDir := filepath.Join(cacheRoot, Name)
+	if filepath.Dir(saw.Path) != ownedDir || !strings.HasPrefix(filepath.Base(saw.Path), channel.TempPrefix+"voice-") || !strings.HasSuffix(saw.Path, ".oga") {
+		t.Fatalf("handler got %q; want an owned .c3tmp-voice-*.oga copy in %s", saw.Path, ownedDir)
+	}
+	if saw.Audio != "OggS-local" || saw.Stdin != "\n" {
+		t.Fatalf("handler saw audio/stdin=%q/%q, want the retained bytes and an empty token line", saw.Audio, saw.Stdin)
+	}
+	if _, err := os.Stat(saw.Path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("owned copy outlived the run: %v", err)
+	}
+	if info, err := os.Stat(ownedDir); err != nil || info.Mode().Perm() != 0o700 {
+		t.Fatalf("cache dir %s: %v, want created 0700", ownedDir, info)
+	}
+}
+
+// A broker-fetched attempt file is handed to the handler as-is, with no token:
+// the handler never fetches.
+func TestRegister_LocalPathReachesTheHandlerWithoutToken(t *testing.T) {
+	audioPath := filepath.Join(t.TempDir(), ".c3tmp-voice-1.oga")
+	if err := os.WriteFile(audioPath, []byte("OggS-fetched"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	host := &fakeHost{
-		cfg:     Config{Enabled: true, HandlerPath: handler, Timeout: 5},
-		channel: &localAudioChannel{path: audioPath},
+	host := &fakeHost{channelCfg: map[string]any{"telegram": map[string]string{"bot_token": "tok"}}}
+	registerPathAndStdinHandler(t, host)
+
+	saw := callHandler(t, host, c3types.VoicePayload{Channel: "telegram", ChatID: 42, MessageID: 7, FileID: "F", LocalPath: audioPath})
+
+	if saw.Path != audioPath || saw.Audio != "OggS-fetched" || saw.Stdin != "\n" {
+		t.Fatalf("handler saw path/audio/stdin=%q/%q/%q, want %q, its bytes, and no token", saw.Path, saw.Audio, saw.Stdin, audioPath)
 	}
+}
+
+// R16-1: with handler_path unconfigured, readiness and execution re-discover a
+// handler installed after startup.
+func TestRegister_UnconfiguredHandlerIsRediscovered(t *testing.T) {
+	src := t.TempDir()
+	t.Setenv("CLAUDE_PLUGIN_ROOT", "")
+	t.Setenv("C3_SRC_DIR", src)
+	t.Setenv("HOME", t.TempDir())
+	previous := sttExecutablePath
+	sttExecutablePath = func() (string, error) { return filepath.Join(t.TempDir(), "c3-broker"), nil }
+	t.Cleanup(func() { sttExecutablePath = previous })
+	host := &fakeHost{cfg: Config{Enabled: true, Timeout: 5}}
 	if err := Register(host); err != nil {
 		t.Fatal(err)
 	}
-	transcript, err := host.voiceCallback(context.Background(), c3types.VoicePayload{
-		Channel: "web", ChatID: 42, MessageID: 7, FileID: "local-file", Size: 10,
-	})
-	if err != nil {
+	if host.voiceReady == nil || host.voiceReady() {
+		t.Fatal("no handler anywhere: readiness must be registered and false")
+	}
+
+	handler := filepath.Join(src, sttHandlerRelativePath)
+	if err := os.MkdirAll(filepath.Dir(handler), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	var seen struct {
-		Path  string `json:"path"`
-		Stdin string `json:"stdin"`
+	if err := os.WriteFile(handler, []byte("print('found')\n"), 0o644); err != nil {
+		t.Fatal(err)
 	}
-	if err := json.Unmarshal([]byte(transcript), &seen); err != nil {
-		t.Fatalf("handler output %q: %v", transcript, err)
+	if !host.voiceReady() {
+		t.Fatal("a handler installed after startup was not discovered")
 	}
-	if seen.Path != audioPath || seen.Stdin != "\n" {
-		t.Fatalf("local handler saw path/stdin=%q/%q, want %q/newline", seen.Path, seen.Stdin, audioPath)
+	if _, err := exec.LookPath("python3"); err == nil {
+		got, _ := host.voiceCallback(context.Background(), c3types.VoicePayload{Channel: "telegram", LocalPath: handler})
+		if got != "found" {
+			t.Fatalf("callback ran %q; want the discovered handler's output", got)
+		}
 	}
 }
 

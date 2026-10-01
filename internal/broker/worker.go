@@ -903,10 +903,12 @@ func (w *RouteWorker) enqueueVoiceReadback(ctx context.Context, in *c3types.Inbo
 }
 
 // sttFailureText renders the agent-facing STT-failure recovery message. It is
-// self-documenting: the agent learns the audio exists, exactly how to fetch it
-// (download_attachment), that it can retry transcription (retranscribe), and
-// that the user does NOT need to resend. Includes file_id, mime, and duration
-// when known. See broker.log (LogPath) for the provider traceback.
+// self-documenting: the agent learns how to fetch the audio
+// (download_attachment), that it can retry transcription (retranscribe), and,
+// only when a retained local copy exists (cachedPath), that the audio is saved
+// and the user does not need to resend. Without one it says so: recovery needs
+// a fresh fetch. Includes file_id, mime, and duration when known. See
+// broker.log (LogPath) for the provider traceback.
 //
 // It names the attachment it is ABOUT, not Attachments[0]: a rich message can
 // put a photo first and the voice second, and quoting the photo's file_id would
@@ -917,15 +919,14 @@ func sttFailureText(att c3types.Attachment, reason, cachedPath string) string {
 		mime = "audio"
 	}
 	dur = "duration unknown"
-	// P2-5: when the audio was downloaded before STT failed, name the cached file so
-	// recovery is a no-brainer — download_attachment and retranscribe are both
-	// cache-first now (P1-4), so they reuse it instantly with no re-download.
-	cached := ""
+	// P2-5: name the retained copy so recovery is a no-brainer —
+	// download_attachment and retranscribe both reuse it with no re-download.
+	saved := " No local copy of the audio was kept, so recovery needs a fresh fetch from the channel."
 	if cachedPath != "" {
-		cached = fmt.Sprintf(" The audio is cached locally at %s — download_attachment and retranscribe reuse it instantly (no re-download).", cachedPath)
+		saved = fmt.Sprintf(" The audio is saved and recoverable — the user does not need to resend. It is cached locally at %s — download_attachment and retranscribe reuse it instantly (no re-download).", cachedPath)
 	}
-	return fmt.Sprintf(sttFailureOpening+" %s] The audio is saved and recoverable — the user does not need to resend.%s Call download_attachment with file_id=%q (%s, %s) to retrieve it, or retranscribe with the same file_id to re-run transcription. Try retranscribe ONCE; if it still fails, ask the sender to resend or type it out — do not retry repeatedly. Provider traceback: %s",
-		reason, cached, fileID, mime, dur, LogPath())
+	return fmt.Sprintf(sttFailureOpening+" %s]%s Call download_attachment with file_id=%q (%s, %s) to retrieve it, or retranscribe with the same file_id to re-run transcription. Try retranscribe ONCE; if it still fails, ask the sender to resend or type it out — do not retry repeatedly. Provider traceback: %s",
+		reason, saved, fileID, mime, dur, LogPath())
 }
 
 // sttFailureReason extracts the failure reason to surface in sttFailureText. An

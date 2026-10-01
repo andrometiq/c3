@@ -440,20 +440,25 @@ def main():
     # re-fetching — so recovery works even while the network is still flaky, and the
     # broker's "download_attachment/retranscribe reuse it instantly" notice is true.
     cached = find_cached_audio(file_id)
-    if cached:
+    if local_file:
+        # The caller owns this file for the whole run, so transcribe IT: an inbox
+        # copy can be pruned by a concurrent handler. The inbox copy is retention
+        # only, and failing to make one does not fail the transcription.
+        if os.path.getsize(local_file) <= 0:
+            logging.error('stt-handler: C3_STT_LOCAL_FILE is empty')
+            sys.exit(1)
+        if not cached:
+            try:
+                copy_local_file(local_file, audio_path)
+                logging.info(f'Retained local audio as {audio_path}')
+            except Exception as e:
+                logging.warning(f'Local audio retention copy failed: {e}')
+        audio_path = local_file
+        logging.info(f'Transcribing local audio {audio_path}')
+    elif cached:
         audio_path = cached
         logging.info(f'Reusing cached audio {audio_path} (skipping download)')
-    if not cached and local_file:
-        try:
-            copy_local_file(local_file, audio_path)
-            fsize = os.path.getsize(audio_path)
-            if fsize <= 0:
-                raise OSError('local audio is empty')
-            logging.info(f'Copied local audio to {audio_path} ({fsize} bytes)')
-        except Exception as e:
-            logging.error(f'Local audio copy failed: {e}')
-            sys.exit(1)
-    elif not cached:
+    else:
         for attempt in range(1, 4):
             try:
                 download_file(token, file_id, audio_path)
