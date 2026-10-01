@@ -137,6 +137,7 @@ type Channel struct {
 	rate       *rateLimiter
 	sentPolls  *sentPollMap // pollID → route+owner for poll-result routing (P4)
 	httpClient *http.Client // shared transport for non-gotgbot calls (file downloads)
+	transport  *http.Transport
 
 	// endpoints is the ordered, deduped list of Bot-API base URLs the channel
 	// may use. It is always non-empty: with no config it is [""], where "" means
@@ -230,6 +231,28 @@ type Channel struct {
 	cancel context.CancelFunc
 }
 
+// newBotTransport builds the transport shared by Bot API calls and downloads.
+// The connection-setup race is installed only when no proxy variable is set;
+// otherwise the transport is the plain proxy-aware one.
+func newBotTransport(getenv func(string) string, dialer *setupDialer) *http.Transport {
+	transport := &http.Transport{
+		Proxy: http.ProxyFromEnvironment,
+		DialContext: (&net.Dialer{
+			Timeout:   10 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		MaxIdleConns:          10,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+		ResponseHeaderTimeout: time.Duration(longPollTimeoutSeconds+10) * time.Second,
+	}
+	if !proxyConfigured(getenv) {
+		transport.DialTLSContext = dialer.DialTLSContext
+	}
+	return transport
+}
+
 // primaryBaseFromEnv applies the C3_TELEGRAM_API_URL env override to a config
 // primary base: a non-empty (trimmed) env value WINS over the config value
 // (env-beats-file, matching the C3_LOG_FILE precedent); an empty/unset env
@@ -298,18 +321,8 @@ func (c *Channel) Start(ctx context.Context, host channel.Host) error {
 	// timeout (25s), this gives gotgbot's request-context a hard ceiling.
 	// The stall watchdog (see pollLoop / stallWatchdog) is the second line
 	// of defense for cases where this network-layer cap somehow doesn't fire.
-	httpTransport := &http.Transport{
-		Proxy: http.ProxyFromEnvironment,
-		DialContext: (&net.Dialer{
-			Timeout:   10 * time.Second,
-			KeepAlive: 30 * time.Second,
-		}).DialContext,
-		MaxIdleConns:          10,
-		IdleConnTimeout:       90 * time.Second,
-		TLSHandshakeTimeout:   10 * time.Second,
-		ExpectContinueTimeout: 1 * time.Second,
-		ResponseHeaderTimeout: time.Duration(longPollTimeoutSeconds+10) * time.Second,
-	}
+	httpTransport := newBotTransport(os.Getenv, newSetupDialer(host.Logf))
+	c.transport = httpTransport
 
 	// Custom BaseBotClient with DefaultRequestOpts set to the "send" budget
 	// (20s). Per-call sites pass RequestOpts with method-specific timeouts via
@@ -323,7 +336,7 @@ func (c *Channel) Start(ctx context.Context, host channel.Host) error {
 	// still works; this just ensures any call that ever forgets a per-call APIURL
 	// still honors the configured proxy. "" stays gotgbot's default.
 	botClient := &gotgbot.BaseBotClient{
-		Client: http.Client{Transport: httpTransport},
+		Client: botAPIClient(httpTransport),
 		DefaultRequestOpts: &gotgbot.RequestOpts{
 			Timeout: 20 * time.Second,
 			APIURL:  c.activeEndpointURL(),
