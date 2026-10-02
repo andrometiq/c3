@@ -104,7 +104,10 @@ func hardeningButtonArgs(data string) map[string]any {
 // there or the assumption is false.
 func TestDispatchReply_ReservedCallbackPrefixRefused(t *testing.T) {
 	key := RouteKey{Channel: "telegram", ChatID: -100, HasTopic: true, TopicID: 281}
-	for _, data := range []string{"perm:allow:abcde", "perm:x", "ask:AAAAAAAA:0", "c3:_chosen", "c3:anything"} {
+	for _, data := range []string{
+		"perm:allow:abcde", "perm:x", "ask:AAAAAAAA:0", "c3:_chosen", "c3:anything",
+		"c3:auto:allow:0123456789abcdef0123456789abcdef",
+	} {
 		ch := &hardeningChannel{}
 		_, err := dispatchReply(ch, key, hardeningButtonArgs(data))
 		if err == nil {

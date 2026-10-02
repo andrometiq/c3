@@ -300,6 +300,9 @@ type UpgradeHint struct {
 }
 
 type HelloMsg struct {
+	// ClientKind is ClientKindHook for a transient hook connection; empty for
+	// an adapter.
+	ClientKind        string          `json:"client_kind,omitempty"`
 	ReceiptShapeDrift string          `json:"receipt_shape_drift,omitempty"`
 	Build             string          `json:"build,omitempty"`
 	ResumeContract    string          `json:"resume_contract,omitempty"`
@@ -970,4 +973,75 @@ func PeekOp(raw []byte) (Op, error) {
 		return "", fmt.Errorf("ipc: missing op field")
 	}
 	return env.Op, nil
+}
+
+// ClientKindHook marks a HelloMsg from a transient hook process. The broker
+// never registers such a connection as an adapter or lets it claim a route; it
+// serves exactly one auto-mode approval op (auto_denied or grant_check).
+const ClientKindHook = "hook"
+
+// AutoCallContext identifies one tool call for auto-mode approval: the
+// CLI-namespaced session, the sub-agent when there is one, the working
+// directory and the tool. The broker adds the adapter incarnation and route
+// itself; a hook can never name them.
+type AutoCallContext struct {
+	CLI       string `json:"cli"`
+	SessionID string `json:"session_id"`
+	AgentID   string `json:"agent_id,omitempty"`
+	CWD       string `json:"cwd"`
+	ToolName  string `json:"tool_name"`
+}
+
+// AutoDeniedReq reports an auto-mode classifier denial. ToolInput is the raw
+// tool_input from the hook payload; the broker validates it strictly
+// (CanonicalToolInput) and keys any grant on its SHA-256. BudgetMS is what is
+// left of the hook's end-to-end budget; the broker gives up 5 s before it runs
+// out.
+type AutoDeniedReq struct {
+	Op Op `json:"op"` // = OpAutoDenied
+	AutoCallContext
+	ToolInput json.RawMessage `json:"tool_input"`
+	Reason    string          `json:"reason"`
+	BudgetMS  int64           `json:"budget_ms"`
+}
+
+// AutoDecision states carried by AutoDecisionMsg.
+const (
+	// AutoDecisionApproved: the operator tapped Allow. The hook must answer
+	// with AutoAckMsg; nothing is armed until it does.
+	AutoDecisionApproved = "approved"
+	// AutoDecisionArmed: the grant is armed and the hook may print
+	// retry:true. A waiter that joined a deduplicated request can receive
+	// armed without seeing approved first.
+	AutoDecisionArmed = "armed"
+	// AutoDecisionNone: no grant. The hook prints nothing.
+	AutoDecisionNone = "none"
+)
+
+// AutoDecisionMsg is the broker's answer on an auto_denied connection.
+type AutoDecisionMsg struct {
+	Op        Op     `json:"op"` // = OpAutoDecision
+	RequestID string `json:"request_id,omitempty"`
+	State     string `json:"state"`
+}
+
+// AutoAckMsg acknowledges an "approved" decision on the same connection.
+type AutoAckMsg struct {
+	Op        Op     `json:"op"` // = OpAutoAck
+	RequestID string `json:"request_id"`
+}
+
+// GrantCheckReq asks whether an armed grant matches this call, consuming it if
+// so. InputHash is ToolInputHash of the call's tool_input.
+type GrantCheckReq struct {
+	Op Op `json:"op"` // = OpGrantCheck
+	AutoCallContext
+	InputHash string `json:"input_hash"`
+}
+
+// GrantCheckResp answers a GrantCheckReq. Allow is true only for a grant this
+// request consumed.
+type GrantCheckResp struct {
+	Op    Op   `json:"op"` // = OpGrantCheckResult
+	Allow bool `json:"allow"`
 }

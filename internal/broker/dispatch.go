@@ -269,20 +269,21 @@ func mediaFromArgs(args map[string]any) []c3types.MediaItem {
 	return out
 }
 
-// c3InternalCallbackPrefix is the callback_data namespace of C3's own inert
-// keyboard indicator (callbackChosenData = "c3:_chosen", internal/channel/
-// telegram/poll.go): a tap there is swallowed by the channel and never surfaced
-// as an event, so agent data must not land in it either. Reserved as a whole
-// namespace, not as the single literal, so a future C3-internal callback needs
-// no second fix here.
+// c3InternalCallbackPrefix is the callback_data namespace of C3's own
+// keyboards: the inert indicator (callbackChosenData = "c3:_chosen", swallowed
+// by internal/channel/telegram/poll.go) and auto-mode approval cards
+// (autoCallbackPrefix = "c3:auto:", resolved by resolveAutoTap). Agent data must
+// not land in it. Reserved as a whole namespace, not as single literals, so a
+// future C3-internal callback needs no second fix here.
 const c3InternalCallbackPrefix = "c3:"
 
 // reservedCallbackPrefixes are the callback_data namespaces C3 OWNS. The
 // inbound side routes a tap by prefix to a C3 resolver instead of to the agent —
-// "perm:" → resolvePerm (worker.go), "ask:" → resolveAsk (worker.go), "c3:" →
-// swallowed by the channel (poll.go) — and resolvePerm treats such a tap as the
-// human's tool-use verdict. An agent-authored button must therefore never mint
-// one.
+// "perm:" → resolvePerm (worker.go), "ask:" → resolveAsk (worker.go),
+// "c3:auto:" → resolveAutoTap (worker.go), other "c3:" → swallowed by the
+// channel (poll.go) — and resolvePerm and resolveAutoTap treat such a tap as
+// the human's tool-use verdict. An agent-authored button must therefore never
+// mint one.
 var reservedCallbackPrefixes = []string{permCallbackPrefix, askCallbackPrefix, c3InternalCallbackPrefix}
 
 // buttonsFromArgs parses the reply tool's `buttons` arg into a channel-neutral

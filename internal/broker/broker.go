@@ -57,6 +57,10 @@ type Broker struct {
 	// when the human taps. See ask.go.
 	Asks *askRegistry
 
+	// auto holds auto-mode approval requests and grants (auto.go). In memory
+	// only: a restart drops them all.
+	auto autoRegistry
+
 	// Perms is the registry of in-flight permission relays (Claude Code tool-use
 	// prompts surfaced as Allow/Deny keyboards). Fire-and-forget: registered before
 	// the keyboard is sent and resolved on the route worker goroutine when the
@@ -474,7 +478,15 @@ func (b *Broker) lastHealthSnapshot() map[string]c3types.HealthEvent {
 //     a full broker restart.
 func (b *Broker) SetMappings(mf *mappings.MappingsFile) {
 	b.mutationMu.Lock()
+	// Swapped under the auto-approval lock: a request is created only while that
+	// lock is held and the feature reads enabled, so none can slip in after a
+	// reload turns it off and before the cancel below.
+	b.auto.mu.Lock()
 	b.mappings.Store(mf)
+	if !mf.AutoModeApprovalSettings().Enabled {
+		b.cancelAutoLocked(nil, nil, "feature disabled")
+	}
+	b.auto.mu.Unlock()
 	b.mutationMu.Unlock()
 	if b.Voice != nil {
 		b.Voice.setRetryExpiry(voiceRetryExpiryFromMappings(mf))

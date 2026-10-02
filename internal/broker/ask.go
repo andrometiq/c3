@@ -671,6 +671,7 @@ func (b *Broker) StartAskReaper() {
 					defer recoverGoroutine("askReaper")
 					b.sweepExpiredAsks()
 					b.sweepExpiredPerms()
+					b.sweepAuto()
 				}()
 			}
 		}

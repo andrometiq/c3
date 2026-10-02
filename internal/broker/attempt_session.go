@@ -150,8 +150,10 @@ func (b *Broker) registerDeliveryHello(hello ipc.HelloMsg, conn *ipc.Conn, old *
 
 // Called with Routes.mu held at every actual release. AddRoute alone cannot
 // distinguish release/reclaim of the same stub from an uninterrupted claim.
-func (s *Stub) invalidateDeliveryClaim(key RouteKey) {
-	if s == nil || s.delivery == nil {
+// Negotiated delivery and auto-mode grants both bind to claimGeneration, so it
+// advances for every stub, not only negotiated ones.
+func (s *Stub) invalidateClaim(key RouteKey) {
+	if s == nil {
 		return
 	}
 	s.stubMu.Lock()

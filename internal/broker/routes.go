@@ -92,7 +92,7 @@ func (r *Routes) Claim(key RouteKey, stub *Stub) (*Stub, bool) {
 		log.Printf("routes Claim DISPLACE key=%s held by DEAD cli=%s pid=%d conn=%d, granting to cli=%s pid=%d conn=%d",
 			routeKeyStr(key), existing.CLI, existing.PID, existing.ConnID,
 			stub.CLI, stub.PID, stub.ConnID)
-		existing.invalidateDeliveryClaim(key)
+		existing.invalidateClaim(key)
 		delete(r.m, key)
 		delete(r.claimedAt, key)
 		r.presenceChanged(key, nil, time.Time{})
@@ -180,7 +180,7 @@ func (r *Routes) ForceReleaseKey(key RouteKey) *Stub {
 	if !ok {
 		return nil
 	}
-	existing.invalidateDeliveryClaim(key)
+	existing.invalidateClaim(key)
 	delete(r.m, key)
 	delete(r.claimedAt, key)
 	log.Printf("routes ForceReleaseKey key=%s evicted cli=%s pid=%d conn=%d (user-confirmed steal)",
@@ -217,7 +217,7 @@ func (r *Routes) Release(key RouteKey, connID uint64) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if existing, ok := r.m[key]; ok && existing.ConnID == connID {
-		existing.invalidateDeliveryClaim(key)
+		existing.invalidateClaim(key)
 		delete(r.m, key)
 		delete(r.claimedAt, key)
 		log.Printf("routes Release key=%s conn=%d cli=%s pid=%d",
@@ -236,7 +236,7 @@ func (r *Routes) ReleaseAllByConnID(connID uint64) []RouteKey {
 		if s.ConnID == connID {
 			log.Printf("routes ReleaseAllByConnID key=%s conn=%d cli=%s pid=%d",
 				routeKeyStr(k), connID, s.CLI, s.PID)
-			s.invalidateDeliveryClaim(k)
+			s.invalidateClaim(k)
 			delete(r.m, k)
 			delete(r.claimedAt, k)
 			released = append(released, k)

@@ -55,6 +55,10 @@ func (b *Broker) HandleConn(nc net.Conn) {
 		return
 	}
 
+	if hello.ClientKind == ipc.ClientKindHook {
+		b.handleAutoClient(conn, hello)
+		return
+	}
 	// Protocol version: retain the connection for safe operations, but refuse
 	// destructive/ownership-changing ops outside the explicitly implemented
 	// compatibility window. `c3 update` can therefore remain diagnosable without
@@ -179,6 +183,7 @@ func (b *Broker) HandleConn(nc net.Conn) {
 	// process by the time this defer runs).
 	defer func() {
 		stub.MarkDisconnected()
+		b.cancelAuto(stub, nil, "adapter disconnected")
 		if isPIDAlive(stub.PID) {
 			b.attempts.release(stub, "disconnect", time.Now())
 			log.Printf("conn-drop: cli=%s pid=%d cwd=%q conn=%d (claims preserved while pid alive)",
@@ -392,6 +397,7 @@ func (b *Broker) handleRelease(conn *ipc.Conn, stub *Stub, raw []byte) bool {
 			return false
 		}
 		b.Routes.Release(key, stub.ConnID)
+		b.cancelAuto(stub, &key, "session detached")
 		removed, _, newOutput := stub.RemoveRoute(key)
 		if !removed {
 			_ = conn.WriteJSON(ipc.ReleaseResp{Op: ipc.OpReleaseResult, Err: "release refused: selected route is not held"})
@@ -409,6 +415,7 @@ func (b *Broker) handleRelease(conn *ipc.Conn, stub *Stub, raw []byte) bool {
 		}
 	} else {
 		b.Routes.ReleaseAllByConnID(stub.ConnID)
+		b.cancelAuto(stub, nil, "session detached")
 		stub.ClearRoutes()
 	}
 	// Set unconditionally (not only in the empty-id case): the flag means "the

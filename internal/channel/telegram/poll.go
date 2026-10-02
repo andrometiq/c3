@@ -611,6 +611,12 @@ func (c *Channel) dispatchPollUpdate(updateID int64, poll *gotgbot.Poll) {
 // see dispatchCallback. Keep the two constants in lockstep.
 const permTapDataPrefix = "perm:"
 
+// autoTapDataPrefix mirrors the broker's autoCallbackPrefix (internal/broker/
+// auto.go): auto-mode approval cards ("c3:auto:<verb>:<id>"). Like perm taps,
+// their ack is deferred to the broker's resolver and their keyboard is never
+// collapsed here. Keep the two constants in lockstep.
+const autoTapDataPrefix = "c3:auto:"
+
 // askTapDataPrefix mirrors the broker's askCallbackPrefix (internal/broker/
 // ask.go): the callback_data namespace of `ask`-tool keyboards ("ask:<id>:<idx>").
 // The ask flow OWNS these keyboards — single-select clears them on resolve,
@@ -688,7 +694,7 @@ func (c *Channel) dispatchCallback(updateID int64, cq *gotgbot.CallbackQuery) {
 		}
 		return
 	}
-	permTap := strings.HasPrefix(cq.Data, permTapDataPrefix)
+	permTap := strings.HasPrefix(cq.Data, permTapDataPrefix) || strings.HasPrefix(cq.Data, autoTapDataPrefix)
 	// Auto-ack immediately, regardless of whether we can route the event. A
 	// failed ack is logged but not fatal — the surfacing still proceeds. Perm
 	// taps are the exception: their single answer is deferred to the outcome

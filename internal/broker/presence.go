@@ -67,6 +67,7 @@ func (b *Broker) dispatchPresenceChanges() {
 				b.presenceMu.Unlock()
 				if change.stub == nil {
 					b.wakeDelivery(change.key)
+					b.refreshAutoRoute(change.key)
 				}
 				b.notifyRouteHolder(change)
 			}

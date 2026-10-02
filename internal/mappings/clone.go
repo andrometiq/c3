@@ -16,6 +16,10 @@ func (mf *MappingsFile) Clone() *MappingsFile {
 		SchemaVersion: mf.SchemaVersion,
 		AutoUpdate:    mf.AutoUpdate,
 	}
+	if mf.AutoModeApproval != nil {
+		config := *mf.AutoModeApproval
+		out.AutoModeApproval = &config
+	}
 	if mf.AutoAttachOnResume != nil { // deep-copy the pointer per the Clone contract (cf. Invasive below)
 		v := *mf.AutoAttachOnResume
 		out.AutoAttachOnResume = &v
