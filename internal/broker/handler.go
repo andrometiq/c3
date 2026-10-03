@@ -45,6 +45,10 @@ func (b *Broker) HandleConn(nc net.Conn) {
 		return
 	}
 	op, err := ipc.PeekOp(raw)
+	if err == nil && op == ipc.OpHookHello {
+		b.handleAutoClient(conn, raw)
+		return
+	}
 	if err != nil || op != ipc.OpHello {
 		_ = conn.WriteJSON(ipc.ErrorMsg{Op: ipc.OpError, Err: "expected hello first"})
 		return
@@ -55,10 +59,6 @@ func (b *Broker) HandleConn(nc net.Conn) {
 		return
 	}
 
-	if hello.ClientKind == ipc.ClientKindHook {
-		b.handleAutoClient(conn, hello)
-		return
-	}
 	// Protocol version: retain the connection for safe operations, but refuse
 	// destructive/ownership-changing ops outside the explicitly implemented
 	// compatibility window. `c3 update` can therefore remain diagnosable without

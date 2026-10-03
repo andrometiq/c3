@@ -52,7 +52,8 @@ const (
 type autoState string
 
 // pending → approved → armed → consumed | expired, or
-// pending | approved → denied | timed_out | cancelled.
+// pending | approved → denied | timed_out | cancelled. A consumed grant
+// becomes vetoed when Claude Code denies the very call it allowed.
 const (
 	autoPending   autoState = "pending"
 	autoApproved  autoState = "approved" // Allow tapped; nothing armed until a hook acks
@@ -62,6 +63,7 @@ const (
 	autoDenied    autoState = "denied"
 	autoTimedOut  autoState = "timed_out"
 	autoCancelled autoState = "cancelled"
+	autoVetoed    autoState = "vetoed-after-allow"
 )
 
 func (s autoState) isLive() bool { return s == autoPending || s == autoApproved || s == autoArmed }
@@ -119,6 +121,23 @@ type autoRegistry struct {
 	mu    sync.Mutex
 	byKey map[autoKey]*autoRequest
 	byID  map[string]*autoRequest
+	// consumed remembers, for one grant lifetime, which tool call (by
+	// tool_use_id) consumed each grant, so a denial of that same call is
+	// recognised as Claude Code vetoing an allowed retry.
+	consumed map[autoConsumedCall]autoConsumedRecord
+}
+
+// autoConsumedCall is a consumed grant's key plus the tool_use_id of the call
+// that consumed it. tool_use_id is never part of the grant key: it only tells
+// that later call apart from a new, identical one.
+type autoConsumedCall struct {
+	key       autoKey
+	toolUseID string
+}
+
+type autoConsumedRecord struct {
+	request *autoRequest
+	expires time.Time
 }
 
 // newAutoRequestID returns a fresh 128-bit random request id (§5.2): never
@@ -217,6 +236,10 @@ func (b *Broker) openAutoRequest(req ipc.AutoDeniedReq, inputHash string, waiter
 	if !settings.Enabled {
 		return nil, false, ""
 	}
+	key := autoKey{AutoCallContext: req.AutoCallContext, inputHash: inputHash}
+	if b.vetoAutoLocked(autoConsumedCall{key: key, toolUseID: req.ToolUseID}) {
+		return nil, false, "vetoed after allow"
+	}
 	if !isClassifierBlock(req.CLI, req.Reason) {
 		return nil, false, "unknown reason"
 	}
@@ -228,7 +251,6 @@ func (b *Broker) openAutoRequest(req ipc.AutoDeniedReq, inputHash string, waiter
 	if !ok {
 		return nil, false, "no unique confirmed Telegram route"
 	}
-	key := autoKey{AutoCallContext: req.AutoCallContext, inputHash: inputHash}
 	if existing := b.auto.byKey[key]; existing != nil && b.refreshAutoLocked(existing) {
 		if existing.state == autoArmed {
 			// The retry it armed is still usable; a second one is not granted.
@@ -376,6 +398,12 @@ func (b *Broker) sweepAuto() {
 	for _, r := range b.auto.byKey {
 		b.refreshAutoLocked(r)
 	}
+	now := time.Now()
+	for call, record := range b.auto.consumed {
+		if !now.Before(record.expires) {
+			delete(b.auto.consumed, call)
+		}
+	}
 }
 
 // dropAutoWaiter removes a hook connection that has finished or gone away. The
@@ -442,7 +470,32 @@ func (b *Broker) consumeAutoGrant(req ipc.GrantCheckReq) bool {
 	if r == nil || !b.refreshAutoLocked(r) || r.state != autoArmed {
 		return false
 	}
-	b.setAutoStateLocked(r, autoConsumed, "")
+	b.setAutoStateLocked(r, autoConsumed, "tool_use_id="+req.ToolUseID)
+	if req.ToolUseID != "" {
+		if b.auto.consumed == nil {
+			b.auto.consumed = map[autoConsumedCall]autoConsumedRecord{}
+		}
+		call := autoConsumedCall{key: r.key, toolUseID: req.ToolUseID}
+		b.auto.consumed[call] = autoConsumedRecord{request: r, expires: time.Now().Add(r.grantTTL)}
+	}
+	return true
+}
+
+// vetoAutoLocked reports whether call is a tool call that consumed a grant
+// within the last grant lifetime. If so, Claude Code allowed it through the
+// hook and then denied it anyway (a hook allow need not bypass the
+// classifier). The call did not run: the original card says so, and no new
+// card is posted for a retry the operator already approved.
+func (b *Broker) vetoAutoLocked(call autoConsumedCall) bool {
+	record, isFound := b.auto.consumed[call]
+	if call.toolUseID == "" || !isFound {
+		return false
+	}
+	delete(b.auto.consumed, call)
+	if !time.Now().Before(record.expires) {
+		return false
+	}
+	b.setAutoStateLocked(record.request, autoVetoed, "tool_use_id="+call.toolUseID)
 	return true
 }
 

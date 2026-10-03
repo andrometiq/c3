@@ -12,12 +12,13 @@ import (
 // its whole round trip 300 ms.
 const grantCheckTimeout = 300 * time.Millisecond
 
-// handleAutoClient serves the single op of a transient hook connection
-// (HelloMsg.ClientKind == ipc.ClientKindHook). The connection is never
-// registered as an adapter and can never claim a route. HandleConn closes it
-// when this returns.
-func (b *Broker) handleAutoClient(conn *ipc.Conn, hello ipc.HelloMsg) {
-	if ipc.PeerProtocolVersion(hello.ProtocolVersion) != ipc.ProtocolVersion {
+// handleAutoClient serves the single op of a transient hook connection, whose
+// first frame (raw) is an ipc.HookHelloMsg. The connection is never registered
+// as an adapter and can never claim a route. HandleConn closes it when this
+// returns.
+func (b *Broker) handleAutoClient(conn *ipc.Conn, helloFrame []byte) {
+	var hello ipc.HookHelloMsg
+	if ipc.DecodeStrict(helloFrame, &hello) != nil || ipc.PeerProtocolVersion(hello.ProtocolVersion) != ipc.ProtocolVersion {
 		return
 	}
 	// Nothing below may hold the connection past the hook's own bound.

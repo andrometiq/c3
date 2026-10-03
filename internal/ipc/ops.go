@@ -55,12 +55,13 @@ const (
 	// blocking tool to unblock, so the broker sends no synchronous ack (unlike
 	// OpAskRegister). The verdict comes back later as OpPermissionVerdict.
 	OpPermissionRequest Op = "permission_request"
-	// Auto-mode approval ops run on a transient hook connection (HelloMsg
-	// ClientKind "hook"), one op per connection. OpAutoDenied reports an
+	// Auto-mode approval ops run on a transient hook connection opened with
+	// OpHookHello instead of OpHello, one op per connection. OpAutoDenied reports an
 	// auto-mode classifier denial and holds the connection through the
 	// approval handoff: broker OpAutoDecision "approved" → hook OpAutoAck →
 	// broker OpAutoDecision "armed", or a terminal "none". OpGrantCheck
 	// atomically consumes an armed grant; the answer is OpGrantCheckResult.
+	OpHookHello        Op = "hook_hello"
 	OpAutoDenied       Op = "auto_denied"
 	OpAutoDecision     Op = "auto_decision"
 	OpAutoAck          Op = "auto_ack"

@@ -1289,8 +1289,7 @@ func TestAutoHookClientNeverRegisters(t *testing.T) {
 	go func() { defer close(done); f.b.HandleConn(brokerSide) }()
 	hook := ipc.NewConn(hookSide)
 	defer hook.Close()
-	hello := ipc.HelloMsg{Op: ipc.OpHello, CLI: "claude", PID: 4242, CWD: "/workspace", ClientKind: ipc.ClientKindHook,
-		ProtocolVersion: ipc.ProtocolVersion}
+	hello := ipc.HookHelloMsg{Op: ipc.OpHookHello, CLI: "claude", PID: 4242, ProtocolVersion: ipc.ProtocolVersion}
 	if err := hook.WriteJSON(hello); err != nil {
 		t.Fatal(err)
 	}
@@ -1311,6 +1310,77 @@ func TestAutoHookClientNeverRegisters(t *testing.T) {
 	<-done
 	if len(f.b.Stubs.Snapshot()) != 1 || !f.owner.IsConnected() {
 		t.Fatal("the hook displaced the adapter")
+	}
+}
+
+// Claude Code can deny a retry it allowed through the hook. That denial (same
+// call, same tool_use_id as the consuming check) gets no new card and no
+// grant; the original card says the retry was blocked. A later identical call
+// with a new tool_use_id is a fresh request, and the record lapses with the
+// grant lifetime.
+func TestAutoVetoAfterAllow(t *testing.T) {
+	f := newAutoFixture(t)
+	r := f.armed(t)
+	f.b.auto.mu.Lock()
+	r.messageID, r.cardText = 10, "card body"
+	f.b.auto.mu.Unlock()
+	check := f.check()
+	check.ToolUseID = "toolu_retry"
+	if !f.b.consumeAutoGrant(check) {
+		t.Fatal("grant not consumed")
+	}
+	vetoed := f.req
+	vetoed.ToolUseID = "toolu_retry"
+	var decision ipc.AutoDecisionMsg
+	output := captureLog(t, func() {
+		hook, _ := f.startHook(t, vetoed)
+		decision = readDecision(t, hook)
+	})
+	if decision.State != ipc.AutoDecisionNone || len(f.ch.sent()) != 0 {
+		t.Fatalf("vetoed retry got %+v and %d sends", decision, len(f.ch.sent()))
+	}
+	if !strings.Contains(output, "vetoed-after-allow id="+r.id) || f.state(r) != autoVetoed {
+		t.Fatalf("veto not recorded (state %s): %s", f.state(r), output)
+	}
+	eventually(t, func() bool {
+		edits := f.ch.editCallsSnapshot()
+		return len(edits) > 0 && strings.Contains(edits[len(edits)-1].Text, "Claude Code still blocked the retry; it did not run")
+	})
+
+	fresh := f.req
+	fresh.ToolUseID = "toolu_later"
+	f.startHook(t, fresh)
+	f.postedCard(t)
+}
+
+func TestAutoVetoRecordIsExactAndLapses(t *testing.T) {
+	for _, name := range []string{"other tool_use_id", "no tool_use_id", "lapsed"} {
+		t.Run(name, func(t *testing.T) {
+			f := newAutoFixture(t)
+			f.armed(t)
+			check := f.check()
+			check.ToolUseID = "toolu_retry"
+			if !f.b.consumeAutoGrant(check) {
+				t.Fatal("grant not consumed")
+			}
+			denial := f.req
+			denial.ToolUseID = "toolu_retry"
+			switch name {
+			case "other tool_use_id":
+				denial.ToolUseID = "toolu_other"
+			case "no tool_use_id":
+				denial.ToolUseID = ""
+			case "lapsed":
+				f.b.auto.mu.Lock()
+				for call, record := range f.b.auto.consumed {
+					record.expires = time.Now().Add(-time.Second)
+					f.b.auto.consumed[call] = record
+				}
+				f.b.auto.mu.Unlock()
+			}
+			f.startHook(t, denial)
+			f.postedCard(t) // a normal new request, not a veto
+		})
 	}
 }
 

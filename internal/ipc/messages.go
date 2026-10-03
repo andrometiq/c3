@@ -300,9 +300,6 @@ type UpgradeHint struct {
 }
 
 type HelloMsg struct {
-	// ClientKind is ClientKindHook for a transient hook connection; empty for
-	// an adapter.
-	ClientKind        string          `json:"client_kind,omitempty"`
 	ReceiptShapeDrift string          `json:"receipt_shape_drift,omitempty"`
 	Build             string          `json:"build,omitempty"`
 	ResumeContract    string          `json:"resume_contract,omitempty"`
@@ -975,10 +972,17 @@ func PeekOp(raw []byte) (Op, error) {
 	return env.Op, nil
 }
 
-// ClientKindHook marks a HelloMsg from a transient hook process. The broker
+// HookHelloMsg opens a transient hook connection (OpHookHello). The broker
 // never registers such a connection as an adapter or lets it claim a route; it
-// serves exactly one auto-mode approval op (auto_denied or grant_check).
-const ClientKindHook = "hook"
+// serves exactly one auto-mode approval op (auto_denied or grant_check). It is
+// a distinct first frame, not a hello, so a broker that predates it answers
+// "expected hello first" and registers nothing.
+type HookHelloMsg struct {
+	Op              Op     `json:"op"` // = OpHookHello
+	CLI             string `json:"cli"`
+	PID             int    `json:"pid"`
+	ProtocolVersion int    `json:"protocol_version"`
+}
 
 // AutoCallContext identifies one tool call for auto-mode approval: the
 // CLI-namespaced session, the sub-agent when there is one, the working
@@ -997,9 +1001,14 @@ type AutoCallContext struct {
 // (CanonicalToolInput) and keys any grant on its SHA-256. BudgetMS is what is
 // left of the hook's end-to-end budget; the broker gives up 5 s before it runs
 // out.
+//
+// ToolUseID, like GrantCheckReq's, identifies the tool call but is not part of
+// the grant key: it only lets the broker see that Claude Code denied a retry
+// it had just allowed.
 type AutoDeniedReq struct {
 	Op Op `json:"op"` // = OpAutoDenied
 	AutoCallContext
+	ToolUseID string          `json:"tool_use_id,omitempty"`
 	ToolInput json.RawMessage `json:"tool_input"`
 	Reason    string          `json:"reason"`
 	BudgetMS  int64           `json:"budget_ms"`
@@ -1036,6 +1045,7 @@ type AutoAckMsg struct {
 type GrantCheckReq struct {
 	Op Op `json:"op"` // = OpGrantCheck
 	AutoCallContext
+	ToolUseID string `json:"tool_use_id,omitempty"`
 	InputHash string `json:"input_hash"`
 }
 

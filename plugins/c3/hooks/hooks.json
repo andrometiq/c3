@@ -1,5 +1,5 @@
 {
-  "description": "C3 SessionStart hook — records the stable --resume session id (via c3-broker session-hook) so a resumed session auto-attaches to its last Telegram topic.",
+  "description": "C3 hooks — SessionStart records the stable --resume session id (c3-broker session-hook) so a resumed session auto-attaches to its last Telegram topic. PermissionDenied and PreToolUse carry Telegram approval of auto-mode denials; both are silent unless auto_mode_approval is enabled.",
   "hooks": {
     "SessionStart": [
       {
@@ -8,6 +8,30 @@
           {
             "type": "command",
             "command": "c3-broker session-hook"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "c3-broker pretooluse-hook || exit 0",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PermissionDenied": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "c3-broker permission-denied-hook || exit 0",
+            "timeout": 330
           }
         ]
       }

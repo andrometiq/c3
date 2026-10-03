@@ -1,8 +1,10 @@
-package main
+package peercred
 
 import "golang.org/x/sys/unix"
 
-func crossSessionPeerIdentity(fd int) (int, uint32, error) {
+// Identity returns the pid and uid of the process at the other end of the
+// connected Unix socket fd, as recorded by the kernel.
+func Identity(fd int) (int, uint32, error) {
 	pid, err := unix.GetsockoptInt(fd, unix.SOL_LOCAL, unix.LOCAL_PEERPID)
 	if err != nil {
 		return 0, 0, err

@@ -44,6 +44,7 @@ var autoCardStatus = map[autoState]string{
 	autoDenied:    "❌ Denied",
 	autoTimedOut:  "⌛ Timed out",
 	autoCancelled: "🚫 Cancelled (session ended / hook gone)",
+	autoVetoed:    "⚠️ Allowed, but Claude Code still blocked the retry; it did not run",
 }
 
 // sendAutoCard renders and posts r's card. When the input overflows one
