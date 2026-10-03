@@ -530,6 +530,31 @@ func TestInject_NoPromptUntilDrain(t *testing.T) {
 	}
 }
 
+// expiredNotDoneCtx is a context whose deadline has passed but whose timer
+// has not fired yet — the window between a socket read deadline expiring and
+// context.WithTimeout marking the context done.
+type expiredNotDoneCtx struct{ context.Context }
+
+func (expiredNotDoneCtx) Deadline() (time.Time, bool) { return time.Now().Add(-time.Millisecond), true }
+func (expiredNotDoneCtx) Err() error                  { return nil }
+
+// drainPending must not report a held turn as drained when the deadline has
+// passed but ctx.Err() is still nil: that nil let the next session/prompt go
+// out while the first turn was still running (TestInject_NoPromptUntilDrain
+// failed about one run in five).
+func TestDrainPending_DeadlinePassedBeforeCtxDone(t *testing.T) {
+	client, server := net.Pipe()
+	t.Cleanup(func() { _ = client.Close(); _ = server.Close() })
+	c := &leaderClient{pendingDrainID: 7}
+	err := c.drainPending(expiredNotDoneCtx{context.Background()}, client)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("drainPending past its deadline = %v, want context.DeadlineExceeded", err)
+	}
+	if c.pendingDrainID != 7 {
+		t.Fatalf("an undrained turn must stay pending, pendingDrainID = %d", c.pendingDrainID)
+	}
+}
+
 // ─── Mid-turn retry wall-clock backstop ──────────────────────────────────────
 
 // The long-turn fix made injectWithRetry's mid-turn loop unbounded; since

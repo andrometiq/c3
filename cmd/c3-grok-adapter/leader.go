@@ -581,7 +581,11 @@ func (c *leaderClient) drainPending(ctx context.Context, conn net.Conn) error {
 		if d, ok := ctx.Deadline(); ok {
 			rem := time.Until(d)
 			if rem <= 0 {
-				return ctx.Err()
+				// The socket read deadline can fire a moment before ctx's
+				// own timer marks it done, so ctx.Err() may still be nil
+				// here. Returning it would report the turn as drained and
+				// put the next session/prompt on the wire mid-turn.
+				return context.DeadlineExceeded
 			}
 			if rem < slice {
 				slice = rem
