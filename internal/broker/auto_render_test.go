@@ -86,13 +86,13 @@ func TestAutoRenderFieldsAndLabels(t *testing.T) {
 		t.Fatalf("render: %v, overflow=%t", err, card.overflow != nil)
 	}
 	for _, want := range []string{
-		"<b>tool_name</b>\n<pre>Edit</pre>",
-		"<b>cwd</b>\n<pre>/workspace</pre>",
-		"<b>reason</b>\n<pre>[Code from External]</pre>",
-		"<b>tool_input.file_path</b>\n<pre>&#34;a.go&#34;</pre>",
-		"<b>tool_input.n</b>\n<pre>9007199254740993</pre>",
-		"<b>tool_input.opt</b>\n<pre>null</pre>",
-		`<b>tool_input.nested</b>` + "\n" + `<pre>{&#34;k&#34;:[&#34;v&#34;,1]}</pre>`,
+		"<b>tool_name</b>\n<pre>&#34;Edit&#34;</pre>",
+		"<b>cwd</b>\n<pre>&#34;/workspace&#34;</pre>",
+		"<b>reason</b>\n<pre>&#34;[Code from External]&#34;</pre>",
+		"<b>tool_input[&#34;file_path&#34;]</b>\n<pre>&#34;a.go&#34;</pre>",
+		"<b>tool_input[&#34;n&#34;]</b>\n<pre>9007199254740993</pre>",
+		"<b>tool_input[&#34;opt&#34;]</b>\n<pre>null</pre>",
+		`<b>tool_input[&#34;nested&#34;]</b>` + "\n" + `<pre>{&#34;k&#34;:[&#34;v&#34;,1]}</pre>`,
 		"Request <code>01234567</code> · input <code>aaaaaaaaaaaa</code>",
 		"arms one identical retry for 120 s",
 	} {
@@ -107,8 +107,19 @@ func TestAutoRenderFieldsAndLabels(t *testing.T) {
 		t.Fatal("card does not explain the quoting")
 	}
 	described := renderTestCard(t, "Bash", map[string]any{"command": "ls", "description": "List files"})
-	if !strings.Contains(described.text, "tool_input.description (the model&#39;s own words)") {
+	if !strings.Contains(described.text, "<b>tool_input[&#34;description&#34;] (the model&#39;s own words)</b>") {
 		t.Fatalf("description not marked as the model's words:\n%s", described.text)
+	}
+	// A literal key that spells out the annotation can't pass for the real,
+	// annotated description: its own label ends inside the brackets.
+	spoof := renderTestCard(t, "Bash", map[string]any{"description": "real", "description (the model's own words)": "fake"})
+	for _, want := range []string{
+		"<b>tool_input[&#34;description&#34;] (the model&#39;s own words)</b>\n<pre>&#34;real&#34;</pre>",
+		"<b>tool_input[&#34;description (the model&#39;s own words)&#34;]</b>\n<pre>&#34;fake&#34;</pre>",
+	} {
+		if !strings.Contains(spoof.text, want) {
+			t.Fatalf("missing %q:\n%s", want, spoof.text)
+		}
 	}
 }
 
@@ -220,8 +231,35 @@ func TestAutoRenderDisplayEscaping(t *testing.T) {
 	}
 	// Metadata is untrusted too, and never spans lines.
 	card := renderTestCard(t, "Bash\n\u202e<i>x</i>", map[string]any{})
-	if !strings.Contains(card.text, "<pre>Bash⟦U+000A⟧⟦U+202E⟧&lt;i&gt;x&lt;/i&gt;</pre>") {
+	if !strings.Contains(card.text, "<pre>&#34;Bash⟦U+000A⟧⟦U+202E⟧&lt;i&gt;x&lt;/i&gt;&#34;</pre>") {
 		t.Fatalf("tool_name not escaped:\n%s", card.text)
+	}
+}
+
+// Metadata is quoted, so a cwd with a leading or trailing space can't pass for
+// the same path without it, on the card or in the overflow file.
+func TestAutoRenderMetadataBoundariesAreVisible(t *testing.T) {
+	render := func(cwd string, input map[string]any) autoCard {
+		raw, _ := json.Marshal(input)
+		card, err := renderAutoCard(autoCardFields{requestID: renderTestID, inputHash: renderTestHash, toolName: "Bash",
+			cwd: cwd, reason: "[Code from External]", toolInput: raw, grantTTL: time.Minute})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return card
+	}
+	for _, isOverflow := range []bool{false, true} {
+		input := map[string]any{"command": "ls"}
+		if isOverflow {
+			input = padded(input)
+		}
+		spaced := render(" /workspace/project ", input)
+		if !strings.Contains(spaced.text, "<pre>&#34; /workspace/project &#34;</pre>") {
+			t.Fatalf("overflow=%t: card hides cwd spaces:\n%s", isOverflow, spaced.text)
+		}
+		if isOverflow && !strings.Contains(string(spaced.overflow), "\ncwd\n│ \" /workspace/project \"\n") {
+			t.Fatalf("overflow file hides cwd spaces:\n%.400s", spaced.overflow)
+		}
 	}
 }
 
@@ -260,8 +298,8 @@ func TestAutoRenderOverflowFile(t *testing.T) {
 		t.Fatal("overflow file truncated the input")
 	}
 	for _, want := range []string{
-		"\ntool_input.content\n│ \"line one⟦U+000A⟧\n│ tool_name⟦U+000A⟧\n│ ⟦U+2502⟧ Fake⟦U+000A⟧\n",
-		"\ntool_input.key⟦U+000A⟧with⟦U+000A⟧breaks\n│ \"v\"\n",
+		"\ntool_input[\"content\"]\n│ \"line one⟦U+000A⟧\n│ tool_name⟦U+000A⟧\n│ ⟦U+2502⟧ Fake⟦U+000A⟧\n",
+		"\ntool_input[\"key⟦U+000A⟧with⟦U+000A⟧breaks\"]\n│ \"v\"\n",
 	} {
 		if !strings.Contains(file, want) {
 			t.Fatalf("overflow file missing %q:\n%.600s", want, file)

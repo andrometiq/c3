@@ -57,10 +57,12 @@ func renderAutoCard(fields autoCardFields) (autoCard, error) {
 	if err != nil {
 		return autoCard{}, err
 	}
+	// Metadata is text and is quoted like text values, so leading or trailing
+	// spaces (a cwd of "/work " is not "/work") stay visible.
 	metadata := []autoField{
-		{"tool_name", displayEscape(fields.toolName, false)},
-		{"cwd", displayEscape(fields.cwd, false)},
-		{"reason", displayEscape(fields.reason, false)},
+		{"tool_name", quoted(fields.toolName, false)},
+		{"cwd", quoted(fields.cwd, false)},
+		{"reason", quoted(fields.reason, false)},
 	}
 	shortID, hashPrefix := autoShortID(fields.requestID), fields.inputHash[:12]
 	header := fmt.Sprintf("<b>🛡 Auto mode blocked a tool call</b>\nRequest <code>%s</code> · input <code>%s</code>\n"+
@@ -116,7 +118,7 @@ func writeWrappedLine(file *strings.Builder, line string) {
 }
 
 // autoInputFields lists tool_input's top-level fields in their original order,
-// labelled "tool_input.<key>". A string shows as its text in double quotes; any
+// labelled tool_input["<key>"]. A string shows as its text in double quotes; any
 // other value as compact JSON, which never starts with a quote, so the string
 // "false" and the boolean false can't look alike. A non-object input is one
 // field, "tool_input".
@@ -137,7 +139,10 @@ func autoInputFields(raw json.RawMessage) ([]autoField, error) {
 		if err := decoder.Decode(&value); err != nil {
 			return nil, err
 		}
-		label := "tool_input." + displayEscape(key, false)
+		// The key sits inside tool_input["…"], and any annotation goes after the
+		// closing bracket, so no literal key can render as an annotated label:
+		// a bare label always ends in "], an annotated one never does.
+		label := "tool_input[" + quoted(key, false) + "]"
 		if key == "description" {
 			label += " (the model's own words)"
 		}
@@ -155,13 +160,19 @@ func autoFieldValue(raw json.RawMessage) (string, error) {
 	var text string
 	// Only a JSON string shows as text: null must not render as an empty string.
 	if len(raw) > 0 && raw[0] == '"' && json.Unmarshal(raw, &text) == nil {
-		return `"` + displayEscape(text, true) + `"`, nil
+		return quoted(text, true), nil
 	}
 	var compact bytes.Buffer
 	if err := json.Compact(&compact, raw); err != nil {
 		return "", err
 	}
 	return displayEscape(compact.String(), true), nil
+}
+
+// quoted is displayEscape inside double quotes, the card's mark of a text
+// value. The quotes sit at fixed positions, so no content can fake them.
+func quoted(text string, keepLineBreaks bool) string {
+	return `"` + displayEscape(text, keepLineBreaks) + `"`
 }
 
 // htmlFields renders each field as a bold label over a code block. The value is

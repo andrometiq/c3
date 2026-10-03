@@ -175,13 +175,6 @@ func TestAutoLoopVetoAfterAllow(t *testing.T) {
 	if !strings.Contains(preToolUse(socketPath, loopCall(loopToolInput, "toolu_2", "")), `"allow"`) {
 		t.Fatal("retry not allowed")
 	}
-	// The hook confirms delivery (grant_delivered) right after printing; in
-	// Claude Code a classifier call separates that from any re-denial.
-	eventually(t, func() bool {
-		f.b.auto.mu.Lock()
-		defer f.b.auto.mu.Unlock()
-		return f.b.auto.consumed[autoConsumedCall{key: r.key, toolUseID: "toolu_2"}].isDelivered
-	})
 	if text := awaitOutput(t, startDeniedHook(socketPath, loopCall(loopToolInput, "toolu_2", ""))); text != "" {
 		t.Fatalf("vetoed retry's denial hook printed %q", text)
 	}

@@ -88,6 +88,29 @@ func TestToolInputHash(t *testing.T) {
 	}
 }
 
+func nested(depth int) string {
+	return strings.Repeat("[", depth) + "0" + strings.Repeat("]", depth)
+}
+
+// The walk enforces its own depth limit, below encoding/json's, both for a
+// tool input and for a hook envelope carrying one.
+func TestStrictJSONDepthLimit(t *testing.T) {
+	if _, err := CanonicalToolInput(json.RawMessage(nested(maxJSONDepth))); err != nil {
+		t.Fatalf("depth %d rejected: %v", maxJSONDepth, err)
+	}
+	for _, depth := range []int{maxJSONDepth + 1, 200000} {
+		if _, err := CanonicalToolInput(json.RawMessage(nested(depth))); err == nil || err.Error() != "json: nesting too deep" {
+			t.Fatalf("depth %d: %v, want this package's depth error", depth, err)
+		}
+		envelope := `{"op":"auto_denied","cli":"claude","session_id":"s","cwd":"/w","tool_name":"Bash","tool_input":` +
+			nested(depth) + `}`
+		var request AutoDeniedReq
+		if err := DecodeStrict([]byte(envelope), &request); err == nil || err.Error() != "json: nesting too deep" {
+			t.Fatalf("envelope at depth %d: %v", depth, err)
+		}
+	}
+}
+
 func TestDecodeStrict(t *testing.T) {
 	var request GrantCheckReq
 	if err := DecodeStrict([]byte(`{"op":"grant_check","cli":"claude","session_id":"s"}`), &request); err != nil ||

@@ -387,6 +387,8 @@ func TestHooksSilentOnMalformedStdin(t *testing.T) {
 		`{"session_id":"s","cwd":"/w","tool_name":"Bash","tool_input":{"a":1,"a":2}}`,
 		`{"session_id":"s","cwd":"/w","tool_name":"Bash","tool_input":{"a":"` + backslash + `uD800"}}`,
 		strings.Repeat(" ", ipc.MaxFrameSize+1),
+		`{"session_id":"s","cwd":"/w","tool_name":"Bash","tool_input":` + strings.Repeat("[", 5000) + "0" +
+			strings.Repeat("]", 5000) + `}`,
 	} {
 		if output, _ := runPre(t, stdin, fake.path, time.Second); output != "" {
 			t.Fatalf("pretooluse printed %q", output)

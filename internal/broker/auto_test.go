@@ -413,8 +413,34 @@ func TestAutoArmedWriteFailureArmsNothing(t *testing.T) {
 	}
 }
 
+// The grant is armed before "armed" is written, so the retry's grant_check
+// succeeds however slowly the arming goroutine finishes. Here the write never
+// completes at all.
+func TestAutoGrantArmedBeforeArmedWrite(t *testing.T) {
+	f := newAutoFixture(t)
+	r := f.open(t, f.req)
+	hookSide, brokerSide := net.Pipe() // nobody reads hookSide: the write blocks
+	defer hookSide.Close()
+	defer brokerSide.Close()
+	waiter := &autoWaiter{conn: ipc.NewConn(brokerSide)}
+	f.b.auto.mu.Lock()
+	r.state = autoApproved
+	r.waiters = map[*autoWaiter]struct{}{waiter: {}}
+	f.b.auto.mu.Unlock()
+	done := make(chan struct{})
+	go func() { defer close(done); f.b.armAutoGrant(r, waiter) }()
+	eventually(t, func() bool { return f.state(r) == autoArmed })
+	if !f.b.consumeAutoGrant(f.check()) {
+		t.Fatal("the retry's check failed while the armed write was still in flight")
+	}
+	<-done // the write times out; a consumed grant is not cancelled after the fact
+	if f.state(r) != autoConsumed {
+		t.Fatalf("state %s after the write timed out, want consumed", f.state(r))
+	}
+}
+
 // A hook that blocks on the armed write can't stall a config reload, and the
-// reload stops the handoff with nothing armed.
+// reload cancels the grant and stops the handoff.
 func TestAutoSlowArmedWriteDoesNotBlockDisable(t *testing.T) {
 	f := newAutoFixture(t)
 	r := f.open(t, f.req)
@@ -428,10 +454,7 @@ func TestAutoSlowArmedWriteDoesNotBlockDisable(t *testing.T) {
 	f.b.auto.mu.Unlock()
 	done := make(chan struct{})
 	go func() { defer close(done); f.b.armAutoGrant(r, waiter) }()
-	eventually(t, func() bool { f.b.auto.mu.Lock(); defer f.b.auto.mu.Unlock(); return r.isArming })
-	if f.b.consumeAutoGrant(f.check()) {
-		t.Fatal("grant consumable before the armed write completed")
-	}
+	eventually(t, func() bool { return f.state(r) == autoArmed })
 	disabled := make(chan struct{})
 	go func() { f.setEnabled(false); close(disabled) }()
 	select {
@@ -444,8 +467,8 @@ func TestAutoSlowArmedWriteDoesNotBlockDisable(t *testing.T) {
 	case <-time.After(300 * time.Millisecond): // well under autoReplyTimeout: only cancellation ends it
 		t.Fatal("disable did not stop the handoff")
 	}
-	if f.b.consumeAutoGrant(f.check()) {
-		t.Fatal("the stopped handoff armed a grant")
+	if f.b.consumeAutoGrant(f.check()) || f.state(r) != autoCancelled {
+		t.Fatal("disable left a usable grant")
 	}
 }
 
@@ -1329,7 +1352,7 @@ func TestAutoVetoAfterAllow(t *testing.T) {
 	if !f.b.consumeAutoGrant(check) {
 		t.Fatal("grant not consumed")
 	}
-	f.b.markAutoDelivered(autoConsumedCall{key: r.key, toolUseID: "toolu_retry"})
+	f.b.finishAutoConfirmation(autoConsumedCall{key: r.key, toolUseID: "toolu_retry"}, true)
 	vetoed := f.req
 	vetoed.ToolUseID = "toolu_retry"
 	var decision ipc.AutoDecisionMsg
@@ -1364,7 +1387,7 @@ func TestAutoVetoRecordIsExactAndLapses(t *testing.T) {
 			if !f.b.consumeAutoGrant(check) {
 				t.Fatal("grant not consumed")
 			}
-			f.b.markAutoDelivered(autoConsumedCall{key: r.key, toolUseID: "toolu_retry"})
+			f.b.finishAutoConfirmation(autoConsumedCall{key: r.key, toolUseID: "toolu_retry"}, true)
 			denial := f.req
 			denial.ToolUseID = "toolu_retry"
 			switch name {
@@ -1386,11 +1409,10 @@ func TestAutoVetoRecordIsExactAndLapses(t *testing.T) {
 	}
 }
 
-// If the hook never confirmed it printed the allow (it missed its budget, or
-// predates grant_delivered), a denial of that same call is not a veto: Claude
-// Code overrode nothing. The old request closes as allow-undelivered and the
-// operator gets a fresh card.
-func TestAutoUndeliveredAllowGetsANewCard(t *testing.T) {
+// If the hook's confirmation never came (it missed its budget, or predates
+// grant_delivered), a denial of that same call is not taken for a veto. The
+// old request closes as allow-unconfirmed and the operator gets a fresh card.
+func TestAutoUnconfirmedAllowGetsANewCard(t *testing.T) {
 	f := newAutoFixture(t)
 	r := f.armed(t)
 	f.b.auto.mu.Lock()
@@ -1401,6 +1423,7 @@ func TestAutoUndeliveredAllowGetsANewCard(t *testing.T) {
 	if !f.b.consumeAutoGrant(check) {
 		t.Fatal("grant not consumed")
 	}
+	f.b.finishAutoConfirmation(autoConsumedCall{key: r.key, toolUseID: "toolu_retry"}, false)
 	denial := f.req
 	denial.ToolUseID = "toolu_retry"
 	var fresh *autoRequest
@@ -1408,15 +1431,15 @@ func TestAutoUndeliveredAllowGetsANewCard(t *testing.T) {
 		f.startHook(t, denial)
 		fresh = f.postedCard(t)
 	})
-	if fresh == r || f.state(r) != autoUndelivered {
+	if fresh == r || f.state(r) != autoUnconfirmed {
 		t.Fatalf("no fresh request (old state %s)", f.state(r))
 	}
-	if !strings.Contains(output, "allow-undelivered id="+r.id) || strings.Contains(output, "vetoed-after-allow") {
+	if !strings.Contains(output, "allow-unconfirmed id="+r.id) || strings.Contains(output, "vetoed-after-allow") {
 		t.Fatalf("audit: %s", output)
 	}
 	eventually(t, func() bool {
 		for _, edit := range f.ch.editCallsSnapshot() {
-			if edit.MessageID == 10 && strings.Contains(edit.Text, "didn't reach Claude Code") {
+			if edit.MessageID == 10 && strings.Contains(edit.Text, "couldn't confirm the approval reached Claude Code") {
 				return true
 			}
 		}
@@ -1456,12 +1479,56 @@ func TestAutoGrantDeliveredFrame(t *testing.T) {
 			<-done
 			f.b.auto.mu.Lock()
 			record := f.b.auto.consumed[autoConsumedCall{key: r.key, toolUseID: "toolu_retry"}]
+			isDelivered := record.isDelivered
 			f.b.auto.mu.Unlock()
-			if record.isDelivered != (name == "delivered") {
-				t.Fatalf("delivered=%t", record.isDelivered)
+			select {
+			case <-record.confirmation:
+			default:
+				t.Fatal("the confirmation wait did not end")
+			}
+			if isDelivered != (name == "delivered") {
+				t.Fatalf("delivered=%t", isDelivered)
 			}
 			hook.Close()
 		})
+	}
+}
+
+// A denial of the call can arrive on its own connection while the grant_check
+// connection is still waiting for grant_delivered. It waits for that wait to
+// end, so a confirmation in flight still makes it a veto.
+func TestAutoDenialWaitsForAConfirmationInFlight(t *testing.T) {
+	f := newAutoFixture(t)
+	r := f.armed(t)
+	check := f.check()
+	check.ToolUseID = "toolu_retry"
+	raw, _ := json.Marshal(check)
+	hookSide, brokerSide := net.Pipe()
+	defer hookSide.Close()
+	checkDone := make(chan struct{})
+	go func() {
+		defer close(checkDone)
+		defer brokerSide.Close()
+		f.b.handleGrantCheck(ipc.NewConn(brokerSide), "claude", raw)
+	}()
+	preHook := ipc.NewConn(hookSide)
+	if _, err := preHook.ReadFrame(); err != nil {
+		t.Fatal(err)
+	}
+	denial := f.req
+	denial.ToolUseID = "toolu_retry"
+	deniedHook, _ := f.startHook(t, denial)
+	time.Sleep(50 * time.Millisecond) // the denial is now waiting on the open confirmation
+	if err := preHook.WriteJSON(ipc.GrantDeliveredMsg{Op: ipc.OpGrantDelivered, ToolUseID: "toolu_retry"}); err != nil {
+		t.Fatal(err)
+	}
+	<-checkDone
+	eventually(t, func() bool { return f.state(r) == autoVetoed })
+	if len(f.ch.cards()) != 0 {
+		t.Fatal("a card was posted for a vetoed retry")
+	}
+	if decision := readDecision(t, deniedHook); decision.State != ipc.AutoDecisionNone {
+		t.Fatalf("denial got %+v", decision)
 	}
 }
 

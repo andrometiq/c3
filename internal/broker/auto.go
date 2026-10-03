@@ -54,7 +54,7 @@ type autoState string
 // pending → approved → armed → consumed | expired, or
 // pending | approved → denied | timed_out | cancelled. A consumed grant
 // becomes vetoed when Claude Code denies the very call it allowed, or
-// allow-undelivered when that allow never reached Claude Code.
+// allow-unconfirmed when C3 can't tell that the allow reached Claude Code.
 const (
 	autoPending   autoState = "pending"
 	autoApproved  autoState = "approved" // Allow tapped; nothing armed until a hook acks
@@ -65,9 +65,9 @@ const (
 	autoTimedOut  autoState = "timed_out"
 	autoCancelled autoState = "cancelled"
 	autoVetoed    autoState = "vetoed-after-allow"
-	// autoUndelivered: the grant was consumed but the hook never confirmed it
-	// printed the allow, and the same call was denied again.
-	autoUndelivered autoState = "allow-undelivered"
+	// autoUnconfirmed: the grant was consumed but the hook's confirmation
+	// that it printed the allow never came, and the same call was denied again.
+	autoUnconfirmed autoState = "allow-unconfirmed"
 )
 
 func (s autoState) isLive() bool { return s == autoPending || s == autoApproved || s == autoArmed }
@@ -106,8 +106,7 @@ type autoRequest struct {
 	grantTTL time.Duration
 	expires  time.Time // set when armed
 
-	waiters  map[*autoWaiter]struct{}
-	isArming bool // one waiter is writing "armed"; no other may start
+	waiters map[*autoWaiter]struct{}
 
 	messageID int64 // card message; taps are refused until it is recorded
 	cardText  string
@@ -128,7 +127,7 @@ type autoRegistry struct {
 	// consumed remembers, for one grant lifetime, which tool call (by
 	// tool_use_id) consumed each grant, so a denial of that same call is
 	// recognised as Claude Code vetoing an allowed retry.
-	consumed map[autoConsumedCall]autoConsumedRecord
+	consumed map[autoConsumedCall]*autoConsumedRecord
 }
 
 // autoConsumedCall is a consumed grant's key plus the tool_use_id of the call
@@ -140,9 +139,12 @@ type autoConsumedCall struct {
 }
 
 type autoConsumedRecord struct {
-	request     *autoRequest
-	expires     time.Time
-	isDelivered bool // the hook confirmed it printed the allow (grant_delivered)
+	request *autoRequest
+	expires time.Time
+	// confirmation is closed when handleGrantCheck stops waiting for
+	// grant_delivered, with isDelivered set if the frame came.
+	confirmation chan struct{}
+	isDelivered  bool
 }
 
 // newAutoRequestID returns a fresh 128-bit random request id (§5.2): never
@@ -422,40 +424,18 @@ func (b *Broker) dropAutoWaiter(r *autoRequest, waiter *autoWaiter) {
 	}
 }
 
-// armAutoGrant runs step 3 of the handoff for the waiter that acked: write
-// "armed", and only once that write has completed make the grant consumable. A
-// failed write arms nothing and cancels the request. It reports whether this
-// waiter's exchange is over (an armed frame was attempted); false means arming
-// was not this waiter's to do, and it keeps waiting.
+// armAutoGrant runs step 3 of the handoff for the waiter that acked. The
+// grant is armed under the lock before "armed" is written: the hook prints
+// retry:true as soon as it reads the frame, so the retry's grant_check must
+// already find the grant. A failed write cancels the grant unless it was
+// already used. It reports whether this waiter's exchange is over; false means
+// arming was not this waiter's to do, and it keeps waiting.
 func (b *Broker) armAutoGrant(r *autoRequest, waiter *autoWaiter) bool {
 	b.auto.mu.Lock()
 	_, isWaiting := r.waiters[waiter]
-	if !b.refreshAutoLocked(r) || r.state != autoApproved || r.isArming || !isWaiting {
+	if !b.refreshAutoLocked(r) || r.state != autoApproved || !isWaiting {
 		b.auto.mu.Unlock()
 		return false
-	}
-	// Written outside the lock so a stuck hook socket can't stall other requests
-	// or a config reload; isArming keeps a second waiter from arming meanwhile.
-	r.isArming = true
-	b.auto.mu.Unlock()
-
-	ctx, cancel := context.WithTimeout(r.ctx, autoReplyTimeout)
-	err := waiter.conn.WriteJSONContext(ctx, r.decision(ipc.AutoDecisionArmed))
-	cancel()
-
-	b.auto.mu.Lock()
-	defer b.auto.mu.Unlock()
-	r.isArming = false
-	if err != nil {
-		if r.state.isLive() {
-			b.setAutoStateLocked(r, autoCancelled, "armed write failed: "+err.Error())
-		}
-		return true
-	}
-	// Cancelled, disabled or past the deadline while writing: nothing is armed,
-	// and the hook's retry gets normal permission processing.
-	if !b.refreshAutoLocked(r) || r.state != autoApproved {
-		return true
 	}
 	r.expires = time.Now().Add(r.grantTTL)
 	for connected := range r.waiters {
@@ -463,6 +443,20 @@ func (b *Broker) armAutoGrant(r *autoRequest, waiter *autoWaiter) bool {
 	}
 	b.setAutoStateLocked(r, autoArmed, "")
 	b.refreshAutoAfter(r, r.grantTTL)
+	b.auto.mu.Unlock()
+
+	// Written outside the lock so a stuck hook socket can't stall other requests
+	// or a config reload.
+	ctx, cancel := context.WithTimeout(r.ctx, autoReplyTimeout)
+	err := waiter.conn.WriteJSONContext(ctx, r.decision(ipc.AutoDecisionArmed))
+	cancel()
+	if err != nil {
+		b.auto.mu.Lock()
+		if r.state == autoArmed {
+			b.setAutoStateLocked(r, autoCancelled, "armed write failed: "+err.Error())
+		}
+		b.auto.mu.Unlock()
+	}
 	return true
 }
 
@@ -478,21 +472,46 @@ func (b *Broker) consumeAutoGrant(req ipc.GrantCheckReq) bool {
 	b.setAutoStateLocked(r, autoConsumed, "tool_use_id="+req.ToolUseID)
 	if req.ToolUseID != "" {
 		if b.auto.consumed == nil {
-			b.auto.consumed = map[autoConsumedCall]autoConsumedRecord{}
+			b.auto.consumed = map[autoConsumedCall]*autoConsumedRecord{}
 		}
 		call := autoConsumedCall{key: r.key, toolUseID: req.ToolUseID}
-		b.auto.consumed[call] = autoConsumedRecord{request: r, expires: time.Now().Add(r.grantTTL)}
+		b.auto.consumed[call] = &autoConsumedRecord{request: r, expires: time.Now().Add(r.grantTTL),
+			confirmation: make(chan struct{})}
 	}
 	return true
 }
 
-// markAutoDelivered records that the hook printed the allow for call.
-func (b *Broker) markAutoDelivered(call autoConsumedCall) {
+// finishAutoConfirmation ends the wait for call's grant_delivered, recording
+// whether it came. handleGrantCheck calls it exactly once per consumed call.
+func (b *Broker) finishAutoConfirmation(call autoConsumedCall, isDelivered bool) {
 	b.auto.mu.Lock()
 	defer b.auto.mu.Unlock()
-	if record, isFound := b.auto.consumed[call]; isFound {
-		record.isDelivered = true
-		b.auto.consumed[call] = record
+	if record := b.auto.consumed[call]; record != nil {
+		record.isDelivered = isDelivered
+		close(record.confirmation)
+	}
+}
+
+// awaitAutoConfirmation lets an open grant_delivered wait for call finish
+// before a denial of call is classified, so a confirmation still in flight on
+// the grant_check connection is not mistaken for a missing one. It waits at
+// most grantDeliveredWait and never holds b.auto.mu while waiting.
+func (b *Broker) awaitAutoConfirmation(call autoConsumedCall) {
+	if call.toolUseID == "" {
+		return
+	}
+	b.auto.mu.Lock()
+	record := b.auto.consumed[call]
+	b.auto.mu.Unlock()
+	if record == nil {
+		return
+	}
+	timer := time.NewTimer(grantDeliveredWait)
+	defer timer.Stop()
+	select {
+	case <-record.confirmation:
+	case <-timer.C:
+	case <-b.ctx.Done():
 	}
 }
 
@@ -503,12 +522,13 @@ func (b *Broker) markAutoDelivered(call autoConsumedCall) {
 // card says so, and no new card is posted for a retry the operator already
 // approved.
 //
-// If the hook never confirmed it printed the allow (it ran out of time, or
-// predates grant_delivered), Claude Code overrode nothing: the old request is
-// closed and the denial gets a fresh card, so the operator can approve again.
+// If the hook's confirmation never came (it ran out of time, or predates
+// grant_delivered), C3 can't tell that the allow reached Claude Code: the old
+// request is closed as allow-unconfirmed and the denial gets a fresh card, so
+// the operator can approve again. Callers run awaitAutoConfirmation first.
 func (b *Broker) vetoAutoLocked(call autoConsumedCall) bool {
-	record, isFound := b.auto.consumed[call]
-	if call.toolUseID == "" || !isFound {
+	record := b.auto.consumed[call]
+	if call.toolUseID == "" || record == nil {
 		return false
 	}
 	delete(b.auto.consumed, call)
@@ -516,8 +536,8 @@ func (b *Broker) vetoAutoLocked(call autoConsumedCall) bool {
 		return false
 	}
 	if !record.isDelivered {
-		b.setAutoStateLocked(record.request, autoUndelivered,
-			"tool_use_id="+call.toolUseID+": hook did not confirm the allow; asking again")
+		b.setAutoStateLocked(record.request, autoUnconfirmed,
+			"tool_use_id="+call.toolUseID+": no grant_delivered from the hook; asking again")
 		return false
 	}
 	b.setAutoStateLocked(record.request, autoVetoed, "tool_use_id="+call.toolUseID)

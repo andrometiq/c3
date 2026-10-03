@@ -47,9 +47,16 @@ func DecodeStrict(raw []byte, v any) error {
 	return json.Unmarshal(raw, v)
 }
 
+// maxJSONDepth bounds object and array nesting in parseStrictJSON, whose walk
+// recurses once per level. Tool inputs nest a handful of levels; the limit is
+// explicit, and below encoding/json's own, so the walk never depends on the
+// standard library's internal bound.
+const maxJSONDepth = 1000
+
 // parseStrictJSON decodes exactly one JSON value, with numbers as json.Number.
 // It rejects invalid UTF-8, unpaired \uD800–\uDFFF escapes, duplicate object
-// keys at any depth and any data after the value.
+// keys at any depth, nesting deeper than maxJSONDepth and any data after the
+// value.
 func parseStrictJSON(raw []byte) (any, error) {
 	if !utf8.Valid(raw) {
 		return nil, errors.New("json: not valid UTF-8")
@@ -59,7 +66,7 @@ func parseStrictJSON(raw []byte) (any, error) {
 	}
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.UseNumber()
-	value, err := readStrictValue(decoder)
+	value, err := readStrictValue(decoder, 0)
 	if err != nil {
 		return nil, err
 	}
@@ -118,7 +125,8 @@ func hexEscape(raw []byte, start int) (uint64, bool) {
 	return code, err == nil
 }
 
-func readStrictValue(decoder *json.Decoder) (any, error) {
+// readStrictValue reads one value whose enclosing nesting depth is depth.
+func readStrictValue(decoder *json.Decoder, depth int) (any, error) {
 	token, err := decoder.Token()
 	if err != nil {
 		return nil, err
@@ -126,6 +134,9 @@ func readStrictValue(decoder *json.Decoder) (any, error) {
 	delimiter, isDelimiter := token.(json.Delim)
 	if !isDelimiter {
 		return token, nil
+	}
+	if depth >= maxJSONDepth {
+		return nil, errors.New("json: nesting too deep")
 	}
 	switch delimiter {
 	case '{':
@@ -142,7 +153,7 @@ func readStrictValue(decoder *json.Decoder) (any, error) {
 			if _, exists := object[key]; exists {
 				return nil, errors.New("json: duplicate object key")
 			}
-			if object[key], err = readStrictValue(decoder); err != nil {
+			if object[key], err = readStrictValue(decoder, depth+1); err != nil {
 				return nil, err
 			}
 		}
@@ -153,7 +164,7 @@ func readStrictValue(decoder *json.Decoder) (any, error) {
 	case '[':
 		array := []any{}
 		for decoder.More() {
-			value, err := readStrictValue(decoder)
+			value, err := readStrictValue(decoder, depth+1)
 			if err != nil {
 				return nil, err
 			}

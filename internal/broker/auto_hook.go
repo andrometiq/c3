@@ -17,7 +17,7 @@ const grantCheckTimeout = 300 * time.Millisecond
 const grantDeliveredWait = time.Second
 
 // handleAutoClient serves the single op of a transient hook connection, whose
-// first frame (raw) is an ipc.HookHelloMsg. The connection is never registered
+// first frame (helloFrame) is an ipc.HookHelloMsg. The connection is never registered
 // as an adapter and can never claim a route. HandleConn closes it when this
 // returns.
 func (b *Broker) handleAutoClient(conn *ipc.Conn, helloFrame []byte) {
@@ -61,6 +61,8 @@ func (b *Broker) handleAutoDenied(conn *ipc.Conn, helloCLI string, raw []byte) {
 	var r *autoRequest
 	var isNew bool
 	if refusal == "" {
+		key := autoKey{AutoCallContext: req.AutoCallContext, inputHash: inputHash}
+		b.awaitAutoConfirmation(autoConsumedCall{key: key, toolUseID: req.ToolUseID})
 		r, isNew, refusal = b.openAutoRequest(req, inputHash, waiter, received)
 	}
 	if r == nil {
@@ -194,6 +196,12 @@ func writeAutoDecision(conn *ipc.Conn, deadline time.Time, decision ipc.AutoDeci
 func (b *Broker) handleGrantCheck(conn *ipc.Conn, helloCLI string, raw []byte) {
 	var req ipc.GrantCheckReq
 	isAllowed := ipc.DecodeStrict(raw, &req) == nil && req.CLI == helloCLI && b.consumeAutoGrant(req)
+	isDelivered := false
+	if isAllowed && req.ToolUseID != "" {
+		call := autoConsumedCall{key: autoKey{AutoCallContext: req.AutoCallContext, inputHash: req.InputHash},
+			toolUseID: req.ToolUseID}
+		defer func() { b.finishAutoConfirmation(call, isDelivered) }()
+	}
 	ctx, cancel := context.WithTimeout(b.ctx, grantCheckTimeout)
 	defer cancel()
 	err := conn.WriteJSONContext(ctx, ipc.GrantCheckResp{Op: ipc.OpGrantCheckResult, Allow: isAllowed})
@@ -209,11 +217,8 @@ func (b *Broker) handleGrantCheck(conn *ipc.Conn, helloCLI string, raw []byte) {
 	select {
 	case frame := <-frames:
 		var delivered ipc.GrantDeliveredMsg
-		if ipc.DecodeStrict(frame, &delivered) == nil && delivered.Op == ipc.OpGrantDelivered &&
-			delivered.ToolUseID == req.ToolUseID {
-			key := autoKey{AutoCallContext: req.AutoCallContext, inputHash: req.InputHash}
-			b.markAutoDelivered(autoConsumedCall{key: key, toolUseID: req.ToolUseID})
-		}
+		isDelivered = ipc.DecodeStrict(frame, &delivered) == nil && delivered.Op == ipc.OpGrantDelivered &&
+			delivered.ToolUseID == req.ToolUseID
 	case <-time.After(grantDeliveredWait):
 	case <-b.ctx.Done():
 	}
