@@ -3,6 +3,7 @@ package broker
 import (
 	"bytes"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"testing"
@@ -37,6 +38,11 @@ func loopCall(toolInput, toolUseID, agentID string) string {
 // allowlisted so taps from it pass the inbound gate.
 func listenAuto(t *testing.T, f *autoFixture) string {
 	t.Helper()
+	// The real hook client verifies the broker's peer credentials, which
+	// exist only on Linux and macOS; elsewhere the hooks are always silent.
+	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
+		t.Skip("hooks are silent on this platform: the broker peer can't be verified")
+	}
 	mf := f.b.Mappings().Clone()
 	mf.AddAllowedGroup(f.route.ChatID)
 	f.b.SetMappings(mf)

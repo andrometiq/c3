@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -83,7 +84,28 @@ func payload(extra string) string {
 		`,"reason":"[Code from External]"` + extra + `}`
 }
 
-func testEnv(budget time.Duration) hookEnv { return defaultEnv(budget) }
+// testEnv is the production env with a peer check that always passes, so
+// protocol tests run on every platform. The real check is exercised by
+// TestHooksWithTheRealPeerCheck and, for rejection, TestHooksRefuseAnUnverifiedPeer.
+func testEnv(budget time.Duration) hookEnv {
+	env := defaultEnv(budget)
+	env.verifyPeer = func(net.Conn) error { return nil }
+	return env
+}
+
+// receive takes one value from ch, failing the test instead of hanging when
+// nothing arrives.
+func receive[T any](t *testing.T, ch <-chan T, what string) T {
+	t.Helper()
+	select {
+	case value := <-ch:
+		return value
+	case <-time.After(3 * time.Second):
+		t.Fatalf("no %s within 3 s", what)
+		var zero T
+		return zero
+	}
+}
 
 func runPreWith(t *testing.T, stdin, socketPath string, env hookEnv) (string, time.Duration) {
 	t.Helper()
@@ -127,12 +149,12 @@ func TestPreToolUseAllowsOnlyAConsumedGrant(t *testing.T) {
 	if strings.Contains(output, "updatedInput") {
 		t.Fatal("allow carries updatedInput")
 	}
-	hello := <-fake.hellos
+	hello := receive(t, fake.hellos, "hello")
 	if hello.Op != ipc.OpHookHello || hello.CLI != CLI || hello.ProtocolVersion != ipc.ProtocolVersion {
 		t.Fatalf("hello %+v", hello)
 	}
 	var request ipc.GrantCheckReq
-	if err := ipc.DecodeStrict(<-fake.ops, &request); err != nil {
+	if err := ipc.DecodeStrict(receive(t, fake.ops, "op frame"), &request); err != nil {
 		t.Fatal(err)
 	}
 	wantHash, _ := ipc.ToolInputHash(json.RawMessage(testInput))
@@ -244,7 +266,7 @@ func TestPreToolUseConfirmsDelivery(t *testing.T) {
 			followUps <- frame
 		})
 		output, _ := runPre(t, payload(`,"tool_use_id":"toolu_9"`), fake.path, time.Second)
-		frame := <-followUps
+		frame := receive(t, followUps, "follow-up read")
 		if !isAllowed {
 			if output != "" || frame != nil {
 				t.Fatalf("no allow, yet printed %q and sent %s", output, frame)
@@ -301,7 +323,27 @@ func TestPreToolUseAllowJudgedAfterDeadlineIsSilent(t *testing.T) {
 	}
 }
 
-// A peer that is not this user gets nothing: not the hello, not the input.
+// With the real peer check, a broker socket owned by this user is accepted
+// and the hook completes its exchange. Peer credentials exist only on Linux
+// and macOS; elsewhere the check always rejects (see the test below).
+func TestHooksWithTheRealPeerCheck(t *testing.T) {
+	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
+		t.Skip("no peer credentials on this platform; the hooks are silent here")
+	}
+	var fake *fakeBroker
+	fake = newFakeBroker(t, func(conn *ipc.Conn, _ net.Conn) {
+		if fake.helloAndOp(conn) {
+			writeRaw(conn, `{"op":"grant_check_result","allow":true}`)
+		}
+	})
+	if output, _ := runPreWith(t, payload(""), fake.path, defaultEnv(time.Second)); output != allowOutput {
+		t.Fatalf("printed %q with the real peer check", output)
+	}
+}
+
+// A peer that is not this user, or one that can't be verified (every peer on
+// a platform without peer credentials), gets nothing: not the hello, not the
+// input, and the hook prints nothing.
 func TestHooksRefuseAnUnverifiedPeer(t *testing.T) {
 	var fake *fakeBroker
 	fake = newFakeBroker(t, func(conn *ipc.Conn, _ net.Conn) {
@@ -367,7 +409,7 @@ func TestHooksAgainstABrokerThatOnlyKnowsHello(t *testing.T) {
 		t.Fatalf("permission-denied printed %q", output)
 	}
 	for range 2 {
-		if frames := <-frameCounts; frames != 1 {
+		if frames := receive(t, frameCounts, "old broker frame count"); frames != 1 {
 			t.Fatalf("hook sent %d frames to an old broker, want only the first", frames)
 		}
 	}
@@ -468,11 +510,11 @@ func TestPermissionDeniedRetriesOnlyAfterArmed(t *testing.T) {
 	if output := runDenied(t, stdin, fake.path, PermissionDeniedBudget); output != retryOutput {
 		t.Fatalf("output %q, want retry", output)
 	}
-	if hello := <-fake.hellos; hello.CLI != CLI || hello.Op != ipc.OpHookHello {
+	if hello := receive(t, fake.hellos, "hello"); hello.CLI != CLI || hello.Op != ipc.OpHookHello {
 		t.Fatalf("hello %+v", hello)
 	}
 	var request ipc.AutoDeniedReq
-	if err := ipc.DecodeStrict(<-fake.ops, &request); err != nil {
+	if err := ipc.DecodeStrict(receive(t, fake.ops, "op frame"), &request); err != nil {
 		t.Fatal(err)
 	}
 	want := ipc.AutoCallContext{CLI: CLI, SessionID: "session-1", AgentID: "agent-7", CWD: "/workspace", ToolName: "Bash"}
@@ -482,7 +524,7 @@ func TestPermissionDeniedRetriesOnlyAfterArmed(t *testing.T) {
 		t.Fatalf("request %+v", request)
 	}
 	var ack ipc.AutoAckMsg
-	if err := ipc.DecodeStrict(<-acks, &ack); err != nil || ack.Op != ipc.OpAutoAck || ack.RequestID != "r1" {
+	if err := ipc.DecodeStrict(receive(t, acks, "ack"), &ack); err != nil || ack.Op != ipc.OpAutoAck || ack.RequestID != "r1" {
 		t.Fatalf("ack %+v (%v)", ack, err)
 	}
 }
