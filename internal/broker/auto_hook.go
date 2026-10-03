@@ -126,23 +126,28 @@ func readAutoFrames(conn *ipc.Conn) (<-chan []byte, <-chan struct{}) {
 	return frames, disconnected
 }
 
-// awaitAutoOutcome drives one waiter through the handoff: "approved" once the
-// operator taps Allow, then "armed" after this waiter's ack arms the grant (or
-// after another waiter's ack did), else "none" before the deadline. It returns
-// when this waiter's exchange is over.
+// awaitAutoOutcome drives one waiter through the handoff. Each frame is
+// decided from request state at the moment of sending, never from anything
+// remembered: "approved" while the operator's Allow awaits an ack, "armed"
+// only while the grant is armed (consumable), "none" for anything else, and
+// nothing after the deadline. A valid ack arms the grant (armAutoGrant); this
+// waiter then announces it like any other. It returns when this waiter's
+// exchange is over.
 func (b *Broker) awaitAutoOutcome(r *autoRequest, waiter *autoWaiter, frames <-chan []byte, disconnected <-chan struct{}) {
 	isApprovedSent := false
 	for {
 		b.auto.mu.Lock()
 		isLive := b.refreshAutoLocked(r)
-		state, changed, isArmed := r.state, r.changed, waiter.isArmed
+		state, changed := r.state, r.changed
 		b.auto.mu.Unlock()
 		switch {
-		case isArmed:
-			// Armed by another waiter while this one was connected. The grant is
-			// already consumable (and may be consumed); telling this hook is best
-			// effort, so it is not bound to r.ctx, which consumption cancels.
-			writeAutoDecision(waiter.conn, r.deadline, r.decision(ipc.AutoDecisionArmed))
+		case isLive && state == autoArmed:
+			// r.ctx ends when the grant does (used, expired, cancelled) and at
+			// the deadline, so an announcement can't outlive the grant.
+			ctx, cancel := context.WithTimeout(r.ctx, autoReplyTimeout)
+			err := waiter.conn.WriteJSONContext(ctx, r.decision(ipc.AutoDecisionArmed))
+			cancel()
+			b.finishAutoAnnouncement(r, waiter, err)
 			return
 		case !isLive:
 			writeAutoDecision(waiter.conn, r.deadline, autoNone)
@@ -163,9 +168,7 @@ func (b *Broker) awaitAutoOutcome(r *autoRequest, waiter *autoWaiter, frames <-c
 			if !isApprovedSent || ipc.DecodeStrict(frame, &ack) != nil || ack.Op != ipc.OpAutoAck || ack.RequestID != r.id {
 				return
 			}
-			if b.armAutoGrant(r, waiter) {
-				return
-			}
+			b.armAutoGrant(r, waiter)
 		}
 	}
 }

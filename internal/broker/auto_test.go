@@ -396,79 +396,205 @@ func TestAutoConcurrentConsumeIsAtomic(t *testing.T) {
 	}
 }
 
-// A failed "armed" write arms nothing.
-func TestAutoArmedWriteFailureArmsNothing(t *testing.T) {
-	f := newAutoFixture(t)
-	r := f.open(t, f.req)
+// handoffWaiter is a waiter whose hook side the test drives directly.
+type handoffWaiter struct {
+	hook   net.Conn
+	waiter *autoWaiter
+}
+
+// addWaiter joins a waiter to r without starting it.
+func addWaiter(f *autoFixture, r *autoRequest) *handoffWaiter {
 	hookSide, brokerSide := net.Pipe()
-	hookSide.Close()
-	defer brokerSide.Close()
+	f.t.Cleanup(func() { hookSide.Close(); brokerSide.Close() })
 	waiter := &autoWaiter{conn: ipc.NewConn(brokerSide)}
 	f.b.auto.mu.Lock()
-	r.waiters = map[*autoWaiter]struct{}{waiter: {}}
-	r.state = autoApproved
+	r.waiters[waiter] = struct{}{}
 	f.b.auto.mu.Unlock()
-	if !f.b.armAutoGrant(r, waiter) || f.b.consumeAutoGrant(f.check()) || f.state(r) != autoCancelled {
-		t.Fatal("a failed armed write left a grant")
-	}
+	return &handoffWaiter{hook: hookSide, waiter: waiter}
 }
 
-// The grant is armed before "armed" is written, so the retry's grant_check
-// succeeds however slowly the arming goroutine finishes. Here the write never
-// completes at all.
-func TestAutoGrantArmedBeforeArmedWrite(t *testing.T) {
-	f := newAutoFixture(t)
-	r := f.open(t, f.req)
-	hookSide, brokerSide := net.Pipe() // nobody reads hookSide: the write blocks
-	defer hookSide.Close()
-	defer brokerSide.Close()
-	waiter := &autoWaiter{conn: ipc.NewConn(brokerSide)}
-	f.b.auto.mu.Lock()
-	r.state = autoApproved
-	r.waiters = map[*autoWaiter]struct{}{waiter: {}}
-	f.b.auto.mu.Unlock()
+// run starts the waiter as handleAutoDenied would, minus the frame reader.
+func (w *handoffWaiter) run(f *autoFixture, r *autoRequest) <-chan struct{} {
 	done := make(chan struct{})
-	go func() { defer close(done); f.b.armAutoGrant(r, waiter) }()
-	eventually(t, func() bool { return f.state(r) == autoArmed })
-	if !f.b.consumeAutoGrant(f.check()) {
-		t.Fatal("the retry's check failed while the armed write was still in flight")
-	}
-	<-done // the write times out; a consumed grant is not cancelled after the fact
-	if f.state(r) != autoConsumed {
-		t.Fatalf("state %s after the write timed out, want consumed", f.state(r))
-	}
+	go func() {
+		defer close(done)
+		defer f.b.dropAutoWaiter(r, w.waiter)
+		f.b.awaitAutoOutcome(r, w.waiter, nil, nil)
+	}()
+	return done
 }
 
-// A hook that blocks on the armed write can't stall a config reload, and the
-// reload cancels the grant and stops the handoff.
-func TestAutoSlowArmedWriteDoesNotBlockDisable(t *testing.T) {
-	f := newAutoFixture(t)
-	r := f.open(t, f.req)
-	hookSide, brokerSide := net.Pipe() // nobody reads hookSide
-	defer hookSide.Close()
-	defer brokerSide.Close()
-	waiter := &autoWaiter{conn: ipc.NewConn(brokerSide)}
-	f.b.auto.mu.Lock()
-	r.state = autoApproved
-	r.waiters = map[*autoWaiter]struct{}{waiter: {}}
-	f.b.auto.mu.Unlock()
-	done := make(chan struct{})
-	go func() { defer close(done); f.b.armAutoGrant(r, waiter) }()
-	eventually(t, func() bool { return f.state(r) == autoArmed })
-	disabled := make(chan struct{})
-	go func() { f.setEnabled(false); close(disabled) }()
-	select {
-	case <-disabled:
-	case <-time.After(500 * time.Millisecond):
-		t.Fatal("a blocked handoff stalled the config reload")
+// frame reads the waiter's next frame, or "" if the connection ends.
+func (w *handoffWaiter) frame(t *testing.T) string {
+	t.Helper()
+	_ = w.hook.SetReadDeadline(time.Now().Add(2 * time.Second))
+	frame, err := ipc.NewConn(w.hook).ReadFrame()
+	if err != nil {
+		return ""
 	}
+	var decision ipc.AutoDecisionMsg
+	if json.Unmarshal(frame, &decision) != nil {
+		t.Fatalf("bad frame %s", frame)
+	}
+	return decision.State
+}
+
+// approvedRequest is a request the operator allowed, with one waiter that is
+// about to ack.
+func approvedRequest(t *testing.T, f *autoFixture) (*autoRequest, *handoffWaiter) {
+	t.Helper()
+	r := f.open(t, f.req)
+	f.b.auto.mu.Lock()
+	r.waiters = map[*autoWaiter]struct{}{}
+	r.state = autoApproved
+	f.b.auto.mu.Unlock()
+	return r, addWaiter(f, r)
+}
+
+func wait(t *testing.T, done <-chan struct{}, limit time.Duration) {
+	t.Helper()
 	select {
 	case <-done:
-	case <-time.After(300 * time.Millisecond): // well under autoReplyTimeout: only cancellation ends it
-		t.Fatal("disable did not stop the handoff")
+	case <-time.After(limit):
+		t.Fatalf("waiter still running after %v", limit)
 	}
-	if f.b.consumeAutoGrant(f.check()) || f.state(r) != autoCancelled {
+}
+
+// W1: the acking waiter dies before it can announce; a healthy waiter still
+// announces, and the grant stays usable.
+func TestAutoHandoffSurvivorKeepsTheGrant(t *testing.T) {
+	f := newAutoFixture(t)
+	r, acker := approvedRequest(t, f)
+	survivor := addWaiter(f, r)
+	acker.hook.Close()
+	f.b.armAutoGrant(r, acker.waiter)
+	wait(t, acker.run(f, r), time.Second)
+	survivorDone := survivor.run(f, r)
+	if state := survivor.frame(t); state != ipc.AutoDecisionArmed {
+		t.Fatalf("survivor got %q", state)
+	}
+	wait(t, survivorDone, time.Second)
+	if !f.b.consumeAutoGrant(f.check()) {
+		t.Fatal("a dead waiter's failure discarded the survivor's grant")
+	}
+}
+
+// W2 and W3: a grant cancelled or expired before a waiter decides is never
+// announced; that waiter is told "none".
+func TestAutoHandoffNeverAnnouncesADeadGrant(t *testing.T) {
+	for _, name := range []string{"disabled", "detached", "expired"} {
+		t.Run(name, func(t *testing.T) {
+			f := newAutoFixture(t)
+			r, acker := approvedRequest(t, f)
+			late := addWaiter(f, r)
+			f.b.armAutoGrant(r, acker.waiter)
+			switch name {
+			case "disabled":
+				f.setEnabled(false)
+			case "detached":
+				f.b.cancelAuto(f.owner, &f.route, "session detached")
+			case "expired":
+				f.b.auto.mu.Lock()
+				r.expires = time.Now().Add(-time.Second)
+				f.b.auto.mu.Unlock()
+			}
+			done := late.run(f, r)
+			if state := late.frame(t); state != ipc.AutoDecisionNone {
+				t.Fatalf("got %q for a %s grant", state, name)
+			}
+			wait(t, done, time.Second)
+		})
+	}
+}
+
+// W4: once one waiter has announced, another waiter's failure leaves the
+// grant alone.
+func TestAutoHandoffFailureAfterAnnouncementKeepsTheGrant(t *testing.T) {
+	f := newAutoFixture(t)
+	r, announcer := approvedRequest(t, f)
+	failing := addWaiter(f, r)
+	f.b.armAutoGrant(r, announcer.waiter)
+	announcerDone := announcer.run(f, r)
+	if state := announcer.frame(t); state != ipc.AutoDecisionArmed {
+		t.Fatalf("announcer got %q", state)
+	}
+	wait(t, announcerDone, time.Second)
+	failing.hook.Close()
+	wait(t, failing.run(f, r), time.Second)
+	if !f.b.consumeAutoGrant(f.check()) {
+		t.Fatal("a later failure cancelled an announced grant")
+	}
+}
+
+// When no waiter could be told, the grant is cancelled with that cause.
+func TestAutoHandoffNoHookToldCancels(t *testing.T) {
+	f := newAutoFixture(t)
+	r, first := approvedRequest(t, f)
+	second := addWaiter(f, r)
+	first.hook.Close()
+	second.hook.Close()
+	f.b.armAutoGrant(r, first.waiter)
+	output := captureLog(t, func() {
+		wait(t, first.run(f, r), time.Second)
+		wait(t, second.run(f, r), time.Second)
+	})
+	if f.state(r) != autoCancelled || f.b.consumeAutoGrant(f.check()) {
+		t.Fatalf("state %s: a grant no hook was told about survived", f.state(r))
+	}
+	if !strings.Contains(output, `detail="no hook could be told`) {
+		t.Fatalf("cancel cause not audited: %s", output)
+	}
+}
+
+// A grant used before a waiter decides is gone: that waiter is told "none",
+// and there was exactly one grant.
+func TestAutoHandoffConsumedBeforeDecisionIsNone(t *testing.T) {
+	f := newAutoFixture(t)
+	r, acker := approvedRequest(t, f)
+	late := addWaiter(f, r)
+	f.b.armAutoGrant(r, acker.waiter)
+	if !f.b.consumeAutoGrant(f.check()) {
+		t.Fatal("grant not consumable")
+	}
+	done := late.run(f, r)
+	if state := late.frame(t); state != ipc.AutoDecisionNone {
+		t.Fatalf("late waiter got %q after the grant was used", state)
+	}
+	wait(t, done, time.Second)
+	if f.b.consumeAutoGrant(f.check()) {
+		t.Fatal("a second grant")
+	}
+}
+
+// A disable aborts an "armed" write still in flight, for any waiter, well
+// within the write's own timeout.
+func TestAutoHandoffDisableAbortsAnInFlightAnnouncement(t *testing.T) {
+	f := newAutoFixture(t)
+	r, acker := approvedRequest(t, f)
+	stuck := addWaiter(f, r) // nobody reads its hook side: the write blocks
+	f.b.armAutoGrant(r, acker.waiter)
+	done := stuck.run(f, r)
+	time.Sleep(50 * time.Millisecond)
+	f.setEnabled(false)
+	wait(t, done, 300*time.Millisecond)
+	if f.b.consumeAutoGrant(f.check()) {
 		t.Fatal("disable left a usable grant")
+	}
+}
+
+// Arming is a state change: the retry's grant_check finds the grant while
+// the announcement is still in flight.
+func TestAutoGrantArmedBeforeAnnouncement(t *testing.T) {
+	f := newAutoFixture(t)
+	r, acker := approvedRequest(t, f)
+	f.b.armAutoGrant(r, acker.waiter)
+	done := acker.run(f, r) // its hook side is never read: the write blocks
+	if !f.b.consumeAutoGrant(f.check()) {
+		t.Fatal("the retry's check failed while the announcement was in flight")
+	}
+	wait(t, done, 2*time.Second) // an unread "none" or "armed" write gives up after 1 s
+	if f.state(r) != autoConsumed {
+		t.Fatalf("state %s, want consumed", f.state(r))
 	}
 }
 
@@ -647,8 +773,8 @@ func TestAutoDeduplicatedWaiters(t *testing.T) {
 	}
 }
 
-// Every waiter connected when the grant is armed is told "armed", even after
-// the grant is consumed; there is still only one grant.
+// Every waiter connected while the grant is armed is told "armed", and there
+// is still only one grant.
 func TestAutoAllLiveWaitersToldArmed(t *testing.T) {
 	f := newAutoFixture(t)
 	first, firstDone := f.startHook(t, f.req)
@@ -660,19 +786,13 @@ func TestAutoAllLiveWaitersToldArmed(t *testing.T) {
 		t.Fatal("waiters not approved")
 	}
 	ack(t, first, r)
-	if readDecision(t, first).State != ipc.AutoDecisionArmed {
-		t.Fatal("first waiter not armed")
+	if readDecision(t, first).State != ipc.AutoDecisionArmed || readDecision(t, second).State != ipc.AutoDecisionArmed {
+		t.Fatal("not every waiter was told armed")
 	}
 	<-firstDone
-	if !f.b.consumeAutoGrant(f.check()) {
-		t.Fatal("grant not consumable")
-	}
-	if readDecision(t, second).State != ipc.AutoDecisionArmed {
-		t.Fatal("second waiter not told armed")
-	}
 	<-secondDone
-	if f.b.consumeAutoGrant(f.check()) {
-		t.Fatal("second waiter produced another grant")
+	if !f.b.consumeAutoGrant(f.check()) || f.b.consumeAutoGrant(f.check()) {
+		t.Fatal("not exactly one grant")
 	}
 }
 

@@ -80,7 +80,7 @@ func RunPreToolUse(stdin io.Reader, stdout io.Writer, socketPath string) {
 
 func runPreToolUse(stdin io.Reader, stdout io.Writer, socketPath string, env hookEnv) {
 	deadline := env.now().Add(env.budget)
-	in, ok := readHookInput(stdin)
+	in, ok := readHookInput(stdin, deadline)
 	if !ok {
 		return
 	}
@@ -129,7 +129,7 @@ func RunPermissionDenied(stdin io.Reader, stdout io.Writer, socketPath string) {
 
 func runPermissionDenied(stdin io.Reader, stdout io.Writer, socketPath string, env hookEnv) {
 	deadline := env.now().Add(env.budget)
-	in, ok := readHookInput(stdin)
+	in, ok := readHookInput(stdin, deadline)
 	if !ok || !json.Valid(in.ToolInput) {
 		return
 	}
@@ -183,9 +183,28 @@ func runPermissionDenied(stdin io.Reader, stdout io.Writer, socketPath string, e
 }
 
 // readHookInput strictly decodes the hook payload, capped at the IPC frame
-// size since it is forwarded to the broker.
-func readHookInput(stdin io.Reader) (hookInput, bool) {
-	raw, err := io.ReadAll(io.LimitReader(stdin, ipc.MaxFrameSize+1))
+// size since it is forwarded to the broker. The read obeys the hook's
+// deadline: a stdin that never reaches EOF gets no answer, not a stalled hook.
+// The reading goroutine is abandoned on expiry; the process exits right after.
+func readHookInput(stdin io.Reader, deadline time.Time) (hookInput, bool) {
+	type readResult struct {
+		raw []byte
+		err error
+	}
+	results := make(chan readResult, 1)
+	go func() {
+		raw, err := io.ReadAll(io.LimitReader(stdin, ipc.MaxFrameSize+1))
+		results <- readResult{raw, err}
+	}()
+	timer := time.NewTimer(time.Until(deadline))
+	defer timer.Stop()
+	var result readResult
+	select {
+	case result = <-results:
+	case <-timer.C:
+		return hookInput{}, false
+	}
+	raw, err := result.raw, result.err
 	if err != nil || len(raw) > ipc.MaxFrameSize {
 		return hookInput{}, false
 	}

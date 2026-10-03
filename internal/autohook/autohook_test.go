@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"io"
 	"net"
 	"path/filepath"
 	"strings"
@@ -369,6 +370,48 @@ func TestHooksAgainstABrokerThatOnlyKnowsHello(t *testing.T) {
 		if frames := <-frameCounts; frames != 1 {
 			t.Fatalf("hook sent %d frames to an old broker, want only the first", frames)
 		}
+	}
+}
+
+// stallingReader yields a payload and then blocks instead of reaching EOF, as
+// a stdin pipe whose writer never closes would.
+type stallingReader struct {
+	payload []byte
+	release chan struct{}
+}
+
+func (r *stallingReader) Read(buffer []byte) (int, error) {
+	if len(r.payload) > 0 {
+		n := copy(buffer, r.payload)
+		r.payload = r.payload[n:]
+		return n, nil
+	}
+	<-r.release
+	return 0, io.EOF
+}
+
+// A stdin that never reaches EOF can't stall either hook past its deadline:
+// it returns silently and never reaches the broker.
+func TestHooksStdinWithoutEOFIsBoundedByTheDeadline(t *testing.T) {
+	fake := newFakeBroker(t, nil)
+	for _, isPreToolUse := range []bool{true, false} {
+		stdin := &stallingReader{payload: []byte(payload("")), release: make(chan struct{})}
+		t.Cleanup(func() { close(stdin.release) })
+		var out bytes.Buffer
+		start := time.Now()
+		if isPreToolUse {
+			runPreToolUse(stdin, &out, fake.path, testEnv(100*time.Millisecond))
+		} else {
+			runPermissionDenied(stdin, &out, fake.path, testEnv(100*time.Millisecond))
+		}
+		if elapsed := time.Since(start); elapsed > time.Second || out.Len() != 0 {
+			t.Fatalf("pretooluse=%t: returned after %v, printed %q", isPreToolUse, elapsed, out.String())
+		}
+	}
+	select {
+	case hello := <-fake.hellos:
+		t.Fatalf("a stalled stdin reached the broker: %+v", hello)
+	default:
 	}
 }
 

@@ -98,7 +98,8 @@ type autoRequest struct {
 
 	// deadline ends the hook transaction (§5.4: queueing, upload, card send,
 	// wait and handoff). ctx expires with it and is cancelled at any terminal
-	// state; every Telegram send and hook write for the request uses it.
+	// state, consumed included; every Telegram send and hook write for the
+	// request uses it, so a grant that ends aborts an "armed" still in flight.
 	deadline time.Time
 	ctx      context.Context
 	cancel   context.CancelFunc
@@ -107,6 +108,9 @@ type autoRequest struct {
 	expires  time.Time // set when armed
 
 	waiters map[*autoWaiter]struct{}
+	// isAnnounced: some hook was sent "armed" successfully. From then on the
+	// grant stays until it is used or expires, whatever other waiters do.
+	isAnnounced bool
 
 	messageID int64 // card message; taps are refused until it is recorded
 	cardText  string
@@ -114,10 +118,12 @@ type autoRequest struct {
 	editMu sync.Mutex // serializes card edits so the last one shows the latest state
 }
 
-// autoWaiter is one hook connection waiting on a request.
+// autoWaiter is one hook connection waiting on a request. Its frames are
+// decided from request state alone (awaitAutoOutcome); isDone records that it
+// has written its last frame or failed to, so it can no longer announce.
 type autoWaiter struct {
-	conn    *ipc.Conn
-	isArmed bool // connected when the grant was armed, so it is told "armed"
+	conn   *ipc.Conn
+	isDone bool
 }
 
 type autoRegistry struct {
@@ -413,51 +419,67 @@ func (b *Broker) sweepAuto() {
 	}
 }
 
-// dropAutoWaiter removes a hook connection that has finished or gone away. The
-// request is cancelled only when no waiter is left before it is armed (§5.4).
+// dropAutoWaiter removes a hook connection that has finished or gone away. A
+// request is cancelled when no waiter is left before it is armed (§5.4), or,
+// once armed, when no hook was told and none is left to tell (settleAutoLocked).
 func (b *Broker) dropAutoWaiter(r *autoRequest, waiter *autoWaiter) {
 	b.auto.mu.Lock()
 	defer b.auto.mu.Unlock()
 	delete(r.waiters, waiter)
 	if len(r.waiters) == 0 && (r.state == autoPending || r.state == autoApproved) {
 		b.setAutoStateLocked(r, autoCancelled, "hook gone")
+		return
 	}
+	b.settleAutoLocked(r, "")
 }
 
-// armAutoGrant runs step 3 of the handoff for the waiter that acked. The
-// grant is armed under the lock before "armed" is written: the hook prints
-// retry:true as soon as it reads the frame, so the retry's grant_check must
-// already find the grant. A failed write cancels the grant unless it was
-// already used. It reports whether this waiter's exchange is over; false means
-// arming was not this waiter's to do, and it keeps waiting.
-func (b *Broker) armAutoGrant(r *autoRequest, waiter *autoWaiter) bool {
+// armAutoGrant arms the grant on a valid ack from a waiter that was sent
+// "approved". It is only a state change: every waiter, the acking one
+// included, then announces "armed" itself (awaitAutoOutcome). Arming comes
+// first because the hook prints retry:true as soon as it reads "armed", and
+// the retry's grant_check must already find the grant.
+func (b *Broker) armAutoGrant(r *autoRequest, waiter *autoWaiter) {
 	b.auto.mu.Lock()
-	_, isWaiting := r.waiters[waiter]
-	if !b.refreshAutoLocked(r) || r.state != autoApproved || !isWaiting {
-		b.auto.mu.Unlock()
-		return false
+	defer b.auto.mu.Unlock()
+	if _, isWaiting := r.waiters[waiter]; !isWaiting || !b.refreshAutoLocked(r) || r.state != autoApproved {
+		return
 	}
 	r.expires = time.Now().Add(r.grantTTL)
-	for connected := range r.waiters {
-		connected.isArmed = true
-	}
 	b.setAutoStateLocked(r, autoArmed, "")
 	b.refreshAutoAfter(r, r.grantTTL)
-	b.auto.mu.Unlock()
+}
 
-	// Written outside the lock so a stuck hook socket can't stall other requests
-	// or a config reload.
-	ctx, cancel := context.WithTimeout(r.ctx, autoReplyTimeout)
-	err := waiter.conn.WriteJSONContext(ctx, r.decision(ipc.AutoDecisionArmed))
-	cancel()
-	if err != nil {
-		b.auto.mu.Lock()
-		if r.state == autoArmed {
-			b.setAutoStateLocked(r, autoCancelled, "armed write failed: "+err.Error())
-		}
-		b.auto.mu.Unlock()
+// finishAutoAnnouncement records one waiter's "armed" write. A success keeps
+// the grant for good; a failure counts against it only if no other waiter
+// announced it or still can.
+func (b *Broker) finishAutoAnnouncement(r *autoRequest, waiter *autoWaiter, err error) {
+	b.auto.mu.Lock()
+	defer b.auto.mu.Unlock()
+	waiter.isDone = true
+	if err == nil {
+		r.isAnnounced = true
+		return
 	}
-	return true
+	b.settleAutoLocked(r, err.Error())
+}
+
+// settleAutoLocked cancels an armed, unused grant that no hook was told about
+// and no remaining waiter can still announce. One waiter's failure never
+// cancels a grant another waiter announced or may yet announce.
+func (b *Broker) settleAutoLocked(r *autoRequest, lastError string) {
+	if r.state != autoArmed || r.isAnnounced {
+		return
+	}
+	for waiter := range r.waiters {
+		if !waiter.isDone {
+			return
+		}
+	}
+	detail := "no hook could be told"
+	if lastError != "" {
+		detail += ": " + lastError
+	}
+	b.setAutoStateLocked(r, autoCancelled, detail)
 }
 
 // consumeAutoGrant atomically consumes the armed grant matching this call. It
