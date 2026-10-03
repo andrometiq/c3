@@ -15,8 +15,8 @@ and `docs/` for the architecture.
 1. `README.md` — what C3 is and the architecture.
 2. `ROADMAP.md` — future and not-yet-built work.
 3. `DECISIONS.md` — decisions taken and their rationale.
-4. `WORKLOG.md` — `sed -n 1,12p WORKLOG.md; grep '^## ' WORKLOG.md | tail -5`, then read
-   only the last entry. Never read the whole file.
+4. `WORKLOG.md` (local, gitignored) — `sed -n 1,12p WORKLOG.md; grep '^## ' WORKLOG.md | tail -5`,
+   then read only the last entry. Never read the whole file.
 
 ## Build · test · check
 

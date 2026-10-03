@@ -57,3 +57,6 @@ session-logs.md
 local-notes/
 # Local, per-machine agent context (never committed).
 CLAUDE.local.md
+
+# agent work log — local only, never committed
+WORKLOG.md
