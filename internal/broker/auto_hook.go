@@ -12,6 +12,10 @@ import (
 // its whole round trip 300 ms.
 const grantCheckTimeout = 300 * time.Millisecond
 
+// grantDeliveredWait bounds the wait for grant_delivered after an allow. The
+// hook sends it as soon as it has printed.
+const grantDeliveredWait = time.Second
+
 // handleAutoClient serves the single op of a transient hook connection, whose
 // first frame (raw) is an ipc.HookHelloMsg. The connection is never registered
 // as an adapter and can never claim a route. HandleConn closes it when this
@@ -183,10 +187,34 @@ func writeAutoDecision(conn *ipc.Conn, deadline time.Time, decision ipc.AutoDeci
 // handleGrantCheck answers the PreToolUse hook. Allow is true only for a grant
 // this request consumed; every error is a plain false. The lookup is an exact
 // key match, so a malformed hash simply matches nothing.
+//
+// After an allow it waits briefly for grant_delivered, the hook's word that it
+// printed the allow. Without it, a later denial of the same call is not taken
+// for a veto (vetoAutoLocked).
 func (b *Broker) handleGrantCheck(conn *ipc.Conn, helloCLI string, raw []byte) {
 	var req ipc.GrantCheckReq
 	isAllowed := ipc.DecodeStrict(raw, &req) == nil && req.CLI == helloCLI && b.consumeAutoGrant(req)
 	ctx, cancel := context.WithTimeout(b.ctx, grantCheckTimeout)
 	defer cancel()
-	_ = conn.WriteJSONContext(ctx, ipc.GrantCheckResp{Op: ipc.OpGrantCheckResult, Allow: isAllowed})
+	err := conn.WriteJSONContext(ctx, ipc.GrantCheckResp{Op: ipc.OpGrantCheckResult, Allow: isAllowed})
+	if err != nil || !isAllowed || req.ToolUseID == "" {
+		return
+	}
+	frames := make(chan []byte, 1)
+	go func() { // ends when HandleConn closes conn after this returns
+		if frame, err := conn.ReadFrame(); err == nil {
+			frames <- frame
+		}
+	}()
+	select {
+	case frame := <-frames:
+		var delivered ipc.GrantDeliveredMsg
+		if ipc.DecodeStrict(frame, &delivered) == nil && delivered.Op == ipc.OpGrantDelivered &&
+			delivered.ToolUseID == req.ToolUseID {
+			key := autoKey{AutoCallContext: req.AutoCallContext, inputHash: req.InputHash}
+			b.markAutoDelivered(autoConsumedCall{key: key, toolUseID: req.ToolUseID})
+		}
+	case <-time.After(grantDeliveredWait):
+	case <-b.ctx.Done():
+	}
 }

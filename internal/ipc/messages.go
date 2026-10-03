@@ -1055,3 +1055,12 @@ type GrantCheckResp struct {
 	Op    Op   `json:"op"` // = OpGrantCheckResult
 	Allow bool `json:"allow"`
 }
+
+// GrantDeliveredMsg follows an allowed GrantCheckResp on the same connection
+// once the hook has printed the allow. ToolUseID repeats the check's. Best
+// effort: without it, a later denial of the same call is treated as an allow
+// that never reached Claude Code, not as a veto.
+type GrantDeliveredMsg struct {
+	Op        Op     `json:"op"` // = OpGrantDelivered
+	ToolUseID string `json:"tool_use_id"`
+}

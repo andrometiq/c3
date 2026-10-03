@@ -1329,6 +1329,7 @@ func TestAutoVetoAfterAllow(t *testing.T) {
 	if !f.b.consumeAutoGrant(check) {
 		t.Fatal("grant not consumed")
 	}
+	f.b.markAutoDelivered(autoConsumedCall{key: r.key, toolUseID: "toolu_retry"})
 	vetoed := f.req
 	vetoed.ToolUseID = "toolu_retry"
 	var decision ipc.AutoDecisionMsg
@@ -1357,12 +1358,13 @@ func TestAutoVetoRecordIsExactAndLapses(t *testing.T) {
 	for _, name := range []string{"other tool_use_id", "no tool_use_id", "lapsed"} {
 		t.Run(name, func(t *testing.T) {
 			f := newAutoFixture(t)
-			f.armed(t)
+			r := f.armed(t)
 			check := f.check()
 			check.ToolUseID = "toolu_retry"
 			if !f.b.consumeAutoGrant(check) {
 				t.Fatal("grant not consumed")
 			}
+			f.b.markAutoDelivered(autoConsumedCall{key: r.key, toolUseID: "toolu_retry"})
 			denial := f.req
 			denial.ToolUseID = "toolu_retry"
 			switch name {
@@ -1380,6 +1382,85 @@ func TestAutoVetoRecordIsExactAndLapses(t *testing.T) {
 			}
 			f.startHook(t, denial)
 			f.postedCard(t) // a normal new request, not a veto
+		})
+	}
+}
+
+// If the hook never confirmed it printed the allow (it missed its budget, or
+// predates grant_delivered), a denial of that same call is not a veto: Claude
+// Code overrode nothing. The old request closes as allow-undelivered and the
+// operator gets a fresh card.
+func TestAutoUndeliveredAllowGetsANewCard(t *testing.T) {
+	f := newAutoFixture(t)
+	r := f.armed(t)
+	f.b.auto.mu.Lock()
+	r.messageID, r.cardText = 10, "card body"
+	f.b.auto.mu.Unlock()
+	check := f.check()
+	check.ToolUseID = "toolu_retry"
+	if !f.b.consumeAutoGrant(check) {
+		t.Fatal("grant not consumed")
+	}
+	denial := f.req
+	denial.ToolUseID = "toolu_retry"
+	var fresh *autoRequest
+	output := captureLog(t, func() {
+		f.startHook(t, denial)
+		fresh = f.postedCard(t)
+	})
+	if fresh == r || f.state(r) != autoUndelivered {
+		t.Fatalf("no fresh request (old state %s)", f.state(r))
+	}
+	if !strings.Contains(output, "allow-undelivered id="+r.id) || strings.Contains(output, "vetoed-after-allow") {
+		t.Fatalf("audit: %s", output)
+	}
+	eventually(t, func() bool {
+		for _, edit := range f.ch.editCallsSnapshot() {
+			if edit.MessageID == 10 && strings.Contains(edit.Text, "didn't reach Claude Code") {
+				return true
+			}
+		}
+		return false
+	})
+}
+
+// grant_delivered on the grant_check connection marks the record delivered;
+// a mismatched tool_use_id or no frame leaves it undelivered.
+func TestAutoGrantDeliveredFrame(t *testing.T) {
+	for _, name := range []string{"delivered", "wrong tool_use_id", "no frame"} {
+		t.Run(name, func(t *testing.T) {
+			f := newAutoFixture(t)
+			r := f.armed(t)
+			check := f.check()
+			check.ToolUseID = "toolu_retry"
+			raw, _ := json.Marshal(check)
+			hookSide, brokerSide := net.Pipe()
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				defer brokerSide.Close()
+				f.b.handleGrantCheck(ipc.NewConn(brokerSide), "claude", raw)
+			}()
+			hook := ipc.NewConn(hookSide)
+			if _, err := hook.ReadFrame(); err != nil {
+				t.Fatal(err)
+			}
+			switch name {
+			case "delivered":
+				_ = hook.WriteJSON(ipc.GrantDeliveredMsg{Op: ipc.OpGrantDelivered, ToolUseID: "toolu_retry"})
+			case "wrong tool_use_id":
+				_ = hook.WriteJSON(ipc.GrantDeliveredMsg{Op: ipc.OpGrantDelivered, ToolUseID: "toolu_other"})
+			case "no frame":
+				hook.Close()
+			}
+			<-done
+			f.b.auto.mu.Lock()
+			record := f.b.auto.consumed[autoConsumedCall{key: r.key, toolUseID: "toolu_retry"}]
+			f.b.auto.mu.Unlock()
+			if record.isDelivered != (name == "delivered") {
+				t.Fatalf("delivered=%t", record.isDelivered)
+			}
+			hook.Close()
 		})
 	}
 }

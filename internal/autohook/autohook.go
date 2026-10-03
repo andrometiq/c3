@@ -110,7 +110,12 @@ func runPreToolUse(stdin io.Reader, stdout io.Writer, socketPath string, env hoo
 	if !env.now().Before(deadline) {
 		return
 	}
-	_, _ = io.WriteString(stdout, allowOutput)
+	if _, err := io.WriteString(stdout, allowOutput); err != nil || in.ToolUseID == "" {
+		return
+	}
+	// Tell the broker the allow reached Claude Code, so a denial of this same
+	// call reads as a veto. Best effort: it changes nothing printed.
+	conn.writeBestEffort(ipc.GrantDeliveredMsg{Op: ipc.OpGrantDelivered, ToolUseID: in.ToolUseID})
 }
 
 // RunPermissionDenied reports the denial and holds the connection through the
@@ -160,7 +165,9 @@ func runPermissionDenied(stdin io.Reader, stdout io.Writer, socketPath string, e
 				return
 			}
 			approvedID = decision.RequestID
-			conn.writeAck(approvedID)
+			// A failed ack is not the end: the broker may have armed the grant
+			// through another waiter and still send "armed".
+			conn.writeBestEffort(ipc.AutoAckMsg{Op: ipc.OpAutoAck, RequestID: approvedID})
 		case ipc.AutoDecisionArmed:
 			// A waiter that joined a deduplicated request can be told "armed"
 			// without "approved" first.
@@ -236,12 +243,11 @@ func dialHook(socketPath string, deadline time.Time, env hookEnv) (*hookConn, er
 	return conn, nil
 }
 
-// writeAck sends the ack best effort, straight to the socket: a failed
-// ipc write would close the connection, and the next frame must still be
-// read. The broker may have armed the grant through another waiter and still
-// send "armed".
-func (c *hookConn) writeAck(requestID string) {
-	frame, err := json.Marshal(ipc.AutoAckMsg{Op: ipc.OpAutoAck, RequestID: requestID})
+// writeBestEffort writes one frame straight to the socket and ignores the
+// outcome. An ipc write that fails closes the connection, and a following
+// frame may still need reading.
+func (c *hookConn) writeBestEffort(message any) {
+	frame, err := json.Marshal(message)
 	if err != nil {
 		return
 	}

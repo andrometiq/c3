@@ -53,7 +53,8 @@ type autoState string
 
 // pending → approved → armed → consumed | expired, or
 // pending | approved → denied | timed_out | cancelled. A consumed grant
-// becomes vetoed when Claude Code denies the very call it allowed.
+// becomes vetoed when Claude Code denies the very call it allowed, or
+// allow-undelivered when that allow never reached Claude Code.
 const (
 	autoPending   autoState = "pending"
 	autoApproved  autoState = "approved" // Allow tapped; nothing armed until a hook acks
@@ -64,6 +65,9 @@ const (
 	autoTimedOut  autoState = "timed_out"
 	autoCancelled autoState = "cancelled"
 	autoVetoed    autoState = "vetoed-after-allow"
+	// autoUndelivered: the grant was consumed but the hook never confirmed it
+	// printed the allow, and the same call was denied again.
+	autoUndelivered autoState = "allow-undelivered"
 )
 
 func (s autoState) isLive() bool { return s == autoPending || s == autoApproved || s == autoArmed }
@@ -136,8 +140,9 @@ type autoConsumedCall struct {
 }
 
 type autoConsumedRecord struct {
-	request *autoRequest
-	expires time.Time
+	request     *autoRequest
+	expires     time.Time
+	isDelivered bool // the hook confirmed it printed the allow (grant_delivered)
 }
 
 // newAutoRequestID returns a fresh 128-bit random request id (§5.2): never
@@ -481,11 +486,26 @@ func (b *Broker) consumeAutoGrant(req ipc.GrantCheckReq) bool {
 	return true
 }
 
+// markAutoDelivered records that the hook printed the allow for call.
+func (b *Broker) markAutoDelivered(call autoConsumedCall) {
+	b.auto.mu.Lock()
+	defer b.auto.mu.Unlock()
+	if record, isFound := b.auto.consumed[call]; isFound {
+		record.isDelivered = true
+		b.auto.consumed[call] = record
+	}
+}
+
 // vetoAutoLocked reports whether call is a tool call that consumed a grant
-// within the last grant lifetime. If so, Claude Code allowed it through the
-// hook and then denied it anyway (a hook allow need not bypass the
-// classifier). The call did not run: the original card says so, and no new
-// card is posted for a retry the operator already approved.
+// within the last grant lifetime and whose allow reached Claude Code. If so,
+// Claude Code allowed it through the hook and then denied it anyway (a hook
+// allow need not bypass the classifier). The call did not run: the original
+// card says so, and no new card is posted for a retry the operator already
+// approved.
+//
+// If the hook never confirmed it printed the allow (it ran out of time, or
+// predates grant_delivered), Claude Code overrode nothing: the old request is
+// closed and the denial gets a fresh card, so the operator can approve again.
 func (b *Broker) vetoAutoLocked(call autoConsumedCall) bool {
 	record, isFound := b.auto.consumed[call]
 	if call.toolUseID == "" || !isFound {
@@ -493,6 +513,11 @@ func (b *Broker) vetoAutoLocked(call autoConsumedCall) bool {
 	}
 	delete(b.auto.consumed, call)
 	if !time.Now().Before(record.expires) {
+		return false
+	}
+	if !record.isDelivered {
+		b.setAutoStateLocked(record.request, autoUndelivered,
+			"tool_use_id="+call.toolUseID+": hook did not confirm the allow; asking again")
 		return false
 	}
 	b.setAutoStateLocked(record.request, autoVetoed, "tool_use_id="+call.toolUseID)

@@ -227,6 +227,52 @@ func TestPreToolUseSilentOnHostileOrFailingBroker(t *testing.T) {
 	})
 }
 
+// After printing an allow the hook confirms delivery on the same connection,
+// for the same tool_use_id. Without an allow it sends nothing more.
+func TestPreToolUseConfirmsDelivery(t *testing.T) {
+	for _, isAllowed := range []bool{true, false} {
+		followUps := make(chan []byte, 1)
+		var fake *fakeBroker
+		fake = newFakeBroker(t, func(conn *ipc.Conn, raw net.Conn) {
+			if !fake.helloAndOp(conn) {
+				return
+			}
+			writeRaw(conn, `{"op":"grant_check_result","allow":`+map[bool]string{true: "true", false: "false"}[isAllowed]+`}`)
+			_ = raw.SetReadDeadline(time.Now().Add(time.Second))
+			frame, _ := conn.ReadFrame()
+			followUps <- frame
+		})
+		output, _ := runPre(t, payload(`,"tool_use_id":"toolu_9"`), fake.path, time.Second)
+		frame := <-followUps
+		if !isAllowed {
+			if output != "" || frame != nil {
+				t.Fatalf("no allow, yet printed %q and sent %s", output, frame)
+			}
+			continue
+		}
+		var delivered ipc.GrantDeliveredMsg
+		if output != allowOutput || ipc.DecodeStrict(frame, &delivered) != nil ||
+			delivered != (ipc.GrantDeliveredMsg{Op: ipc.OpGrantDelivered, ToolUseID: "toolu_9"}) {
+			t.Fatalf("printed %q, then sent %s", output, frame)
+		}
+	}
+}
+
+// A delivery confirmation that can't be written changes nothing the hook
+// printed: the broker here closes as soon as it has answered.
+func TestPreToolUseFailedDeliveryKeepsTheAllow(t *testing.T) {
+	var fake *fakeBroker
+	fake = newFakeBroker(t, func(conn *ipc.Conn, raw net.Conn) {
+		if fake.helloAndOp(conn) {
+			writeRaw(conn, `{"op":"grant_check_result","allow":true}`)
+			_ = raw.Close()
+		}
+	})
+	if output, _ := runPre(t, payload(`,"tool_use_id":"toolu_9"`), fake.path, time.Second); output != allowOutput {
+		t.Fatalf("printed %q, want the allow", output)
+	}
+}
+
 // An allow that is read in time but judged after the deadline is still
 // silent. The clock jumps past the deadline only after the reply is read, so
 // this fails if the final deadline check goes.
