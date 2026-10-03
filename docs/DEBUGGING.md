@@ -265,3 +265,47 @@ only for relays actually cancelled at the cap; already-resolved and unknown IDs
 retain the ordinary inactive feedback. New relay refusal says the request
 “may still be waiting at the laptop”; C3 cannot establish its current host state. See
 [Updating C3](USAGE.md#updating-c3) for the scope and limitations.
+
+## Auto-mode approval
+
+The broker logs every request's lifecycle as metadata only: request id, route, tool name, input hash, the tapping user's id and a cause. **Tool input is never logged**, whether the request succeeds or fails. That is stricter than the content policy in the top-level [`DEBUGGING.md`](../DEBUGGING.md#content-policy), and for this feature it wins.
+
+```text
+auto-approval created id=ID route=-100/281 tool="Bash" hash=HASH actor=0 detail=""
+auto-approval card-sent id=ID route=-100/281 tool="Bash" hash=HASH actor=0 detail="msg=42 state=pending"
+auto-approval tap-allow id=ID route=-100/281 tool="Bash" hash=HASH actor=USER detail=""
+auto-approval consumed id=ID route=-100/281 tool="Bash" hash=HASH actor=0 detail="tool_use_id=TOOL_USE_ID"
+auto-approval no-card session="SESSION" tool="Bash" hash=HASH classifier_reason="[…]" cause="unknown reason"
+```
+
+- **Lifecycle events:** `created`, `attachment-sent`, `card-sent`, `tap-allow` / `tap-deny`, then the state reached: `approved`, `armed`, `consumed`, `expired`, `denied`, `timed_out`, `cancelled`, `vetoed-after-allow` or `allow-undelivered`.
+- **`tap-<verb>-refused`** means the tap changed nothing. Its `detail` gives the reason: `not an operator`, `not active`, `already decided`, `card not recorded yet`, or `wrong chat, topic or message`.
+- **`cancelled`** details: `hook gone`, `session detached`, `adapter disconnected`, `session no longer holds the route`, `feature disabled`, `card not sent`, `armed write failed: …` and `broker stopping`.
+- **`card-failed`** carries the channel error. A `send aborted, delivery unknown` failure may still have reached Telegram. **`attachment-orphaned msg=N`** means an overflow file was posted but the request ended before its card was sent: the input is in the topic with no card, and you may want to delete it.
+- **`no-card`** is logged when a denial gets no card while the feature is on. Its `classifier_reason` is the denial's reason, not tool input, and is logged so a new classifier-block form can be added deliberately. The causes are `unknown reason`, `no single live adapter for the session`, `no unique confirmed Telegram route`, `max_pending reached on route …`, `grant already armed for this call`, `vetoed after allow`, `hook budget exhausted`, `malformed frame`, `missing or mismatched call context` and `tool_input is not strict JSON`. With the feature off there's no line.
+- **`vetoed-after-allow`** means Claude Code denied the very call (same `tool_use_id`) that a grant allowed, after the `PreToolUse` hook confirmed with a `grant_delivered` frame that it had printed the `allow`. Claude Code no longer lets a hook `allow` override the auto-mode classifier: turn the feature off. No new card is posted.
+- **`allow-undelivered`** means the broker consumed a grant but never received `grant_delivered` for that call within one second, and the same call was then denied again. Claude Code overrode nothing: the allow never reached it, usually because the hook ran out of its 300 ms budget. The old card says so, and the new denial gets a fresh card, so the operator can approve again. A hook binary older than the `grant_delivered` frame never confirms, so with one, a re-denial always gets a fresh card rather than a veto label.
+
+**No log line at all after a denial** means the hooks never reached the broker. Check, in order:
+
+1. `c3-broker --help` lists `pretooluse-hook` and `permission-denied-hook`. If it doesn't, the binary predates the feature: update it.
+2. The plugin is current (`/plugin`), so `hooks/hooks.json` registers `PreToolUse` and `PermissionDenied`.
+3. The running broker is the installed build (`c3-broker status`). A broker older than the hooks answers their opening frame with `expected hello first` and registers nothing, so restart it.
+4. The platform isn't Windows, and the broker runs as the same user as Claude Code. The hooks refuse to talk to a broker running as anyone else.
+
+### Hook and binary versions (maintainers)
+
+`plugins/c3/hooks/hooks.json` registers both hooks behind a shell guard:
+
+```json
+"PreToolUse":       [{"matcher": "*", "hooks": [{"type": "command", "command": "c3-broker pretooluse-hook || exit 0", "timeout": 5}]}],
+"PermissionDenied": [{"matcher": "*", "hooks": [{"type": "command", "command": "c3-broker permission-denied-hook || exit 0", "timeout": 330}]}]
+```
+
+Plugin files reach users through the Claude Code marketplace; binaries reach them through `c3-broker update` or a tarball. Either can be newer than the other.
+
+- **Why the guard exists:** exit code 2 from a `PreToolUse` hook blocks the tool call. A `c3-broker` that lacks these subcommands exits 2 (unknown subcommand), which would block every tool call. The `|| exit 0` guard turns that, a missing binary, or any other failure into a silent exit 0. Binaries that have these subcommands also exit 0 silently for any unknown `*-hook` subcommand, so a hook added later is tolerated even without the guard.
+- The guard needs a POSIX shell: Windows PowerShell 5.1 can't parse `||`. The feature is unsupported on Windows.
+- Hook connections open with a `hook_hello` frame instead of `hello`. A running broker that predates it answers `expected hello first` and registers nothing, so the hooks stay silent until the broker restarts on the new binary.
+- **Release order:** ship the binaries with, or before, the `hooks.json` change. The guard makes hooks-first safe (the hooks stay silent), but it's a safety net, not the release plan. Bump the version in `plugins/c3/.claude-plugin/plugin.json` in the release commit so marketplace clients pick up the new hooks.
+- `cmd/c3-broker/hooks_contract_test.go` checks three things: every registered hook names a subcommand the binary handles; every `PreToolUse` hook carries the guard; and the guarded commands exit 0 with no output when `c3-broker` fails with exit 2 or is missing. Keep it green when adding a hook.

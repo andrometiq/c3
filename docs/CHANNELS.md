@@ -108,6 +108,25 @@ transferred, or released; a nil holder means released. It also replays current
 holders just after channel registration. Notifications run outside the route
 ownership path, and a channel panic is recovered and logged.
 
+Channels may also send auto-mode approval cards by implementing two methods
+(the broker discovers them by method set):
+
+```go
+SendApprovalCard(ctx context.Context, args c3types.ReplyArgs) (int64, error)
+SendApprovalDocument(ctx context.Context, args c3types.ReplyArgs, name string, content []byte) (int64, error)
+```
+
+`SendApprovalCard` sends `args.Text` as HTML the broker has already escaped, with
+`args.Buttons`. With `args.ReplyTo` set, it must fail rather than post the card
+detached from that message. `SendApprovalDocument` uploads `content` from memory
+as a plain-text file with `args.Text` as its caption. `ctx` carries the request's
+deadline and must bound both rate-limit waiting and the send. A channel without
+these methods gets no cards; the request is cancelled and the denial stands.
+Taps arrive as callbacks with the reserved `c3:auto:` prefix. The broker resolves
+them, so a channel must defer their answer to the broker, as it does for
+permission-relay taps, and never route them to an agent. Telegram is the only
+channel that implements this today (`internal/channel/telegram/approval.go`).
+
 ## The Host interface
 
 ```go

@@ -664,6 +664,9 @@ Apply these instead of the Linux-only steps referenced above:
   `git pull` → §1's ten-package `go install`, followed by a full restart.
 - **Skip §6 (systemd).** There is no systemd on Windows; the default on-demand
   broker spawn is what you get.
+- **No auto-mode approval.** Telegram approval of auto-mode denials
+  (`auto_mode_approval` in `mappings.json`) is unsupported on Windows: its hooks
+  never grant there. Leave it off.
 
 Known beta rough edges (documented, not yet smoothed): the broker singleton
 lock is weaker on Windows (a manual kill can briefly race a respawn — write

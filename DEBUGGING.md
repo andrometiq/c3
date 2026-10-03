@@ -74,6 +74,7 @@ and the log is the last place to find it.
 | `fallback FAIL …` | **Yes** — couldn't even send the boilerplate. |
 | `telegram: skip update=… (unsupported service)` | **No** — these are forum_topic_created / new_chat_members type events with no useful content. |
 | `perm settled …` / `perm settled DEFERRED …` / `perm settled REFUSED …` | **No** — a CLI-local resolution cleared the keyboard, is waiting for the in-flight message id, or was rejected as a non-owner. These lines carry ids and session metadata, never the prompt preview. |
+| `auto-approval …` (auto-mode approval lifecycle, refusals and `no-card`) | **No, never**, not even on failure. These lines carry the request id, route, tool name, input hash, tapping user id and cause. This feature's rule overrides the failure rule above; see [`docs/DEBUGGING.md`](docs/DEBUGGING.md#auto-mode-approval). |
 
 Specifics:
 
