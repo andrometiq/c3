@@ -183,7 +183,7 @@ func isClassifierBlock(cli, reason string) bool {
 		return false
 	}
 	name := reason[1:end]
-	if name[0] == ' ' || name[len(name)-1] == ' ' || strings.ContainsRune(name, '[') {
+	if strings.TrimSpace(name) != name || strings.ContainsRune(name, '[') {
 		return false
 	}
 	for _, char := range name {
@@ -199,8 +199,8 @@ func isClassifierBlock(cli, reason string) bool {
 		return true
 	}
 	explanation, isSpaced := strings.CutPrefix(suffix, " ")
-	first, _ := utf8.DecodeRuneInString(explanation)
-	return isSpaced && first != utf8.RuneError && !unicode.IsSpace(first)
+	first, width := utf8.DecodeRuneInString(explanation)
+	return isSpaced && width > 0 && !unicode.IsSpace(first)
 }
 
 // sessionAdapter returns the one connected adapter whose stable session id
