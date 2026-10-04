@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/Andrometiq/c3/internal/ipc"
 )
@@ -194,7 +195,12 @@ func isClassifierBlock(cli, reason string) bool {
 		return false
 	}
 	suffix := reason[end+1:]
-	return suffix == "" || (len(suffix) >= 2 && suffix[0] == ' ' && !unicode.IsSpace(rune(suffix[1])))
+	if suffix == "" {
+		return true
+	}
+	explanation, isSpaced := strings.CutPrefix(suffix, " ")
+	first, _ := utf8.DecodeRuneInString(explanation)
+	return isSpaced && first != utf8.RuneError && !unicode.IsSpace(first)
 }
 
 // sessionAdapter returns the one connected adapter whose stable session id

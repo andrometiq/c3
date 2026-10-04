@@ -946,7 +946,7 @@ var autoSoftDenyRuleNames = []string{
 }
 
 func TestAutoClassifierBlocksGetCards(t *testing.T) {
-	reasons := []string{"[Git Destructive] explanation", "Blocked by classifier", "[Some New Block]"}
+	reasons := []string{"[Git Destructive] explanation", "[Git Destructive] éxplication", "Blocked by classifier", "[Some New Block]"}
 	for _, name := range autoSoftDenyRuleNames {
 		reasons = append(reasons, "["+name+"]")
 	}
@@ -1017,6 +1017,9 @@ func TestAutoNoCardPaths(t *testing.T) {
 		"no verdict":                 func(_ *autoFixture, req *ipc.AutoDeniedReq) { req.Reason = "Auto mode classifier unavailable" },
 		"unknown form":               func(_ *autoFixture, req *ipc.AutoDeniedReq) { req.Reason = "Some new free-text reason" },
 		"near miss":                  func(_ *autoFixture, req *ipc.AutoDeniedReq) { req.Reason = "[Code from External] " },
+		"no-break space only":        func(_ *autoFixture, req *ipc.AutoDeniedReq) { req.Reason = "[Git Destructive] \u00a0" },
+		"line separator explanation": func(_ *autoFixture, req *ipc.AutoDeniedReq) { req.Reason = "[Git Destructive] \u2028explanation" },
+		"next line explanation":      func(_ *autoFixture, req *ipc.AutoDeniedReq) { req.Reason = "[Git Destructive] \u0085explanation" },
 		"empty reason":               func(_ *autoFixture, req *ipc.AutoDeniedReq) { req.Reason = "" },
 		"unregistered CLI":           func(_ *autoFixture, req *ipc.AutoDeniedReq) { req.CLI = "codex" },
 		"unknown session":            func(_ *autoFixture, req *ipc.AutoDeniedReq) { req.SessionID = "unknown" },
