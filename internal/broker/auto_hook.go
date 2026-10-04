@@ -68,7 +68,7 @@ func (b *Broker) handleAutoDenied(conn *ipc.Conn, helloCLI string, raw []byte) {
 	if r == nil {
 		if refusal != "" {
 			// The classifier reason is not tool input; it is logged (escaped and
-			// capped) so an unknown form can be added deliberately (§5.7).
+			// capped) so an unrecognised denial form can be seen (§5.7).
 			log.Printf("auto-approval no-card session=%q tool=%q hash=%s classifier_reason=%q cause=%q",
 				truncateRunes(req.SessionID, 100), truncateRunes(req.ToolName, 100), inputHash,
 				truncateRunes(req.Reason, 200), refusal)

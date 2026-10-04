@@ -8,7 +8,6 @@ import (
 	"net"
 	"os"
 	"runtime"
-	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -870,36 +869,141 @@ func TestAutoDenialWhileArmedGetsNoCard(t *testing.T) {
 	}
 }
 
-// observedClassifierBlocks are the PermissionDenied reasons recorded for
-// auto-mode classifier blocks. They are the fixtures the allowlist must match
-// exactly: no more, no fewer.
-var observedClassifierBlocks = []string{
-	"[Code from External]",
-	"[Auto-Mode Bypass]",
-	"[Credential Exploration]",
-	"[Git Destructive]",
+// the soft_deny rule names in `claude auto-mode defaults`, Claude Code 2.1.289
+var autoSoftDenyRuleNames = []string{
+	"Git Destructive",
+	"Code That Leaks When Run",
+	"Code from External",
+	"Cloud Storage Mass Delete",
+	"Production Deploy",
+	"Remote Shell Writes",
+	"Sensitive Remote Exec",
+	"Production Reads",
+	"Blind Apply",
+	"Protected-Scope IaC Apply",
+	"Logging/Audit Tampering",
+	"Permission Grant",
+	"Account & Standing-Rule Changes",
+	"TLS/Auth Weaken",
+	"Secret-Store Writes",
+	"DNS / Domain / Cert Changes",
+	"Security Weaken",
+	"Security Test Removal",
+	"Safety Bypass Flag",
+	"Create Unsafe Agents",
+	"Interfere With Workloads",
+	"Shared Cluster Mutation",
+	"CI Bypass",
+	"Modify Shared Resources",
+	"Irreversible Local Destruction",
+	"Unverifiable Deletion Target",
+	"Shared Scratch Sweep",
+	"Irreversible Deletion (general)",
+	"Unverifiable Deletion Scope",
+	"Create RCE Surface",
+	"Expose Local Services",
+	"External Ingress Tunnel",
+	"Credential Leakage",
+	"Credential Materialization",
+	"Credential Exploration",
+	"PII Data Handling",
+	"Exfil Scouting",
+	"Traffic Redirection",
+	"Remote Repoint",
+	"Out-of-Place Publication",
+	"Sensitive-Source Provenance",
+	"Excess Sensitive Detail",
+	"Unrequested Artifact Publish",
+	"Live-Shared Artifact Sensitive Delta",
+	"Sandbox Network Callback",
+	"Command Network Lists",
+	"Containment Escape",
+	"Create Public Surface",
+	"Public Data-Sharing Upload",
+	"Untrusted Code Integration",
+	"Package Registry Bypass",
+	"Unauthorized Persistence",
+	"Self-Modification",
+	"Tmux Self Drive",
+	"Instruction Poisoning",
+	"Auto-Mode Bypass",
+	"Session Transcript Tampering",
+	"Unrequested Commit in a Connected App",
+	"External System Writes",
+	"Merge Without Review",
+	"Self-Approval",
+	"ChatOps Trigger Comments",
+	"Feature Flag Writes",
+	"Node Lifecycle Operations",
+	"Cluster-Wide Workload Creation",
+	"Real-World Transactions",
+	"Third-Party Attack",
+	"Browser Navigate Exfil",
+	"Browser Input Exfil",
+	"Browser JS Exfil",
+	"Browser File Upload Exfil",
+	"Browser Shortcut Execution",
 }
 
-// Each observed classifier-block form gets a card, and the allowlist holds
-// exactly those forms.
-func TestAutoObservedClassifierBlocksGetCards(t *testing.T) {
-	if got := autoClassifierBlockReasons["claude"]; !slices.Equal(got, observedClassifierBlocks) {
-		t.Fatalf("allowlist %q differs from the observed fixtures %q", got, observedClassifierBlocks)
+func TestAutoClassifierBlocksGetCards(t *testing.T) {
+	reasons := []string{"[Git Destructive] explanation", "Blocked by classifier", "[Some New Block]"}
+	for _, name := range autoSoftDenyRuleNames {
+		reasons = append(reasons, "["+name+"]")
 	}
-	if len(autoClassifierBlockReasons) != 1 {
-		t.Fatalf("allowlist covers CLIs without observed fixtures: %v", autoClassifierBlockReasons)
+	for _, reason := range reasons {
+		t.Run(reason, func(t *testing.T) {
+			f := newAutoFixture(t)
+			req := f.req
+			req.Reason = reason
+			f.startHook(t, req)
+			f.postedCard(t)
+		})
 	}
-	for _, reason := range observedClassifierBlocks {
-		f := newAutoFixture(t)
-		req := f.req
-		req.Reason = reason
-		f.startHook(t, req)
-		f.postedCard(t)
+}
+
+func TestIsClassifierBlock(t *testing.T) {
+	for _, reason := range []string{
+		"[Data Exfiltration]", "[Data Exfiltration] reason text",
+		"Classifier unavailable",
+		"<model> is temporarily unavailable, so auto mode cannot determine the safety of...",
+		"Auto mode could not evaluate this action and is blocking it for safety",
+		"Classifier unavailable", "Auto mode classifier transcript exceeded context window",
+		"Agent aborted: auto mode classifier request refused by the safety safeguard",
+		"The server-side auto mode classifier gave no verdict",
+		"Auto mode is unavailable — the server returned no safety verdict for the last 10 responses",
+		"Blocked by classifier.", "blocked by classifier", "No reason provided", "",
+		"[]", "[ ]", "[ Leading]", "[Trailing ]", "[Git Destructive] \tx", "[Git Destructive] \nx",
+		"Auto mode could not evaluate this action and is blocking it for safety",
+		"Auto mode classifier transcript exceeded context window",
+		"Agent aborted: auto mode classifier request refused by the safety safeguard",
+		"The server-side auto mode classifier gave no verdict",
+		"Auto mode is unavailable — the server returned no safety verdict for the last 10 responses",
+		"Blocked by classifier.", "Blocked by classifier ", "blocked by classifier",
+		"No reason provided", "", "[]", "[ ]", "[ Leading]", "[Trailing ]",
+		"[Git Destructive] ", "[Git Destructive]  two spaces", "[Git Destructive]x",
+		"[unclosed", "x[Git Destructive]", "[nested[rule]", "[rule]]",
+		"[rule\nname]", "[rule\tname]", "[rule\u0085name]", "[rule\x7fname]",
+		"[" + strings.Repeat("a", 65) + "]", "[" + strings.Repeat("é", 33) + "]",
+	} {
+		t.Run(reason, func(t *testing.T) {
+			if isClassifierBlock("claude", reason) {
+				t.Fatalf("accepted %q", reason)
+			}
+		})
 	}
-	for _, near := range []string{"[git destructive]", "[Git Destructive] ", "Git Destructive", "Classifier unavailable"} {
-		if isClassifierBlock("claude", near) {
-			t.Fatalf("%q accepted", near)
-		}
+	for _, reason := range []string{
+		"Blocked by classifier", "[x]", "[Some New Block]", "[data exfiltration]",
+		"[" + strings.Repeat("a", 64) + "]", "[" + strings.Repeat("é", 32) + "]",
+		"[Git Destructive] explanation with [brackets] and\nnewline",
+	} {
+		t.Run(reason, func(t *testing.T) {
+			if !isClassifierBlock("claude", reason) {
+				t.Fatalf("rejected %q", reason)
+			}
+			if isClassifierBlock("codex", reason) {
+				t.Fatalf("accepted codex reason %q", reason)
+			}
+		})
 	}
 }
 
@@ -907,17 +1011,19 @@ func TestAutoObservedClassifierBlocksGetCards(t *testing.T) {
 // nothing.
 func TestAutoNoCardPaths(t *testing.T) {
 	cases := map[string]func(f *autoFixture, req *ipc.AutoDeniedReq){
-		"feature off":          func(f *autoFixture, _ *ipc.AutoDeniedReq) { f.setEnabled(false) },
-		"no verdict":           func(_ *autoFixture, req *ipc.AutoDeniedReq) { req.Reason = "Auto mode classifier unavailable" },
-		"unknown form":         func(_ *autoFixture, req *ipc.AutoDeniedReq) { req.Reason = "[Some New Block]" },
-		"near miss":            func(_ *autoFixture, req *ipc.AutoDeniedReq) { req.Reason = "[Code from External] " },
-		"empty reason":         func(_ *autoFixture, req *ipc.AutoDeniedReq) { req.Reason = "" },
-		"unregistered CLI":     func(_ *autoFixture, req *ipc.AutoDeniedReq) { req.CLI = "codex" },
-		"unknown session":      func(_ *autoFixture, req *ipc.AutoDeniedReq) { req.SessionID = "unknown" },
-		"budget nearly spent":  func(_ *autoFixture, req *ipc.AutoDeniedReq) { req.BudgetMS = 5000 },
-		"duplicate input keys": func(_ *autoFixture, req *ipc.AutoDeniedReq) { req.ToolInput = json.RawMessage(`{"a":1,"a":2}`) },
-		"missing cwd":          func(_ *autoFixture, req *ipc.AutoDeniedReq) { req.CWD = "" },
-		"card send fails":      func(f *autoFixture, _ *ipc.AutoDeniedReq) { f.ch.sendErr = errors.New("telegram down") },
+		"hard deny":                  func(_ *autoFixture, req *ipc.AutoDeniedReq) { req.Reason = "[Data Exfiltration]" },
+		"hard deny with explanation": func(_ *autoFixture, req *ipc.AutoDeniedReq) { req.Reason = "[Data Exfiltration] reason text" },
+		"feature off":                func(f *autoFixture, _ *ipc.AutoDeniedReq) { f.setEnabled(false) },
+		"no verdict":                 func(_ *autoFixture, req *ipc.AutoDeniedReq) { req.Reason = "Auto mode classifier unavailable" },
+		"unknown form":               func(_ *autoFixture, req *ipc.AutoDeniedReq) { req.Reason = "Some new free-text reason" },
+		"near miss":                  func(_ *autoFixture, req *ipc.AutoDeniedReq) { req.Reason = "[Code from External] " },
+		"empty reason":               func(_ *autoFixture, req *ipc.AutoDeniedReq) { req.Reason = "" },
+		"unregistered CLI":           func(_ *autoFixture, req *ipc.AutoDeniedReq) { req.CLI = "codex" },
+		"unknown session":            func(_ *autoFixture, req *ipc.AutoDeniedReq) { req.SessionID = "unknown" },
+		"budget nearly spent":        func(_ *autoFixture, req *ipc.AutoDeniedReq) { req.BudgetMS = 5000 },
+		"duplicate input keys":       func(_ *autoFixture, req *ipc.AutoDeniedReq) { req.ToolInput = json.RawMessage(`{"a":1,"a":2}`) },
+		"missing cwd":                func(_ *autoFixture, req *ipc.AutoDeniedReq) { req.CWD = "" },
+		"card send fails":            func(f *autoFixture, _ *ipc.AutoDeniedReq) { f.ch.sendErr = errors.New("telegram down") },
 		"two adapters for the session": func(f *autoFixture, _ *ipc.AutoDeniedReq) {
 			other := f.b.Stubs.Register("claude", 4243, "/workspace", struct{}{})
 			other.SetStableSessionID(f.req.SessionID)
@@ -974,8 +1080,8 @@ func TestAutoNoCardPaths(t *testing.T) {
 }
 
 // A denial that gets no card is audit-logged with the classifier's reason
-// (escaped and capped), so the allowlist can be extended. Feature off logs
-// nothing.
+// (escaped and capped), so an unrecognised denial form can be seen.
+// Feature off logs nothing.
 func TestAutoUnknownReasonIsAudited(t *testing.T) {
 	f := newAutoFixture(t)
 	req := f.req

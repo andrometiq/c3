@@ -6,8 +6,10 @@ import (
 	"encoding/hex"
 	"log"
 	"slices"
+	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/Andrometiq/c3/internal/ipc"
 )
@@ -29,14 +31,8 @@ import (
 // ack to resolveAutoTap; keep the two in lockstep.
 const autoCallbackPrefix = "c3:auto:"
 
-// autoClassifierBlockReasons are the exact PermissionDenied reasons observed for
-// auto-mode classifier blocks, per CLI. Only these get a card. Everything else
-// (no-verdict and "unavailable" denials, any new form) gets no card and is
-// audit-logged so the list can be extended deliberately from observed hook
-// payloads. Never match by pattern.
-var autoClassifierBlockReasons = map[string][]string{
-	"claude": {"[Code from External]", "[Auto-Mode Bypass]", "[Credential Exploration]", "[Git Destructive]"},
-}
+// Hard-deny rules are not overridable by user intent, so C3 must not offer an override.
+var autoClassifierHardDenyRules = []string{"Data Exfiltration"}
 
 const (
 	// autoHookBudgetMax is the denial hook's own end-to-end bound. A hook never
@@ -168,8 +164,37 @@ func (r *autoRequest) decision(state string) ipc.AutoDecisionMsg {
 	return ipc.AutoDecisionMsg{Op: ipc.OpAutoDecision, RequestID: r.id, State: state}
 }
 
+// isClassifierBlock accepts "Blocked by classifier" or [Rule Name] with an optional
+// explanation, excluding hard-deny rules. No-verdict/unavailable texts cannot match
+// the bracketed shape because none start with '['.
 func isClassifierBlock(cli, reason string) bool {
-	return slices.Contains(autoClassifierBlockReasons[cli], reason)
+	if cli != "claude" {
+		return false
+	}
+	if reason == "Blocked by classifier" {
+		return true
+	}
+	if !strings.HasPrefix(reason, "[") {
+		return false
+	}
+	end := strings.IndexByte(reason, ']')
+	if end < 2 || end > 65 {
+		return false
+	}
+	name := reason[1:end]
+	if name[0] == ' ' || name[len(name)-1] == ' ' || strings.ContainsRune(name, '[') {
+		return false
+	}
+	for _, char := range name {
+		if unicode.IsControl(char) {
+			return false
+		}
+	}
+	if slices.Contains(autoClassifierHardDenyRules, name) {
+		return false
+	}
+	suffix := reason[end+1:]
+	return suffix == "" || (len(suffix) >= 2 && suffix[0] == ' ' && !unicode.IsSpace(rune(suffix[1])))
 }
 
 // sessionAdapter returns the one connected adapter whose stable session id

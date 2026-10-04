@@ -259,7 +259,7 @@ Add the block to `~/.config/c3/mappings.json`, then run `/c3:reload-config`:
 
 A zero or omitted number takes the default. Values outside the limits are clamped. Turning the feature off on reload cancels every open card and armed grant.
 
-Only a denial whose `reason` exactly matches a known classifier-block form gets a card: `[Code from External]`, `[Auto-Mode Bypass]`, `[Credential Exploration]` or `[Git Destructive]`. Any other reason gets no card, and the denial stands. That covers denials made without a classifier verdict and any form C3 hasn't seen before. The broker logs the reason so the list can be extended deliberately.
+A card is posted for a classifier verdict: a reason of the form `[Rule Name]` (optionally followed by the classifier's explanation) or `Blocked by classifier`. No card is posted for `[Data Exfiltration]`, which Claude Code itself treats as never overridable. Denials made without a classifier verdict (`Auto mode could not evaluate…`, `Classifier unavailable` and similar) get no card; Claude Code ignores a retry for these anyway. Any other form gets no card and is logged by the broker.
 
 There is also no card when the session has no single live C3 adapter, holds no confirmed Telegram route, or holds several Telegram routes and none of them is its output route. Sessions on web-only routes get no card.
 
