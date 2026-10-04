@@ -179,6 +179,11 @@ It works fine with a single session. The architecture starts to matter once you 
 - **Remote permission decisions** — Claude Code can relay its permission prompt as an
   Allow/Deny keyboard. Only a DM-paired operator's tap becomes a verdict, and command
   previews render literally rather than as markdown.
+- **Telegram approval of auto-mode denials (opt-in, off by default)** — when Claude Code's
+  auto-mode classifier denies a tool call, an operator can tap Allow once to let the model's
+  next identical retry through, once. The card shows the full, unmasked tool input to everyone
+  in the topic. Linux and macOS only. See
+  [Approving auto-mode denials](docs/USAGE.md#approving-auto-mode-denials-from-telegram).
 - **Your CLIs, your auth, your machine** — C3 is a local multiplexer. Each host keeps its
   normal models, credentials, tools, sandboxes, and project directories.
 - **Local, inspectable state** — Go binaries, MIT licence, a mode-0600 config file, and a

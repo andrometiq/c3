@@ -22,14 +22,17 @@ package main
 import (
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
 
+	"github.com/Andrometiq/c3/internal/autohook"
 	"github.com/Andrometiq/c3/internal/broker"
 	"github.com/Andrometiq/c3/internal/channel"
 	"github.com/Andrometiq/c3/internal/channel/telegram"
@@ -95,8 +98,31 @@ const (
 	exitConfig  = 78 // EX_CONFIG — config-time failure (setup, install-codex-shim)
 )
 
+// hookCommands are the c3 plugin's hook subcommands (plugins/c3/hooks/hooks.json).
+// Every one exits 0 on every path: a hook that fails can block a tool call or
+// break the user's session.
+var hookCommands = map[string]func(){
+	// SessionStart. NEVER connects to the broker; runSessionHook returns nil
+	// unconditionally.
+	"session-hook": func() { _ = runSessionHook() },
+	// Auto-mode approval. Silent on every failure, including an unresolvable
+	// socket path: staying silent leaves Claude Code's own decision in place.
+	"pretooluse-hook":        func() { runAutoHook(autohook.RunPreToolUse) },
+	"permission-denied-hook": func() { runAutoHook(autohook.RunPermissionDenied) },
+}
+
+func runAutoHook(run func(stdin io.Reader, stdout io.Writer, socketPath string)) {
+	if socketPath, err := broker.SocketPath(); err == nil {
+		run(os.Stdin, os.Stdout, socketPath)
+	}
+}
+
 func main() {
 	if len(os.Args) >= 2 {
+		if run, ok := hookCommands[os.Args[1]]; ok {
+			run()
+			return
+		}
 		switch os.Args[1] {
 		case "inject":
 			if err := runInject(os.Args[2:]); err != nil {
@@ -221,12 +247,6 @@ func main() {
 				os.Exit(exitConfig)
 			}
 			return
-		case "session-hook":
-			// SessionStart hook (c3 plugin). NEVER connects to the broker and is
-			// designed to exit 0 even on bad input — a hook that errors would
-			// break the user's session. runSessionHook returns nil unconditionally.
-			_ = runSessionHook()
-			return
 		case "restart":
 			if err := bounceUpgradeBroker(); err != nil {
 				fmt.Fprintln(os.Stderr, err)
@@ -249,6 +269,12 @@ func main() {
 			fmt.Print(usage)
 			return
 		default:
+			// A hook this binary predates (newer plugin files, older binary)
+			// stays silent: exiting non-zero from a PreToolUse hook blocks the
+			// tool call.
+			if strings.HasSuffix(os.Args[1], "-hook") {
+				return
+			}
 			fmt.Fprintf(os.Stderr, "c3-broker: unknown subcommand %q\n%s", os.Args[1], usage)
 			os.Exit(exitUsage)
 		}
@@ -328,6 +354,17 @@ Usage:
                         instance id to the stable --resume session id, and
                         writes a handoff the adapter reads to auto-attach a
                         resumed session. Never touches the broker socket;
+                        always exits 0.
+  c3-broker pretooluse-hook
+                        Internal: the c3 plugin's PreToolUse hook. Allows a
+                        tool call only when the broker holds an armed
+                        auto-mode approval for that exact call, consuming it.
+                        Otherwise prints nothing; always exits 0.
+  c3-broker permission-denied-hook
+                        Internal: the c3 plugin's PermissionDenied hook.
+                        Reports an auto-mode denial so the broker can post an
+                        Allow/Deny card, and prints retry:true only after an
+                        operator's Allow is armed. Otherwise prints nothing;
                         always exits 0.
   c3-broker update [--check]
                         Update C3 to the latest GitHub release: download the

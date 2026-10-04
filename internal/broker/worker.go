@@ -1101,6 +1101,11 @@ func (w *RouteWorker) flushEvent(ctx context.Context, ev *c3types.Inbound) {
 		// SUPPRESS it, whether or not it resolved: a non-operator / unknown / expired /
 		// route-mismatched tap must not be surfaced as a raw callback event into the
 		// session (it's already auto-acked by the channel regardless).
+		// Auto-mode approval cards: same rule, resolved by resolveAutoTap.
+		if strings.HasPrefix(cb.Data, autoCallbackPrefix) {
+			w.broker.resolveAutoTap(w.key, cb)
+			return
+		}
 		if strings.HasPrefix(cb.Data, permCallbackPrefix) {
 			w.broker.resolvePerm(w.key, cb)
 			return

@@ -480,6 +480,8 @@ these deltas instead of the Linux-only steps above:
   binaries (prebuilt install) or `git pull` → `/c3:build` (source install), and restart.
 - **No systemd** — the default on-demand broker spawn is what you get
   (systemd supervision is Linux-only — see the top-level `INSTALL.md` §6).
+- **No auto-mode approval** — Telegram approval of auto-mode denials is unsupported on
+  Windows. Its hooks never grant there, so auto-mode denials stand as Claude Code made them.
 
 See [`DESKTOP.md`](DESKTOP.md) for the remaining Windows caveats (broker
 singleton, per-tab Desktop identity).

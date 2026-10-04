@@ -8,6 +8,8 @@ import (
 	"os"
 
 	"golang.org/x/sys/unix"
+
+	"github.com/Andrometiq/c3/internal/peercred"
 )
 
 const crossSessionPeerPIDAvailable = true
@@ -31,7 +33,7 @@ func validateCrossSessionPeer(conn net.Conn, hostPID int) error {
 		if unix.Fstat(int(fd), &stat) != nil || stat.Mode&unix.S_IFMT != unix.S_IFSOCK || stat.Uid != uint32(os.Getuid()) {
 			return
 		}
-		pid, uid, err := crossSessionPeerIdentity(int(fd))
+		pid, uid, err := peercred.Identity(int(fd))
 		valid = err == nil && crossSessionCredentialsMatch(hostPID, pid, uid)
 	})
 	if err != nil || !valid {

@@ -224,6 +224,103 @@ If you want Claude and Codex on different topics in the same group, attach Codex
 
 Recovery ids are scoped by CLI family. If two hosts happen to issue the same opaque session id, Claude's remembered topic and Codex's remembered topic remain separate; an old unqualified record can be adopted by at most one family.
 
+## Approving auto-mode denials from Telegram
+
+In auto mode, Claude Code's classifier allows or denies most tool calls without opening a prompt, so C3's permission relay (the Allow/Deny keyboard for Claude Code permission prompts) never sees them. With this feature on, a classifier denial posts an **Allow once / Deny** card to the session's Telegram topic, and Allow lets the model's next identical retry through, once. It is **off by default**, Claude Code only, Telegram routes only, and Linux and macOS only.
+
+### How it works
+
+1. The classifier denies a tool call. The plugin's `PermissionDenied` hook (`c3-broker permission-denied-hook`) reports the denial to the broker and waits. Claude Code waits on the hook, so the session pauses while the card is open.
+2. The broker posts a card to the session's Telegram route: the output route if it is Telegram, otherwise the only Telegram route the session holds. The card shows the tool name, `cwd`, the classifier's reason and every field of the tool input in full.
+3. **Allow once** from an operator arms a one-shot grant, and the hook tells the model it may retry. **Deny**, no tap before the wait ends, or the hook going away arms nothing, and the denial stands. If the same call was denied more than once while the card was open, each waiting hook is told to retry only if the grant is still usable at that moment; once it has been used, has expired or was cancelled, the rest are told no. If no hook can be told at all, the grant is cancelled.
+4. If the model retries the identical call, the plugin's `PreToolUse` hook (`c3-broker pretooluse-hook`) consumes the grant and returns `allow`. Every other call gets Claude Code's normal permission flow.
+
+After the tap, C3 edits the card to show the outcome as far as it can know it: `Allowed — retry armed`, `Retry authorized (execution unconfirmed)`, `Allowed, not used (expired)`, `Denied`, `Timed out`, `Cancelled (session ended / hook gone)`, `Allowed, but C3 couldn't confirm the approval reached Claude Code; it did not run. A new card asks again.`, or `Allowed, but Claude Code still blocked the retry; it did not run` (for the last two, see [Depends on Claude Code honouring a hook `allow`](#depends-on-claude-code-honouring-a-hook-allow)). These edits are best effort and are lost if the broker restarts. A card never says a command ran or succeeded.
+
+### Turning it on
+
+Add the block to `~/.config/c3/mappings.json`, then run `/c3:reload-config`:
+
+```json
+"auto_mode_approval": {
+  "enabled": true,
+  "wait_seconds": 300,
+  "grant_ttl_seconds": 120,
+  "max_pending": 5
+}
+```
+
+| Key | Default | Limits | Meaning |
+|---|---|---|---|
+| `enabled` | `false` | — | With the block absent or `false`, both hooks print nothing. |
+| `wait_seconds` | `300` | 30–300 | The whole hook transaction: attachment upload, card send and the wait for a tap. A slow send leaves less time to tap. The hook's own 320-second bound also applies, and the broker stops 5 s before it. |
+| `grant_ttl_seconds` | `120` | 30–120 | How long an armed grant stays usable. |
+| `max_pending` | `5` | at least 1 | Undecided cards per route. Beyond it, a denial gets no card and is logged. |
+
+A zero or omitted number takes the default. Values outside the limits are clamped. Turning the feature off on reload cancels every open card and armed grant.
+
+A card is posted for a classifier verdict: a reason of the form `[Rule Name]` (optionally followed by the classifier's explanation) or `Blocked by classifier`. No card is posted for `[Data Exfiltration]`, which Claude Code itself treats as never overridable. Denials made without a classifier verdict (`Auto mode could not evaluate…`, `Classifier unavailable` and similar) get no card; Claude Code ignores a retry for these anyway. Any other form gets no card and is logged by the broker.
+
+There is also no card when the session has no single live C3 adapter, holds no confirmed Telegram route, or holds several Telegram routes and none of them is its output route. Sessions on web-only routes get no card.
+
+### What Allow guarantees, and what it doesn't
+
+Allow arms **one** retry. The grant matches only a call that has all of these:
+
+- the same Claude Code session, and the same sub-agent (`agent_id`) when the denial came from one;
+- the same adapter connection and route claim the card was issued for. A reconnect, re-attach, steal or detach cancels the request;
+- the same `cwd` and tool name;
+- the same tool input, compared by the SHA-256 of its canonical JSON. Object key order and whitespace don't matter; numbers must be written exactly the same. Input that isn't strict JSON (invalid UTF-8, an unpaired surrogate escape, duplicate keys, data after the value) gets no card.
+
+The first matching call consumes the grant. If no call matches within `grant_ttl_seconds` (default and maximum 120 s), the grant expires. Expiry is checked at the moment of use.
+
+Allow does **not**:
+
+- make the model retry. The model decides, and if it doesn't retry, nothing runs on the strength of the tap;
+- allow a changed call. A retry with a different input, `cwd` or tool goes through the classifier again, and may be denied again and get a new card;
+- create a standing rule. Nothing is written to Claude Code's settings, and the next identical denial needs a new tap;
+- override explicit `permissions.deny` or `ask` rules, a stricter decision from another hook, or the actions Claude Code never auto-approves in any mode;
+- tell C3 whether the call ran or succeeded;
+- survive a broker restart. Open cards and grants live only in memory, so a restart drops them, and a tap on a stale card is answered "no longer active".
+
+### Who sees the card, and who can approve
+
+- **Everyone who can read the topic sees the full tool input**, including any secret in a command, file content or URL. Nothing is masked: C3 only escapes the input for display. Invisible, bidirectional and control characters show as `⟦U+XXXX⟧`. Every text value is in double quotes, including the tool name, `cwd` and reason, so leading or trailing spaces stay visible. Each tool-input field is labelled `tool_input["<key>"]`; the `description` field's label adds `(the model's own words)` after the closing bracket, so no other key can pass for it. The masking the harness applies to permission prompts does not apply here. Input too long for one message is posted first as a plain-text file, `c3-approval-<id>.txt`, with the same escaping, and the card replies to it. The card and the file's caption show the same request id and input-hash prefix. If the file can't be sent, no card is sent.
+- Cards stay in the topic's history after they're decided. If a card showed a secret, delete the card and its file in Telegram and rotate the secret.
+- **An owner-only group is a prerequisite.** C3 controls which group it listens to, not who is in that group. Turn this on only where every member may see everything your sessions run.
+- **Only operators' taps count.** Operators are the users in `allowlist.users`, the list DM pairing fills. Any operator can approve any card on any route. Anyone else's tap is answered "Not authorized" and changes nothing. Approval comes only from a button tap on the card itself, never from a text message, a reply or a forward.
+
+### Requirement: no other hook may rewrite tool input
+
+Claude Code runs `PreToolUse` hooks in parallel. If another hook returns `updatedInput`, the call that runs can differ from the input you approved, after C3 has matched its grant. C3's hooks never return `updatedInput`, but C3 can't check other hooks: hook configuration doesn't say whether a handler rewrites input, and hooks can also come from plugins, skills and sub-agent definitions. **Enable this feature only when no other `PreToolUse` hook returns `updatedInput` for any tool.** Checking that is up to you.
+
+### Depends on Claude Code honouring a hook `allow`
+
+The retry runs because Claude Code lets a `PreToolUse` hook's `allow` decide a call the auto-mode classifier would deny. This was confirmed on Claude Code 2.1.286, but it is Claude Code's behaviour, not something C3 controls, and a later release could change it.
+
+C3 watches for that change. After the `PreToolUse` hook prints its `allow`, it confirms this to the broker. If Claude Code then denies that very call anyway (same tool call id), C3 edits the card to **`Allowed, but Claude Code still blocked the retry; it did not run`**, the broker logs `auto-approval vetoed-after-allow`, and no new card is posted for that retry. If you see this state, Claude Code no longer honours the hook; turn the feature off.
+
+If the broker consumed the grant but the hook's confirmation never arrived (for example, the hook ran out of its 300 ms budget, so the retry went to the classifier instead and was denied again), C3 can't tell whether Claude Code ever saw the `allow`, so it doesn't call it a veto. The old card then reads **`Allowed, but C3 couldn't confirm the approval reached Claude Code; it did not run. A new card asks again.`**, the broker logs `auto-approval allow-unconfirmed`, and the new denial gets a fresh card. Tap Allow on the new card if you still want the call to run. A denial that arrives while the hook's confirmation is still on its way waits up to one second for it, so a confirmation in flight still counts.
+
+If Claude Code blocks the retry without firing `PermissionDenied`, C3 can't see it, and the card stays at `Retry authorized (execution unconfirmed)`.
+
+### Platforms and versions
+
+- **Windows is not supported.** The hooks never grant there: the hook can't verify which user the broker runs as, so it exits without output, and the classifier's decision stands. The `|| exit 0` guard in the hook commands also needs a POSIX shell; Windows PowerShell 5.1 can't parse `||`.
+- The hooks ship in the plugin's `hooks/hooks.json` and update through the Claude Code marketplace (`/plugin`). The binaries update through `/c3:update`. If the hooks are newer than the binary, they print nothing; if the binary is newer than the hooks, nothing fires. The feature works once both are current.
+- The `PreToolUse` hook runs on every tool call, whether the feature is on or not. It makes one local socket round trip, bounded at 300 ms, prints nothing unless it consumes a grant, and never starts the broker.
+
+### Threat model
+
+- **Trusted:** Telegram's authentication of the tapping user's id; the secrecy of the bot token; the local broker, its socket and every process running as your user; your phone and Telegram account; your other `PreToolUse` hooks (see the requirement above).
+- **A leaked bot token matters more than it looks.** Someone with the token can't forge who tapped, but can read every card and can edit a genuine card's text and buttons before you tap, misleading you about what you're approving. They can't change what the broker arms: the grant is keyed on the broker's own record of the input. Card integrity depends on keeping the token secret.
+- **Prompt injection** can at most cause a card. It can't tap one.
+- **Group members who aren't operators** can read every card but can't approve one.
+- **Local processes running as your user** can reach the broker socket, so they could post a card or use up a grant. They already have your privileges. The hooks refuse to talk to a broker running as another user.
+- **The scope of one Allow** is one exact call in one exact session, sub-agent, `cwd` and adapter claim, for at most 120 s. There are no pattern or time-boxed grants.
+- **Residual risk:** if the denial hook crashes after the grant is armed, the model never gets the retry prompt, but the next matching call within the grant lifetime can still use the grant. That call is the one you approved. Otherwise the grant expires.
+- **With the feature off,** both hooks print nothing and Claude Code's permission behaviour is unchanged.
+
 ## Editing mappings.json by hand
 
 Nothing stops you. Mode 600, JSON, atomically rewritten by the broker — but if you `vim` it while the broker is running and save, the broker's next read will pick up the change. Common edits:
@@ -247,6 +344,7 @@ C3 doesn't auto-delete. From your phone (Telegram), long-press the topic in the 
 - **Typing indicator** — the broker now auto-pulses a typing indicator on a route while the agent is working, once that session has replied at least once in the topic (the signal you're in an active Telegram conversation). It stops when the agent sends its reply, or after a safety timeout. A brand-new topic shows no typing until the agent's first reply, and default-CLI-mode sessions (that never reply to Telegram) never pulse it.
 - **`codex` doesn't seem to be using C3** — check `which codex` returns the C3 launcher (`$GOBIN/codex` after install). Long-running shells hash; open a new terminal or `hash -r`. The launcher logs to `/tmp/c3-codex-supervisor.log` — `tail` it during a `codex` invocation to see what it thinks it's doing.
 - **`reply` says to attach first** — your adapter lost local state but the broker may still hold your claim. Try `attach` again with the same target; the adapter recovers from the broker's claim (both Claude and Codex adapters do this). If that fails, `topics` shows who's holding what; `c3-broker status` from a separate shell tells you the same with more detail.
+- **An auto-mode denial produced no approval card** — check that `auto_mode_approval.enabled` is `true` and that you ran `/c3:reload-config`, then look for `auto-approval no-card` in `broker.log`: its `cause` says why (an unknown reason, no Telegram route, `max_pending` reached, …). If there's no line at all, the hooks didn't reach the broker. The usual causes are plugin hooks or binaries older than this feature, Windows, or a running broker that predates the binary. See [Auto-mode approval](DEBUGGING.md#auto-mode-approval).
 
 ## Health checks
 
@@ -396,5 +494,6 @@ This release changes how a session binds to a topic. Three user-visible changes:
 
 - The bot token is in `mappings.json` at mode 600. Treat it like a password.
 - Anyone in your Telegram supergroup can send messages that hit your CLI. The `master_user_id` field in `mappings.json` is plumbed for future per-user access control; today, the bot trusts everyone in the group. Use private supergroups.
+- Auto-mode approval cards, when you turn them on, post the full tool input of every denied call to the topic, unmasked. See [Who sees the card, and who can approve](#who-sees-the-card-and-who-can-approve).
 - C3 doesn't store message history beyond what's needed for routing. If you want a message log, set up Telegram's own export, or write a plugin that subscribes to `OnInbound` and writes to a file.
 - The Codex bridge spawns app-servers. They're long-lived processes that hold MCP servers loaded; they listen on `127.0.0.1` only (not exposed to the network). Concurrent launchers serialize port selection and child readiness with a per-user runtime-directory lock, and each child starts on an OS-assigned ephemeral port. If you `pkill codex-app-server` everything cleans up.

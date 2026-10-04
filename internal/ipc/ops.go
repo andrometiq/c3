@@ -55,6 +55,21 @@ const (
 	// blocking tool to unblock, so the broker sends no synchronous ack (unlike
 	// OpAskRegister). The verdict comes back later as OpPermissionVerdict.
 	OpPermissionRequest Op = "permission_request"
+	// Auto-mode approval ops run on a transient hook connection opened with
+	// OpHookHello instead of OpHello, one op per connection. OpAutoDenied reports an
+	// auto-mode classifier denial and holds the connection through the
+	// approval handoff: broker OpAutoDecision "approved" → hook OpAutoAck →
+	// broker OpAutoDecision "armed", or a terminal "none". OpGrantCheck
+	// atomically consumes an armed grant; the answer is OpGrantCheckResult.
+	// After printing an allow, the hook sends OpGrantDelivered on the same
+	// connection, so the broker knows the allow reached Claude Code.
+	OpHookHello        Op = "hook_hello"
+	OpAutoDenied       Op = "auto_denied"
+	OpAutoDecision     Op = "auto_decision"
+	OpAutoAck          Op = "auto_ack"
+	OpGrantCheck       Op = "grant_check"
+	OpGrantCheckResult Op = "grant_check_result"
+	OpGrantDelivered   Op = "grant_delivered"
 	// OpPermissionSettled reports that a previously-relayed Claude Code
 	// permission prompt was resolved in the CLI. Carries NO route — the broker
 	// owner-checks it against the requesting stub. Fire-and-forget: it only clears

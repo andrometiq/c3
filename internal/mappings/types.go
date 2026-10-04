@@ -44,6 +44,46 @@ type MappingsFile struct {
 	// "unset" apart from an explicit false. omitempty keeps pre-feature and
 	// opted-out config files byte-identical.
 	AutoUpdate bool `json:"auto_update,omitempty"`
+	// AutoModeApproval configures Telegram approval of auto-mode denials.
+	// Absent ⇒ disabled. Read it through AutoModeApprovalSettings, which
+	// applies the defaults and limits.
+	AutoModeApproval *AutoModeApprovalConfig `json:"auto_mode_approval,omitempty"`
+}
+
+// AutoModeApprovalConfig is the auto_mode_approval block. A zero or absent
+// number means its default.
+type AutoModeApprovalConfig struct {
+	// Enabled turns the feature on. Off ⇒ both hooks stay silent.
+	Enabled bool `json:"enabled"`
+	// WaitSeconds bounds the whole hook transaction: card upload, send and the
+	// wait for a tap. Default 300, clamped to [30, 300].
+	WaitSeconds int `json:"wait_seconds,omitempty"`
+	// GrantTTLSeconds is how long an armed grant stays usable. Default 120,
+	// clamped to [30, 120].
+	GrantTTLSeconds int `json:"grant_ttl_seconds,omitempty"`
+	// MaxPending caps undecided cards per route. Default 5, minimum 1.
+	MaxPending int `json:"max_pending,omitempty"`
+}
+
+// AutoModeApprovalSettings returns the effective auto-mode approval settings:
+// defaults applied and limits clamped. A nil file or absent block is disabled.
+func (mf *MappingsFile) AutoModeApprovalSettings() AutoModeApprovalConfig {
+	settings := AutoModeApprovalConfig{WaitSeconds: 300, GrantTTLSeconds: 120, MaxPending: 5}
+	if mf == nil || mf.AutoModeApproval == nil {
+		return settings
+	}
+	configured := mf.AutoModeApproval
+	settings.Enabled = configured.Enabled
+	if configured.WaitSeconds != 0 {
+		settings.WaitSeconds = min(max(configured.WaitSeconds, 30), 300)
+	}
+	if configured.GrantTTLSeconds != 0 {
+		settings.GrantTTLSeconds = min(max(configured.GrantTTLSeconds, 30), 120)
+	}
+	if configured.MaxPending != 0 {
+		settings.MaxPending = max(configured.MaxPending, 1)
+	}
+	return settings
 }
 
 // NotificationsConfig governs the "invasive" health-notification surfaces
