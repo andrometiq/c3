@@ -45,6 +45,7 @@ The first is cleaner; the second is far easier to reason about when it misbehave
 - Per-user access control — who is allowed to drive which CLI.
 - Trusted-operator authorization for actions the CLI would otherwise hard-deny.
 - Permission-relay niceties: "see more" expansion, a text `y/n` fallback.
+- Neutral wording for a tap on an unknown permission id. Today `permAnswerGoneText` (`internal/broker/perm.go`) answers every unknown, resolved or expired id with "already answered or expired", which overclaims for an id the broker never knew. Use wording that is true for all three cases (for example "no longer active"), and update the tests that assert the current text (`internal/broker/perm_test.go`, the unknown-id and late-tap cases).
 
 ## Reach
 
@@ -106,7 +107,7 @@ The first is cleaner; the second is far easier to reason about when it misbehave
 - Broker-side `/list` and `/route` commands.
 - Monitoring dashboard, persistent message history, STT latency instrumentation.
 - Async-dispatch more non-critical broker sends (as the voice-readback echo already does), preserving strict per-topic ordering.
-- Delivery-contingent consume for `fetch_queue` — the live-push half now consumes by message id (the ack removes exactly the lines its push covered), but the fetch path still commits its consume before the response is known to have been received, so an adapter that abandons a fetch can have the batch consumed anyway. Close that window the same way: peek, respond, then an explicit id-targeted ack. Needed by the pooled-queue work regardless.
+- Delivery-contingent consume for legacy `fetch_queue` peers. A connection with a confirmed `fetch_receipt` already leases a receipt group and retires rows only at the declared receipt milestone (see [Fetch and receipt groups](docs/ADAPTERS.md#fetch-and-receipt-groups)). Legacy peers and `fetch:"consume"` declarations still remove rows when the fetch returns, so an adapter that abandons a fetch can lose that batch. Close the window for them: move each adapter that can observe its host's tool result onto receipts, or give consume peers a peek, respond, then id-targeted ack path.
 - Attach-replay refinements: gate `disambiguate_dm` on `Replay`, and honor `group` in the step-2 name lookup, so a replayed DM or non-default-group attach restores cleanly instead of falling to a discarded proposal. This also covers a case the steal-sanitize introduced: a DM attach that steered past disambiguation with `steal=true` is remembered as `{Target:"dm", Steal:false}` (the one-shot steal is stripped), so a fresh-broker replay lands back on the `disambiguate_dm` proposal — discarded → detached (the auto-recover net usually restores it) — which the `Replay` gate would fix.
 - Surface the silent auto-recover skip: when a resumed session's own last topic is held by another live session, carry a `Skipped`/reason field and show a one-line CLI notice, instead of resuming quietly with no explanation.
 - Idempotent-attach hint: an already-attached bare `attach` could return an "already attached to X — to switch topics attach by name, or detach first" hint instead of a bare confirmation. Needs an additive `AttachedMsg` field so the formatter can tell an idempotent re-confirm apart from a fresh claim.
