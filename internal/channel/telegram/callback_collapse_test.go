@@ -55,6 +55,9 @@ func TestDispatchCallback_GenericTap_CollapsesKeyboard(t *testing.T) {
 	c := makeChannelWithBot(h, rc)
 
 	c.dispatchCallback(9, genericTapWithKeyboard("cb-choice", "choice:a"))
+	if h.emitCount() == 1 && h.emitted[0].Event.Callback.Label != "A · Disable" {
+		t.Fatalf("callback label = %q", h.emitted[0].Event.Callback.Label)
+	}
 
 	if h.emitCount() != 1 {
 		t.Fatalf("a generic callback must still emit; got %d", h.emitCount())

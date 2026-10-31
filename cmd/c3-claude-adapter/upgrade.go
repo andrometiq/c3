@@ -152,7 +152,7 @@ func (a *adapter) pollUpgrade(now time.Time) {
 	if !u.reported {
 		if c := a.currentConn(); c != nil {
 			if a.deliveryAccepted.Load() {
-				writeLiveFrame(c, ipc.DeliveryReportMsg{Op: ipc.OpDeliveryReport, Live: a.deliveryFacts()})
+				writeLiveFrame(c, ipc.DeliveryReportMsg{Op: ipc.OpDeliveryReport, Live: a.deliveryReportFacts(c)})
 			} else {
 				a.liveMu.Lock()
 				a.renderRoute = ipc.RenderRoute{State: ipc.RenderQueueOnly, Reason: "adapter upgrade pending"}

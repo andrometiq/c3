@@ -33,6 +33,9 @@ func (a *adapter) confirmDeliveryAcceptance(conn *ipc.Conn, ack *ipc.DeliveryAcc
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
+	if conn != nil && a.eventPushFactsConn.Load() == conn {
+		return conn.WriteJSONContext(ctx, ipc.DeliveryReportMsg{Op: ipc.OpDeliveryReport, Accepted: modes, AcceptedCapabilities: []string{"event_push_renders:1"}, Live: a.deliveryReportFacts(conn)})
+	}
 	return conn.WriteJSONContext(ctx, struct {
 		Op       ipc.Op   `json:"op"`
 		Accepted []string `json:"accepted"`

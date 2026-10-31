@@ -111,3 +111,38 @@ func TestNegotiatedInboxRenderHistory(t *testing.T) {
 		}
 	}
 }
+
+func TestEventPushRenderingFact(t *testing.T) {
+	for _, tc := range []struct {
+		value          string
+		valid, renders bool
+	}{
+		{"", true, false}, {`,"event_push_renders":false`, true, false}, {`,"event_push_renders":true`, true, true}, {`,"event_push_renders":"true"`, false, false},
+	} {
+		raw := []byte(`{"version":1,"live":{"channel":{"eligible":true` + tc.value + `},"inbox":{"eligible":false}},"receipts":"transcript","fetch":"receipt"}`)
+		offer := ParseDeliveryOffer(raw)
+		if (offer != nil) != tc.valid {
+			t.Fatalf("offer=%+v raw=%s", offer, raw)
+		}
+		if offer != nil && offer.Live.Channel.EventPushRenders != tc.renders {
+			t.Fatalf("offer=%+v", offer)
+		}
+	}
+	// Older brokers strictly parse the old shape and decline extended offers;
+	// the existing hello legacy render state remains their fallback.
+	type oldEligibility struct {
+		Eligible bool   `json:"eligible"`
+		Reason   string `json:"reason,omitempty"`
+	}
+	var oldLive struct {
+		Channel oldEligibility `json:"channel"`
+		Inbox   oldEligibility `json:"inbox"`
+	}
+	if StrictJSON([]byte(`{"channel":{"eligible":true,"event_push_renders":true},"inbox":{"eligible":false}}`), &oldLive) == nil {
+		t.Fatal("old schema unexpectedly accepted extended facts")
+	}
+	raw, err := json.Marshal(DeliveryLive{Channel: DeliveryEligibility{Eligible: true}})
+	if err != nil || strings.Contains(string(raw), "event_push_renders") {
+		t.Fatalf("false fact must be omitted: %s %v", raw, err)
+	}
+}

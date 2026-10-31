@@ -48,6 +48,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -275,6 +276,8 @@ type adapter struct {
 	deliveryObservers       map[string]*deliveryObserver
 	deliveryLoopOnce        sync.Once
 	deliveryLastFacts       ipc.DeliveryLive
+	deliveryLastFactsConn   *ipc.Conn
+	eventPushFactsConn      atomic.Pointer[ipc.Conn]
 	deliveryRehello         deliveryRehelloState // liveMu
 	deliveryHostInitialized atomic.Bool
 
@@ -545,7 +548,7 @@ func (a *adapter) hello() error {
 		Build: buildidentity.Current(), ResumeContract: upgradeContract(), UpgradeDisabled: !upgradeSupported || a.upgrade.disabled.Load(),
 		ReceiptShapeDrift: a.receiptDriftHost(),
 		Delivery:          offer, Op: ipc.OpHello, CLI: "claude", PID: os.Getpid(), CWD: cwd,
-		Capabilities: []string{"claude/channel"},
+		Capabilities: []string{"claude/channel", "event_push_renders:1"},
 		// Conservative fallback for old brokers: probing is also queue-only.
 		CannotRenderChannels: route.State != ipc.RenderCapable,
 		RenderState:          route.State, RenderReason: route.Reason,
@@ -570,6 +573,10 @@ func (a *adapter) hello() error {
 	}
 	wasNegotiated := a.deliveryAccepted.Load()
 	a.acceptDelivery(offer, ack.Delivery)
+	a.eventPushFactsConn.Store(nil)
+	if a.deliveryAccepted.Load() && slices.Contains(ack.AcceptedCapabilities, "event_push_renders:1") {
+		a.eventPushFactsConn.Store(conn)
+	}
 	if err := a.confirmDeliveryAcceptance(conn, ack.Delivery); err != nil {
 		return err
 	}
@@ -1220,7 +1227,7 @@ func (a *adapter) handleInbound(ctx context.Context, raw []byte) {
 	}
 
 	if a.deliveryAccepted.Load() {
-		if in.Inbound.IsEvent() && a.deliveryFacts().Channel.Eligible && a.notifyTx != nil {
+		if in.Inbound.IsEvent() && a.deliveryFacts().Channel.EventPushRenders && a.notifyTx != nil {
 			_ = a.notifyTx.Notify(ctx, "notifications/claude/channel", frame)
 		}
 		return

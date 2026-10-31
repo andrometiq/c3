@@ -261,6 +261,7 @@ type CallbackEvent struct {
 	MessageID  int64  `json:"MessageID"`
 	Actor      Sender `json:"Actor"`
 	Data       string `json:"Data"`
+	Label      string `json:"Label,omitempty"`
 }
 
 // Sender identifies the originator of an Inbound or ReplyContext. UserID

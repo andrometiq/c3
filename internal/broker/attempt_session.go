@@ -36,6 +36,7 @@ func (s *Stub) claimGeneration(key RouteKey) uint64 {
 	return s.claimGenerations[key]
 }
 func (b *Broker) configureDelivery(s *Stub, raw json.RawMessage) {
+	s.deliveryOffered = len(raw) != 0
 	offer := ipc.ParseDeliveryOffer(raw)
 	if b.Queue == nil || offer == nil {
 		return

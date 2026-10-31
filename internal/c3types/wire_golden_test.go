@@ -171,10 +171,10 @@ func wireGoldens() []wireGolden {
 			name: "CallbackEvent",
 			value: CallbackEvent{
 				CallbackID: "cb", MessageID: 42,
-				Actor: Sender{UserID: 1, Username: "u"}, Data: "approve",
+				Actor: Sender{UserID: 1, Username: "u"}, Data: "approve", Label: "Approve",
 			},
-			keys:      []string{"CallbackID", "MessageID", "Actor", "Data"},
-			omitEmpty: nil,
+			keys:      []string{"CallbackID", "MessageID", "Actor", "Data", "Label"},
+			omitEmpty: []string{"Label"},
 		},
 		{
 			name:      "Sender",

@@ -203,8 +203,13 @@ func heldReplySource(key RouteKey, rows []queue.TrackedInbound) *int64 {
 	}
 	for _, row := range rows {
 		in := row.Inbound
-		if !in.IsEvent() && in.DrainedFrom == "" && row.SourceRecordID == "" && len(row.VoicePending) == 0 && in.MessageID > 0 && MakeRouteKey(in.Channel, in.ChatID, in.TopicID) == key {
-			return &in.MessageID
+		if !in.IsEvent() && in.DrainedFrom == "" && row.SourceRecordID == "" && len(row.VoicePending) == 0 && MakeRouteKey(in.Channel, in.ChatID, in.TopicID) == key {
+			if in.MessageID > 0 {
+				return &in.MessageID
+			}
+			if in.MessageID == 0 && in.ReplyTo != nil && in.ReplyTo.MessageID > 0 {
+				return &in.ReplyTo.MessageID
+			}
 		}
 	}
 	return nil

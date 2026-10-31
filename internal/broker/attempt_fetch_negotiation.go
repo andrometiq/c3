@@ -10,7 +10,7 @@ import (
 )
 
 func supportedCapabilities() []string {
-	return []string{"intake_metadata:1"}
+	return []string{"intake_metadata:1", "event_push_renders:1"}
 }
 
 func deliveryAcceptance(offer ipc.DeliveryOffer) *ipc.DeliveryAcceptance {
@@ -41,6 +41,9 @@ func sameAcceptedModes(a, b *Stub) bool {
 // transport or make the route appear live, even after a capability report.
 func (s *Stub) acceptedLive() ipc.DeliveryLive {
 	live := s.delivery.live
+	if !s.eventPushFactsActive.Load() {
+		live.Channel.EventPushRenders = false
+	}
 	if !s.acceptsDeliveryMode("channel") {
 		live.Channel = ipc.DeliveryEligibility{Reason: "channel mode not accepted"}
 	}
@@ -99,6 +102,14 @@ func (b *Broker) handleDeliveryReport(s *Stub, raw []byte) {
 			}
 			s.deliveryReady.Store(true)
 			b.rearmDelivery(s)
+		}
+		if slices.Contains(msg.AcceptedCapabilities, "event_push_renders:1") {
+			s.stubMu.Lock()
+			offered := slices.Contains(s.helloAcceptedCaps, "event_push_renders:1")
+			s.stubMu.Unlock()
+			if offered {
+				s.eventPushFactsActive.Store(true)
+			}
 		}
 		if slices.Contains(msg.AcceptedCapabilities, "intake_metadata:1") && slices.Contains(msg.Accepted, "fetch_receipt") {
 			s.stubMu.Lock()

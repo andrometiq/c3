@@ -313,6 +313,9 @@ type RouteWorker struct {
 	// voiceResolveTestHook is nil in production. Tests inject a panic at a
 	// named post-mutation stage to pin the durable-before-push idempotency seam.
 	voiceResolveTestHook func(string)
+
+	// eventDispatchTestHook pins holder changes at dispatch boundaries.
+	eventDispatchTestHook func(string)
 }
 
 type coveredPushRecord struct {
@@ -627,6 +630,11 @@ var sttFlushTimeout = 750 * time.Second
 //     per-source origins remain available in Merged either way.
 //   - OnInbound chain runs ONCE on the merged Inbound, not per-message.
 func (w *RouteWorker) flushOccurrences(ctx context.Context, occurrences []inboundOccurrence) {
+	w.flushMessageOccurrences(ctx, occurrences, false)
+}
+
+// Converted events already passed plugins and must not consume a legacy probe.
+func (w *RouteWorker) flushMessageOccurrences(ctx context.Context, occurrences []inboundOccurrence, convertedEvent bool) {
 	batch := make([]*c3types.Inbound, len(occurrences))
 	sources := make(map[*c3types.Inbound]*intake.Source, len(occurrences))
 	states := make(map[*c3types.Inbound]intake.AttachmentsState, len(occurrences))
@@ -750,6 +758,10 @@ func (w *RouteWorker) flushOccurrences(ctx context.Context, occurrences []inboun
 			isPendingVoice := hasVoicePlan && len(plan.pending) > 0
 			recordID, err := w.broker.Queue.AppendTrackedIntake(qrk, in, sources[in], states[in], plan.pending...)
 			if err != nil {
+				if convertedEvent {
+					w.noteEventStorageFailure(err)
+					continue
+				}
 				log.Printf("queue append FAIL chan=%s chat=%d topic=%s msg=%d: %v — offset will NOT advance; Telegram redelivers — %s",
 					w.key.Channel, w.key.ChatID, TopicKeyStr(w.key), in.MessageID, err, fallbackSummary(in))
 				// C2: do NOT record the id as seen — the Append failed, so a later
@@ -802,6 +814,10 @@ func (w *RouteWorker) flushOccurrences(ctx context.Context, occurrences []inboun
 			deliverySources = append(deliverySources, occurrence(in, sources[in], states[in]))
 		}
 	} else if w.broker != nil {
+		if convertedEvent {
+			w.noteEventStorageFailure(fmt.Errorf("durable queue unavailable"))
+			return
+		}
 		// No durable copy exists: hold the Telegram frontier for replay after
 		// restart with a working queue. Clear the staged association but retain
 		// poll dedup, so redeliveries stay paced. Live delivery remains best-effort.
@@ -821,6 +837,10 @@ func (w *RouteWorker) flushOccurrences(ctx context.Context, occurrences []inboun
 				}
 			}
 		}
+	}
+
+	if convertedEvent {
+		return // The deferred scheduler or held notice owns delivery.
 	}
 
 	// Pending voice rows are deliberate backlog until their own resolve job. A
@@ -1066,7 +1086,8 @@ func (w *RouteWorker) echoReadback(in *c3types.Inbound, transcript, failNotice s
 }
 
 // flushEvent forwards a single synthesized channel EVENT (poll_result /
-// reaction / callback) straight through delivery. CB-1: events are NEVER
+// reaction / callback) through delivery. Render-incapable holders receive a
+// durable text description instead of a direct push. CB-1: events are NEVER
 // debounce-merged with text and NEVER run through the voice/STT substitution —
 // they are delivered intact and on their own. The OnInbound plugin chain still
 // runs (so a plugin can observe/drop an event), but the per-inbound STT loop in
@@ -1220,6 +1241,9 @@ func (w *RouteWorker) forwardOccurrences(ctx context.Context, in *c3types.Inboun
 			w.broker.evaluateNotices(w.key, true)
 		}
 	}()
+	if in.IsEvent() && w.eventDispatchTestHook != nil {
+		w.eventDispatchTestHook("before_holder")
+	}
 	holder, claimed := w.broker.Routes.Holder(w.key)
 	if w.broker.prompts.draining.Load() {
 		holder, claimed = nil, false
@@ -1248,6 +1272,10 @@ func (w *RouteWorker) forwardOccurrences(ctx context.Context, in *c3types.Inboun
 		holder = nil
 	}
 
+	if claimed && in.IsEvent() && !eventPushRenders(holder) && w.convertEvent(ctx, in) {
+		return
+	}
+
 	// Render-incapable holder (forked-session blackhole fix): the holder is a
 	// live, claimed session whose HOST silently drops channel push notifications
 	// (a Claude Code session launched without the development-channels flag —
@@ -1259,9 +1287,8 @@ func (w *RouteWorker) forwardOccurrences(ctx context.Context, in *c3types.Inboun
 	// held-notice, recoverable via fetch_queue (an MCP tool-result, which DOES
 	// render) and visible to the human as the held count. Do NOT release the
 	// claim: the session legitimately holds the route for OUTBOUND (reply/tools
-	// still work). Gated to NON-events: events are never queued and carry no lost
-	// content, so leaving them on the current push path is zero behavior change
-	// (they'd be dropped by the host anyway, same as today).
+	// still work). Dispatch converts events before reaching this path when
+	// their holder cannot render a direct push.
 	if claimed && !in.IsEvent() && !holder.tryRenderPush() {
 		log.Printf("deliver HELD chan=%s chat=%d topic=%s msg=%d: holder cli=%s pid=%d cannot render channel push — queuing for fetch_queue — %s",
 			w.key.Channel, w.key.ChatID, TopicKeyStr(w.key), in.MessageID,
@@ -1287,6 +1314,9 @@ func (w *RouteWorker) forwardOccurrences(ctx context.Context, in *c3types.Inboun
 	if claimed {
 		holderConn, _ = holder.ConnValue().(*ipc.Conn)
 		if holderConn == nil {
+			if in.IsEvent() && w.convertEvent(ctx, in) {
+				return
+			}
 			log.Printf("deliver BOUNCE chan=%s chat=%d topic=%s msg=%d: holder cli=%s pid=%d alive but disconnected — falling back so user can resend — %s",
 				w.key.Channel, w.key.ChatID, TopicKeyStr(w.key), in.MessageID,
 				holder.CLI, holder.PID, fallbackSummary(in))
@@ -1351,10 +1381,23 @@ func (w *RouteWorker) forwardOccurrences(ctx context.Context, in *c3types.Inboun
 			w.shadowPush(deliveryToken, holder, coveredIDs)
 			holder.RecordPushRoute(in.MessageID, deliveryToken, w.key)
 		}
-		if err := conn.WriteJSON(ipc.InboundMsg{
+		if in.IsEvent() && w.eventDispatchTestHook != nil {
+			w.eventDispatchTestHook("before_write")
+		}
+		if in.IsEvent() && !eventPushRenders(holder) && w.convertEvent(ctx, in) {
+			return
+		}
+		err := conn.WriteJSON(ipc.InboundMsg{
 			Op: ipc.OpInbound, Inbound: *in, Covered: covered, Pending: pending,
 			DeliveryToken: deliveryToken, RecordIDs: coveredIDs,
-		}); err != nil {
+		})
+		// Failed writes and downgrades can lose the direct event. Prefer a
+		// possible duplicate (direct render plus durable copy) to losing it.
+		if in.IsEvent() && (err != nil || !eventPushRenders(holder)) && w.convertEvent(ctx, in) {
+			log.Printf("event converted chan=%s topic=%s kind=%s reason=write_failed_or_capability_changed err=%v", w.key.Channel, TopicKeyStr(w.key), in.Kind, err)
+			return
+		}
+		if err != nil {
 			w.broker.attempts.write(deliveryToken, w.key, err, time.Now())
 			if w.broker.Queue == nil {
 				log.Printf("deliver FAIL chan=%s chat=%d topic=%s msg=%d to cli=%s pid=%d: %v — %s, nothing stored — %s",
@@ -1540,6 +1583,10 @@ func (w *RouteWorker) markPersistFailed(in *c3types.Inbound) {
 // real safety net; this notice just tells the human why a message seems stuck.
 // Reuses the existing fallback cooldown so a stuck disk does not spam the topic.
 func (w *RouteWorker) notePersistFailure(in *c3types.Inbound) {
+	w.noteStorageFailure("⚠️ Could not persist a received message (storage error) — it was NOT lost; Telegram will redeliver it. Check the broker host's disk.")
+}
+
+func (w *RouteWorker) noteStorageFailure(text string) {
 	if w.broker == nil || w.broker.Fallbacks == nil || !w.broker.Fallbacks.ShouldSend(w.key) {
 		return
 	}
@@ -1552,12 +1599,9 @@ func (w *RouteWorker) notePersistFailure(in *c3types.Inbound) {
 		t := w.key.TopicID
 		topicID = &t
 	}
-	// in's content is intentionally NOT echoed back to the chat (it failed to
-	// persist, but we don't surface user content in an error notice). The caller
-	// already logged the metadata via fallbackSummary(in) on the append-fail line.
 	_, _ = ch.SendReply(c3types.ReplyArgs{
 		Channel: w.key.Channel, ChatID: w.key.ChatID, TopicID: topicID,
-		Text: "⚠️ Could not persist a received message (storage error) — it was NOT lost; Telegram will redeliver it. Check the broker host's disk.",
+		Text: text,
 	})
 }
 

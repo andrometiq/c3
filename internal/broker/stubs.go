@@ -21,21 +21,23 @@ import (
 // confirmed-dead holder, Routes.Claim will release the stale claim and
 // grant the new one.
 type Stub struct {
-	Build            string // immutable hello identity
-	UpgradeDisabled  bool
-	ResumeContract   string
-	deliveryReady    atomic.Bool
-	deliveryModes    atomic.Pointer[ipc.DeliveryAcceptance]
-	intakeActive     atomic.Bool
-	deliveryPrevious *Stub
-	deliveryRefused  atomic.Bool
-	delivery         *negotiatedSession
-	claimGenerations map[RouteKey]uint64
-	claimSequence    uint64
-	CLI              string
-	PID              int
-	CWD              string
-	ConnID           uint64
+	Build                string // immutable hello identity
+	UpgradeDisabled      bool
+	ResumeContract       string
+	deliveryReady        atomic.Bool
+	deliveryOffered      bool // immutable: hello contained an offer, even if invalid
+	deliveryModes        atomic.Pointer[ipc.DeliveryAcceptance]
+	intakeActive         atomic.Bool
+	eventPushFactsActive atomic.Bool
+	deliveryPrevious     *Stub
+	deliveryRefused      atomic.Bool
+	delivery             *negotiatedSession
+	claimGenerations     map[RouteKey]uint64
+	claimSequence        uint64
+	CLI                  string
+	PID                  int
+	CWD                  string
+	ConnID               uint64
 
 	// Conn is opaque from the registry's POV — broker package wires it after
 	// constructing, used by route workers to write inbound to the right

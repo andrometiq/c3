@@ -49,6 +49,7 @@ func (a *adapter) deliveryFacts() ipc.DeliveryLive {
 			channel.Reason = "session transcript unavailable"
 		}
 	}
+	channel.EventPushRenders = channel.Eligible && route.State == ipc.RenderCapable
 	inbox := ipc.DeliveryEligibility{Reason: "no owning session socket"}
 	if a.crossSession != nil {
 		if _, ok := transcriptOffset(a.livePath()); !ok {
@@ -69,7 +70,9 @@ func (a *adapter) deliveryOffer() json.RawMessage {
 	if !a.deliveryFetchEligible() {
 		return nil
 	}
+	// Acceptance belongs to the new connection and is not known until hello_ack.
 	live := a.deliveryFacts()
+	live.Channel.EventPushRenders = false
 	data, _ := json.Marshal(ipc.DeliveryOffer{Version: 1, Live: live, Receipts: "transcript", Fetch: "receipt"})
 	return data
 }
@@ -77,6 +80,7 @@ func (a *adapter) acceptDelivery(offer json.RawMessage, accepted *ipc.DeliveryAc
 	offered := ipc.ParseDeliveryOffer(offer)
 	enabled := accepted.AcceptsOffer(offered)
 	inbox := enabled && accepted.HasMode("inbox")
+	conn := a.rawConn()
 	a.deliveryAccepted.Store(enabled)
 	a.liveMu.Lock()
 	a.deliveryInboxAccepted = inbox
@@ -92,6 +96,7 @@ func (a *adapter) acceptDelivery(offer json.RawMessage, accepted *ipc.DeliveryAc
 		a.livePending = nil
 		a.liveCrossSession = false
 		a.deliveryLastFacts = offered.Live
+		a.deliveryLastFactsConn = conn
 		if a.renderRoute.State != "live_channel" && a.renderRoute.State != "live_inbox" && a.renderRoute.State != "pull_only" {
 			a.renderRoute = ipc.RenderRoute{State: "waiting"}
 		}
@@ -196,13 +201,22 @@ func (a *adapter) observeDeliveries(ctx context.Context) {
 		a.pollFetchReceipts()
 	}
 }
-func (a *adapter) pollDeliveries() {
+func (a *adapter) deliveryReportFacts(conn *ipc.Conn) ipc.DeliveryLive {
 	facts := a.deliveryFacts()
+	if conn == nil || a.eventPushFactsConn.Load() != conn {
+		facts.Channel.EventPushRenders = false
+	}
+	return facts
+}
+
+func (a *adapter) pollDeliveries() {
 	conn := a.currentConn()
+	facts := a.deliveryReportFacts(conn)
 	a.liveMu.Lock()
-	changed := facts != a.deliveryLastFacts
+	changed := facts != a.deliveryLastFacts || conn != a.deliveryLastFactsConn
 	if conn != nil && changed {
 		a.deliveryLastFacts = facts
+		a.deliveryLastFactsConn = conn
 	}
 	type result struct {
 		token    string

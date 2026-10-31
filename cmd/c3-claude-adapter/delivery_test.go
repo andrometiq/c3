@@ -292,3 +292,28 @@ func TestNegotiatedInboxAttachAndPreamble(t *testing.T) {
 		t.Fatal("preamble omitted inbox")
 	}
 }
+
+func TestNegotiatedDirectEventsRequireCapableHost(t *testing.T) {
+	isolateAdapterTest(t)
+	for _, state := range []string{ipc.RenderCapable, ipc.RenderProbing, ipc.RenderQueueOnly} {
+		t.Run(state, func(t *testing.T) {
+			a, output, _, ctx := negotiatedAdapter(t)
+			// The current host can differ from the initial hello and receipt history.
+			a.deliveryHostRoute = func() ipc.RenderRoute { return ipc.RenderRoute{State: state} }
+			facts := a.deliveryFacts()
+			if facts.Channel.Eligible != (state != ipc.RenderQueueOnly) || facts.Channel.EventPushRenders != (state == ipc.RenderCapable) {
+				t.Fatalf("facts=%+v", facts)
+			}
+			offer := ipc.ParseDeliveryOffer(a.deliveryOffer())
+			facts.Channel.EventPushRenders = false // hello never sends an unaccepted extension
+			if offer == nil || offer.Live != facts {
+				t.Fatalf("offer=%+v facts=%+v", offer, facts)
+			}
+			raw, _ := json.Marshal(ipc.InboundMsg{Op: ipc.OpInbound, Inbound: c3types.Inbound{Kind: c3types.InboundCallback, Event: &c3types.InboundEvent{Callback: &c3types.CallbackEvent{Data: "choose"}}}})
+			a.handleInbound(ctx, raw)
+			if got := strings.Contains(string(output.Bytes()), "notifications/claude/channel"); got != (state == ipc.RenderCapable) {
+				t.Fatalf("state=%s output=%s", state, output.Bytes())
+			}
+		})
+	}
+}

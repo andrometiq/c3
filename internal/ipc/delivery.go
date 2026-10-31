@@ -11,8 +11,9 @@ import (
 // P1: "Malformed or unknown-version offers are ignored (legacy), never partially honoured."
 // Raw hello storage keeps an invalid optional offer from invalidating the hello.
 type DeliveryEligibility struct {
-	Eligible bool   `json:"eligible"`
-	Reason   string `json:"reason,omitempty"`
+	Eligible         bool   `json:"eligible"`
+	EventPushRenders bool   `json:"event_push_renders,omitempty"`
+	Reason           string `json:"reason,omitempty"`
 }
 type DeliveryLive struct {
 	Channel DeliveryEligibility `json:"channel"`

@@ -566,7 +566,30 @@ Retired means removed from the live queue after confirmation, operator drain
 (copy before remove), documented eviction, or oversize set-aside. A negotiated
 oversize replacement must be confirmed before its original retires. Queue limits
 at this HEAD are 1,000 messages / 90 days per route; trash retention is bounded
-separately. Events are never queued. Append precedes Telegram offset advancement;
+separately. Channel callbacks, reactions and poll results become standalone durable
+text messages when the claimed holder cannot render a direct channel push. Their
+source message is reply context, not the queue deduplication identity. Capable
+holders still receive direct events; unclaimed events are dropped. Failed direct
+writes and alive-but-disconnected holders also convert events to durable text.
+Negotiated direct events require both channel eligibility and the optional
+`live.channel.event_push_renders: true` fact; probing remains eligible for
+receipt-tracked messages but cannot directly render events. Omission by older
+adapters means false and converts events. This fact requires the optional
+`event_push_renders:1` token in hello `capabilities`, echoed by the broker in
+`accepted_capabilities` and confirmed by the adapter in its first delivery report.
+Hello delivery offers always omit the fact because acceptance is not yet known.
+Only after acceptance may delivery reports include it; the first confirmation
+report carries the current facts. Without acceptance, adapters preserve the old
+report schema even when host detection later recovers. Brokers ignore the fact
+on negotiated delivery connections that did not confirm this capability.
+
+The broker's capability view may lag the host: a direct event can still be lost
+after a successful socket write. Direct events have no end-to-end confirmation;
+confirmed event delivery is future work. Conversion after a write can duplicate
+an event that did render. If durable fallback fails, delivery remains unconfirmed
+and automatic redelivery is not guaranteed. Event intake
+retains its existing Telegram offset handling. For ordinary messages, append
+precedes Telegram offset advancement;
 with no queue, offsets freeze even after best-effort live forwarding. Telegram's
 24-hour retention and roughly 100 waiting-update limit then bound replay.
 

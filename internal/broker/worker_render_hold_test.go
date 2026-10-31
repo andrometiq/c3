@@ -125,41 +125,28 @@ func TestForwardOrFallback_RenderCapableHolder_DeliveredNoHold(t *testing.T) {
 	}
 }
 
-// The blackhole fix is gated to human messages: a synthesized EVENT on a
-// render-incapable holder is NOT diverted to the queue (events are never queued
-// and carry no lost content). It stays on the current push path — proving the
-// !in.IsEvent() guard.
-func TestForwardOrFallback_RenderIncapableHolder_EventNotDiverted(t *testing.T) {
-	t.Setenv("C3_QUEUE_DIR", t.TempDir())
-	mf := mfWithTelegram()
-	fc := &fakeChannel{}
-	b := brokerWithChannel(t, mf, fc)
-	defer b.Shutdown()
-
-	tid := int64(914)
-	key := MakeRouteKey("telegram", -1001234567890, &tid)
-	stub, pushed := liveHolder(t, b, key)
-	stub.SetCannotRender(true)
-
-	w := newRouteWorker(context.Background(), key, time.Hour, b)
-	defer w.Stop()
-
-	event := &c3types.Inbound{
-		Channel: "telegram", ChatID: -1001234567890, TopicID: &tid,
-		MessageID: 3, Kind: c3types.InboundPollResult,
-		Event: &c3types.InboundEvent{PollResult: &c3types.PollResult{PollID: "p", IsClosed: true}},
+// Callback taps must remain recoverable when the host cannot render pushes.
+func TestForwardOrFallback_RenderIncapableHolder_EventQueued(t *testing.T) {
+	b, w, holder, frames := shadowFixture(t)
+	holder.SetCannotRender(true)
+	w.flushEvent(context.Background(), callbackInbound(w.key))
+	rows, err := b.Queue.PeekTracked(queueRouteKey(w.key), -1)
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("queued callback: rows=%+v err=%v", rows, err)
 	}
-	w.forwardOrFallback(context.Background(), event, 0)
-
-	// The event took the normal claimed-push path (not the held path).
+	in := rows[0].Inbound
+	if in.IsEvent() || in.Event != nil || in.MessageID != 0 || in.Text != `[button tap] @operator pressed (data="choose") on message 3` || in.ReplyTo == nil || in.ReplyTo.MessageID != 3 {
+		t.Fatalf("converted inbound: %+v", in)
+	}
 	select {
-	case <-pushed:
-	case <-time.After(2 * time.Second):
-		t.Fatal("an event on a render-incapable holder must still take the push path")
+	case f := <-frames:
+		t.Fatalf("unexpected push: %+v", f)
+	case <-time.After(50 * time.Millisecond):
 	}
-	if got := len(fc.sendRepliesSnapshot()); got != 0 {
-		t.Errorf("an event must not fire a held-notice; got %d", got)
-	}
+}
+
+func callbackInbound(key RouteKey) *c3types.Inbound {
+	return &c3types.Inbound{Channel: key.Channel, ChatID: key.ChatID, TopicID: topicPointer(key), MessageID: 3, Timestamp: time.Now(), Sender: c3types.Sender{UserID: 7, Username: "operator"}, Kind: c3types.InboundCallback, Event: &c3types.InboundEvent{Callback: &c3types.CallbackEvent{MessageID: 3, Actor: c3types.Sender{UserID: 7, Username: "operator"}, Data: "choose"}}}
 }
 
 // Broker-side wire-compat: a hello WITHOUT the cannot_render_channels field (old

@@ -736,6 +736,7 @@ func (c *Channel) dispatchCallback(updateID int64, cq *gotgbot.CallbackQuery) {
 				MessageID:  msg.MessageId,
 				Actor:      convertSender(&cq.From),
 				Data:       cq.Data,
+				Label:      callbackLabel(msg, cq.Data),
 			},
 		},
 	}
@@ -753,6 +754,21 @@ func (c *Channel) dispatchCallback(updateID int64, cq *gotgbot.CallbackQuery) {
 	c.emitEvent(updateID, in, "callback")
 }
 
+func callbackLabel(msg *gotgbot.Message, data string) string {
+	if msg == nil || msg.ReplyMarkup == nil {
+		return ""
+	}
+	label := ""
+	for _, row := range msg.ReplyMarkup.InlineKeyboard {
+		for _, btn := range row {
+			if btn.CallbackData == data {
+				label = btn.Text
+			}
+		}
+	}
+	return label
+}
+
 // collapseCallbackKeyboard edits a generic callback message's inline keyboard down
 // to a single inert button showing the tapped option's label ("✓ <label>"), so the
 // keyboard can't be pressed again and the message permanently records the choice.
@@ -764,14 +780,7 @@ func (c *Channel) collapseCallbackKeyboard(updateID int64, msg *gotgbot.Message,
 	if c.bot == nil || msg == nil || msg.ReplyMarkup == nil {
 		return
 	}
-	label := ""
-	for _, row := range msg.ReplyMarkup.InlineKeyboard {
-		for _, btn := range row {
-			if btn.CallbackData == data {
-				label = btn.Text
-			}
-		}
-	}
+	label := callbackLabel(msg, data)
 	if label == "" {
 		label = "Selected"
 	}
@@ -920,8 +929,8 @@ func (c *Channel) dispatchReaction(updateID int64, mr *gotgbot.MessageReactionUp
 // is ever logged, strangers see nothing. Mirrors dispatchMessage's gate handling
 // without the message-only STT/kind plumbing.
 func (c *Channel) emitEvent(updateID int64, in *c3types.Inbound, kind string) {
-	// Synthesized events (poll_result / reaction / callback) are NEVER persisted
-	// to the durable queue — they are delivered live or dropped. The offset
+	// The broker may convert events to durable text for render-incapable holders.
+	// Events have no message persistence seam here; the offset
 	// marking for the event update_id is owned by dispatchUpdate (which calls
 	// markUpdateDone after every event-dispatch case, covering early returns too).
 	switch c.host.GateInbound(in) {
@@ -941,7 +950,7 @@ func (c *Channel) emitEvent(updateID int64, in *c3types.Inbound, kind string) {
 	// offset marking is owned by dispatchUpdate (it calls markUpdateDone after the
 	// event-dispatch case unconditionally), so a queue-full Emit drop of an event
 	// does not strand its update — the offset advances regardless. Events are
-	// never persisted, so there is no msgToUpdate seam to clean up here.
+	// not staged in msgToUpdate, so there is no seam to clean up here.
 	_ = c.host.Emit(in)
 }
 
