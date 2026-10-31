@@ -95,6 +95,26 @@ The first is cleaner; the second is far easier to reason about when it misbehave
   code is reused; its weakness (a turn is marked "running" the instant tmux accepts keystrokes, with
   no submitted/received separation) is exactly the receipt-contract gap to close here.
 
+## Voice identity
+
+- **A voice ID on every voice message.** Give each inbound voice note a compact speaker
+  fingerprint the processing agent can read. It should answer two questions: is this the
+  operator, and if not, is it someone heard before? It should also carry coarse, readable traits
+  such as pitch band, pace and voice category. Most of the time the ID matches the operator and
+  the agent carries on. When it changes, the agent sees that and decides what to do. That gives
+  the agent a soft identity check alongside the allowlist.
+- **Model it on how people recognise a voice.** Someone who is excited, tired, ill, eating or
+  upset is still recognisably the same person. So separate the stable identity (the fingerprint)
+  from the momentary state: emotion, energy, a cold, background noise. Report a state change
+  without reading it as a different speaker.
+- **A separate system from transcription.** The STT path can contribute signals; today its
+  prompt already asks for some tone and emotion cues. The ID itself should not depend on the STT
+  provider.
+- **Research first:** speaker verification and embeddings (d-vector, x-vector, ECAPA-style
+  models), open-source toolkits, on-device options, paralinguistic and emotion detection, and
+  what such an ID can't prove (voice cloning, replay). Then decide whether a fingerprint can be
+  both stable and human-readable.
+
 ## Telegram completeness
 
 - Media-group / album assembly, media echo by `file_id`, message forwarding.
