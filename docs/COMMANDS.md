@@ -105,6 +105,7 @@ once").
 | `""` (empty)                       | bare attach — never guesses (see below)      |
 | `"dm"` / `"DM"` (case-insensitive) | `target = "dm"` (DM disambiguation may fire) |
 | `"web"` / `"telegram"` (case-insensitive) | channel selector |
+| `target = "private"` (structured field only) | every guest DM route, for the configured `private_holder` only (see USAGE.md, Guests) |
 | `"+<selector>"` (for example `+web`, `+c3`) | parse `<selector>` normally, set `add = true` |
 | `"<int>"`                          | `topic_id = <int>`                           |
 | `"create <name>"`                  | `name = <name>, create = true`               |

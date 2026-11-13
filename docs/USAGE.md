@@ -332,6 +332,20 @@ Nothing stops you. Mode 600, JSON, atomically rewritten by the broker — but if
 
 If you bork the file structurally (invalid JSON), the broker refuses to start and prints the parse error. Restore from your backup or fix the syntax.
 
+### Guests (private DMs to one holder)
+
+Guests are people who may DM the bot but are never operators. Use them only on a broker that runs as its own OS user with no Claude or Codex sessions.
+
+```json
+"allowlist": { "users": [111], "guests": [222, 333] },
+"channels": { "telegram": { "private_holder": { "cli": "genie" } } }
+```
+
+- A guest passes only in their own DM. Groups, other chats and topics are dropped.
+- Guests get no `/status`, `/queue` or `/drain`, no broker notices, and their taps on permission or auto-mode cards are refused.
+- Only the session whose hello `cli` equals `private_holder.cli`, and that is queue-only, can `attach target=private`. It holds every guest's DM route, has no output route, and must pass `channel="dm:<chat_id>"` on every reply or edit.
+- Add or remove a guest: edit the list, then run `c3-broker reload-config` at once and check the `guests:` log line. The broker never rewrites the guest list. A removed guest's route is released and their queued messages are dropped.
+
 ## Deleting a topic
 
 C3 doesn't auto-delete. From your phone (Telegram), long-press the topic in the group's topic list and pick "Delete topic". Then in `mappings.json`, remove the topic from `channels.telegram.topics` and any cwd mappings that pointed at it. Or run the broker's cleanup tool if it exists by the time you read this.
