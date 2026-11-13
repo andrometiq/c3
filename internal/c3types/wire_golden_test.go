@@ -110,13 +110,17 @@ func wireGoldens() []wireGolden {
 				ConvKind:      "group",
 				Edited:        true,
 				ConvertedFrom: InboundCallback,
+
+				ConvertedCallbackID:   "cb-1",
+				ConvertedCallbackData: "ask:1",
 			},
 			keys: []string{
 				"Channel", "ChatID", "TopicID", "MessageID", "Sender", "Text",
 				"Attachments", "ReplyTo", "Timestamp", "MediaGroupID", "ForwardOrigin", "Merged", "Kind", "Event",
 				"DrainedFrom", "V", "ConvKind", "Edited", "ConsumedRecordID", "TestInjected", "ConvertedFrom",
+				"ConvertedCallbackID", "ConvertedCallbackData",
 			},
-			omitEmpty: []string{"MediaGroupID", "ForwardOrigin", "Merged", "Kind", "Event", "DrainedFrom", "V", "ConvKind", "Edited", "ConsumedRecordID", "TestInjected", "ConvertedFrom"},
+			omitEmpty: []string{"MediaGroupID", "ForwardOrigin", "Merged", "Kind", "Event", "DrainedFrom", "V", "ConvKind", "Edited", "ConsumedRecordID", "TestInjected", "ConvertedFrom", "ConvertedCallbackID", "ConvertedCallbackData"},
 		},
 		{
 			name: "InboundEvent",

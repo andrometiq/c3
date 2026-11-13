@@ -42,7 +42,9 @@ func (w *RouteWorker) intakeFetchRows(mode string) ([]queue.TrackedInbound, int,
 		switch {
 		case reserved[row.RecordID]:
 			reason = "reserved"
-		case row.Source == nil:
+		case row.Source == nil && row.Inbound.ConvertedFrom == "":
+			// A converted event row has no provider message by design; its
+			// ConvertedFrom marker is its provenance, so it never blocks.
 			reason = "no_source"
 		case row.Inbound.DrainedFrom != "":
 			reason = "frozen"

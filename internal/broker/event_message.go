@@ -36,7 +36,7 @@ func eventMessage(ev *c3types.Inbound) *c3types.Inbound {
 		return nil
 	}
 	messageID := ev.MessageID
-	var text string
+	var text, callbackID, callbackData string
 	switch ev.Kind {
 	case c3types.InboundCallback:
 		cb := ev.Event.Callback
@@ -49,6 +49,7 @@ func eventMessage(ev *c3types.Inbound) *c3types.Inbound {
 			label = fmt.Sprintf(" %q", cb.Label)
 		}
 		text = fmt.Sprintf("[button tap] %s pressed%s (data=%q) on message %d", eventActor(cb.Actor), label, cb.Data, messageID)
+		callbackID, callbackData = cb.CallbackID, cb.Data
 	case c3types.InboundReaction:
 		reaction := ev.Event.Reaction
 		if reaction == nil {
@@ -69,7 +70,8 @@ func eventMessage(ev *c3types.Inbound) *c3types.Inbound {
 	default:
 		return nil
 	}
-	return &c3types.Inbound{Channel: ev.Channel, ChatID: ev.ChatID, TopicID: ev.TopicID, Sender: ev.Sender, Timestamp: ev.Timestamp, ConvKind: ev.ConvKind, TestInjected: ev.TestInjected, Text: text, ReplyTo: &c3types.ReplyContext{MessageID: messageID}, ConvertedFrom: ev.Kind}
+	return &c3types.Inbound{Channel: ev.Channel, ChatID: ev.ChatID, TopicID: ev.TopicID, Sender: ev.Sender, Timestamp: ev.Timestamp, ConvKind: ev.ConvKind, TestInjected: ev.TestInjected, Text: text, ReplyTo: &c3types.ReplyContext{MessageID: messageID},
+		ConvertedFrom: ev.Kind, ConvertedCallbackID: callbackID, ConvertedCallbackData: callbackData}
 }
 
 func eventActor(actor c3types.Sender) string {
@@ -80,6 +82,10 @@ func eventActor(actor c3types.Sender) string {
 }
 
 func (w *RouteWorker) convertEvent(ctx context.Context, ev *c3types.Inbound) bool {
+	if ev.Kind == c3types.InboundReaction && w.broker.isPrivateNonOperatorRoute(w.key) {
+		log.Printf("event dropped chan=%s chat=%d kind=reaction reason=private_guest_route", w.key.Channel, w.key.ChatID)
+		return true
+	}
 	converted := eventMessage(ev)
 	if converted == nil {
 		return false

@@ -72,6 +72,10 @@ type Inbound struct {
 	// reaction, poll result) that the holder could not render. It is structured
 	// so a holder never mistakes it for typed text.
 	ConvertedFrom InboundKind `json:"ConvertedFrom,omitempty"`
+	// ConvertedCallbackID and ConvertedCallbackData keep a converted tap's
+	// callback id and data, so the holder can turn the tap into an answer.
+	ConvertedCallbackID   string `json:"ConvertedCallbackID,omitempty"`
+	ConvertedCallbackData string `json:"ConvertedCallbackData,omitempty"`
 
 	// V is the on-disk/wire RECORD FORMAT version of this Inbound. Absent or 0
 	// MEANS VERSION 1 — every record written before this field existed has no

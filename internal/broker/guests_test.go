@@ -374,3 +374,51 @@ func TestConvertedEventRowsAreMarked(t *testing.T) {
 }
 
 func guestPtr(v int64) *int64 { return &v }
+
+func TestConvertedEventRowDoesNotStallReadyPrefix(t *testing.T) {
+	clearFetchTestEnvironment(t)
+	b, s, routes := readyPrefixFixture(t)
+	appendReadyPrefixRow(t, b, routes[0], false, false, false)
+	reaction := eventMessage(&c3types.Inbound{Channel: "telegram", ChatID: -100, Kind: c3types.InboundReaction,
+		Event: &c3types.InboundEvent{Reaction: &c3types.ReactionEvent{MessageID: 9, Added: []string{"x"}}}})
+	if _, err := b.Queue.AppendTrackedIntake(queueRouteKey(routes[0]), reaction, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	appendReadyPrefixRow(t, b, routes[0], false, false, false)
+
+	raw := intakeFetchWire(t, b, s, ipc.FetchQueueReq{ID: "q", Mode: "ready_prefix", All: true})
+	var resp struct {
+		Messages  []c3types.Inbound `json:"messages"`
+		BlockedOn *ipc.BlockedOn    `json:"blocked_on"`
+	}
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.BlockedOn != nil || len(resp.Messages) != 3 || resp.Messages[1].ConvertedFrom != c3types.InboundReaction {
+		t.Fatalf("fetch = %s", raw)
+	}
+}
+
+func TestConvertedTapKeepsCallback(t *testing.T) {
+	row := eventMessage(&c3types.Inbound{Channel: "telegram", ChatID: 501, Kind: c3types.InboundCallback,
+		Event: &c3types.InboundEvent{Callback: &c3types.CallbackEvent{CallbackID: "cb-7", MessageID: 9, Data: "ask:a1:yes"}}})
+	if row == nil || row.ConvertedFrom != c3types.InboundCallback || row.ConvertedCallbackID != "cb-7" || row.ConvertedCallbackData != "ask:a1:yes" {
+		t.Fatalf("row = %+v", row)
+	}
+}
+
+func TestGuestReactionIsDropped(t *testing.T) {
+	t.Setenv("C3_QUEUE_DIR", t.TempDir())
+	b := brokerWithChannel(t, mfWithGuests(501), &fakeChannel{})
+	defer b.Shutdown()
+	key := MakeRouteKey("telegram", 501, nil)
+	w := &RouteWorker{broker: b, key: key}
+	ev := &c3types.Inbound{Channel: "telegram", ChatID: 501, Kind: c3types.InboundReaction,
+		Event: &c3types.InboundEvent{Reaction: &c3types.ReactionEvent{MessageID: 9, Added: []string{"x"}}}}
+	if !w.convertEvent(t.Context(), ev) {
+		t.Fatal("guest reaction not handled")
+	}
+	if n, _ := b.Queue.Pending(queueRouteKey(key)); n != 0 {
+		t.Fatalf("guest reaction queued %d row(s)", n)
+	}
+}
