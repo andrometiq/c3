@@ -138,6 +138,7 @@ func (b *Broker) registerDeliveryHello(hello ipc.HelloMsg, conn *ipc.Conn, old *
 		s.receiptShapeDrift = hello.ReceiptShapeDrift
 		s.ReceiptConfirming = hello.RenderState != ""
 		s.SetRenderRoute(hello.RenderState, hello.RenderReason, hello.CannotRenderChannels)
+		s.privateEligible = privateHelloEligible(hello)
 		s.deliveryPrevious = old
 		if old.negotiated() && s.delivery != nil && sameDeliveryContract(old.delivery.offer, s.delivery.offer) && isPIDAlive(old.PID) {
 			live := s.delivery.live

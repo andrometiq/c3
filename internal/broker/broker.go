@@ -478,6 +478,7 @@ func (b *Broker) lastHealthSnapshot() map[string]c3types.HealthEvent {
 //     a full broker restart.
 func (b *Broker) SetMappings(mf *mappings.MappingsFile) {
 	b.mutationMu.Lock()
+	previous := b.mappings.Load()
 	// Swapped under the auto-approval lock: a request is created only while that
 	// lock is held and the feature reads enabled, so none can slip in after a
 	// reload turns it off and before the cancel below.
@@ -491,6 +492,7 @@ func (b *Broker) SetMappings(mf *mappings.MappingsFile) {
 	if b.Voice != nil {
 		b.Voice.setRetryExpiry(voiceRetryExpiryFromMappings(mf))
 	}
+	b.applyGuestChange(previous, mf)
 }
 
 // SetPersistedCallback registers a channel's durable-persist notifier.

@@ -445,6 +445,9 @@ func (c *Channel) SendReadback(args c3types.ReadbackArgs) (int64, error) {
 }
 
 func (c *Channel) SendReadbackWithHeld(args c3types.ReadbackArgs, heldCount int) (int64, error) {
+	if !c.allowBrokerSend(args.ChatID, args.TopicID) {
+		return 0, errPrivateChat
+	}
 	if c.bot == nil {
 		return 0, errors.New("telegram: channel not started")
 	}

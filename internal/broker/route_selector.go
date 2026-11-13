@@ -83,6 +83,9 @@ func (b *Broker) resolveHeldRoute(stub *Stub, selector string) (RouteKey, error)
 	if stub == nil {
 		return RouteKey{}, fmt.Errorf("route %q is not held by this session", selector)
 	}
+	if raw, ok := strings.CutPrefix(selector, "dm:"); ok {
+		return b.resolveGuestSelector(stub, selector, raw)
+	}
 	var matches []RouteKey
 	for _, route := range stub.Routes() {
 		matched := strings.EqualFold(route.Channel, selector)
@@ -123,6 +126,9 @@ func (b *Broker) resolveToolRoute(stub *Stub, args map[string]any) (RouteKey, ma
 		}
 		route = resolved
 	} else {
+		if stub.private.Load() {
+			return RouteKey{}, nil, fmt.Errorf("the private holder must select a route with channel=\"dm:<chat_id>\"")
+		}
 		output := stub.OutputRoute()
 		if output == nil || !stub.HasRoute(*output) {
 			return RouteKey{}, nil, fmt.Errorf("tool_call before attach: no route claimed")

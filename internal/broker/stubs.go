@@ -31,13 +31,17 @@ type Stub struct {
 	eventPushFactsActive atomic.Bool
 	deliveryPrevious     *Stub
 	deliveryRefused      atomic.Bool
-	delivery             *negotiatedSession
-	claimGenerations     map[RouteKey]uint64
-	claimSequence        uint64
-	CLI                  string
-	PID                  int
-	CWD                  string
-	ConnID               uint64
+	// private marks the configured private-route holder (guests.go); it can
+	// never take a live push. privateEligible is the immutable hello fact.
+	private          atomic.Bool
+	privateEligible  bool
+	delivery         *negotiatedSession
+	claimGenerations map[RouteKey]uint64
+	claimSequence    uint64
+	CLI              string
+	PID              int
+	CWD              string
+	ConnID           uint64
 
 	// Conn is opaque from the registry's POV — broker package wires it after
 	// constructing, used by route workers to write inbound to the right
@@ -303,6 +307,14 @@ func (s *Stub) SetOutputRoute(key RouteKey) bool {
 	return true
 }
 
+// clearOutputRoute leaves the stub without a default route; the private holder
+// must name every destination.
+func (s *Stub) clearOutputRoute() {
+	s.stubMu.Lock()
+	defer s.stubMu.Unlock()
+	s.output = nil
+}
+
 // ClearRoutes drops the held set, output, and all per-route confirmation and
 // reply state. Outstanding push-route correlations are intentionally retained,
 // matching the old detach behavior: an in-flight ack still identifies the route
@@ -399,6 +411,9 @@ func (s *Stub) SetCannotRender(v bool) {
 // instead. Default true (renderable) for old adapters that never reported the
 // flag. Guarded by stubMu.
 func (s *Stub) CanRenderPush() bool {
+	if s.private.Load() {
+		return false
+	}
 	s.stubMu.Lock()
 	defer s.stubMu.Unlock()
 	return s.renderRoute.State != ipc.RenderQueueOnly
@@ -641,6 +656,9 @@ func (s *Stub) RenderRoute() ipc.RenderRoute {
 // Reserve the first probe across all routes held by this session. Later human
 // messages use the normal durable hold path until its receipt arrives.
 func (s *Stub) tryRenderPush() bool {
+	if s.private.Load() {
+		return false
+	}
 	s.stubMu.Lock()
 	defer s.stubMu.Unlock()
 	if s.renderRoute.State == ipc.RenderProbing {

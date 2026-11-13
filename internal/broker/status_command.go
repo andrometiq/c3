@@ -50,6 +50,10 @@ func (h *BrokerHost) HandleCommand(in *c3types.Inbound) (string, bool) {
 	if j := strings.IndexByte(cmd, '@'); j >= 0 {
 		cmd = cmd[:j]
 	}
+	isCommand := strings.EqualFold(cmd, "/status") || strings.EqualFold(cmd, "/queue") || strings.EqualFold(cmd, "/drain")
+	if isCommand && isGuestDM(h.broker.Mappings(), in) {
+		return "", true // guests get no broker commands (INV-7: zero bytes back)
+	}
 	switch {
 	case strings.EqualFold(cmd, "/status"):
 		if rest != "" {

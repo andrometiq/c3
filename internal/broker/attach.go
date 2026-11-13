@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -51,6 +52,11 @@ func (b *Broker) handleAttach(conn *ipc.Conn, stub *Stub, raw []byte) {
 	// selectors rather than topic names.
 	if req.Expr != "" {
 		applyExprToAttachReq(&req)
+	}
+	if stub.private.Load() && !strings.EqualFold(req.Target, "private") {
+		_ = conn.WriteJSON(ipc.AttachedMsg{Op: ipc.OpAttached, OK: false,
+			Err: "attach refused: this connection holds the private routes; use a separate connection"})
+		return
 	}
 
 	// Policy-rejected hint: the CLI host's policy layer rejected the
@@ -124,6 +130,10 @@ func (b *Broker) handleAttach(conn *ipc.Conn, stub *Stub, raw []byte) {
 		return
 	}
 
+	if strings.EqualFold(req.Target, "private") {
+		b.attachPrivate(conn, stub, chanName)
+		return
+	}
 	switch {
 	case strings.EqualFold(req.Target, "dm"):
 		b.attachDM(conn, stub, chanName, req.Steal, req.Replay, req.Add)
@@ -1554,7 +1564,26 @@ func (b *Broker) SaveMappings() error {
 	if err != nil {
 		return err
 	}
-	return mappings.Write(path, b.Mappings())
+	return mappings.Write(path, withDiskGuests(path, b.Mappings()))
+}
+
+// withDiskGuests keeps the guest list the owner wrote on disk. The broker never
+// changes guests, so a save between a hand edit and its reload must not undo it.
+func withDiskGuests(path string, mf *mappings.MappingsFile) *mappings.MappingsFile {
+	disk, err := mappings.Read(path)
+	if err != nil {
+		return mf
+	}
+	guests := disk.AllowlistOrEmpty().Guests
+	if slices.Equal(guests, mf.AllowlistOrEmpty().Guests) {
+		return mf
+	}
+	out := mf.Clone()
+	if out.Allowlist == nil {
+		out.Allowlist = &mappings.Allowlist{}
+	}
+	out.Allowlist.Guests = append([]int64(nil), guests...)
+	return out
 }
 
 // resolveGroup returns the group name + config for the attach's group choice.

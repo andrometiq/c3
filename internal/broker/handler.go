@@ -157,6 +157,7 @@ func (b *Broker) HandleConn(nc net.Conn) {
 			stub.AdoptPushRoutes(existing)
 			b.attempts.adopt(existing, shadowHolder(stub), time.Now())
 		}
+		b.carryPrivateHolder(existing, stub)
 		log.Printf("hello: RECONNECT cli=%s pid=%d cwd=%q old-conn=%d new-conn=%d (claims transferred)",
 			hello.CLI, hello.PID, hello.CWD, oldConnID, stub.ConnID)
 	} else {
@@ -417,6 +418,7 @@ func (b *Broker) handleRelease(conn *ipc.Conn, stub *Stub, raw []byte) bool {
 		b.Routes.ReleaseAllByConnID(stub.ConnID)
 		b.cancelAuto(stub, nil, "session detached")
 		stub.ClearRoutes()
+		stub.private.Store(false)
 	}
 	// Set unconditionally (not only in the empty-id case): the flag means "the
 	// user detached every route on THIS connection", so it is true whether or not

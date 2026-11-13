@@ -163,6 +163,12 @@ type Host interface {
 	HandleCommand(in *c3types.Inbound) (reply string, handled bool)
 }
 
+// OutboundGuard is an optional Host interface. A channel asks it before every
+// send that is not a session's own tool call (Outbound.HolderSend false).
+type OutboundGuard interface {
+	AllowBrokerSend(chatID int64, topicID *int64) bool
+}
+
 // GateInboundDecision mirrors broker.GateDecision but lives at the channel
 // boundary so internal/channel doesn't import internal/broker.
 type GateInboundDecision int

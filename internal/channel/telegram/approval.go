@@ -18,6 +18,9 @@ import (
 // overflow attachment): if the message is gone the send fails rather than
 // posting a card detached from its input.
 func (c *Channel) SendApprovalCard(ctx context.Context, args c3types.ReplyArgs) (int64, error) {
+	if !c.allowBrokerSend(args.ChatID, args.TopicID) {
+		return 0, errPrivateChat
+	}
 	if c.bot == nil {
 		return 0, errors.New("telegram: channel not started")
 	}
@@ -53,6 +56,9 @@ func (c *Channel) SendApprovalCard(ctx context.Context, args c3types.ReplyArgs) 
 // plain-text document straight from memory, with args.Text as the caption.
 // ctx bounds the rate-limit wait and the upload, as for SendApprovalCard.
 func (c *Channel) SendApprovalDocument(ctx context.Context, args c3types.ReplyArgs, name string, content []byte) (int64, error) {
+	if !c.allowBrokerSend(args.ChatID, args.TopicID) {
+		return 0, errPrivateChat
+	}
 	if c.bot == nil {
 		return 0, errors.New("telegram: channel not started")
 	}

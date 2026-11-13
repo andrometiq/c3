@@ -123,6 +123,7 @@ func sendParts(ch channel.Channel, key RouteKey, parts []c3types.Outbound, notes
 			log.Printf("media-send chan=%s chat=%d topic=%s kind=%s path=%q",
 				key.Channel, part.ChatID, TopicKeyStr(key), m.Kind, abs)
 		}
+		part.MarkHolderSend()
 		id, err := ch.SendReply(part)
 		if i == 0 {
 			firstID = id

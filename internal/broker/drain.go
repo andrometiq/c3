@@ -285,6 +285,9 @@ func (b *Broker) Drain(spec DrainSpec) (DrainResult, error) {
 	if srcKey == dstKey {
 		return res, ErrDrainSameRoute
 	}
+	if b.isPrivateNonOperatorRoute(spec.Source) || b.isPrivateNonOperatorRoute(spec.Target) {
+		return res, errors.New("drain: private guest chats cannot be drained")
+	}
 	// Per-source in-flight lock (A1): a concurrent /drain on the same source
 	// rejects immediately — two interleaved drains would each freeze the same
 	// head and double-copy it.

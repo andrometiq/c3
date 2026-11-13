@@ -68,6 +68,11 @@ type Inbound struct {
 	// an old JSONL line without the field unmarshals to "" (zero migration).
 	DrainedFrom string `json:"DrainedFrom,omitempty"`
 
+	// ConvertedFrom marks a text row the broker wrote for a channel event (tap,
+	// reaction, poll result) that the holder could not render. It is structured
+	// so a holder never mistakes it for typed text.
+	ConvertedFrom InboundKind `json:"ConvertedFrom,omitempty"`
+
 	// V is the on-disk/wire RECORD FORMAT version of this Inbound. Absent or 0
 	// MEANS VERSION 1 — every record written before this field existed has no
 	// "V" key at all, and there is no migration pass that could add one, so
@@ -345,6 +350,9 @@ type Outbound struct {
 	// wire markup. No channel-specific limit (e.g. callback-data byte ceiling)
 	// is encoded here — those are enforced in the channel implementation.
 	Buttons [][]Button `json:"Buttons,omitempty"`
+	// holderSend marks a session's own tool send. Broker-originated text leaves
+	// it false, so a channel guard can keep that text out of guest chats.
+	holderSend bool
 }
 
 // Button is one channel-neutral inline-keyboard button. Text is the visible
@@ -369,6 +377,12 @@ type Button struct {
 // same struct for both internal forwarding and adapter-initiated
 // replies.
 type ReplyArgs = Outbound
+
+// MarkHolderSend marks this part as a session's own tool send.
+func (o *Outbound) MarkHolderSend() { o.holderSend = true }
+
+// IsHolderSend reports a session's own tool send (never broker text).
+func (o Outbound) IsHolderSend() bool { return o.holderSend }
 
 // EditArgs is the argument shape for the `edit_message` MCP tool.
 // MessageID identifies the message to edit; Text is the new content;

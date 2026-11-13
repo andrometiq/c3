@@ -100,6 +100,10 @@ func (b *Broker) handleFetchQueue(conn *ipc.Conn, stub *Stub, raw []byte) {
 	} else {
 		routes = orderedHeldRoutes(stub)
 	}
+	if len(routes) == 0 && stub.private.Load() {
+		_ = conn.WriteJSON(ipc.FetchQueueResp{Op: ipc.OpFetchQueueResult, ID: req.ID})
+		return
+	}
 	if len(routes) == 0 {
 		_ = conn.WriteJSON(ipc.FetchQueueResp{Op: ipc.OpFetchQueueResult, ID: req.ID, Err: "fetch_queue before attach: no route claimed"})
 		return

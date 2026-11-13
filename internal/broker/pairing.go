@@ -350,7 +350,7 @@ func (b *Broker) Gate(in *c3types.Inbound) GateDecision {
 	mf := b.Mappings()
 	// Fast-path: allowlisted user (DM-cleared) or allowlisted group.
 	if isPrivateChat(in) {
-		if mf.IsUserAllowed(in.Sender.UserID) {
+		if mf.IsUserAllowed(in.Sender.UserID) || isGuestDM(mf, in) {
 			return GateAllow
 		}
 	} else {
@@ -372,6 +372,11 @@ func (b *Broker) Gate(in *c3types.Inbound) GateDecision {
 	// real user (per-voter would-be answers, reactions, callbacks gate normally).
 	if in.Kind == c3types.InboundPollResult {
 		return GateAllow
+	}
+
+	// A guest never touches a pairing window (DM or group).
+	if mf.IsGuest(in.Sender.UserID) {
+		return GateDrop
 	}
 
 	// Allowlist miss. Check pairing.

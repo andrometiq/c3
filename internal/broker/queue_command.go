@@ -167,6 +167,9 @@ func (b *Broker) queueIndex(scope cmdScope) []queueRow {
 		if !scope.dm && qrk.ChatID != scope.chatID {
 			continue // B2: group scope sees only its own chat's routes
 		}
+		if b.isPrivateNonOperatorChat(qrk.Channel, qrk.ChatID, qrk.TopicID != nil) {
+			continue // guest chats are never operator queue targets
+		}
 		rows = append(rows, queueRow{
 			key:    MakeRouteKey(qrk.Channel, qrk.ChatID, qrk.TopicID),
 			name:   b.topicDisplayName(qrk.Channel, qrk.ChatID, qrk.TopicID),

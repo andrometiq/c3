@@ -69,7 +69,7 @@ func eventMessage(ev *c3types.Inbound) *c3types.Inbound {
 	default:
 		return nil
 	}
-	return &c3types.Inbound{Channel: ev.Channel, ChatID: ev.ChatID, TopicID: ev.TopicID, Sender: ev.Sender, Timestamp: ev.Timestamp, ConvKind: ev.ConvKind, TestInjected: ev.TestInjected, Text: text, ReplyTo: &c3types.ReplyContext{MessageID: messageID}}
+	return &c3types.Inbound{Channel: ev.Channel, ChatID: ev.ChatID, TopicID: ev.TopicID, Sender: ev.Sender, Timestamp: ev.Timestamp, ConvKind: ev.ConvKind, TestInjected: ev.TestInjected, Text: text, ReplyTo: &c3types.ReplyContext{MessageID: messageID}, ConvertedFrom: ev.Kind}
 }
 
 func eventActor(actor c3types.Sender) string {

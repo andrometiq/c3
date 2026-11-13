@@ -44,6 +44,9 @@ import (
 //   - MarkupNative: send the text as-is (pre-formed HTML), parse_mode=HTML.
 //   - MarkupNone: plain text, no parse_mode.
 func (c *Channel) SendReply(args c3types.ReplyArgs) (int64, error) {
+	if !args.IsHolderSend() && !c.allowBrokerSend(args.ChatID, args.TopicID) {
+		return 0, errPrivateChat
+	}
 	if c.bot == nil {
 		return 0, errors.New("telegram: channel not started")
 	}
@@ -216,6 +219,14 @@ func buildInlineKeyboard(rows [][]c3types.Button) (*gotgbot.InlineKeyboardMarkup
 // SendTyping sends a typing chat action. Used both for the typing indicator
 // (spec §7.1) and as the validate_topic primitive (spec §6 — sending a typing
 // action with a thread_id implicitly validates the thread exists).
+// errPrivateChat refuses broker-originated text to a guest's private chat.
+var errPrivateChat = errors.New("telegram: broker text to a private guest chat is not sent")
+
+func (c *Channel) allowBrokerSend(chatID int64, topicID *int64) bool {
+	guard, ok := c.host.(channel.OutboundGuard)
+	return !ok || guard.AllowBrokerSend(chatID, topicID)
+}
+
 func (c *Channel) SendTyping(chatID int64, threadID *int64) error {
 	if c.bot == nil {
 		return errors.New("telegram: channel not started")

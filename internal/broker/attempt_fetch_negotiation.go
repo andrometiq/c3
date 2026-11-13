@@ -40,6 +40,10 @@ func sameAcceptedModes(a, b *Stub) bool {
 // Call with delivery.mu held. Facts for unconfirmed modes cannot schedule a
 // transport or make the route appear live, even after a capability report.
 func (s *Stub) acceptedLive() ipc.DeliveryLive {
+	if s.private.Load() {
+		off := ipc.DeliveryEligibility{Reason: "private holder is queue-only"}
+		return ipc.DeliveryLive{Channel: off, Inbox: off}
+	}
 	live := s.delivery.live
 	if !s.eventPushFactsActive.Load() {
 		live.Channel.EventPushRenders = false

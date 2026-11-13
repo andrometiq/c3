@@ -136,6 +136,9 @@ func (b *Broker) handleObserve(conn *ipc.Conn, stub *Stub, raw []byte) {
 		chanName = b.primaryChannel()
 	}
 	res := b.resolveTopicRoute(chanName, req.Name, req.Target, req.TopicID, req.Group)
+	if res.status == observeOK && b.isPrivateNonOperatorRoute(res.key) {
+		res = observeResolution{status: observeNotFound}
+	}
 	if res.status != observeOK {
 		// A non-ok resolution still returns a well-formed response so the panel
 		// can render the state (not_found → offer take-over-creates, etc.).
