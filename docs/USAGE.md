@@ -343,7 +343,7 @@ Guests are people who may DM the bot but are never operators. Use them only on a
 
 - A guest passes only in their own DM. Groups, other chats and topics are dropped.
 - Guests get no `/status`, `/queue` or `/drain`, no broker notices, and their taps on permission or auto-mode cards are refused.
-- Only the session whose hello `cli` equals `private_holder.cli`, and that is queue-only, can `attach target=private`. It holds every guest's DM route, has no output route, and must pass `channel="dm:<chat_id>"` on every reply or edit.
+- Only the session whose hello `cli` equals `private_holder.cli`, and that is queue-only, can `attach target=private`. It holds every guest's DM route, has no output route, and must pass `channel="dm:<chat_id>"` on every reply or edit. The broker sends no welcome, held notice or readback to any route that this cli holds, including its topics; only its own replies go there.
 - Add or remove a guest: edit the list, then run `c3-broker reload-config` at once and check the `guests:` log line. The broker never rewrites the guest list. A removed guest's route is released and their queued messages are dropped.
 
 ## Deleting a topic

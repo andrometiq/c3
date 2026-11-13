@@ -422,3 +422,57 @@ func TestGuestReactionIsDropped(t *testing.T) {
 		t.Fatalf("guest reaction queued %d row(s)", n)
 	}
 }
+
+// guardedChannel applies the broker's send check like the real Telegram channel.
+type guardedChannel struct {
+	*fakeChannel
+	host *BrokerHost
+}
+
+func (g *guardedChannel) SendReply(args c3types.ReplyArgs) (int64, error) {
+	if !args.IsHolderSend() && !g.host.AllowBrokerSend(args.ChatID, args.TopicID) {
+		return 0, nil
+	}
+	return g.fakeChannel.SendReply(args)
+}
+
+func TestBrokerTextSkipsRoutesHeldByPrivateHolderCLI(t *testing.T) {
+	fc := &fakeChannel{}
+	b := brokerWithChannel(t, mfWithGuests(501), fc)
+	defer b.Shutdown()
+	host := NewBrokerHost(b, "telegram")
+	b.chMu.Lock()
+	b.channels["telegram"] = &channelRegistration{Channel: &guardedChannel{fakeChannel: fc, host: host}}
+	b.chMu.Unlock()
+
+	developer := MakeRouteKey("telegram", -100, guestPtr(281))
+	genie := &Stub{CLI: "genie", PID: os.Getpid(), ConnID: 901}
+	if _, ok := b.Routes.Claim(developer, genie); !ok {
+		t.Fatal("claim developer topic")
+	}
+	b.sendWelcome(genie, developer, "c3")
+	if sent := fc.sendRepliesSnapshot(); len(sent) != 0 {
+		t.Fatalf("welcome reached the holder's topic: %+v", sent)
+	}
+	if host.AllowBrokerSend(-100, guestPtr(281)) {
+		t.Fatal("held notices and readbacks would reach the holder's topic")
+	}
+	reply := c3types.ReplyArgs{Channel: "telegram", ChatID: -100, TopicID: guestPtr(281), Text: "from genie"}
+	reply.MarkHolderSend()
+	if _, err := b.channels["telegram"].Channel.SendReply(reply); err != nil || len(fc.sendRepliesSnapshot()) != 1 {
+		t.Fatal("the holder's own reply was dropped")
+	}
+
+	operator := MakeRouteKey("telegram", -200, guestPtr(412))
+	claude := &Stub{CLI: "claude", PID: os.Getpid(), ConnID: 902}
+	if _, ok := b.Routes.Claim(operator, claude); !ok {
+		t.Fatal("claim operator topic")
+	}
+	b.sendWelcome(claude, operator, "feature-x")
+	if sent := fc.sendRepliesSnapshot(); len(sent) != 2 || sent[1].ChatID != -200 {
+		t.Fatalf("operator welcome missing: %+v", sent)
+	}
+	if !host.AllowBrokerSend(-200, guestPtr(412)) {
+		t.Fatal("operator topic notices were dropped")
+	}
+}

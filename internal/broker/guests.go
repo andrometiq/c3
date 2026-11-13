@@ -51,7 +51,23 @@ func (h *BrokerHost) AllowBrokerSend(chatID int64, topicID *int64) bool {
 		log.Printf("private: broker-originated send to private chat %d dropped", chatID)
 		return false
 	}
+	if h.broker.isHeldByPrivateHolderCLI(MakeRouteKey(h.channel, chatID, topicID)) {
+		log.Printf("private: broker-originated send to %s dropped (held by the private holder cli)", routeKeyStr(MakeRouteKey(h.channel, chatID, topicID)))
+		return false
+	}
 	return true
+}
+
+// isHeldByPrivateHolderCLI reports a route held by the configured private
+// holder's cli on any connection (for example its developer topic). The holder
+// posts its own messages there, so broker text would only be noise.
+func (b *Broker) isHeldByPrivateHolderCLI(key RouteKey) bool {
+	cfg := b.Mappings().Channels[key.Channel].PrivateHolder
+	if cfg == nil || cfg.CLI == "" {
+		return false
+	}
+	holder, held := b.Routes.Holder(key)
+	return held && holder.CLI == cfg.CLI
 }
 
 // privateHelloEligible reports a hello that can never render channel messages
