@@ -28,6 +28,19 @@ func (mf *MappingsFile) IsUserAllowed(userID int64) bool {
 	return false
 }
 
+// IsGuest reports whether userID is in the guest set. Guests are not operators.
+func (mf *MappingsFile) IsGuest(userID int64) bool {
+	if mf == nil || mf.Allowlist == nil || userID <= 0 {
+		return false
+	}
+	for _, g := range mf.Allowlist.Guests {
+		if g == userID {
+			return true
+		}
+	}
+	return false
+}
+
 // IsGroupAllowed reports whether chatID is in the group-cleared set.
 func (mf *MappingsFile) IsGroupAllowed(chatID int64) bool {
 	if mf == nil || mf.Allowlist == nil {

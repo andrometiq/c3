@@ -26,6 +26,9 @@ func (mf *MappingsFile) Validate() error {
 	if mf.SchemaVersion != 1 {
 		return fmt.Errorf("mappings: unsupported schema_version %d (want 1)", mf.SchemaVersion)
 	}
+	if err := mf.validateGuests(); err != nil {
+		return err
+	}
 	for chanName, cc := range mf.Channels {
 		if chanName == "web" {
 			if err := validateWebChannelConfig(cc); err != nil {
@@ -143,4 +146,26 @@ func WebPublicURLIsPrivate(raw string) bool {
 	}
 	ip := net.ParseIP(host)
 	return ip != nil && (ip.IsLoopback() || tailscaleIP(ip))
+}
+
+// validateGuests keeps guests disjoint from operators: a guest id may not be a
+// paired user or the configured DM chat, and must be a positive user id.
+func (mf *MappingsFile) validateGuests() error {
+	if mf.Allowlist == nil {
+		return nil
+	}
+	for _, guest := range mf.Allowlist.Guests {
+		if guest <= 0 {
+			return fmt.Errorf("mappings: allowlist guest %d is not a user id", guest)
+		}
+		if mf.IsUserAllowed(guest) {
+			return fmt.Errorf("mappings: allowlist id %d is both a user and a guest", guest)
+		}
+		for chanName, cc := range mf.Channels {
+			if cc.DMChatID == guest {
+				return fmt.Errorf("mappings: allowlist guest %d is channels.%s.dm_chat_id", guest, chanName)
+			}
+		}
+	}
+	return nil
 }

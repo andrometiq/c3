@@ -131,9 +131,14 @@ func (mf *MappingsFile) AutoUpdateEnabled() bool {
 //   - Group pairing allowlists the chat_id (the whole group is cleared;
 //     the user_id who happened to type the code is incidental — we trust
 //     the group, not the member).
+//
+// Guests are Telegram user ids that may only talk to the private-route holder
+// from their own DM. A guest is never an operator: no broker commands, notices
+// or permission taps. Edited by hand and applied by reload; never paired.
 type Allowlist struct {
 	Users  []int64 `json:"users,omitempty"`
 	Groups []int64 `json:"groups,omitempty"`
+	Guests []int64 `json:"guests,omitempty"`
 }
 
 // ChannelConfig holds typed per-channel state for the in-tree transports.
@@ -167,6 +172,14 @@ type ChannelConfig struct {
 	// would zero-value to false and silently disable decoding for everyone who
 	// never set it — the trap documented for notifications.invasive.
 	RichInbound *bool `json:"rich_inbound,omitempty"`
+	// PrivateHolder names the only session that may take `attach target=private`
+	// (every guest DM route). Absent = private routes are refused.
+	PrivateHolder *PrivateHolder `json:"private_holder,omitempty"`
+}
+
+// PrivateHolder pins the private-route holder by its hello `cli`.
+type PrivateHolder struct {
+	CLI string `json:"cli"`
 }
 
 // EnabledOrDefault reports whether a configured channel is enabled. An absent

@@ -62,6 +62,9 @@ func (mf *MappingsFile) Clone() *MappingsFile {
 		if mf.Allowlist.Groups != nil {
 			al.Groups = append([]int64(nil), mf.Allowlist.Groups...)
 		}
+		if mf.Allowlist.Guests != nil {
+			al.Guests = append([]int64(nil), mf.Allowlist.Guests...)
+		}
 		out.Allowlist = &al
 	}
 	if mf.Notifications != nil {
@@ -136,6 +139,10 @@ func cloneChannelConfig(cc ChannelConfig) ChannelConfig {
 	if cc.RichInbound != nil {
 		v := *cc.RichInbound
 		out.RichInbound = &v
+	}
+	if cc.PrivateHolder != nil {
+		v := *cc.PrivateHolder
+		out.PrivateHolder = &v
 	}
 	return out
 }
