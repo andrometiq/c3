@@ -8,6 +8,13 @@ set -eu
 repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$repo_root"
 
+# Run on the Go version go.mod names, which is what hosted CI installs, so a
+# newer local Go can't pass what CI fails (Go 1.25 vs 1.27 json decoding,
+# 2026-10). The go command downloads that toolchain once if it is missing.
+go_version=$(sed -n 's/^go //p' go.mod)
+export GOTOOLCHAIN="go${go_version}"
+echo "==> go ${go_version} ($(go version))"
+
 echo "==> formatting"
 unformatted=$(gofmt -l .)
 if [ -n "$unformatted" ]; then

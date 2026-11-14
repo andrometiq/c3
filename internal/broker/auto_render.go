@@ -121,8 +121,13 @@ func writeWrappedLine(file *strings.Builder, line string) {
 // labelled tool_input["<key>"]. A string shows as its text in double quotes; any
 // other value as compact JSON, which never starts with a quote, so the string
 // "false" and the boolean false can't look alike. A non-object input is one
-// field, "tool_input".
+// field, "tool_input". Invalid JSON is refused up front: the token walk below
+// does not check the closing brace on every Go version (Go 1.25 reads "{" as
+// an empty object).
 func autoInputFields(raw json.RawMessage) ([]autoField, error) {
+	if !json.Valid(raw) {
+		return nil, errors.New("tool_input is not valid JSON")
+	}
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	if token, err := decoder.Token(); err != nil || token != json.Delim('{') {
 		value, err := autoFieldValue(raw)
