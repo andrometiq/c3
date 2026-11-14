@@ -30,6 +30,21 @@ func TestBuildInstructions_Default(t *testing.T) {
 	}
 }
 
+// Agents learn to view an attachment through download_attachment then Read,
+// which the c3 plugin's hook pre-approves for the session, and to download
+// once more when the Read still prompts, then tell the user rather than loop.
+func TestBuildInstructions_SayHowToViewAnAttachment(t *testing.T) {
+	isolateAdapterTest(t)
+	out := (&adapter{helloAck: ipc.HelloAckMsg{}}).buildInstructions()
+	for _, want := range []string{"call `download_attachment` with its file_id, then `Read` the exact path it returns",
+		"pre-approves that Read for this session and its sub-agents", "call `download_attachment` once more",
+		"if it still asks, tell the user it needs their approval", "always ask"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("instructions missing %q: %q", want, out)
+		}
+	}
+}
+
 func TestInstanceIDFromEnv(t *testing.T) {
 	isolateAdapterTest(t)
 	t.Setenv("CLAUDE_CODE_SESSION_ID", "inst-abc")

@@ -189,24 +189,31 @@ func writeAutoDecision(conn *ipc.Conn, deadline time.Time, decision ipc.AutoDeci
 	_ = conn.WriteJSONContext(ctx, decision)
 }
 
-// handleGrantCheck answers the PreToolUse hook. Allow is true only for a grant
-// this request consumed; every error is a plain false. The lookup is an exact
-// key match, so a malformed hash simply matches nothing.
+// handleGrantCheck answers the PreToolUse hook. Allow is true for a grant this
+// request consumed, else for a Read of an attachment this session downloaded
+// (Attachment set, nothing consumed, in any auto-mode setting); every error is
+// a plain false. The lookup is an exact key match, so a malformed hash simply
+// matches nothing.
 //
-// After an allow it waits briefly for grant_delivered, the hook's word that it
-// printed the allow. Without it, a later denial of the same call is not taken
-// for a veto (vetoAutoLocked).
+// After a grant allow it waits briefly for grant_delivered, the hook's word
+// that it printed the allow. Without it, a later denial of the same call is
+// not taken for a veto (vetoAutoLocked).
 func (b *Broker) handleGrantCheck(conn *ipc.Conn, helloCLI string, raw []byte) {
 	var req ipc.GrantCheckReq
-	isAllowed := ipc.DecodeStrict(raw, &req) == nil && req.CLI == helloCLI && b.consumeAutoGrant(req)
+	isValid := ipc.DecodeStrict(raw, &req) == nil && req.CLI == helloCLI
+	isAllowed := isValid && b.consumeAutoGrant(req)
+	ctx, cancel := context.WithTimeout(b.ctx, grantCheckTimeout)
+	defer cancel()
+	if isValid && !isAllowed && b.isSessionAttachment(req) {
+		_ = conn.WriteJSONContext(ctx, ipc.GrantCheckResp{Op: ipc.OpGrantCheckResult, Allow: true, Attachment: true})
+		return
+	}
 	isDelivered := false
 	if isAllowed && req.ToolUseID != "" {
 		call := autoConsumedCall{key: autoKey{AutoCallContext: req.AutoCallContext, inputHash: req.InputHash},
 			toolUseID: req.ToolUseID}
 		defer func() { b.finishAutoConfirmation(call, isDelivered) }()
 	}
-	ctx, cancel := context.WithTimeout(b.ctx, grantCheckTimeout)
-	defer cancel()
 	err := conn.WriteJSONContext(ctx, ipc.GrantCheckResp{Op: ipc.OpGrantCheckResult, Allow: isAllowed})
 	if err != nil || !isAllowed || req.ToolUseID == "" {
 		return

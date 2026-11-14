@@ -140,6 +140,9 @@ type Channel struct {
 	httpClient *http.Client // shared transport for non-gotgbot calls (file downloads)
 	transport  *http.Transport
 
+	// attachmentRecords keeps emitted attachments' names for DownloadAttachment.
+	attachmentRecords attachmentRecords
+
 	// endpoints is the ordered, deduped list of Bot-API base URLs the channel
 	// may use. It is always non-empty: with no config it is [""], where "" means
 	// gotgbot's DefaultAPIURL (api.telegram.org) — byte-for-byte today's default

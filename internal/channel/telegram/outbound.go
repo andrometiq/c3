@@ -543,9 +543,9 @@ func retryAfter(header string, now time.Time) time.Duration {
 // getFile is the size check, and whatever the bot server agreed to serve is
 // fetched (see getFileErr).
 //
-// Local cache layout:
+// Local cache layout (attachmentsDir):
 //
-//	$XDG_CACHE_HOME/c3/telegram/attachments/<file_unique_basename>
+//	$XDG_CACHE_HOME/c3/telegram/attachments/<file_unique_id>_<original name>
 //	~/.cache/c3/telegram/attachments/<...>  (fallback)
 func (c *Channel) DownloadAttachment(fileID string) (string, error) {
 	if c.bot == nil {
@@ -583,12 +583,12 @@ func (c *Channel) DownloadAttachment(fileID string) (string, error) {
 	// answer against a number of our own could only ever refuse a file that was
 	// about to work.
 
-	// Local filename: keep the file_unique_id stable across redownloads + the
-	// upstream basename for human-friendliness.
-	base := filepath.Base(f.FilePath)
-	localPath := filepath.Join(cacheDir, fmt.Sprintf("%s_%s", f.FileUniqueId, base))
-	if _, err := os.Stat(localPath); err == nil {
-		return localPath, nil // cached
+	// Local filename: the file_unique_id keeps it stable across redownloads, and
+	// the original name keeps it readable and typed by extension.
+	name := attachmentFileName(c.attachmentRecords.lookup(fileID), f.FilePath)
+	localPath := filepath.Join(cacheDir, f.FileUniqueId+"_"+name)
+	if cached := cachedAttachment(cacheDir, f.FileUniqueId, localPath, f.FileSize); cached != "" {
+		return cached, nil
 	}
 
 	// Download into a reserved-prefix temporary and rename, so a cut transfer
@@ -597,12 +597,15 @@ func (c *Channel) DownloadAttachment(fileID string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("telegram: %w", err)
 	}
-	_, err = c.fetchBody(c.ctx, c.httpClient, f.FilePath, out)
+	size, err := c.fetchBody(c.ctx, c.httpClient, f.FilePath, out)
 	if closeErr := out.Close(); err == nil {
 		err = closeErr
 	}
+	if err == nil && attachmentExtension(name) == "" {
+		name = sanitiseAttachmentName(name + sniffExtension(out.Name()))
+	}
 	if err == nil {
-		err = os.Rename(out.Name(), localPath)
+		localPath, err = placeDownload(out.Name(), cacheDir, f.FileUniqueId, name, size)
 	}
 	if err != nil {
 		_ = os.Remove(out.Name())
@@ -728,15 +731,10 @@ func (c *Channel) ValidateTopic(chatID int64, threadID int64) error {
 // temporaries a dead process left there. Every download operation starts here,
 // before any cache or network early return.
 func attachmentsDir() (string, error) {
-	cache := os.Getenv("XDG_CACHE_HOME")
-	if cache == "" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return "", fmt.Errorf("telegram: resolve home: %w", err)
-		}
-		cache = filepath.Join(home, ".cache")
+	dir, err := channel.AttachmentCacheDir(Name)
+	if err != nil {
+		return "", fmt.Errorf("telegram: %w", err)
 	}
-	dir := filepath.Join(cache, "c3", "telegram", "attachments")
 	channel.SweepStaleTemps(dir)
 	return dir, nil
 }

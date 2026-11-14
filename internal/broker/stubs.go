@@ -124,6 +124,12 @@ type Stub struct {
 	// this connection's handler goroutine, so both go through stubMu.
 	pushRoutes map[int64][]pushRouteRecord
 	pushOrder  []pushRouteOrder
+
+	// attachments maps each download_attachment result on this connection,
+	// keyed by conversation and resolved path, to its channel; attachmentOrder
+	// bounds it (attachment_read.go). Guarded by stubMu.
+	attachments     map[stubAttachment]string
+	attachmentOrder []stubAttachment
 }
 
 type pushRouteRecord struct {

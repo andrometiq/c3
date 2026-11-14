@@ -1254,6 +1254,7 @@ func (c *Channel) dispatchMessage(updateID int64, msg *gotgbot.Message, edited b
 		// drop itself, and the drop is already logged loudly.
 		c.editSupp.record(msg.Chat.Id, msg.MessageId, updateID, fp)
 	}
+	c.attachmentRecords.record(in.Attachments)
 	c.host.Logf("telegram: inbound update=%d msg=%d chat=%d thread=%d kind=%s edited=%v",
 		updateID, msg.MessageId, msg.Chat.Id, msg.MessageThreadId, kind, edited)
 	// Record the (chat_id, message_id) → update_id seam BEFORE Emit so the broker's

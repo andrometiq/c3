@@ -12,6 +12,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/modelcontextprotocol/go-sdk/mcp"
+
 	c3broker "github.com/Andrometiq/c3/internal/broker"
 	"github.com/Andrometiq/c3/internal/c3types"
 	"github.com/Andrometiq/c3/internal/channel"
@@ -911,6 +913,60 @@ func TestToolsCall_SwitchCheckRunsBeforeIdentityGate(t *testing.T) {
 	case <-attachDone:
 	case <-time.After(5 * time.Second):
 		t.Fatal("attach never returned after its post-switch broker response")
+	}
+}
+
+// A download_attachment issued while an in-app switch is pending reaches the
+// broker only after the new conversation's recover_session has been answered.
+// The broker handles one connection's frames in order, so it records the
+// download under the new conversation, never the one the session left.
+func TestDownloadAttachment_DuringAPendingSwitchIsRecordedUnderTheNewConversation(t *testing.T) {
+	isolateAdapterTest(t)
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	writeIdentityHandoff(t, "conversation-a", "conversation-b", 20)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	a := newAdapter()
+	a.runCtx = ctx
+	broker := newRecoveryBroker(t, a)
+	establishSettledIdentity(a, sessionhandoff.Entry{
+		StableSessionID: "conversation-a", CWD: "/projects/a", UnixNano: 10,
+	})
+
+	a.checkForIdentitySwitch(ctx) // what the tools/call middleware runs first
+	args, _ := json.Marshal(map[string]any{"file_id": "F"})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _ = a.toolForward("download_attachment")(ctx, &mcp.CallToolRequest{Params: &mcp.CallToolParamsRaw{Arguments: args}})
+	}()
+
+	if req := nextIdentitySwitchRecover(t, broker); req.StableSessionID != "conversation-b" {
+		t.Fatalf("switch recovered %q, want conversation-b", req.StableSessionID)
+	}
+	select {
+	case raw := <-broker.frames:
+		op, _ := ipc.PeekOp(raw)
+		t.Fatalf("%q reached the broker before the new conversation's recover was answered", op)
+	case <-time.After(250 * time.Millisecond):
+	}
+	answerRecover(t, a)
+	select {
+	case raw := <-broker.frames:
+		var call ipc.ToolCallReq
+		if err := json.Unmarshal(raw, &call); err != nil || call.Op != ipc.OpToolCall || call.Name != "download_attachment" {
+			t.Fatalf("after the switch settled the broker got %s, want the download", raw)
+		}
+		result, _ := json.Marshal(ipc.ToolResultMsg{Op: ipc.OpToolResult, ID: call.ID})
+		a.dispatchToolResult(result)
+	case <-time.After(5 * time.Second):
+		t.Fatal("the download never reached the broker after the switch settled")
+	}
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("download_attachment never returned")
 	}
 }
 

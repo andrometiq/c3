@@ -1041,19 +1041,27 @@ type AutoAckMsg struct {
 }
 
 // GrantCheckReq asks whether an armed grant matches this call, consuming it if
-// so. InputHash is ToolInputHash of the call's tool_input.
+// so. InputHash is ToolInputHash of the call's tool_input. AttachmentPath is
+// set only on a Read whose file_path is itself a regular file (not a link)
+// directly in the hook's configured attachment cache dir: the resolved path,
+// which the broker allows when download_attachment returned it to this
+// session (it re-checks the path itself). A broker that predates the field
+// ignores it and allows nothing for it.
 type GrantCheckReq struct {
 	Op Op `json:"op"` // = OpGrantCheck
 	AutoCallContext
-	ToolUseID string `json:"tool_use_id,omitempty"`
-	InputHash string `json:"input_hash"`
+	ToolUseID      string `json:"tool_use_id,omitempty"`
+	InputHash      string `json:"input_hash"`
+	AttachmentPath string `json:"attachment_path,omitempty"`
 }
 
-// GrantCheckResp answers a GrantCheckReq. Allow is true only for a grant this
-// request consumed.
+// GrantCheckResp answers a GrantCheckReq. Allow is true for a grant this
+// request consumed, or, with Attachment, for a Read of an attachment this
+// session downloaded, which consumes nothing.
 type GrantCheckResp struct {
-	Op    Op   `json:"op"` // = OpGrantCheckResult
-	Allow bool `json:"allow"`
+	Op         Op   `json:"op"` // = OpGrantCheckResult
+	Allow      bool `json:"allow"`
+	Attachment bool `json:"attachment,omitempty"`
 }
 
 // GrantDeliveredMsg follows an allowed GrantCheckResp on the same connection

@@ -1843,7 +1843,7 @@ func (a *adapter) buildInstructions() string {
 	// returned in the MCP initialize RESULT (a normal JSON-RPC response the CLI
 	// always processes), NOT a channel push, so they render even in the broken
 	// session. The human separately sees the Telegram held-notice.
-	return a.liveRoutePreamble() + head + "\n\nRelay C3 adapter update system notices to the user verbatim." + permissionContractNote + mode.Combined(caps)
+	return a.liveRoutePreamble() + head + "\n\nRelay C3 adapter update system notices to the user verbatim." + permissionContractNote + attachmentReadNote + mode.Combined(caps)
 }
 
 // permissionContractNote is the security contract carried in the MCP instructions
@@ -1852,6 +1852,10 @@ func (a *adapter) buildInstructions() string {
 // only honors an Allow/Deny verdict from an allowlisted operator, and tapping
 // Allow over Telegram AUTHORIZES the pending tool use.
 const permissionContractNote = "\n\nPermission relay: C3 declares the claude/channel/permission capability, which asserts the channel authenticates the replier. When the host has registered the channel, C3 surfaces a tool-use permission prompt as an Allow/Deny keyboard, honors a verdict only from an allowlisted operator, and an Allow tap over Telegram authorizes the pending tool use. This relay is unavailable on the cross-session route."
+
+// attachmentReadNote tells the agent how to view an attachment. The c3 plugin's
+// PreToolUse hook allows a session's Read of a file it downloaded.
+const attachmentReadNote = "\n\nAttachments: to view a photo or file someone sent, call `download_attachment` with its file_id, then `Read` the exact path it returns (images render). The c3 plugin pre-approves that Read for this session and its sub-agents. If the Read still asks for permission (for example after C3 restarted), call `download_attachment` once more (it is served from the cache); if it still asks, tell the user it needs their approval. A voice note served from the STT inbox, and hosts without the c3 plugin's hooks or on Windows, always ask."
 
 // capsOrDefault returns the channel capability manifest the broker delivered
 // on hello_ack (or a fresh attach), falling back to a sensible default when
@@ -2334,7 +2338,12 @@ func (a *adapter) toolTopics(ctx context.Context, _ *mcp.CallToolRequest) (*mcp.
 // `send_typing` is NOT among these — the typing indicator is relayed
 // programmatically by the broker (P5), not via an LLM tool call.
 func (a *adapter) toolForward(name string) mcp.ToolHandler {
-	return func(_ context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	return func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		if name == "download_attachment" {
+			// The broker records a download for the conversation it is told
+			// about, so a pending in-app switch settles first (as attach does).
+			a.awaitIdentitySettled(ctx)
+		}
 		args, err := decodeArgs(req.Params.Arguments)
 		if err != nil {
 			return nil, fmt.Errorf("invalid params: %w", err)
