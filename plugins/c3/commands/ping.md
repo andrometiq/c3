@@ -1,8 +1,9 @@
 ---
 description: Send a one-shot "this is me" message to Telegram identifying which CLI session currently owns the attached topic. Run in each candidate tab to find the owner before evicting.
+allowed-tools: Bash(c3-broker ping)
 ---
 
-!c3-broker ping
+!`c3-broker ping`
 
 Display the broker's output verbatim. The broker has dispatched a short identification message to the Telegram route this session currently holds, naming the cwd / cli / PID / timestamp so the human reading Telegram can match the topic to the terminal that owns it.
 

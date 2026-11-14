@@ -1,8 +1,9 @@
 ---
 description: Update C3 to the latest checksum-verified release and trigger adapter upgrades.
+allowed-tools: Bash(c3-broker update)
 ---
 
-!c3-broker update
+!`c3-broker update`
 
 Display the output verbatim. A successful update replaces the core binaries and
 bundled STT runtime, then bounces the broker. That bounce triggers upgrade hints

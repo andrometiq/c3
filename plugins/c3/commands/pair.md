@@ -1,9 +1,10 @@
 ---
 description: Arm a Telegram pairing window. `dm` (default) or `group <chat_id>`. Broker prints a 4-digit code; type it from Telegram within 10 min to allowlist your DM user_id or group chat_id.
 argument-hint: "[empty | dm | group <chat_id>]"
+allowed-tools: Bash(c3-broker pair:*)
 ---
 
-!c3-broker pair $ARGUMENTS
+!`c3-broker pair $ARGUMENTS`
 
 Display the broker's output verbatim. The broker has armed a 10-minute pairing window and printed a 4-digit code.
 

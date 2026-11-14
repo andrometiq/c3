@@ -23,7 +23,7 @@ func TestUpgradeBounce(t *testing.T) {
 func TestUpgradeBuildAndUpdatePaths(t *testing.T) {
 	for path, wants := range map[string][]string{
 		"../../plugins/c3/commands/build.md":  {"make install && c3-broker restart"},
-		"../../plugins/c3/commands/update.md": {"!c3-broker update", "bounces the broker"},
+		"../../plugins/c3/commands/update.md": {"!`c3-broker update`", "allowed-tools: Bash(c3-broker update)", "bounces the broker"},
 		"update.go":                           {"bounceUpgradeBroker()"},
 		"setup.go":                            {"sourceBuildFlags(ctx, srcDir)", "restartBrokerForNewConfig()"},
 		"../../Makefile":                      {"git describe --always --dirty", buildidentity.Symbol, "VERSION_LDFLAGS :=", "go install -ldflags \"$(VERSION_LDFLAGS)\""},
