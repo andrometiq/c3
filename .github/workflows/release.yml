@@ -18,6 +18,33 @@ jobs:
       - name: Checkout
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
 
+      # The annotated tag message is the release note; a tag without one fails
+      # here, before anything is built. Older checkout versions left a
+      # lightweight ref in place of the tag object, so fetch the tag itself.
+      # The preview runs under stop-commands so no line of it acts as a
+      # workflow command.
+      - name: Release notes from the tag message
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -eu
+          # The tag name reaches make and shell recipes later; accept only a version.
+          if ! printf '%s\n' "$TAG" | grep -Eqx 'v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?'; then
+            echo "release: tag ${TAG} is not vMAJOR.MINOR.PATCH or vMAJOR.MINOR.PATCH-prerelease" >&2
+            exit 1
+          fi
+          git fetch --no-tags --depth=1 origin "+refs/tags/${TAG}:refs/tags/${TAG}"
+          notes="${RUNNER_TEMP}/release-notes.md"
+          scripts/release-notes.sh "$TAG" > "$notes"
+          printf '\n' >> "$notes"
+          gh api "repos/${GITHUB_REPOSITORY}/releases/generate-notes" \
+            -f tag_name="$TAG" --jq .body >> "$notes"
+          token="notes-$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')"
+          echo "::stop-commands::${token}"
+          cat "$notes"
+          echo "::${token}::"
+
       - name: Set up Go
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
@@ -60,7 +87,6 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ github.ref_name }}
         run: |
-          notes_flags="--generate-notes"
           case "$TAG" in
             *-*) prerelease="--prerelease" ;; # v1.0.0-rc1 etc. → prerelease
             *)   prerelease="" ;;
@@ -75,4 +101,5 @@ jobs:
           gh release create "$TAG" "$@" dist/SHA256SUMS \
             --title "$TAG" \
             --verify-tag \
-            $notes_flags $prerelease
+            --notes-file "${RUNNER_TEMP}/release-notes.md" \
+            $prerelease
