@@ -123,29 +123,40 @@ func attachmentExtension(name string) string {
 	return extension
 }
 
+// attachmentNameASCII is the ASCII punctuation an attachment name keeps.
+// Shells give meaning only to ASCII characters, so with these, letters and
+// digits a pasted path is one inert shell word, quoted or not: no expansion,
+// globbing, zsh glob qualifier, word split or second command.
+const attachmentNameASCII = "._-+,@=%"
+
 // sanitiseAttachmentName keeps name's last path element ('/' and '\' both
-// separate) without control, format (bidi overrides, zero-width) or line and
-// paragraph separator characters, reserved characters, surrounding spaces or
-// leading dots, capped at attachmentNameLimit bytes keeping the extension and
-// valid UTF-8. "" when nothing is left. The sender chooses the name and the
-// agent pastes the path into shell commands, so shell syntax that could run a
-// command or break its quoting ($ ` ' ; & !) is dropped too.
+// separate) as one shell-safe word: whitespace runs become '_', ASCII other
+// than letters, digits and attachmentNameASCII is dropped, as is non-ASCII
+// that is not printable (control, bidi overrides, zero-width). Leading dots,
+// underscores and dashes go, and the result is capped at attachmentNameLimit
+// bytes keeping the extension and valid UTF-8. "" when nothing is left. The
+// sender chooses the name and the agent pastes the path into shell commands.
 func sanitiseAttachmentName(name string) string {
 	name = name[strings.LastIndexAny(name, `/\`)+1:]
+	name = strings.Join(strings.Fields(name), "_")
 	name = strings.Map(func(r rune) rune {
-		if unicode.IsControl(r) || unicode.In(r, unicode.Cf, unicode.Zl, unicode.Zp) || strings.ContainsRune(`<>:"/\|?*$`+"`"+`';&!`, r) {
+		isKept := r > unicode.MaxASCII && unicode.IsGraphic(r) ||
+			r <= unicode.MaxASCII && (unicode.IsLetter(r) || unicode.IsDigit(r) || strings.ContainsRune(attachmentNameASCII, r))
+		if !isKept {
 			return -1
 		}
 		return r
 	}, name)
-	name = strings.TrimLeftFunc(name, func(r rune) bool { return r == '.' || unicode.IsSpace(r) })
-	name = strings.TrimRightFunc(name, unicode.IsSpace)
+	for strings.Contains(name, "__") {
+		name = strings.ReplaceAll(name, "__", "_")
+	}
+	name = strings.TrimLeft(name, "._-")
 	if len(name) <= attachmentNameLimit {
 		return name
 	}
 	extension := attachmentExtension(name)
 	stem := strings.ToValidUTF8(name[:attachmentNameLimit-len(extension)], "")
-	return strings.TrimRightFunc(stem, unicode.IsSpace) + extension
+	return strings.TrimRight(stem, "_") + extension
 }
 
 // cachedAttachment is a completed download of uniqueID: path itself, else, when
