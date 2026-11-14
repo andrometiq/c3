@@ -198,14 +198,12 @@ func TestSourceSchedulerRestartTargetsKeepOwnOccurrenceInReplacement(t *testing.
 	if len(before) != 2 {
 		t.Fatalf("pending rows=%d", len(before))
 	}
-	var err error
-	b.Queue, err = queue.NewStore(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := b.Queue.RecoverOnStartup(); err != nil {
-		t.Fatal(err)
-	}
+	// Restart as production does: a new broker recovers the same queue dir.
+	// Swapping b.Queue under the live broker raced its route worker.
+	b.Shutdown()
+	b = brokerWithChannel(t, mfWithTelegram(), &fakeChannel{})
+	defer b.Shutdown()
+	b.Voice.Stop()
 	scheduler := newVoiceScheduler(b, newFakeVoiceClock())
 	b.Voice = scheduler
 	release := make(chan struct{})
