@@ -2,7 +2,11 @@
 description: Tell the running C3 broker to re-read ~/.config/c3/mappings.json. Non-disruptive — no process restart, no adapter recycle.
 ---
 
-!CAPS="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/c3-broker.caps"; if ! pgrep -x c3-broker >/dev/null; then echo "no running broker; mappings.json will load when one starts"; elif [ ! -f "$CAPS" ] || ! grep -q "^sighup-reload$" "$CAPS"; then echo "REFUSED: running broker is an old binary without SIGHUP support"; echo "(caps file $CAPS missing or does not list sighup-reload)"; echo "sending SIGHUP would kill it, which would also kill this CLI's MCP adapter."; echo "to upgrade safely: quit Claude Code (Ctrl-D or /exit), then relaunch with 'claude --dangerously-load-development-channels=plugin:c3@c3' (append --resume to pick your session back up)."; else pkill -HUP -x c3-broker && echo "SIGHUP sent — broker will re-read mappings.json"; fi
+Run this with Bash:
+
+```sh
+CAPS="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/c3-broker.caps"; if ! pgrep -x c3-broker >/dev/null; then echo "no running broker; mappings.json will load when one starts"; elif [ ! -f "$CAPS" ] || ! grep -q "^sighup-reload$" "$CAPS"; then echo "REFUSED: running broker is an old binary without SIGHUP support"; echo "(caps file $CAPS missing or does not list sighup-reload)"; echo "sending SIGHUP would kill it, which would also kill this CLI's MCP adapter."; echo "to upgrade safely: quit Claude Code (Ctrl-D or /exit), then relaunch with 'claude --dangerously-load-development-channels=plugin:c3@c3' (append --resume to pick your session back up)."; else pkill -HUP -x c3-broker && echo "SIGHUP sent — broker will re-read mappings.json"; fi
+```
 
 Display the output. The slash command first probes the broker's capabilities marker (`$XDG_RUNTIME_DIR/c3-broker.caps`, written by the broker at startup). If the file confirms SIGHUP support, signal is sent and the broker swaps the in-memory mappings pointer in-place — live route claims preserved, no process churn, no adapter recycle.
 

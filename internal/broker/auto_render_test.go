@@ -308,7 +308,8 @@ func TestAutoRenderOverflowFile(t *testing.T) {
 }
 
 func TestAutoRenderRejectsWhatItCannotShow(t *testing.T) {
-	for _, raw := range []json.RawMessage{nil, []byte(`{`), []byte(`{"a":}`)} {
+	for _, raw := range []json.RawMessage{nil, []byte(`{`), []byte(`{"a":}`), []byte(`{"a":1`), []byte(`{"a":"b"`),
+		[]byte(`{"a":1}x`), []byte(`{"a":1}{"b":2}`)} {
 		if _, err := renderAutoCard(autoCardFields{requestID: renderTestID, inputHash: renderTestHash, toolInput: raw}); err == nil {
 			t.Fatalf("rendered invalid input %q", raw)
 		}

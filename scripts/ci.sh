@@ -8,8 +8,28 @@ set -eu
 repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$repo_root"
 
+# Run on the Go version go.mod's go line names, which is what hosted CI
+# installs (setup-go reads it), so a newer local Go can't pass what CI fails
+# (Go 1.25 vs 1.27 json decoding, 2026-10). The go command downloads that
+# toolchain once if it is missing; gofmt comes from the same toolchain.
+go_version=$(sed -n 's/^go \([0-9][0-9.]*\).*/\1/p' go.mod)
+case $go_version in
+*.*.*) ;;
+*.*) go_version="$go_version.0" ;; # "go 1.N" names the language; the release is 1.N.0
+*)
+	echo "scripts/ci.sh: cannot read the go version from go.mod" >&2
+	exit 1
+	;;
+esac
+export GOTOOLCHAIN="go${go_version}"
+if ! go_banner=$(go version); then
+	echo "scripts/ci.sh: Go ${go_version} toolchain is not available (offline and not cached?)" >&2
+	exit 1
+fi
+echo "==> go ${go_version} (${go_banner})"
+
 echo "==> formatting"
-unformatted=$(gofmt -l .)
+unformatted=$("$(go env GOROOT)/bin/gofmt" -l .)
 if [ -n "$unformatted" ]; then
 	echo "These files are not gofmt-clean:" >&2
 	printf '%s\n' "$unformatted" >&2

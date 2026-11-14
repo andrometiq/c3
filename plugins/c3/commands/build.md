@@ -2,7 +2,11 @@
 description: Rebuild C3's core binaries and trigger open-session adapter upgrades.
 ---
 
-!cd "${CLAUDE_PLUGIN_ROOT}/../.." && make install && c3-broker restart
+Run this with Bash:
+
+```sh
+cd "${CLAUDE_PLUGIN_ROOT}/../.." && make install && c3-broker restart
+```
 
 Display the output. The build embeds `git describe --always --dirty` as its build
 identity. The broker bounce triggers upgrade hints for every connected Claude

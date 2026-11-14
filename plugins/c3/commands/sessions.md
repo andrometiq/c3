@@ -1,8 +1,9 @@
 ---
 description: List every live Claude Code / Codex session the broker is tracking, with CWD, attached topic, and a "you are here" marker for the calling terminal. Helps disambiguate which tab owns which topic.
+allowed-tools: Bash(c3-broker sessions)
 ---
 
-!c3-broker sessions
+!`c3-broker sessions`
 
 Display the broker's output verbatim. The broker has returned a snapshot of every connected adapter — CLI, PID, CWD, currently-attached Telegram destination, and a `This?` marker for the session that owns the terminal that fired the slash command (best-effort, may be blank on non-Linux or when the parent-PID walk fails).
 

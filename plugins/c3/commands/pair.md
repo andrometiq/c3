@@ -1,11 +1,11 @@
 ---
 description: Arm a Telegram pairing window. `dm` (default) or `group <chat_id>`. Broker prints a 4-digit code; type it from Telegram within 10 min to allowlist your DM user_id or group chat_id.
 argument-hint: "[empty | dm | group <chat_id>]"
+allowed-tools: Bash(c3-broker pair:*)
+disable-model-invocation: true
 ---
 
-!c3-broker pair $ARGUMENTS
-
-Display the broker's output verbatim. The broker has armed a 10-minute pairing window and printed a 4-digit code.
+Run `c3-broker pair $ARGUMENTS` with Bash, then display the broker's output verbatim. The broker has armed a 10-minute pairing window and printed a 4-digit code.
 
 What the user does next:
 - For `dm` (default): open Telegram, send exactly the 4-digit code (no whitespace, no other characters) to the bot. On match, the broker silently adds the user_id to `~/.config/c3/mappings.json:allowlist.users` and the bot becomes responsive to that user. Wrong codes are silently ignored — the bot still looks dead until the right code arrives or the window expires.
