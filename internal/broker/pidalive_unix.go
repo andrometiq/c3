@@ -2,19 +2,22 @@
 
 package broker
 
-import "syscall"
+import (
+	"syscall"
 
-// isPIDAlive returns true if a process with the given PID exists.
+	"github.com/Andrometiq/c3/internal/osutil"
+)
+
+// isPIDAlive returns true if a process with the given PID is running.
 // Sends signal 0 (a no-op) and checks for ESRCH.
 func isPIDAlive(pid int) bool {
 	if pid <= 0 {
 		return false
 	}
-	err := syscall.Kill(pid, 0)
-	if err == nil {
-		return true
-	}
 	// ESRCH = no such process. Anything else (e.g. EPERM) means we can't
-	// signal it but it's still alive.
-	return err != syscall.ESRCH
+	// signal it but it's still there. A zombie is there but has exited.
+	if err := syscall.Kill(pid, 0); err == syscall.ESRCH {
+		return false
+	}
+	return !osutil.IsZombie(pid)
 }

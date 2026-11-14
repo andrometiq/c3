@@ -247,8 +247,8 @@ func processAlive(pid int) bool {
 	if pid <= 0 {
 		return false
 	}
-	_, err := os.Stat(fmt.Sprintf("/proc/%d", pid))
-	return err == nil
+	_, err := os.Stat(fmt.Sprintf("/proc/%d", pid)) // a zombie keeps /proc/<pid>
+	return err == nil && !osutil.IsZombie(pid)
 }
 
 func ancestorPIDs(start int) []int {

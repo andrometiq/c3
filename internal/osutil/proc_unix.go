@@ -24,13 +24,15 @@ func SignalReload(pid int) error { return syscall.Kill(pid, syscall.SIGHUP) }
 func TerminateProcess(pid int) error { return syscall.Kill(pid, syscall.SIGTERM) }
 
 // ProcessSignalable reports whether the current process can signal pid — i.e.
-// the process exists AND we have permission to signal it (unix: kill(pid,0)==nil,
-// so ESRCH/EPERM both report false). This preserves the exact semantics of the
-// broker's "is a live broker running (and ours)?" liveness probes, which treated
-// any kill(pid,0) error as "not actionable".
+// the process is running AND we have permission to signal it (unix:
+// kill(pid,0)==nil, so ESRCH/EPERM both report false). This preserves the
+// semantics of the broker's "is a live broker running (and ours)?" liveness
+// probes, which treated any kill(pid,0) error as "not actionable". A zombie
+// (exited, not yet reaped) still accepts kill(pid,0) but is not running, so it
+// reports false: a restart waiting on it would otherwise never see it exit.
 func ProcessSignalable(pid int) bool {
 	if pid <= 0 {
 		return false
 	}
-	return syscall.Kill(pid, 0) == nil
+	return syscall.Kill(pid, 0) == nil && !IsZombie(pid)
 }

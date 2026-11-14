@@ -22,6 +22,7 @@ import (
 
 	"github.com/Andrometiq/c3/internal/broker"
 	"github.com/Andrometiq/c3/internal/codexlauncher"
+	"github.com/Andrometiq/c3/internal/osutil"
 )
 
 const defaultWSURL = "ws://127.0.0.1:8766"
@@ -665,19 +666,6 @@ func appServerLogPath(port int) string {
 	return fmt.Sprintf("/tmp/c3-codex-app-server-%d-%d.log", os.Getuid(), port)
 }
 
-// processAlive reports whether pid is a live process we own. Signal 0 performs
-// the permission and existence checks without delivering anything.
-func processAlive(pid int) bool {
-	if pid <= 0 {
-		return false
-	}
-	proc, err := os.FindProcess(pid)
-	if err != nil {
-		return false
-	}
-	return proc.Signal(syscall.Signal(0)) == nil
-}
-
 // appServerPortOwner describes, for a human reading a refusal, what we know
 // about whoever holds wsURL's port. It returns a leading-space clause to splice
 // into an error message, or "" when we know nothing useful.
@@ -710,7 +698,7 @@ func appServerPortOwnerWithReader(wsURL string, readFile func(string) ([]byte, e
 	if err := json.Unmarshal(data, &meta); err != nil || meta.PID <= 0 {
 		return ""
 	}
-	if !processAlive(meta.PID) {
+	if !osutil.ProcessSignalable(meta.PID) {
 		return fmt.Sprintf(" (a C3 app-server recorded on that port, pid %d, is no longer running —"+
 			" something else has taken the port)", meta.PID)
 	}

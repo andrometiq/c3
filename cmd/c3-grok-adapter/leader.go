@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/Andrometiq/c3/internal/c3types"
+	"github.com/Andrometiq/c3/internal/osutil"
 )
 
 const (
@@ -212,9 +213,9 @@ func processAlive(pid int) bool {
 	if pid <= 0 {
 		return false
 	}
-	// Linux: /proc/<pid> is the reliable existence check.
+	// Linux: /proc/<pid> is the reliable existence check; a zombie keeps it.
 	_, err := os.Stat(fmt.Sprintf("/proc/%d", pid))
-	return err == nil
+	return err == nil && !osutil.IsZombie(pid)
 }
 
 type activeSession struct {
