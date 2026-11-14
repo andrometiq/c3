@@ -68,7 +68,7 @@ func startDeniedHook(socketPath, payload string) <-chan string {
 
 func preToolUse(socketPath, payload string) string {
 	var out bytes.Buffer
-	autohook.RunPreToolUse(strings.NewReader(payload), &out, socketPath)
+	autohook.RunPreToolUse(strings.NewReader(payload), &out, socketPath, "")
 	return out.String()
 }
 

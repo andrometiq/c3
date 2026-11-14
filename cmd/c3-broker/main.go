@@ -105,9 +105,15 @@ var hookCommands = map[string]func(){
 	// SessionStart. NEVER connects to the broker; runSessionHook returns nil
 	// unconditionally.
 	"session-hook": func() { _ = runSessionHook() },
-	// Auto-mode approval. Silent on every failure, including an unresolvable
-	// socket path: staying silent leaves Claude Code's own decision in place.
-	"pretooluse-hook":        func() { runAutoHook(autohook.RunPreToolUse) },
+	// Auto-mode approval and attachment reads. Silent on every failure,
+	// including an unresolvable socket path or cache dir (no attachment check):
+	// staying silent leaves Claude Code's own decision in place.
+	"pretooluse-hook": func() {
+		attachmentDir, _ := channel.AttachmentCacheDir(telegram.Name)
+		runAutoHook(func(stdin io.Reader, stdout io.Writer, socketPath string) {
+			autohook.RunPreToolUse(stdin, stdout, socketPath, attachmentDir)
+		})
+	},
 	"permission-denied-hook": func() { runAutoHook(autohook.RunPermissionDenied) },
 }
 
@@ -357,9 +363,10 @@ Usage:
                         always exits 0.
   c3-broker pretooluse-hook
                         Internal: the c3 plugin's PreToolUse hook. Allows a
-                        tool call only when the broker holds an armed
-                        auto-mode approval for that exact call, consuming it.
-                        Otherwise prints nothing; always exits 0.
+                        tool call the broker holds an armed auto-mode
+                        approval for (consuming it), and a Read of a Telegram
+                        attachment download_attachment returned to the same
+                        session. Otherwise prints nothing; always exits 0.
   c3-broker permission-denied-hook
                         Internal: the c3 plugin's PermissionDenied hook.
                         Reports an auto-mode denial so the broker can post an

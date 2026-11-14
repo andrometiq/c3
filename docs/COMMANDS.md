@@ -46,7 +46,7 @@ Beyond `attach` / `detach` / `topics`, the adapters expose a set of message and 
 | `output`             |   ✓    |   ✓   |  ✓   |   ✓   | Select the output route from the session's currently held set.                |
 | `poll`               |   ✓    |   ✓   |  ✓   |   ✓   | Send a Telegram poll (regular or quiz; anonymous/multiple/timer options).     |
 | `stop_poll`          |   ✓    |   ✓   |  ✓   |   ✓   | Force-close a bot-sent poll and return its final aggregate tally.             |
-| `download_attachment`|   ✓    |   ✓   |  ✓   |   ✓   | Download an inbound attachment by `file_id` to the local cache.               |
+| `download_attachment`|   ✓    |   ✓   |  ✓   |   ✓   | Download an inbound attachment by `file_id` to the local cache, keeping its file name and extension when known (not for a file cached under the older naming, a voice note from the STT inbox, or an attachment from before a broker restart); returns the path. |
 | `fetch_queue`        |   ✓    |   ✓   |  ✓   |   ✓   | Drain all held routes output-first, or one held route via `channel` (`limit` / `"all"`; `ack` peek vs consume). |
 | `retranscribe`       |   ✓    |   ✓   |  ✓   |   ✓   | Re-run saved audio through the durable STT scheduler; resolve a pending row or append a transcript-update row. |
 | `ask`                |   ✓    |   —   |  —   |   —   | Blocking human question (single/multi-select + Skip) via an inline keyboard.  |

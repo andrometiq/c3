@@ -119,6 +119,9 @@ The first is cleaner; the second is far easier to reason about when it misbehave
 
 - Media-group / album assembly, media echo by `file_id`, message forwarding.
 - Richer formatting (underline, inline mentions), location sends, more poll options.
+- An attachment tool that returns the content itself (images as pictures, text inline) for
+  hosts with no file-read tool, such as Claude Desktop. Claude Code reads the downloaded file
+  with `Read`, which the plugin hook pre-approves for the session that downloaded it.
 
 ## Packaging & platform
 

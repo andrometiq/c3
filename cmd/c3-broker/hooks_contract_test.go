@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Andrometiq/c3/internal/ipc"
 )
@@ -111,6 +112,85 @@ func TestPreToolUseHookBinaryKeepsAllowWhenDeliveryFails(t *testing.T) {
 	cmd.Stdout = &stdout
 	if err := cmd.Run(); err != nil || !strings.Contains(stdout.String(), `"permissionDecision":"allow"`) {
 		t.Fatalf("err=%v stdout=%q", err, stdout.String())
+	}
+}
+
+// The real binary names a Read of a file in the Telegram attachment cache
+// under XDG_CACHE_HOME to the broker, and prints the attachment allow the
+// broker gives; a Read of a file beside the cache names nothing, so the same
+// answer allows nothing.
+func TestPreToolUseHookBinaryAsksTheBrokerAboutAttachmentReads(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("hooks are silent on Windows: the broker peer can't be verified")
+	}
+	dir := t.TempDir()
+	buildBroker(t, dir)
+	cache := filepath.Join(dir, "cache")
+	attachment := filepath.Join(cache, "c3", "telegram", "attachments", "AQADunique_photo.jpg")
+	beside := filepath.Join(cache, "c3", "telegram", "photo.jpg")
+	if err := os.MkdirAll(filepath.Dir(attachment), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{attachment, beside} {
+		if err := os.WriteFile(path, []byte("jpeg"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	listener, err := net.Listen("unix", filepath.Join(dir, "c3.sock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	requests := make(chan ipc.GrantCheckReq, 2)
+	go func() {
+		for {
+			raw, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			conn := ipc.NewConn(raw)
+			if _, err := conn.ReadFrame(); err == nil { // hook_hello
+				_ = conn.WriteJSON(ipc.HelloAckMsg{Op: ipc.OpHelloAck})
+				if frame, err := conn.ReadFrame(); err == nil {
+					var request ipc.GrantCheckReq
+					_ = json.Unmarshal(frame, &request)
+					requests <- request
+					_ = conn.WriteJSON(ipc.GrantCheckResp{Op: ipc.OpGrantCheckResult, Allow: true, Attachment: true})
+				}
+			}
+			_ = conn.Close()
+		}
+	}()
+	run := func(path string) (string, ipc.GrantCheckReq) {
+		t.Helper()
+		input, _ := json.Marshal(map[string]string{"file_path": path})
+		cmd := exec.Command(filepath.Join(dir, "c3-broker"), "pretooluse-hook")
+		cmd.Env = []string{"PATH=" + dir, "HOME=" + dir, "XDG_RUNTIME_DIR=" + dir, "XDG_CONFIG_HOME=" + dir,
+			"XDG_CACHE_HOME=" + cache}
+		cmd.Stdin = strings.NewReader(`{"session_id":"s","cwd":"/w","tool_name":"Read","tool_input":` + string(input) + `}`)
+		var stdout bytes.Buffer
+		cmd.Stdout = &stdout
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("hook for %s: %v", path, err)
+		}
+		select {
+		case request := <-requests:
+			return stdout.String(), request
+		case <-time.After(5 * time.Second):
+			t.Fatalf("no grant check for %s", path)
+			return "", ipc.GrantCheckReq{}
+		}
+	}
+	resolved, err := filepath.EvalSymlinks(attachment)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if output, request := run(attachment); request.AttachmentPath != resolved ||
+		!strings.Contains(output, "C3: Telegram attachment this session downloaded") {
+		t.Fatalf("attachment read: attachment_path %q, stdout %q", request.AttachmentPath, output)
+	}
+	if output, request := run(beside); request.AttachmentPath != "" || output != "" {
+		t.Fatalf("read beside the cache: attachment_path %q, stdout %q", request.AttachmentPath, output)
 	}
 }
 

@@ -1,5 +1,5 @@
 {
-  "description": "C3 hooks — SessionStart records the stable --resume session id (c3-broker session-hook) so a resumed session auto-attaches to its last Telegram topic. PermissionDenied and PreToolUse carry Telegram approval of auto-mode denials; both are silent unless auto_mode_approval is enabled.",
+  "description": "C3 hooks — SessionStart records the stable --resume session id (c3-broker session-hook) so a resumed session auto-attaches to its last Telegram topic. PreToolUse asks the broker about a Read of a file in C3's Telegram attachment folder (~/.cache/c3/telegram/attachments) and allows it when download_attachment returned that file to the same session, so attachments open without a prompt; permissions.deny rules still apply. PermissionDenied and PreToolUse also carry Telegram approval of auto-mode denials, which stays silent unless auto_mode_approval is enabled.",
   "hooks": {
     "SessionStart": [
       {

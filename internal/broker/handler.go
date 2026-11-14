@@ -669,6 +669,9 @@ func (b *Broker) handleToolCall(conn *ipc.Conn, stub *Stub, raw []byte) {
 		resp.Error = &ipc.ErrorPayload{Code: -32000, Message: res.Err.Error()}
 	} else {
 		resp.Result = res.Result
+		if req.Name == "download_attachment" { // before the agent can see the path
+			rememberAttachment(stub, route, res.Result)
+		}
 	}
 	_ = conn.WriteJSON(resp)
 }

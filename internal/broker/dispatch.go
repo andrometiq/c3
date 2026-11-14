@@ -441,6 +441,16 @@ func dispatchDownloadAttachment(ch channel.Channel, args map[string]any) (map[st
 	return mcpText(path), nil
 }
 
+// mcpTextOf is the text of a one-entry mcpText result, or "".
+func mcpTextOf(result map[string]any) string {
+	content, _ := result["content"].([]map[string]any)
+	if len(content) != 1 {
+		return ""
+	}
+	text, _ := content[0]["text"].(string)
+	return text
+}
+
 // mcpText returns the standard MCP-shape result with one text entry.
 func mcpText(s string) map[string]any {
 	return map[string]any{

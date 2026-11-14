@@ -2,7 +2,9 @@
 // PreToolUse and PermissionDenied hooks (`c3-broker pretooluse-hook` and
 // `c3-broker permission-denied-hook`). Each runs as a short-lived process,
 // reads the hook payload on stdin, makes one op on a transient broker
-// connection and prints a decision only when the broker grants one.
+// connection and prints a decision only when the broker grants one. The
+// broker also allows a Read of an attachment download_attachment returned to
+// the same session.
 //
 // Every failure is silent: no output and exit 0, which leaves Claude Code's
 // normal permission flow (or the denial) in place. The hooks never print
@@ -16,8 +18,10 @@ import (
 	"io"
 	"net"
 	"os"
+	"path/filepath"
 	"time"
 
+	"github.com/Andrometiq/c3/internal/channel"
 	"github.com/Andrometiq/c3/internal/ipc"
 	"github.com/Andrometiq/c3/internal/peercred"
 )
@@ -36,10 +40,12 @@ const (
 )
 
 // The only outputs the hooks can print. They are constants so no input can
-// reach them, and neither carries updatedInput.
+// reach them, and none carries updatedInput.
 const (
 	allowOutput = `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow",` +
 		`"permissionDecisionReason":"C3: approved once on Telegram"}}` + "\n"
+	attachmentReadOutput = `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow",` +
+		`"permissionDecisionReason":"C3: Telegram attachment this session downloaded"}}` + "\n"
 	retryOutput = `{"hookSpecificOutput":{"hookEventName":"PermissionDenied","retry":true}}` + "\n"
 )
 
@@ -61,21 +67,25 @@ func (in hookInput) callContext() ipc.AutoCallContext {
 
 // hookEnv is what a hook run depends on besides its streams; tests replace it.
 type hookEnv struct {
-	budget     time.Duration
-	now        func() time.Time
-	verifyPeer func(net.Conn) error
+	budget        time.Duration
+	now           func() time.Time
+	verifyPeer    func(net.Conn) error
+	attachmentDir string // the attachment cache a Read's file is checked against; "" for none
 }
 
 func defaultEnv(budget time.Duration) hookEnv {
 	return hookEnv{budget: budget, now: time.Now, verifyPeer: peercred.VerifySameUser}
 }
 
-// RunPreToolUse prints the allow decision only when the broker consumed an
-// armed grant for this exact call within PreToolUseBudget. Any other outcome,
-// a panic included, prints nothing.
-func RunPreToolUse(stdin io.Reader, stdout io.Writer, socketPath string) {
+// RunPreToolUse prints the allow decision only when, within PreToolUseBudget,
+// the broker consumed an armed grant for this exact call or allowed a Read of
+// a file in attachmentDir that this session downloaded. Any other outcome, a
+// panic included, prints nothing.
+func RunPreToolUse(stdin io.Reader, stdout io.Writer, socketPath, attachmentDir string) {
 	defer func() { _ = recover() }()
-	runPreToolUse(stdin, stdout, socketPath, defaultEnv(PreToolUseBudget))
+	env := defaultEnv(PreToolUseBudget)
+	env.attachmentDir = attachmentDir
+	runPreToolUse(stdin, stdout, socketPath, env)
 }
 
 func runPreToolUse(stdin io.Reader, stdout io.Writer, socketPath string, env hookEnv) {
@@ -94,8 +104,9 @@ func runPreToolUse(stdin io.Reader, stdout io.Writer, socketPath string, env hoo
 		return
 	}
 	defer conn.close()
+	attachmentPath := attachmentReadPath(in, env.attachmentDir)
 	request := ipc.GrantCheckReq{Op: ipc.OpGrantCheck, AutoCallContext: in.callContext(), ToolUseID: in.ToolUseID,
-		InputHash: inputHash}
+		InputHash: inputHash, AttachmentPath: attachmentPath}
 	if conn.WriteJSONContext(conn.ctx, request) != nil {
 		return
 	}
@@ -110,12 +121,37 @@ func runPreToolUse(stdin io.Reader, stdout io.Writer, socketPath string, env hoo
 	if !env.now().Before(deadline) {
 		return
 	}
+	if response.Attachment { // consumes nothing, so nothing to confirm
+		if attachmentPath != "" {
+			_, _ = io.WriteString(stdout, attachmentReadOutput)
+		}
+		return
+	}
 	if _, err := io.WriteString(stdout, allowOutput); err != nil || in.ToolUseID == "" {
 		return
 	}
 	// Tell the broker the allow reached Claude Code, so a denial of this same
 	// call reads as a veto. Best effort: it changes nothing printed.
 	conn.writeBestEffort(ipc.GrantDeliveredMsg{Op: ipc.OpGrantDelivered, ToolUseID: in.ToolUseID})
+}
+
+// attachmentReadPath is the resolved file of a Read whose file_path is itself
+// a regular file (not a link) directly inside attachmentDir as configured, the
+// form download_attachment returns; else "". file_path is read by its exact
+// key, as the host reads it. This only decides what to ask: the broker checks
+// the path again and allows it only for the session that downloaded it.
+func attachmentReadPath(in hookInput, attachmentDir string) string {
+	var input map[string]json.RawMessage
+	var filePath string
+	if in.ToolName != "Read" || json.Unmarshal(in.ToolInput, &input) != nil ||
+		json.Unmarshal(input["file_path"], &filePath) != nil || filepath.Dir(filepath.Clean(filePath)) != filepath.Clean(attachmentDir) {
+		return ""
+	}
+	if info, err := os.Lstat(filePath); err != nil || !info.Mode().IsRegular() {
+		return ""
+	}
+	path, _ := channel.ResolveAttachment(attachmentDir, filePath)
+	return path
 }
 
 // RunPermissionDenied reports the denial and holds the connection through the
