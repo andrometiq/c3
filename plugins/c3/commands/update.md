@@ -1,11 +1,10 @@
 ---
 description: Update C3 to the latest checksum-verified release and trigger adapter upgrades.
 allowed-tools: Bash(c3-broker update)
+disable-model-invocation: true
 ---
 
-!`c3-broker update`
-
-Display the output verbatim. A successful update replaces the core binaries and
+Run `c3-broker update` with Bash, using the longest timeout the Bash tool allows (a download can take minutes), then display its output verbatim. A successful update replaces the core binaries and
 bundled STT runtime, then bounces the broker. That bounce triggers upgrade hints
 on each adapter's reconnect. Compatible Claude adapters self-exec after draining
 outstanding work; older or incompatible adapters show a notice to run `/mcp` and
