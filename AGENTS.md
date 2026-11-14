@@ -43,7 +43,9 @@ Keep the tree green: build + `go test ./...` must pass before a change is consid
 - Every release has notes, and the annotated tag message is where they live. The notes file is
   line 1 `vX.Y.Z — <one-line summary>` (shown by `git tag -n`; the release page title stays the
   bare tag), line 2 blank, then the user-facing note, which the release page shows exactly as
-  written. Write each paragraph and list item on one line, `- Fixed the stuck voice queue.`
+  written. Keep it short and grouped: a few bold group lines (what users get first, then fixes and
+  internals) with one-line items under each, plain words, no implementation detail, and an upgrade
+  line last. Write each paragraph and list item on one line, `- Fixed the stuck voice queue.`
   style: GitHub shows every newline in a release body as a line break, and a wrapped line that
   starts with `>` becomes a quote. Older tag messages are hard-wrapped; don't copy their shape
   (their release pages were fixed by hand, `gh release view vX.Y.Z --json body`).
