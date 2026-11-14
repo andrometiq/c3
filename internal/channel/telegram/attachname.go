@@ -123,29 +123,43 @@ func attachmentExtension(name string) string {
 	return extension
 }
 
-// attachmentNameASCII is the ASCII punctuation an attachment name keeps.
-// Shells give meaning only to ASCII characters, so with these, letters and
-// digits a pasted path is one inert shell word, quoted or not: no expansion,
-// globbing, zsh glob qualifier, word split or second command.
-const attachmentNameASCII = "._-+,@=%"
+// attachmentNameASCII is the ASCII punctuation an attachment name keeps. With
+// these, letters and digits a pasted path is one inert word in bash, zsh and
+// PowerShell, quoted or not: no expansion, globbing, zsh glob qualifier, word
+// or array split, or second command.
+const attachmentNameASCII = "._-+@="
+
+// PowerShell reads these non-ASCII characters as quotes and dashes, so curly
+// quotes are dropped and dash-like characters become '-'.
+const (
+	attachmentNameCurlyQuotes = "‘’‚‛“”„‟"
+	attachmentNameDashes      = "‐‑‒–—―"
+)
 
 // sanitiseAttachmentName keeps name's last path element ('/' and '\' both
 // separate) as one shell-safe word: whitespace runs become '_', ASCII other
-// than letters, digits and attachmentNameASCII is dropped, as is non-ASCII
-// that is not printable (control, bidi overrides, zero-width). Leading dots,
-// underscores and dashes go, and the result is capped at attachmentNameLimit
-// bytes keeping the extension and valid UTF-8. "" when nothing is left. The
-// sender chooses the name and the agent pastes the path into shell commands.
+// than letters, digits and attachmentNameASCII is dropped, as are curly quotes
+// and non-ASCII that is not printable (control, bidi overrides, zero-width),
+// and dash-like characters become '-'. Leading dots, underscores and dashes
+// go, and the result is capped at attachmentNameLimit bytes keeping the
+// extension and valid UTF-8. "" when nothing is left. The sender chooses the
+// name and the agent pastes the path into shell commands.
 func sanitiseAttachmentName(name string) string {
 	name = name[strings.LastIndexAny(name, `/\`)+1:]
 	name = strings.Join(strings.Fields(name), "_")
 	name = strings.Map(func(r rune) rune {
-		isKept := r > unicode.MaxASCII && unicode.IsGraphic(r) ||
-			r <= unicode.MaxASCII && (unicode.IsLetter(r) || unicode.IsDigit(r) || strings.ContainsRune(attachmentNameASCII, r))
-		if !isKept {
+		switch {
+		case strings.ContainsRune(attachmentNameDashes, r):
+			return '-'
+		case strings.ContainsRune(attachmentNameCurlyQuotes, r):
+			return -1
+		case r > unicode.MaxASCII && unicode.IsGraphic(r):
+			return r
+		case r <= unicode.MaxASCII && (unicode.IsLetter(r) || unicode.IsDigit(r) || strings.ContainsRune(attachmentNameASCII, r)):
+			return r
+		default:
 			return -1
 		}
-		return r
 	}, name)
 	for strings.Contains(name, "__") {
 		name = strings.ReplaceAll(name, "__", "_")

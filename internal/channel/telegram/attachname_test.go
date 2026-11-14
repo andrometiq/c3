@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/PaulSonOfLars/gotgbot/v2"
@@ -67,9 +68,13 @@ func TestSanitiseAttachmentName(t *testing.T) {
 		{in: "x'$(touch PWNED)'.xlsx", want: "xtouch_PWNED.xlsx"},
 		{in: "John's CV & cover!.pdf", want: "Johns_CV_cover.pdf"},
 		{in: "Budget $500.xlsx", want: "Budget_500.xlsx"},
-		{in: "x(e,reboot,).tar", want: "xe,reboot,.tar"},                         // zsh glob qualifier
-		{in: "a{b,--to-command=sh}.tar", want: "ab,--to-command=sh.tar"},         // brace expansion into options
+		{in: "x(e,reboot,).tar", want: "xereboot.tar"},                           // zsh glob qualifier
+		{in: "a{b,--to-command=sh}.tar", want: "ab--to-command=sh.tar"},          // brace expansion into options
 		{in: "notes --to-command=sh x.tar", want: "notes_--to-command=sh_x.tar"}, // word split into options
+		{in: "ab,--to-command=sh.zip", want: "ab--to-command=sh.zip"},            // PowerShell array split
+		{in: "John’s “final” CV.pdf", want: "Johns_final_CV.pdf"},                // PowerShell curly quotes
+		{in: "budget – Q3—v2.xlsx", want: "budget_-_Q3-v2.xlsx"},                 // PowerShell dashes
+		{in: "50% off.pdf", want: "50_off.pdf"},
 		{in: "~user #x ^y [z].txt", want: "user_x_y_z.txt"},
 		{in: "-rf --help.txt", want: "rf_--help.txt"},
 		{in: "report (1).pdf", want: "report_1.pdf"},
@@ -93,6 +98,28 @@ func TestSanitiseAttachmentName(t *testing.T) {
 		}
 		if len(got) > attachmentNameLimit || !utf8.ValidString(got) {
 			t.Errorf("sanitiseAttachmentName(%q) = %q: %d bytes, valid UTF-8 %v", c.in, got, len(got), utf8.ValidString(got))
+		}
+	}
+}
+
+// Every ASCII character either survives as itself (letters, digits and
+// attachmentNameASCII), becomes the word joiner '_' (whitespace), or is dropped.
+func TestSanitiseAttachmentNameKeepsOnlyShellInertASCII(t *testing.T) {
+	for r := rune(0); r <= unicode.MaxASCII; r++ {
+		got := sanitiseAttachmentName("a" + string(r) + "b.txt")
+		var want string
+		switch {
+		case unicode.IsLetter(r) || unicode.IsDigit(r) || strings.ContainsRune(attachmentNameASCII, r):
+			want = "a" + string(r) + "b.txt"
+		case unicode.IsSpace(r):
+			want = "a_b.txt"
+		case r == '/' || r == '\\':
+			want = "b.txt" // a path separator keeps only the last element
+		default:
+			want = "ab.txt"
+		}
+		if got != want {
+			t.Errorf("ASCII %#x: sanitiseAttachmentName = %q, want %q", r, got, want)
 		}
 	}
 }
