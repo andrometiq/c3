@@ -4,7 +4,9 @@ package spawn
 
 import (
 	"errors"
+	"os"
 	"os/exec"
+	"slices"
 	"syscall"
 	"testing"
 	"time"
@@ -57,4 +59,34 @@ func TestDetached_SetsSysProcAttr(t *testing.T) {
 		t.Fatalf("Detached must null all stdio; got stdin=%v stdout=%v stderr=%v",
 			cmd.Stdin, cmd.Stdout, cmd.Stderr)
 	}
+}
+
+// An adopted child stays in the HoldForExec list (so a second exec hands it on)
+// until it exits and is reaped; a pid that is not our child is dropped at once.
+func TestAdopt_ReapsInheritedChildAndKeepsItForTheNextExec(t *testing.T) {
+	child := exec.Command("sleep", "30")
+	if err := child.Start(); err != nil {
+		t.Fatal(err)
+	}
+	pid := child.Process.Pid
+	t.Cleanup(func() { _ = child.Process.Kill(); _ = child.Wait() })
+	Adopt([]int{pid, os.Getppid()})
+	if !slices.Contains(heldPIDs(), pid) {
+		t.Fatalf("adopted child %d missing from the handoff %v; a second exec would orphan its waiter", pid, heldPIDs())
+	}
+	if err := syscall.Kill(pid, syscall.SIGKILL); err != nil {
+		t.Fatal(err)
+	}
+	for deadline := time.Now().Add(3 * time.Second); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
+		if left := heldPIDs(); errors.Is(syscall.Kill(pid, 0), syscall.ESRCH) && !slices.Contains(left, pid) && !slices.Contains(left, os.Getppid()) {
+			return
+		}
+	}
+	t.Fatalf("adopted child %d not reaped, or the handoff kept %v", pid, heldPIDs())
+}
+
+func heldPIDs() []int {
+	pids, release := HoldForExec()
+	release()
+	return pids
 }

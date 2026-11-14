@@ -15,6 +15,7 @@ import (
 	"github.com/Andrometiq/c3/internal/buildidentity"
 	"github.com/Andrometiq/c3/internal/ipc"
 	"github.com/Andrometiq/c3/internal/sessionhandoff"
+	"github.com/Andrometiq/c3/internal/spawn"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -63,6 +64,9 @@ type upgradeResumeState struct {
 	StableID       string
 	Handoff        sessionhandoff.Entry
 	Guidance       string
+	// Children this image spawned and still waits on; exec keeps them as our
+	// children but drops their waiters, so the next image adopts them.
+	UnreapedChildren []int
 }
 
 func (a *adapter) restoreUpgrade(args []string) (*mcp.ServerSessionOptions, error) {
@@ -85,6 +89,7 @@ func (a *adapter) restoreUpgrade(args []string) (*mcp.ServerSessionOptions, erro
 	if err = json.Unmarshal(raw, &state); err != nil {
 		return nil, fmt.Errorf("invalid MCP resume state: %w", err)
 	}
+	spawn.Adopt(state.UnreapedChildren)
 	if state.Contract != upgradeContract() || state.MCP.InitializeParams == nil || state.MCP.InitializedParams == nil {
 		return nil, fmt.Errorf("incompatible MCP resume state")
 	}
@@ -235,6 +240,11 @@ func (a *adapter) tryUpgrade(hint *ipc.UpgradeHint) string {
 	a.idmu.Lock()
 	state.StableID, state.Handoff = a.currentStableID, a.currentHandoffEntry
 	a.idmu.Unlock()
+	// Held through the exec below: broker recovery may spawn on another
+	// goroutine, and a child started after the snapshot would miss the handoff.
+	children, release := spawn.HoldForExec()
+	defer release()
+	state.UnreapedChildren = children
 	raw, err := json.Marshal(state)
 	if err != nil {
 		return "resume state encoding failed"

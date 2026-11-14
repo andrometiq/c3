@@ -1285,8 +1285,10 @@ and negotiated live attempt completion/expiry. Fetch reservations release on
 reconnect, retaining their durable rows. It also tracks consumed stdin bytes
 and stdout writes. After draining it self-execs with `--mcp-resume`, preserving
 PID and fds. Private environment state transfers the original SDK initialization
-parameters and local attachment identity; it is removed from the new process's
-environment immediately. `ServerSessionOptions.State` restores the SDK session.
+parameters, local attachment identity and the PIDs of brokers the adapter spawned
+and still waits on (exec keeps them as its children but drops their waiters, so
+the new image reaps them); it is removed from the new process's environment
+immediately. `ServerSessionOptions.State` restores the SDK session.
 No instructions are resent and no startup watchdog runs in resume mode. Normal
 readiness/re-hello and same-PID/CWD claims transfer remain authoritative.
 

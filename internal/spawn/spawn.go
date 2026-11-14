@@ -7,8 +7,22 @@
 package spawn
 
 import (
+	"os"
 	"os/exec"
+	"sync"
 )
+
+// unreaped holds the pids of children Detached or Adopt is waiting on. exec(2)
+// keeps those children (same pid, same parent) but drops the goroutines waiting
+// on them, so a process about to exec itself hands HoldForExec's list to its
+// next image, which passes it to Adopt. Without that handoff a broker spawned
+// before an adapter's self-upgrade becomes a zombie of the adapter when it
+// exits. The lock also spans Detached's Start and registration, so no child can
+// exist unlisted while HoldForExec holds it.
+var unreaped = struct {
+	sync.Mutex
+	pids map[int]int // pid -> waiters, so a reused pid survives its old waiter's exit
+}{pids: map[int]int{}}
 
 // Detached starts cmd in a new session (detached from the caller's process
 // group via setsid) with no inherited stdio, then reaps it asynchronously so
@@ -33,6 +47,8 @@ func Detached(cmd *exec.Cmd) error {
 	cmd.Stdout = nil
 	cmd.Stderr = nil
 	cmd.SysProcAttr = sysSetsid()
+	unreaped.Lock()
+	defer unreaped.Unlock()
 	if err := cmd.Start(); err != nil {
 		return err
 	}
@@ -40,6 +56,52 @@ func Detached(cmd *exec.Cmd) error {
 	// lingers as a <defunct> zombie. One goroutine per spawn; for the winning
 	// broker it simply blocks for the daemon's lifetime, and if the caller
 	// exits first the broker is reparented to init, which reaps it instead.
-	go func() { _ = cmd.Wait() }()
+	reapInBackground(cmd.Process.Pid, cmd.Wait)
 	return nil
+}
+
+// HoldForExec returns the pids this process is still waiting on and blocks
+// Detached and the reapers until release runs, so the list stays exact through
+// the exec(2) that follows. A successful exec never returns, so release only
+// runs when the exec fails (or the caller gives up first).
+func HoldForExec() (pids []int, release func()) {
+	unreaped.Lock()
+	pids = make([]int, 0, len(unreaped.pids))
+	for pid := range unreaped.pids {
+		pids = append(pids, pid)
+	}
+	return pids, unreaped.Unlock
+}
+
+// Adopt waits on children an earlier image of this process started before it
+// exec'd (its HoldForExec list). A pid that is not this process's child fails
+// its wait at once and is dropped. pid <= 0 is skipped: waiting on it would
+// reap an arbitrary child (wait4(-1)) or a process group.
+func Adopt(pids []int) {
+	unreaped.Lock()
+	defer unreaped.Unlock()
+	for _, pid := range pids {
+		if pid <= 0 {
+			continue
+		}
+		process, err := os.FindProcess(pid)
+		if err != nil {
+			continue
+		}
+		reapInBackground(pid, func() error { _, err := process.Wait(); return err })
+	}
+}
+
+// reapInBackground records pid and waits on it in a goroutine. The caller holds
+// unreaped's lock.
+func reapInBackground(pid int, wait func() error) {
+	unreaped.pids[pid]++
+	go func() {
+		_ = wait()
+		unreaped.Lock()
+		if unreaped.pids[pid]--; unreaped.pids[pid] <= 0 {
+			delete(unreaped.pids, pid)
+		}
+		unreaped.Unlock()
+	}()
 }
