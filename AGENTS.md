@@ -40,6 +40,24 @@ Keep the tree green: build + `go test ./...` must pass before a change is consid
   reads the latest release. Pushing the default branch or redeploying a local broker is not a
   release. An untagged local build may report release version `dev`, and a local deploy alone
   never shows that anything was published.
+- Every release has notes, and the annotated tag message is where they live. The notes file is
+  line 1 `vX.Y.Z — <one-line summary>` (shown by `git tag -n`; the release page title stays the
+  bare tag), line 2 blank, then the user-facing note, which the release page shows exactly as
+  written. Write each paragraph and list item on one line, `- Fixed the stuck voice queue.`
+  style: GitHub shows every newline in a release body as a line break, and a wrapped line that
+  starts with `>` becomes a quote. Older tag messages are hard-wrapped; don't copy their shape
+  (their release pages were fixed by hand, `gh release view vX.Y.Z --json body`).
+  - Create the tag with `git tag -a --cleanup=verbatim vX.Y.Z -F <notes file>`; the default
+    cleanup deletes `#` heading lines. Preview with `scripts/release-notes.sh vX.Y.Z` before
+    pushing the tag.
+  - The release workflow refuses a lightweight tag, a first line that doesn't name the tag, a
+    non-blank line 2, an empty note and an unclosed code fence, before building anything. To
+    recover, re-create the tag with `git tag -a -f --cleanup=verbatim …` and force-push that one
+    tag on the maintainer's word; the push re-runs the workflow. A transient failure needs only
+    "Re-run failed jobs". Wrong notes on a release that already went out are fixed with
+    `gh release edit vX.Y.Z --notes-file <file>`, not by re-tagging; start the file from
+    `gh release view vX.Y.Z --json body --jq .body`, because the workflow appends GitHub's
+    **Full Changelog** link after the tag's notes and an edit from the tag alone drops it.
 - Check a release against what users receive (the latest GitHub Release), not the local deploy.
 - Tags and pushes happen only on the maintainer's word.
 - Before any push, besides the secrets scan, grep the push diff and its commit messages for the
