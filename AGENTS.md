@@ -58,6 +58,9 @@ Keep the tree green: build + `go test ./...` must pass before a change is consid
     `gh release edit vX.Y.Z --notes-file <file>`, not by re-tagging; start the file from
     `gh release view vX.Y.Z --json body --jq .body`, because the workflow appends GitHub's
     **Full Changelog** link after the tag's notes and an edit from the tag alone drops it.
+- Every release bumps `version` in `plugins/c3/.claude-plugin/plugin.json` in its release commit:
+  marketplace users only get new plugin files (commands, hooks) on a version change. v0.4.0 and
+  v0.4.1 missed it.
 - Check a release against what users receive (the latest GitHub Release), not the local deploy.
 - Tags and pushes happen only on the maintainer's word.
 - Before any push, besides the secrets scan, grep the push diff and its commit messages for the
