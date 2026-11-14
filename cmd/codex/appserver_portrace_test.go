@@ -153,48 +153,63 @@ func TestStartAppServer_MovesToAnotherPortAfterLosingOne(t *testing.T) {
 	// below), not a shell script calling nc: nc is not installed everywhere, and
 	// a test that skips protects nothing. Re-exec keeps the fake self-contained.
 	//
-	// The FIRST port must be free when startAppServer probes it, or
-	// chooseAppServerURL simply walks past it and the retry path — the thing
-	// under test — never runs. So the port is poisoned instead: the child asked
-	// to bind it loses the race on cue, exactly as a real losing launcher does.
-	port := freePort(t)
-	started := filepath.Join(dir, "started")
+	// The default URL takes the normal launch path: every attempt binds a
+	// kernel-assigned port. The first child loses the race on cue, exactly as a
+	// real losing launcher does. (An explicit ws://127.0.0.1:<port> override made
+	// the retry walk to port+1; inside the ephemeral range that port can be the
+	// local end of any outbound connection on the host, which a connect probe
+	// cannot see but which fails the child's bind.)
+	lost := filepath.Join(dir, "lost")
 	release := filepath.Join(dir, "release")
+	t.Setenv("XDG_RUNTIME_DIR", dir) // private launcher lock: no live launcher can stall this
 	t.Setenv(fakeAppServerEnv, "1")
-	t.Setenv(fakePoisonPortEnv, strconv.Itoa(port))
-	t.Setenv(fakeSignalDirEnv, dir)
+	t.Setenv(fakeLoseFirstBindDirEnv, dir)
 	fakePIDs := filepath.Join(dir, "fake-app-server-pids")
 	t.Setenv(fakeAppServerPIDsEnv, fakePIDs)
 	cleanupFakeAppServerGroups(t, fakePIDs)
 
 	// The rival launcher, which wins the contended port while our first child is
 	// still up — so when that child dies the port is live and owned by someone else.
+	rivalDone := make(chan struct{})
+	t.Cleanup(func() { close(rivalDone) })
 	go func() {
-		for i := 0; i < 500; i++ {
-			if _, err := os.Stat(started); err == nil {
-				break
+		var contended []byte
+		for len(contended) == 0 {
+			select {
+			case <-rivalDone:
+				return
+			case <-time.After(10 * time.Millisecond):
 			}
-			time.Sleep(10 * time.Millisecond)
+			contended, _ = os.ReadFile(lost)
 		}
-		ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+		ln, err := net.Listen("tcp", string(contended))
 		if err != nil {
+			t.Errorf("setup: rival could not take the contended address %q: %v", contended, err)
 			return
 		}
 		defer ln.Close()
 		_ = os.WriteFile(release, nil, 0o600)
-		time.Sleep(20 * time.Second)
+		<-rivalDone
 	}()
 
-	got, err := startAppServer(os.Args[0], filepath.Join(dir, "adapter"),
-		fmt.Sprintf("ws://127.0.0.1:%d", port), dir, "some-topic")
+	got, err := startAppServer(os.Args[0], filepath.Join(dir, "adapter"), defaultWSURL, dir, "some-topic")
 	if err != nil {
 		t.Fatalf("startAppServer gave up after losing ONE port race — losing a race should cost a "+
 			"port, not the session: %v", err)
 	}
-	if strings.HasSuffix(got, fmt.Sprintf(":%d", port)) {
+	contended, err := os.ReadFile(lost)
+	if err != nil {
+		t.Fatalf("setup: the first app-server never lost its race, so the retry never ran: %v", err)
+	}
+	if got == "ws://"+string(contended) {
 		t.Fatalf("startAppServer returned the CONTENDED url %s — it adopted the process that won "+
 			"that port instead of starting its own app-server elsewhere", got)
 	}
+	_, port, err := parseWSURL(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Remove(appServerMetaPath(port)) })
 	pid := appServerPID(t, got)
 	if pgid, err := syscall.Getpgid(pid); err != nil || pgid != pid {
 		t.Fatalf("defect: app-server pid %d is not isolated in its own process group (pgid=%d, err=%v); cleanup would kill only its parent and leak helpers", pid, pgid, err)
@@ -400,8 +415,7 @@ func TestSignalLauncherHelper(t *testing.T) {
 // Codex app-server: it binds the --listen port it was given and stays up.
 const (
 	fakeAppServerEnv           = "C3_TEST_FAKE_APP_SERVER"
-	fakePoisonPortEnv          = "C3_TEST_FAKE_APP_SERVER_POISON_PORT"
-	fakeSignalDirEnv           = "C3_TEST_FAKE_APP_SERVER_SIGNAL_DIR"
+	fakeLoseFirstBindDirEnv    = "C3_TEST_FAKE_APP_SERVER_LOSE_FIRST_BIND_DIR"
 	fakeAppServerPIDsEnv       = "C3_TEST_FAKE_APP_SERVER_PIDS"
 	fakeAppServerHelperEnv     = "C3_TEST_FAKE_APP_SERVER_HELPER"
 	fakeAppServerHelperPIDEnv  = "C3_TEST_FAKE_APP_SERVER_HELPER_PID"
@@ -416,9 +430,9 @@ const (
 
 // init runs before the test framework parses flags, so a child process started
 // with fakeAppServerEnv set never runs the suite — it becomes the app-server.
-// Asked for the poisoned port it loses the bind race on cue (announce, wait to
-// be overtaken, exit) instead of binding; on any other port it binds and holds,
-// which is what a real app-server does.
+// With fakeLoseFirstBindDirEnv set, the first such child loses the bind race on
+// cue (announce, wait to be overtaken, exit) instead of binding; every other
+// child binds and holds, which is what a real app-server does.
 func init() {
 	if os.Getenv(fakeAppServerHelperEnv) != "" {
 		for {
@@ -494,16 +508,19 @@ func init() {
 			time.Sleep(time.Hour)
 		}
 	}
-	if poison := os.Getenv(fakePoisonPortEnv); poison != "" && strings.HasSuffix(addr, ":"+poison) {
-		dir := os.Getenv(fakeSignalDirEnv)
-		_ = os.WriteFile(filepath.Join(dir, "started"), nil, 0o600)
-		for i := 0; i < 1000; i++ {
-			if _, err := os.Stat(filepath.Join(dir, "release")); err == nil {
-				break
+	if dir := os.Getenv(fakeLoseFirstBindDirEnv); dir != "" {
+		// Only the first child creates the marker; it names the address it lost.
+		if marker, err := os.OpenFile(filepath.Join(dir, "lost"), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600); err == nil {
+			_, _ = marker.WriteString(addr)
+			_ = marker.Close()
+			for i := 0; i < 1000; i++ {
+				if _, err := os.Stat(filepath.Join(dir, "release")); err == nil {
+					break
+				}
+				time.Sleep(10 * time.Millisecond)
 			}
-			time.Sleep(10 * time.Millisecond)
+			os.Exit(1) // lost the bind — exactly what a losing launcher's child does
 		}
-		os.Exit(1) // lost the bind — exactly what a losing launcher's child does
 	}
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
