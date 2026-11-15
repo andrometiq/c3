@@ -161,7 +161,8 @@ func lineSafeName(name string) string {
 
 // bodyCouldForgeLine reports whether any line of a message body could be read as
 // a line C3 writes itself: one that starts with any of prefixes. With
-// metaPrefixes that is the metadata line RenderQueuedInbound appends.
+// metaPrefixes that is the metadata line RenderQueuedInbound appends. The
+// prefixes are lower-case.
 //
 // The compact form (approved 2026-07-24) puts the body bare on its own lines and
 // the metadata last. The form it replaced rendered the body through %q, which
@@ -178,7 +179,11 @@ func bodyCouldForgeLine(text string, prefixes []string) bool {
 		return false // a single-line body can never produce a second line
 	}
 	for _, line := range strings.FieldsFunc(text, IsLineBreak) {
-		s := strings.TrimSpace(strings.Map(DropInvisibleRune, line))
+		// As a reader sees it: no invisible runes, any case, "[ msg" as "[msg".
+		s := strings.ToLower(strings.TrimSpace(strings.Map(DropInvisibleRune, line)))
+		if rest, isBracket := strings.CutPrefix(s, "["); isBracket {
+			s = "[" + strings.TrimLeftFunc(rest, unicode.IsSpace)
+		}
 		for _, p := range prefixes {
 			if strings.HasPrefix(s, p) {
 				return true
