@@ -115,8 +115,9 @@ A request whose `Host` is the front's reaches only `/board` and `/board/*` (else
 request from the front's address under any other `Host` gets 404 (unless `from` is loopback), so
 the web chat stays off the front. It is the operator only when its TCP peer is `from` and
 the header holds exactly one value, equal to `operator`; any other identity gets 403. C3's own
-login never counts on the front, and the header never counts off it. With a front set, board links
-use its origin. `c3-broker status` does not print `front`.
+login never counts on the front, and the header never counts off it. C3 trusts anything that can
+send from `from` as the front, so run the front where nothing else can reach the web listener, or
+fence the listener's port to the front's own user there. With a front set, board links use its origin. `c3-broker status` does not print `front`.
 
 ## Residual leaks
 
