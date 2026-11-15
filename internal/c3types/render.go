@@ -3,6 +3,7 @@ package c3types
 import (
 	"fmt"
 	"strings"
+	"unicode"
 )
 
 // TestInjectedMarker is provenance supplied by the broker, independent of the
@@ -147,19 +148,15 @@ var metaPrefixes = []string{"from=", "message_id=", "reply_to", "attachment=", "
 // message and the readback presents it as a SECOND message from someone else —
 // attribution forgery into the agent's context, from any member of an allowlisted
 // group. (v0.1.0 release audit, 2026-07-25.)
+//
+// Every mandatory line break counts and invisible runes are dropped first, so
+// neither a vertical tab nor a leading U+200B can hide a forged line.
 func bodyCouldForgeMeta(text string) bool {
-	if !strings.ContainsAny(text, "\r\n\u0085\u2028\u2029") {
+	if !strings.ContainsFunc(text, IsLineBreak) {
 		return false // a single-line body can never produce a second line
 	}
-	for _, line := range strings.FieldsFunc(text, func(r rune) bool {
-		switch r {
-		case '\n', '\r', '\u0085', '\u2028', '\u2029':
-			return true
-		default:
-			return false
-		}
-	}) {
-		s := strings.TrimSpace(line)
+	for _, line := range strings.FieldsFunc(text, IsLineBreak) {
+		s := strings.TrimSpace(strings.Map(DropInvisibleRune, line))
 		for _, p := range metaPrefixes {
 			if strings.HasPrefix(s, p) {
 				return true
@@ -167,6 +164,22 @@ func bodyCouldForgeMeta(text string) bool {
 		}
 	}
 	return false
+}
+
+// IsLineBreak reports Unicode's mandatory line breaks (UAX #14 BK, CR, LF, NL),
+// each of which a reader may see as the start of a new line.
+func IsLineBreak(r rune) bool {
+	return r == '\n' || r == '\r' || r == '\v' || r == '\f' || r == '\u0085' || r == '\u2028' || r == '\u2029'
+}
+
+// DropInvisibleRune, for strings.Map, drops format, control and other
+// default-ignorable runes and keeps whitespace, so a prefix check on the result
+// sees what a reader sees.
+func DropInvisibleRune(r rune) rune {
+	if unicode.IsSpace(r) || unicode.IsGraphic(r) && !unicode.In(r, unicode.Variation_Selector, unicode.Other_Default_Ignorable_Code_Point) {
+		return r
+	}
+	return -1
 }
 
 // RenderQueuedInbound renders one inbound message for the fetch_queue / drain
