@@ -381,7 +381,7 @@ func TestNoStructuredAttachBuildsABoardRoute(t *testing.T) {
 func TestBoardSelectorNeverMeansATopic(t *testing.T) {
 	b, telegram, _, boards := newBoardBroker(t)
 	peer, stub, _ := connectSession(t, b, 101, boardCWD, boardSession)
-	if plain := attachVia(t, peer, ipc.AttachReq{Expr: "Board:plan"}); plain.OK || plain.NeedsConfirmation || plain.Err != boardAttachShapeRefusal {
+	if plain := attachVia(t, peer, ipc.AttachReq{Expr: "Board:plan"}); plain.OK || plain.NeedsConfirmation || plain.Err != boardTopicNameRefusal {
 		t.Fatalf("Board:plan without + => %+v, want the +board:<name> hint", plain)
 	}
 	if attached := attachVia(t, peer, ipc.AttachReq{Expr: "+Board:plan"}); !attached.OK || attached.Name != "board:plan" || !stub.HasRoute(firstBoard) {
@@ -420,6 +420,30 @@ func TestBoardSelectorNeverMeansATopic(t *testing.T) {
 	}
 	if got, err := b.resolveHeldRoute(holder, "telegram"); err != nil || got != named {
 		t.Fatalf(`"telegram" => %v, %v; want the topic`, got, err)
+	}
+}
+
+// A topic named "Board: …" before the rule is refused by name, by the slash
+// command's expr as by the structured name, and the refusal names the way that
+// still reaches it: its topic_id.
+func TestBoardNamedTopicAttachesByTopicID(t *testing.T) {
+	b, _, _, _ := newBoardBroker(t)
+	b.mutateMappings(func(mf *mappings.MappingsFile) {
+		telegram := mf.Channels["telegram"]
+		telegram.Topics = append(telegram.Topics, mappings.Topic{ChatID: -100, TopicID: 901, Name: "Board: Q3", Group: "main"})
+		mf.Channels["telegram"] = telegram
+	})
+	peer, stub, _ := connectSession(t, b, 101, boardCWD, boardSession)
+	for _, req := range []ipc.AttachReq{{Expr: "Board: Q3"}, {Name: "Board: Q3"}} {
+		if refused := attachVia(t, peer, req); refused.OK || refused.Err != boardTopicNameRefusal || !strings.Contains(refused.Err, "topic_id") {
+			t.Fatalf("attach %+v => %+v, want the topic-name refusal naming topic_id", req, refused)
+		}
+	}
+	topicID := int64(901)
+	for _, req := range []ipc.AttachReq{{Expr: "901"}, {TopicID: &topicID}} {
+		if attached := attachVia(t, peer, req); !attached.OK || attached.Name != "Board: Q3" || !stub.HasRoute(MakeRouteKey("telegram", -100, &topicID)) {
+			t.Fatalf("attach %+v => %+v, routes %v; want the Board: Q3 topic", req, attached, stub.Routes())
+		}
 	}
 }
 

@@ -10,7 +10,8 @@ skill (`plugins/c3/skills/board/SKILL.md`) and from each board's attach result.
 - `attach expr="+board:<name>"` (the prefix in any case) makes or re-holds a board; names match
   `^[a-z0-9][a-z0-9-]{0,39}$`, `assets` is reserved. `board:<name>` without `+`, structured
   attaches naming the `board` channel, Telegram topic names starting `board:` and a
-  `channels.board` stanza are refused. Boards need the web channel running.
+  `channels.board` stanza are refused; an existing topic with such a name still attaches by its
+  `topic_id`. Boards need the web channel running.
 - A board is the route `(board, <number>, no topic)`, with its own worker and durable queue;
   numbers are never reused. A session may hold topics, the web chat and several boards. A board
   claim keeps the session's output route, unless the session held nothing.
@@ -111,9 +112,15 @@ signed-in identity in a header. In the web stanza (all four keys, once any is se
           "identity_header": "X-Front-User", "operator": "owner@example.com"}
 ```
 
-A request whose `Host` is the front's reaches only `/board` and `/board/*` (else 404), and a
-request from the front's address under any other `Host` gets 404 (unless `from` is loopback), so
-the web chat stays off the front. It is the operator only when its TCP peer is `from` and
+A request whose `Host` is the front's (in any case, with or without one trailing dot, an IP
+literal in any form, the port compared as a number with an empty one meaning 443; a port that isn't
+a number counts too) reaches only `/board` and `/board/*` (else 404), and a request from the
+front's address under any other `Host` gets 404 (unless `from` is loopback), so the web chat stays
+off the front. So the front must pass the browser's `Host` unchanged: under any other its requests
+are not the front's (404, or with a loopback `from` the web chat, which wants C3's own login). A
+health check from the front gets 404 on `/healthz` under the front's name, and under any other
+unless `from` is loopback; check `/board` under the front's name instead, where 403 without the
+operator's identity means C3 is up. A request is the operator only when its TCP peer is `from` and
 the header holds exactly one value, equal to `operator`; any other identity gets 403. C3's own
 login never counts on the front, and the header never counts off it. C3 trusts anything that can
 send from `from` as the front, so run the front where nothing else can reach the web listener, or

@@ -80,7 +80,8 @@ func (b *Broker) handleAttach(conn *ipc.Conn, stub *Stub, raw []byte) {
 	expr := strings.TrimSpace(req.Expr)
 	if selector := strings.TrimSpace(strings.TrimPrefix(expr, "+")); isBoardSelector(selector) {
 		if !strings.HasPrefix(expr, "+") {
-			_ = conn.WriteJSON(ipc.AttachedMsg{Op: ipc.OpAttached, OK: false, Err: boardAttachShapeRefusal})
+			// A bare board: expr may mean a board or an old topic's name; the refusal names both ways.
+			_ = conn.WriteJSON(ipc.AttachedMsg{Op: ipc.OpAttached, OK: false, Err: boardTopicNameRefusal})
 			return
 		}
 		b.attachBoard(conn, stub, selector[len(channel.BoardSelectorPrefix):], req.Steal, req.Replay)

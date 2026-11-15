@@ -24,7 +24,8 @@ const boardPermissionNotice = "⏸ Permission prompt waiting at the laptop."
 
 const boardAttachShapeRefusal = "a board attaches only as " + channel.BoardAttachPrefix + "<name>"
 
-const boardTopicNameRefusal = "a topic name never starts with " + channel.BoardSelectorPrefix + ", which names a live board; " + boardAttachShapeRefusal
+const boardTopicNameRefusal = "a topic name never starts with " + channel.BoardSelectorPrefix + ", which names a live board; " + boardAttachShapeRefusal +
+	"; an existing topic with such a name still attaches by its topic_id (the topics tool lists it)"
 
 func boardRouteKey(number int64) RouteKey {
 	return RouteKey{Channel: channel.BoardChannelName, ChatID: number}

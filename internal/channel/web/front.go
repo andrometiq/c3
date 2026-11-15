@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/url"
 	"path"
+	"strconv"
 	"strings"
 
 	"github.com/Andrometiq/c3/internal/c3types"
@@ -26,19 +27,45 @@ type boardViewer struct {
 
 func (c *Channel) hasFront() bool { return c.cfg.Front.Origin != "" }
 
+// isFrontRequest: the Host is the front origin's, compared canonically. A Host
+// whose port can't be parsed counts when its name is the front's, since the
+// front's rules refuse more.
 func (c *Channel) isFrontRequest(r *http.Request) bool {
 	if !c.hasFront() {
 		return false
 	}
 	front, err := url.Parse(c.cfg.Front.Origin)
-	return err == nil && strings.EqualFold(hostWithHTTPSPort(r.Host), hostWithHTTPSPort(front.Host))
+	if err != nil {
+		return false
+	}
+	frontName, frontPort, _ := canonicalHost(front.Host)
+	name, port, isParsed := canonicalHost(r.Host)
+	return strings.EqualFold(name, frontName) && (port == frontPort || !isParsed)
 }
 
-func hostWithHTTPSPort(host string) string {
-	if _, _, err := net.SplitHostPort(host); err == nil {
-		return host
+// canonicalHost splits a Host into its name, without brackets or one trailing
+// dot and with an IP literal in canonical form, and its port as a number, 443
+// when absent or empty. isParsed is false when what follows the name is no port.
+func canonicalHost(host string) (name string, port uint64, isParsed bool) {
+	name, portText, _ := strings.Cut(host, ":")
+	isParsed = true
+	if inside, isBracketed := strings.CutPrefix(host, "["); isBracketed {
+		var rest string
+		var hasColon bool
+		name, rest, _ = strings.Cut(inside, "]")
+		portText, hasColon = strings.CutPrefix(rest, ":")
+		isParsed = hasColon || rest == ""
 	}
-	return net.JoinHostPort(strings.Trim(host, "[]"), "443")
+	name = strings.TrimSuffix(name, ".")
+	if ip := net.ParseIP(name); ip != nil {
+		name = ip.String()
+	}
+	port = 443
+	if portText != "" {
+		number, err := strconv.ParseUint(portText, 10, 16)
+		port, isParsed = number, isParsed && err == nil
+	}
+	return name, port, isParsed
 }
 
 // isFrontPeer: the request's TCP peer is the front's address.

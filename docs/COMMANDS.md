@@ -115,7 +115,7 @@ once").
 Whitespace is trimmed. Unparsable input falls through to `name`.
 `board:<name>` without `+`, any structured attach naming the `board`
 channel, and a topic name starting `board:` are refused: only the session that made a board can hold it, and only
-through this expr.
+through this expr. An existing topic whose name starts `board:` still attaches by its `topic_id`.
 
 `+web` / `+c3` add that route to the held set and make it output. The
 structured equivalent is `add=true`. Without `+` or `add=true`, an explicit

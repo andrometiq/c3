@@ -170,6 +170,54 @@ func TestFrontAddressReachesNothingUnderAnotherName(t *testing.T) {
 	}
 }
 
+// TestFrontHostCountsInEverySpellingOfItsName: with a loopback front address
+// the Host alone keeps a request on the front's rules, so each spelling of the
+// front's own name a proxy may route as the front (case, one trailing dot, an
+// empty or zero-padded default port, an IP literal's form) counts as the front,
+// and so does its name with a port that can't be parsed. Another port does not.
+func TestFrontHostCountsInEverySpellingOfItsName(t *testing.T) {
+	c, _, cookie := newFrontTest(t)
+	c.cfg.Front.From = "127.0.0.1"
+	local := func(host, path string) *http.Request {
+		r := request(http.MethodGet, path, "", cookie, false)
+		r.RemoteAddr = "127.0.0.1:43210"
+		r.Host = host
+		return r
+	}
+	isFront := func(host string) bool {
+		t.Helper()
+		chat, state := serve(c, local(host, "/")).Code, serve(c, local(host, "/board/plan/state")).Code
+		switch {
+		case chat == http.StatusNotFound && state == http.StatusForbidden:
+			return true
+		case chat == http.StatusOK && state == http.StatusOK:
+			return false
+		}
+		t.Fatalf("Host %q: / =%d, /board/plan/state =%d; want the front's 404/403 or the web chat's 200/200", host, chat, state)
+		return false
+	}
+	for _, host := range []string{
+		"boards.example.test", "BOARDS.Example.TEST", "boards.example.test.", "boards.example.test.:443",
+		"boards.example.test:0443", "boards.example.test:", "boards.example.test:https", "boards.example.test:443:1",
+	} {
+		if !isFront(host) {
+			t.Errorf("Host %q reached the web chat from the loopback front address; want the front's rules", host)
+		}
+	}
+	for _, host := range []string{"boards.example.test:8443", "boards.example.test..", "laptop.example.test"} {
+		if isFront(host) {
+			t.Errorf("Host %q counted as the front", host)
+		}
+	}
+
+	c.cfg.Front.Origin = "https://[2001:db8::10]"
+	for _, host := range []string{"[2001:DB8::10]", "[2001:db8:0:0::10]:443", "[2001:db8::10]:"} {
+		if !isFront(host) {
+			t.Errorf("Host %q is the IPv6 front's own literal; want the front's rules", host)
+		}
+	}
+}
+
 func TestOnlyTheOperatorIdentityIsTheOwner(t *testing.T) {
 	c, host, _ := newFrontTest(t)
 	const guest = "guest@example.test"
