@@ -1,6 +1,7 @@
 package mappings
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -152,5 +153,44 @@ func TestWebTLSListenHostAllowed(t *testing.T) {
 		if WebTLSListenHostAllowed(host) {
 			t.Errorf("WebTLSListenHostAllowed(%q)=true, want false", host)
 		}
+	}
+}
+
+func TestWebFrontNeedsAllFourKeysAndOnlyOnWeb(t *testing.T) {
+	front := WebFront{Origin: "https://boards.example.test", From: "192.0.2.10", IdentityHeader: "X-Front-Identity", Operator: "owner@example.test"}
+	mf := newTestFile()
+	mf.SchemaVersion = 1
+	mf.Channels["web"] = ChannelConfig{Front: front}
+	if err := mf.Validate(); err != nil {
+		t.Fatalf("valid front refused: %v", err)
+	}
+	for name, broken := range map[string]func(*WebFront){
+		"origin path":         func(f *WebFront) { f.Origin += "/board" },
+		"origin http":         func(f *WebFront) { f.Origin = "http://boards.example.test" },
+		"from a name":         func(f *WebFront) { f.From = "front.example.test" },
+		"from with port":      func(f *WebFront) { f.From = "192.0.2.10:443" },
+		"header with a colon": func(f *WebFront) { f.IdentityHeader = "X-Front: identity" },
+		"no header":           func(f *WebFront) { f.IdentityHeader = "" },
+		"blank operator":      func(f *WebFront) { f.Operator = " " },
+		"operator newline":    func(f *WebFront) { f.Operator = "owner\n@example.test" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			config := front
+			broken(&config)
+			mf.Channels["web"] = ChannelConfig{Front: config}
+			if err := mf.Validate(); err == nil || !strings.Contains(err.Error(), "front.") {
+				t.Fatalf("broken front %+v: %v", config, err)
+			}
+		})
+	}
+	mf.Channels["web"] = ChannelConfig{}
+	telegram := mf.Channels["telegram"]
+	telegram.Front = front
+	mf.Channels["telegram"] = telegram
+	if err := mf.Validate(); err == nil || !strings.Contains(err.Error(), "does not support front") {
+		t.Fatalf("front on telegram: %v", err)
+	}
+	if data, err := json.Marshal(ChannelConfig{}); err != nil || string(data) != "{}" {
+		t.Fatalf("a stanza without a front marshals as %s/%v, want {}", data, err)
 	}
 }

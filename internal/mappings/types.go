@@ -167,6 +167,20 @@ type ChannelConfig struct {
 	// would zero-value to false and silently disable decoding for everyone who
 	// never set it — the trap documented for notifications.invasive.
 	RichInbound *bool `json:"rich_inbound,omitempty"`
+	// Front is the web channel's authenticated HTTPS front for boards; zero
+	// means none.
+	Front WebFront `json:"front,omitzero"`
+}
+
+// WebFront is channels.web.front: an authenticated HTTPS front that proxies
+// board routes to the web listener and names the signed-in identity in a
+// header. The header counts only on a request whose Host is Origin's and whose
+// TCP peer is From, and only Operator is the board owner.
+type WebFront struct {
+	Origin         string `json:"origin"`
+	From           string `json:"from"`
+	IdentityHeader string `json:"identity_header"`
+	Operator       string `json:"operator"`
 }
 
 // EnabledOrDefault reports whether a configured channel is enabled. An absent

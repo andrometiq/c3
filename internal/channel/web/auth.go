@@ -80,7 +80,7 @@ func (c *Channel) HasLiveSession(userID int64) bool {
 	if len(expired) != 0 {
 		c.deleteClientMessagesForSessions(expired)
 		for _, key := range expired {
-			c.closeSessionStreams(key)
+			c.closeViewerStreams(key)
 		}
 		c.persistSessions("idle session eviction")
 	}
@@ -142,7 +142,7 @@ func (c *Channel) authenticate(r *http.Request, touch bool) (string, session, bo
 		delete(c.sessions, key)
 		c.authMu.Unlock()
 		c.deleteClientMessagesForSessions([]string{key})
-		c.closeSessionStreams(key)
+		c.closeViewerStreams(key)
 		c.persistSessions("idle session eviction")
 		return "", session{}, false
 	}
@@ -165,8 +165,14 @@ func (c *Channel) destroySession(key string) {
 	delete(c.sessions, key)
 	c.authMu.Unlock()
 	c.deleteClientMessagesForSessions([]string{key})
-	c.closeSessionStreams(key)
+	c.closeViewerStreams(key)
 	c.persistSessions("session logout")
+}
+
+// closeViewerStreams ends a signed-out session's web and board streams.
+func (c *Channel) closeViewerStreams(key string) {
+	c.closeSessionStreams(key)
+	c.board.closeViewerStreams(key)
 }
 
 func (c *Channel) deleteClientMessagesForSessions(sessionKeys []string) {

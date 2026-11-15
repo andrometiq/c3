@@ -39,7 +39,8 @@ path, query, fragment, or user information when `tls` is enabled. A TLS listener
 may bind only loopback or a Tailscale address (`100.64.0.0/10` or
 `fd7a:115c:a1e0::/48`). Web refuses to start unless Telegram is already
 registered and `master_user_id` is nonzero and in `allowlist.users`. Only
-`enabled`, `listen`, `public_url`, and `tls` are legal in the web stanza.
+`enabled`, `listen`, `public_url`, `tls`, and `front` (boards behind an
+authenticated HTTPS front) are legal in the web stanza.
 `c3-broker status` prints them and the live CA fingerprint when TLS is on.
 
 ## Attach and use it

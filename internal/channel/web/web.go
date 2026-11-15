@@ -46,10 +46,11 @@ var pages embed.FS
 
 // Config is the channels.web stanza.
 type Config struct {
-	Enabled   *bool  `json:"enabled,omitempty"`
-	Listen    string `json:"listen,omitempty"`
-	PublicURL string `json:"public_url,omitempty"`
-	TLS       bool   `json:"tls,omitempty"`
+	Enabled   *bool             `json:"enabled,omitempty"`
+	Listen    string            `json:"listen,omitempty"`
+	PublicURL string            `json:"public_url,omitempty"`
+	TLS       bool              `json:"tls,omitempty"`
+	Front     mappings.WebFront `json:"front,omitzero"`
 }
 
 type telegramConfig struct {
@@ -100,9 +101,10 @@ type Channel struct {
 	loginLinkTimes    []time.Time
 	loginLinkInFlight bool
 
-	clientMu       sync.Mutex
-	clientMessages map[clientMessageKey]*clientMessage
-	voiceRetention int
+	clientMu            sync.Mutex
+	clientMessages      map[clientMessageKey]*clientMessage
+	boardClientMessages map[clientMessageKey]*clientMessage // never persisted
+	voiceRetention      int
 
 	streamMu   sync.Mutex
 	streams    map[string]map[*streamClient]struct{}
@@ -139,6 +141,8 @@ type Channel struct {
 
 	tlsMu       sync.RWMutex
 	tlsMaterial certificateMaterial
+
+	board *boardChannel
 }
 
 var _ channel.Channel = (*Channel)(nil)
@@ -151,23 +155,26 @@ var _ channel.CertificateProvider = (*Channel)(nil)
 // New returns an unstarted channel.
 func New() *Channel {
 	speechContext, speechCancel := context.WithCancel(context.Background())
-	return &Channel{
-		tokens:             make(map[string]loginToken),
-		sessions:           make(map[string]*session),
-		failedAuth:         make(map[string]time.Time),
-		clientMessages:     make(map[clientMessageKey]*clientMessage),
-		streams:            make(map[string]map[*streamClient]struct{}),
-		now:                time.Now,
-		sleep:              time.Sleep,
-		failedAttemptDelay: 500 * time.Millisecond,
-		heartbeatInterval:  20 * time.Second,
-		allowedOrigin:      make(map[string]bool),
-		listenFunc:         net.Listen,
-		voiceRetention:     defaultVoiceRetention,
-		speechContext:      speechContext,
-		speechCancel:       speechCancel,
-		audioCache:         make(map[string]cachedAudio),
+	c := &Channel{
+		tokens:              make(map[string]loginToken),
+		sessions:            make(map[string]*session),
+		failedAuth:          make(map[string]time.Time),
+		clientMessages:      make(map[clientMessageKey]*clientMessage),
+		boardClientMessages: make(map[clientMessageKey]*clientMessage),
+		streams:             make(map[string]map[*streamClient]struct{}),
+		now:                 time.Now,
+		sleep:               time.Sleep,
+		failedAttemptDelay:  500 * time.Millisecond,
+		heartbeatInterval:   20 * time.Second,
+		allowedOrigin:       make(map[string]bool),
+		listenFunc:          net.Listen,
+		voiceRetention:      defaultVoiceRetention,
+		speechContext:       speechContext,
+		speechCancel:        speechCancel,
+		audioCache:          make(map[string]cachedAudio),
 	}
+	c.board = newBoardChannel(c)
+	return c
 }
 
 func (c *Channel) Name() string { return Name }
@@ -302,6 +309,9 @@ func (c *Channel) Start(ctx context.Context, host channel.Host) error {
 	if c.cfg.PublicURL != "" {
 		allowedOrigins[normalizeOrigin(c.cfg.PublicURL)] = true
 	}
+	if c.hasFront() {
+		allowedOrigins[normalizeOrigin(c.cfg.Front.Origin)] = true
+	}
 
 	childContext, cancel := context.WithCancel(ctx)
 	server := &http.Server{
@@ -418,6 +428,12 @@ func (c *Channel) ensureState() {
 	if c.clientMessages == nil {
 		c.clientMessages = make(map[clientMessageKey]*clientMessage)
 	}
+	if c.boardClientMessages == nil {
+		c.boardClientMessages = make(map[clientMessageKey]*clientMessage)
+	}
+	if c.board == nil {
+		c.board = newBoardChannel(c)
+	}
 	if c.streams == nil {
 		c.streams = make(map[string]map[*streamClient]struct{})
 	}
@@ -451,20 +467,10 @@ func validateConfig(cfg Config) error {
 	if err != nil || n < 1 || n > 65535 {
 		return fmt.Errorf("listen has invalid port %q", port)
 	}
-	if cfg.PublicURL == "" {
-		return nil
+	if cfg.PublicURL != "" && !mappings.IsHTTPSOrigin(cfg.PublicURL) {
+		return errors.New("public_url must be https://host[:port] with no path, query, fragment, userinfo, or invalid port")
 	}
-	u, err := url.Parse(cfg.PublicURL)
-	if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || u.Path != "" || u.RawQuery != "" || u.Fragment != "" || u.ForceQuery || strings.ContainsAny(cfg.PublicURL, "?#") {
-		return errors.New("public_url must be https://host[:port] with no path, query, fragment, or userinfo")
-	}
-	if port := u.Port(); port != "" {
-		n, err := strconv.Atoi(port)
-		if err != nil || n < 1 || n > 65535 {
-			return fmt.Errorf("public_url has invalid port %q", port)
-		}
-	}
-	return nil
+	return mappings.ValidateWebFront(cfg.Front)
 }
 
 func isLoopbackHost(host string) bool {

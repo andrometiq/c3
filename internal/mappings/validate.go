@@ -1,11 +1,14 @@
 package mappings
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
+	"unicode"
 )
 
 // Validate returns nil if the MappingsFile is internally consistent, or a
@@ -31,6 +34,8 @@ func (mf *MappingsFile) Validate() error {
 			if err := validateWebChannelConfig(cc); err != nil {
 				return err
 			}
+		} else if cc.Front != (WebFront{}) {
+			return fmt.Errorf("mappings: channel %q does not support front", chanName)
 		}
 		if cc.DefaultGroup != "" {
 			if _, ok := cc.Groups[cc.DefaultGroup]; !ok {
@@ -74,7 +79,10 @@ func validateWebChannelConfig(cc ChannelConfig) error {
 		return fmt.Errorf("mappings: channel %q does not support topics", "web")
 	}
 	if cc.DebounceMS != 0 || cc.DebounceMaxMessages != 0 || cc.FallbackCooldownS != 0 || cc.STTPrefix != "" || cc.APIBaseURL != "" || len(cc.APIBaseURLs) != 0 || cc.RichInbound != nil {
-		return fmt.Errorf("mappings: channel %q permits only enabled, listen, public_url, and tls", "web")
+		return fmt.Errorf("mappings: channel %q permits only enabled, listen, public_url, tls, and front", "web")
+	}
+	if err := ValidateWebFront(cc.Front); err != nil {
+		return fmt.Errorf("mappings: channel %q %w", "web", err)
 	}
 	listen := cc.Listen
 	if listen == "" {
@@ -94,18 +102,43 @@ func validateWebChannelConfig(cc ChannelConfig) error {
 	if cc.TLS && cc.PublicURL == "" {
 		return fmt.Errorf("mappings: channel %q tls requires public_url", "web")
 	}
-	if cc.PublicURL == "" {
-		return nil
+	if cc.PublicURL != "" && !IsHTTPSOrigin(cc.PublicURL) {
+		return fmt.Errorf("mappings: channel %q public_url must be https://host[:port] with no path, query, fragment, userinfo, or invalid port", "web")
 	}
-	u, err := url.Parse(cc.PublicURL)
-	if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || u.Path != "" || u.RawQuery != "" || u.Fragment != "" || u.ForceQuery || strings.ContainsAny(cc.PublicURL, "?#") {
-		return fmt.Errorf("mappings: channel %q public_url must be https://host[:port] with no path, query, fragment, or userinfo", "web")
+	return nil
+}
+
+// IsHTTPSOrigin reports whether raw is exactly https://host[:port].
+func IsHTTPSOrigin(raw string) bool {
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || u.Path != "" || u.RawQuery != "" || u.Fragment != "" || u.ForceQuery || strings.ContainsAny(raw, "?#") {
+		return false
 	}
 	if port := u.Port(); port != "" {
 		n, err := strconv.Atoi(port)
-		if err != nil || n < 1 || n > 65535 {
-			return fmt.Errorf("mappings: channel %q public_url has invalid port %q", "web", port)
-		}
+		return err == nil && n >= 1 && n <= 65535
+	}
+	return true
+}
+
+var headerNameRule = regexp.MustCompile(`^[A-Za-z0-9-]+$`)
+
+// ValidateWebFront checks channels.web.front; the zero value means no front.
+func ValidateWebFront(front WebFront) error {
+	if front == (WebFront{}) {
+		return nil
+	}
+	if !IsHTTPSOrigin(front.Origin) {
+		return errors.New("front.origin must be https://host[:port] with no path, query, fragment, or userinfo")
+	}
+	if net.ParseIP(front.From) == nil {
+		return errors.New("front.from must be the front's IP address")
+	}
+	if !headerNameRule.MatchString(front.IdentityHeader) {
+		return errors.New("front.identity_header must be an HTTP header name")
+	}
+	if strings.TrimSpace(front.Operator) == "" || strings.ContainsFunc(front.Operator, unicode.IsControl) {
+		return errors.New("front.operator must be the owner's identity as the front names it")
 	}
 	return nil
 }

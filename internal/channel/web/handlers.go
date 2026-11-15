@@ -11,6 +11,9 @@ import (
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"github.com/Andrometiq/c3/internal/c3types"
+	"github.com/Andrometiq/c3/internal/channel"
 )
 
 func (c *Channel) routes() http.Handler {
@@ -37,8 +40,24 @@ func (c *Channel) routes() http.Handler {
 	mux.HandleFunc("GET /sw.js", handleServiceWorker)
 	mux.HandleFunc("GET /healthz", c.handleHealth)
 	mux.HandleFunc("GET /ca.crt", c.handleCACertificate)
+	mux.HandleFunc("GET /board", c.handleBoardList)
+	mux.HandleFunc("GET /board/{name}", c.handleBoardShell)
+	mux.HandleFunc("GET /board/{name}/state", c.handleBoardState)
+	mux.HandleFunc("GET /board/{name}/page", c.handleBoardPage)
+	mux.HandleFunc("GET /board/{name}/events", c.handleBoardEvents)
+	mux.HandleFunc("POST /board/{name}/act", c.handleBoardAct)
+	mux.HandleFunc("POST /board/{name}/close", c.handleBoardClose)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if (r.Method == http.MethodGet || r.Method == http.MethodHead) && strings.HasPrefix(r.URL.Path, "/files/") {
+		if c.isFrontRequest(r) && !isBoardPath(r.URL.Path) {
+			http.NotFound(w, r)
+			return
+		}
+		isRead := r.Method == http.MethodGet || r.Method == http.MethodHead
+		if isRead && strings.HasPrefix(r.URL.Path, channel.BoardAssetPathPrefix) {
+			c.handleBoardAsset(w, r)
+			return
+		}
+		if isRead && strings.HasPrefix(r.URL.Path, "/files/") {
 			r.SetPathValue("token", strings.TrimPrefix(r.URL.Path, "/files/"))
 			c.handleFile(w, r)
 			return
@@ -285,7 +304,9 @@ func (c *Channel) handleSend(w http.ResponseWriter, r *http.Request) {
 		writeSendError(w, http.StatusRequestEntityTooLarge, "message too long")
 		return
 	}
-	messageID, status, err := c.acceptInbound(sessionID, current, body.Text, body.ClientID)
+	key := clientMessageKey{sessionID: sessionID, clientID: body.ClientID}
+	sender := c3types.Sender{UserID: current.userID, Username: current.username}
+	messageID, status, err := c.acceptInbound(c.webChatInbound(), key, sender, body.Text)
 	if errors.Is(err, errClientIDConflict) {
 		writeSendError(w, status, err.Error())
 		return
@@ -436,7 +457,11 @@ func (c *Channel) handleHealth(w http.ResponseWriter, _ *http.Request) {
 }
 
 func decodeJSON(w http.ResponseWriter, r *http.Request, target any) error {
-	r.Body = http.MaxBytesReader(w, r.Body, postBodyLimit)
+	return decodeJSONLimit(w, r, target, postBodyLimit)
+}
+
+func decodeJSONLimit(w http.ResponseWriter, r *http.Request, target any, limit int64) error {
+	r.Body = http.MaxBytesReader(w, r.Body, limit)
 	decoder := json.NewDecoder(r.Body)
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(target); err != nil {
