@@ -187,11 +187,15 @@ func (b *Broker) notifyAttachedTopics(text string) {
 			t := e.Key.TopicID
 			topicID = &t
 		}
+		routeText := text
+		if isBoardRoute(e.Key) {
+			routeText = "⚠️ " + text // strip only: never a line in the board's log
+		}
 		if _, err := ch.SendReply(c3types.ReplyArgs{
 			Channel: e.Key.Channel,
 			ChatID:  e.Key.ChatID,
 			TopicID: topicID,
-			Text:    text,
+			Text:    routeText,
 		}); err != nil {
 			log.Printf("update-notify: send to %s failed: %v", routeKeyStr(e.Key), err)
 		}

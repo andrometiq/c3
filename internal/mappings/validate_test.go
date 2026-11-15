@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+
+	"github.com/Andrometiq/c3/internal/channel"
 )
 
 func TestValidate_Ok(t *testing.T) {
@@ -152,6 +154,20 @@ func TestWebTLSListenHostAllowed(t *testing.T) {
 	for _, host := range []string{"", "0.0.0.0", "::", "device.example", "192.168.1.20", "100.63.255.255", "100.128.0.1", "fd7a:115c:a1df:ffff::1"} {
 		if WebTLSListenHostAllowed(host) {
 			t.Errorf("WebTLSListenHostAllowed(%q)=true, want false", host)
+		}
+	}
+}
+
+func TestBoardChannelTakesNoStanza(t *testing.T) {
+	mf := newTestFile()
+	mf.SchemaVersion = 1
+	if err := mf.Validate(); err != nil {
+		t.Fatalf("file without a board stanza refused: %v", err)
+	}
+	for _, stanza := range []ChannelConfig{{}, {DMChatID: 1}} {
+		mf.Channels[channel.BoardChannelName] = stanza
+		if err := mf.Validate(); err == nil || !strings.Contains(err.Error(), "takes no stanza") {
+			t.Fatalf("channels.board %+v: %v, want it refused", stanza, err)
 		}
 	}
 }

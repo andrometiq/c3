@@ -73,15 +73,21 @@ func (b *Broker) handleAttach(conn *ipc.Conn, stub *Stub, raw []byte) {
 	}
 
 	// Only the expr +board:<name> reaches a board (spaces after + allowed, as
-	// for topics); every other shape that names the board channel is refused,
-	// stanza or not, so no structured path can build or steal a board route.
+	// for topics; the prefix in any case, the name by the board-name rule);
+	// every other shape that names the board channel is refused, stanza or
+	// not, so no structured path can build or steal a board route. No topic is
+	// created or attached by a board:<x> name, so that selector never means one.
 	expr := strings.TrimSpace(req.Expr)
-	if selector := strings.TrimSpace(strings.TrimPrefix(expr, "+")); strings.HasPrefix(selector, channel.BoardSelectorPrefix) {
+	if selector := strings.TrimSpace(strings.TrimPrefix(expr, "+")); isBoardSelector(selector) {
 		if !strings.HasPrefix(expr, "+") {
 			_ = conn.WriteJSON(ipc.AttachedMsg{Op: ipc.OpAttached, OK: false, Err: boardAttachShapeRefusal})
 			return
 		}
-		b.attachBoard(conn, stub, strings.TrimPrefix(selector, channel.BoardSelectorPrefix), req.Steal, req.Replay)
+		b.attachBoard(conn, stub, selector[len(channel.BoardSelectorPrefix):], req.Steal, req.Replay)
+		return
+	}
+	if isBoardSelector(strings.TrimSpace(req.Name)) {
+		_ = conn.WriteJSON(ipc.AttachedMsg{Op: ipc.OpAttached, OK: false, Err: boardTopicNameRefusal})
 		return
 	}
 

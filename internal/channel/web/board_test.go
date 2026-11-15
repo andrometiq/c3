@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/Andrometiq/c3/internal/c3types"
+	"github.com/Andrometiq/c3/internal/capability"
 	"github.com/Andrometiq/c3/internal/channel"
 )
 
@@ -25,6 +26,7 @@ type fakeBoardHost struct {
 	*fakeHost
 	boardMu  sync.Mutex
 	held     map[int64]int
+	heldErr  error
 	closed   []int64
 	closeErr error
 	onClose  func(number int64)
@@ -44,7 +46,7 @@ func (host *fakeBoardHost) CloseBoardRoute(number int64) error {
 func (host *fakeBoardHost) HeldCount(number int64) (int, error) {
 	host.boardMu.Lock()
 	defer host.boardMu.Unlock()
-	return host.held[number], nil
+	return host.held[number], host.heldErr
 }
 
 func (host *fakeBoardHost) setHeld(number int64, count int) {
@@ -313,6 +315,47 @@ func TestNewRevisionIsStoredLoggedAndAnnounced(t *testing.T) {
 	}
 }
 
+// TestFailedRecordSaveKeepsEveryKeptRevision: a page whose board.json save
+// fails never drops the oldest page board.json still points into.
+func TestFailedRecordSaveKeepsEveryKeptRevision(t *testing.T) {
+	c, _, _ := newBoardTest(t)
+	plan := createBoard(t, c, "plan")
+	for rev := 1; rev <= channel.BoardRevisionsKept; rev++ {
+		sendPage(t, c, plan.Number, "<title>Plan</title><p>rev "+itoa(int64(rev))+"</p>", 0)
+	}
+	directory := filepath.Join(c.board.directory, "plan")
+	record := filepath.Join(directory, boardRecordName)
+	saved := readFile(t, record)
+	// A non-empty directory where board.json goes makes its atomic rename fail.
+	if err := os.Remove(record); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(record, "blocker"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	_, err := c.board.SendReply(c3types.ReplyArgs{Channel: channel.BoardChannelName, ChatID: plan.Number,
+		Media: []c3types.MediaItem{{Kind: c3types.MediaFile, Path: writePageFile(t, "page.html", "<p>rev 6</p>")}}})
+	if err == nil {
+		t.Fatal("a page whose record save failed was accepted")
+	}
+	if page, err := c.board.revision("plan", "1"); err != nil || !strings.Contains(string(page), "rev 1") {
+		t.Fatalf("oldest kept revision after a failed save: %q, %v", page, err)
+	}
+	if err := os.RemoveAll(record); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(record, []byte(saved), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sendPage(t, c, plan.Number, "<p>rev 6</p>", 0)
+	if _, err := os.Stat(boardRevisionPath(directory, 1)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("revision 1 after rev 6 was saved: %v, want it dropped", err)
+	}
+	if page, err := c.board.revision("plan", "6"); err != nil || string(page) != "<p>rev 6</p>" {
+		t.Fatalf("revision 6: %q, %v", page, err)
+	}
+}
+
 func TestLintWarnsButNeverRefuses(t *testing.T) {
 	c, host, cookie := newBoardTest(t)
 	plan := createBoard(t, c, "plan")
@@ -449,6 +492,47 @@ func TestBoardKeeperRules(t *testing.T) {
 	}
 }
 
+// TestBoardSendsTakeOnlyBoardDestinations: every send the session makes
+// refuses a destination that is not a board route, as SendReply does.
+func TestBoardSendsTakeOnlyBoardDestinations(t *testing.T) {
+	c, _, _ := newBoardTest(t)
+	plan := createBoard(t, c, "plan")
+	answer, err := c.board.SendReply(c3types.ReplyArgs{Channel: channel.BoardChannelName, ChatID: plan.Number, Text: "draft"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	topic := int64(5)
+	before := len(boardLog(t, c, "plan"))
+	for name, send := range map[string]func() error{
+		"reply to web": func() error {
+			_, err := c.board.SendReply(c3types.ReplyArgs{Channel: "web", ChatID: plan.Number, Text: "x"})
+			return err
+		},
+		"reply, topic": func() error {
+			_, err := c.board.SendReply(c3types.ReplyArgs{ChatID: plan.Number, TopicID: &topic, Text: "x"})
+			return err
+		},
+		"edit on web": func() error {
+			_, err := c.board.EditMessage(c3types.EditArgs{Channel: "web", ChatID: plan.Number, MessageID: answer, Text: "y"})
+			return err
+		},
+		"react on web": func() error {
+			return c.board.React(c3types.ReactArgs{Channel: "web", ChatID: plan.Number, MessageID: answer, Emoji: "👍"})
+		},
+		"typing, topic": func() error { return c.board.SendTyping(plan.Number, &topic) },
+	} {
+		if err := send(); err == nil {
+			t.Fatalf("%s: accepted", name)
+		}
+	}
+	if after := len(boardLog(t, c, "plan")); after != before {
+		t.Fatalf("refused sends logged %d entries", after-before)
+	}
+	if err := c.board.React(c3types.ReactArgs{Channel: channel.BoardChannelName, ChatID: plan.Number, MessageID: answer, Emoji: "👍"}); err != nil {
+		t.Fatalf("react on the board: %v", err)
+	}
+}
+
 func TestSessionEditsOnlyItsOwnBoardMessages(t *testing.T) {
 	c, _, cookie := newBoardTest(t)
 	plan := createBoard(t, c, "plan")
@@ -508,6 +592,78 @@ func TestWaitingCountComesFromTheQueue(t *testing.T) {
 	waitFor(t, func() bool { _, body := stream.snapshot(); return strings.Contains(body, `"waiting":1`) })
 	if log := boardLog(t, c, "plan"); log[len(log)-1].Op != "comment" {
 		t.Fatalf("a Held notice reached the log: %+v", log[len(log)-1])
+	}
+}
+
+// TestAnAnswerIsAlwaysLogged: a text that answers a message is the session's
+// answer in its thread, whatever it starts with; only a text that answers
+// nothing may be a strip-only status text.
+func TestAnAnswerIsAlwaysLogged(t *testing.T) {
+	c, _, cookie := newBoardTest(t)
+	plan := createBoard(t, c, "plan")
+	act := postAct(c, cookie, "plan", `{"client_id":"c1","op":"comment","part":"1","text":"is this safe?"}`)
+	var accepted struct {
+		ID int64 `json:"id"`
+	}
+	if act.Code != http.StatusAccepted || json.Unmarshal(act.Body.Bytes(), &accepted) != nil || accepted.ID == 0 {
+		t.Fatalf("act=%d %s", act.Code, act.Body.String())
+	}
+	answer := "⚠️ Not yet: the migration drops a column."
+	id, err := c.board.SendReply(c3types.ReplyArgs{Channel: channel.BoardChannelName, ChatID: plan.Number, Text: answer, ReplyTo: &accepted.ID})
+	log := boardLog(t, c, "plan")
+	last := log[len(log)-1]
+	if err != nil || id == 0 || last.ID != id || last.Op != "message" || last.Text != answer || last.ReplyTo != accepted.ID || last.Part != "1" {
+		t.Fatalf("answer id=%d err=%v, last log entry %+v, want the answer logged on part 1", id, err, last)
+	}
+	if id, err := c.board.SendReply(c3types.ReplyArgs{Channel: channel.BoardChannelName, ChatID: plan.Number, Text: "⚠️ C3 is restarting."}); err != nil || id != 0 || len(boardLog(t, c, "plan")) != len(log) {
+		t.Fatalf("a status text answering nothing: id=%d err=%v, log grew to %d", id, err, len(boardLog(t, c, "plan")))
+	}
+}
+
+// TestBoardTextIsPlain: boards show text as typed, so the gate downgrades
+// markup and the guidance asks for plain text.
+func TestBoardTextIsPlain(t *testing.T) {
+	c, _, _ := newBoardTest(t)
+	caps := c.board.Capabilities()
+	parts, _, _, err := capability.Gate(caps, c3types.Outbound{Channel: channel.BoardChannelName, ChatID: 1, Text: "**bold**", Markup: c3types.MarkupMarkdown})
+	if err != nil || len(parts) != 1 || parts[0].Markup != c3types.MarkupNone || parts[0].Text != "**bold**" {
+		t.Fatalf("gate parts=%+v err=%v, want the text as typed with no markup", parts, err)
+	}
+	if guidance := capability.GuidanceFor(caps); !strings.Contains(guidance, "Rich text: NOT supported") {
+		t.Fatalf("board guidance does not ask for plain text:\n%s", guidance)
+	}
+}
+
+func TestMissingHeldCountIsLoggedOnceAndKeepsTheLastCount(t *testing.T) {
+	c, host, cookie := newBoardTest(t)
+	createBoard(t, c, "plan")
+	other := createBoard(t, c, "other")
+	host.setHeld(other.Number, 2)
+	if state := boardStateOf(t, c, cookie, "other"); state.Waiting != 2 {
+		t.Fatalf("waiting=%d, want 2", state.Waiting)
+	}
+	host.boardMu.Lock()
+	host.heldErr = errors.New("the durable queue is disabled for this run")
+	host.boardMu.Unlock()
+	for range 3 {
+		for _, name := range []string{"plan", "other"} {
+			boardStateOf(t, c, cookie, name)
+		}
+		c.board.SetRouteHolder(other.Number, nil, nil)
+	}
+	if state := boardStateOf(t, c, cookie, "other"); state.Waiting != 2 {
+		t.Fatalf("waiting=%d after the count went away, want the last value 2", state.Waiting)
+	}
+	host.mu.Lock()
+	logged := 0
+	for _, line := range host.logs {
+		if strings.Contains(line, "held count") {
+			logged++
+		}
+	}
+	host.mu.Unlock()
+	if logged != 1 {
+		t.Fatalf("held-count failure logged %d times, want once", logged)
 	}
 }
 

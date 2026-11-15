@@ -53,6 +53,20 @@ func TestShellWritesAgentStringsOnlyToAllowedSinks(t *testing.T) {
 	}
 }
 
+// The shell takes a message only from its sandboxed frame: that frame's window
+// and the opaque origin ("null") of a sandbox without allow-same-origin.
+func TestShellTakesMessagesOnlyFromItsSandboxedFrame(t *testing.T) {
+	shell := readPage(t, "board.js")
+	listeners := regexp.MustCompile(`addEventListener\("message", [^\n]*\n([^\n]*)`).FindAllStringSubmatch(shell, -1)
+	if len(listeners) != 1 {
+		t.Fatalf("board.js has %d message listeners, want one", len(listeners))
+	}
+	guard := strings.TrimSpace(listeners[0][1])
+	if !strings.HasPrefix(guard, "if (event.source !== frame.contentWindow || event.origin !== \"null\" || ") || !strings.HasSuffix(guard, ") return;") {
+		t.Fatalf("board.js message guard = %q, want the frame's window and the opaque origin checked first", guard)
+	}
+}
+
 // The limits the shell checks before posting an act, and the quote limit the
 // SDK clips a selection to, are the contract's.
 func TestShellAndSDKUseTheContractLimits(t *testing.T) {

@@ -294,7 +294,15 @@ func (b *Broker) handleRetranscribe(conn *ipc.Conn, stub *Stub, raw []byte) {
 		_ = conn.WriteJSON(ipc.RetranscribeResp{Op: ipc.OpRetranscribeResult, ID: req.ID, Err: "retranscribe: file_id required"})
 		return
 	}
+	// A board output is never the readback's route: its queue and log are the
+	// board's, so the transcript goes to the first other held route, if any.
 	route := stub.OutputRoute()
+	if route != nil && isBoardRoute(*route) {
+		route = nil
+		if held, ok := firstNonBoardRoute(orderedHeldRoutes(stub)); ok {
+			route = &held
+		}
+	}
 	transcriptOnly := route == nil || req.MessageID == 0
 	chanName := "telegram"
 	var chatID int64

@@ -730,7 +730,7 @@ func (b *Broker) handleAskRegister(conn *ipc.Conn, stub *Stub, raw []byte) {
 	ch, err := outputChannel, outputErr
 	for _, candidate := range routes {
 		candidateChannel, lookupErr := b.Channel(candidate.Channel)
-		if lookupErr == nil && candidateChannel.Capabilities().InlineKeyboards {
+		if lookupErr == nil && !isBoardRoute(candidate) && candidateChannel.Capabilities().InlineKeyboards {
 			route = candidate
 			ch = candidateChannel
 			err = nil
@@ -748,8 +748,9 @@ func (b *Broker) handleAskRegister(conn *ipc.Conn, stub *Stub, raw []byte) {
 	// it on a channel that can't render inline keyboards rather than silently
 	// SendReply-ing buttons it will drop. No behavior change for Telegram
 	// (InlineKeyboards=true); closes the latent gap for future text-only channels.
-	// Checked BEFORE register, so there is no pending entry to clean up.
-	if !ch.Capabilities().InlineKeyboards {
+	// Checked BEFORE register, so there is no pending entry to clean up. A
+	// board never takes a question, whatever its channel declares.
+	if isBoardRoute(route) || !ch.Capabilities().InlineKeyboards {
 		_ = conn.WriteJSON(ipc.AskRegisteredMsg{
 			Op: ipc.OpAskRegistered, AskID: req.AskID, OK: false,
 			Err: "channel does not support interactive questions",
@@ -846,7 +847,7 @@ func (b *Broker) handlePermissionRequest(_ *ipc.Conn, stub *Stub, raw []byte) {
 	var ch channel.Channel
 	for _, candidate := range routes {
 		candidateChannel, err := b.Channel(candidate.Channel)
-		if err != nil || !candidateChannel.Capabilities().InlineKeyboards {
+		if err != nil || isBoardRoute(candidate) || !candidateChannel.Capabilities().InlineKeyboards {
 			continue
 		}
 		selected := candidate

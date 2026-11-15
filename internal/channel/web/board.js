@@ -46,7 +46,7 @@
     document.title = `${title} · board`;
     strip.strip.dataset.mode = closed ? "closed" : live ? "live" : "ended";
     const folder = holder?.cwd?.split(/[\\/]/).filter(Boolean).pop() ?? holder?.cwd;
-    strip.session.textContent = closed ? "Closed: read-only." : !live ? `Session ended.${waiting ? ` ${messages(waiting)} wait for it.` : ""}`
+    strip.session.textContent = closed ? "Closed: read-only." : !live ? `Session ended.${waiting ? ` ${messages(waiting)} ${waiting === 1 ? "waits" : "wait"} for it.` : ""}`
       : holder ? `${holder.cli} · ${folder}` : "Live";
     strip.waiting.textContent = live && !closed && waiting ? `${messages(waiting)} waiting` : "";
     strip.typing.hidden = !(live && typing);
@@ -154,8 +154,8 @@
     return toFrame({ c3: "result", call, ...(problem ? { error: problem } : await postAct(body)) });
   }
 
-  addEventListener("message", (event) => {
-    if (event.source !== frame.contentWindow || !state || !event.data || typeof event.data !== "object") return;
+  addEventListener("message", (event) => { // only the sandboxed frame: its window, its opaque origin
+    if (event.source !== frame.contentWindow || event.origin !== "null" || !state || !event.data || typeof event.data !== "object") return;
     onFrameMessage(event.data);
   });
 

@@ -246,10 +246,16 @@ func (b *Broker) refuseRestartPermission(stub *Stub, id string) {
 		log.Printf("controlled restart permission refused id=%s: no route", id)
 		return
 	}
-	route := routes[0]
+	route, ok := firstNonBoardRoute(routes)
+	if !ok {
+		for _, board := range routes {
+			b.renderRestartNotice(restartNotice{kind: "permission", id: id, route: board, text: boardPermissionNotice})
+		}
+		return
+	}
 	for _, candidate := range routes {
 		ch, err := b.Channel(candidate.Channel)
-		if err == nil && ch.Capabilities().InlineKeyboards {
+		if err == nil && !isBoardRoute(candidate) && ch.Capabilities().InlineKeyboards {
 			route = candidate
 			break
 		}

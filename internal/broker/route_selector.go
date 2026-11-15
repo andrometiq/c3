@@ -73,8 +73,9 @@ func sessionAttachmentMatchesStub(attachment mappings.SessionAttachment, stub *S
 
 // resolveHeldRoute is the trust boundary for caller-supplied route selectors.
 // A selector may name a held channel, a held Telegram topic or a held board
-// (board:<name>). Exactly one held route must match; unknown and ambiguous
-// values fail closed and never fall back to the output route.
+// (board:<name>, which never matches a topic). Exactly one held route must
+// match; unknown and ambiguous values fail closed and never fall back to the
+// output route.
 func (b *Broker) resolveHeldRoute(stub *Stub, selector string) (RouteKey, error) {
 	selector = strings.TrimSpace(selector)
 	if selector == "" {
@@ -84,9 +85,10 @@ func (b *Broker) resolveHeldRoute(stub *Stub, selector string) (RouteKey, error)
 		return RouteKey{}, fmt.Errorf("route %q is not held by this session", selector)
 	}
 	var matches []RouteKey
+	isBoard := isBoardSelector(selector)
 	for _, route := range stub.Routes() {
 		matched := strings.EqualFold(route.Channel, selector)
-		if !matched && (route.Channel == "telegram" || isBoardRoute(route)) {
+		if !matched && (route.Channel == "telegram" && !isBoard || isBoardRoute(route)) {
 			ref := b.routeRefForKey(route)
 			matched = ref.Name != "" && strings.EqualFold(ref.Name, selector)
 		}

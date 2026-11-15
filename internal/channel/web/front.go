@@ -41,15 +41,23 @@ func hostWithHTTPSPort(host string) string {
 	return net.JoinHostPort(strings.Trim(host, "[]"), "443")
 }
 
-func (c *Channel) isFrontOperator(r *http.Request) bool {
-	front := c.cfg.Front
+// isFrontPeer: the request's TCP peer is the front's address.
+func (c *Channel) isFrontPeer(r *http.Request) bool {
 	peer, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		return false
-	}
 	peerIP := net.ParseIP(peer)
-	identities := r.Header.Values(front.IdentityHeader)
-	return peerIP != nil && peerIP.Equal(net.ParseIP(front.From)) && len(identities) == 1 && identities[0] == front.Operator
+	return c.hasFront() && err == nil && peerIP != nil && peerIP.Equal(net.ParseIP(c.cfg.Front.From))
+}
+
+// isOffFrontAlias is a request the front proxied under another of its names
+// for this port. A loopback from can't tell the front from a local client,
+// so then the Host alone decides, as before.
+func (c *Channel) isOffFrontAlias(r *http.Request) bool {
+	return c.isFrontPeer(r) && !net.ParseIP(c.cfg.Front.From).IsLoopback() && !c.isFrontRequest(r)
+}
+
+func (c *Channel) isFrontOperator(r *http.Request) bool {
+	identities := r.Header.Values(c.cfg.Front.IdentityHeader)
+	return c.isFrontPeer(r) && len(identities) == 1 && identities[0] == c.cfg.Front.Operator
 }
 
 // boardViewer returns the viewer of a board request, or the status that

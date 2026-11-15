@@ -488,7 +488,7 @@ func (act boardAct) logText() string {
 		if act.Quote == "" {
 			return act.Text
 		}
-		quoted := strings.FieldsFunc(act.Quote, isBoardLineBreak)
+		quoted := strings.FieldsFunc(act.Quote, c3types.IsLineBreak)
 		return "> " + strings.Join(quoted, "\n> ") + "\n" + act.Text
 	case "approve":
 		return act.Note
@@ -499,17 +499,12 @@ func (act boardAct) logText() string {
 	}
 }
 
-// isBoardLineBreak is Unicode's mandatory breaks (UAX #14 BK, CR, LF, NL).
-func isBoardLineBreak(r rune) bool {
-	return r == '\n' || r == '\r' || r == '\v' || r == '\f' || r == '\u0085' || r == '\u2028' || r == '\u2029'
-}
-
 // couldForgeBoardLine reports a line the session would read as C3's own
 // "[board " line, as bodyCouldForgeMeta does for the metadata line. Invisible
 // runes are dropped first, so none can hide the prefix.
 func couldForgeBoardLine(text string) bool {
-	for _, line := range strings.FieldsFunc(text, isBoardLineBreak) {
-		line = strings.ToLower(strings.TrimLeftFunc(strings.Map(dropInvisibleRune, line), unicode.IsSpace))
+	for _, line := range strings.FieldsFunc(text, c3types.IsLineBreak) {
+		line = strings.ToLower(strings.TrimLeftFunc(strings.Map(c3types.DropInvisibleRune, line), unicode.IsSpace))
 		if after, found := strings.CutPrefix(line, "[board"); found {
 			if next, _ := utf8.DecodeRuneInString(after); after == "" || unicode.IsSpace(next) {
 				return true
@@ -517,15 +512,6 @@ func couldForgeBoardLine(text string) bool {
 		}
 	}
 	return false
-}
-
-// dropInvisibleRune drops format, control and other default-ignorable runes,
-// keeping whitespace, which the prefix check reads.
-func dropInvisibleRune(r rune) rune {
-	if unicode.IsSpace(r) || unicode.IsGraphic(r) && !unicode.In(r, unicode.Variation_Selector, unicode.Other_Default_Ignorable_Code_Point) {
-		return r
-	}
-	return -1
 }
 
 func isBoardEmoji(emoji string) bool {

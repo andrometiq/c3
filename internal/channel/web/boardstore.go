@@ -193,16 +193,20 @@ func boardRevisionPath(directory string, rev int64) string {
 	return filepath.Join(directory, boardPagesName, strconv.FormatInt(rev, 10)+".html")
 }
 
-// storeBoardRevision writes rev and drops the one that falls out of the kept
-// window; a failed drop only leaves an unserved file behind.
 func storeBoardRevision(directory string, rev int64, page []byte) error {
 	if err := writeAtomic(boardRevisionPath(directory, rev), page); err != nil {
 		return fmt.Errorf("board: store revision %d: %w", rev, err)
 	}
+	return nil
+}
+
+// dropExpiredBoardRevision removes the revision that rev pushed out of the
+// kept window; call it only once board.json names rev. A failed removal only
+// leaves an unserved file behind.
+func dropExpiredBoardRevision(directory string, rev int64) {
 	if expired := rev - channel.BoardRevisionsKept; expired > 0 {
 		_ = os.Remove(boardRevisionPath(directory, expired))
 	}
-	return nil
 }
 
 // readBoardPage loads the one HTML file an agent sends as a board's page.

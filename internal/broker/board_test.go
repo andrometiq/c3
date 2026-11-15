@@ -1,7 +1,9 @@
 package broker
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"net"
 	"strings"
 	"sync"
@@ -20,6 +22,9 @@ type fakeBoardChannel struct {
 	*fakeChannel
 	boardMu sync.Mutex
 	boards  []channel.Board
+	// isKeyboardCapable makes the board declare InlineKeyboards, which the
+	// real one never does, so a test proves the broker skips boards itself.
+	isKeyboardCapable bool
 }
 
 var _ channel.BoardKeeper = (*fakeBoardChannel)(nil)
@@ -32,7 +37,7 @@ const (
 
 func (c *fakeBoardChannel) Name() string { return channel.BoardChannelName }
 func (c *fakeBoardChannel) Capabilities() c3types.Capabilities {
-	return c3types.Capabilities{Channel: channel.BoardChannelName, RichText: true, EditMessages: true}
+	return c3types.Capabilities{Channel: channel.BoardChannelName, EditMessages: true, InlineKeyboards: c.isKeyboardCapable}
 }
 
 func (c *fakeBoardChannel) CreateBoard(name string, owner channel.BoardOwner) (channel.Board, bool, error) {
@@ -234,7 +239,9 @@ func TestBoardAttachBindsTheBoardToTheCallingSession(t *testing.T) {
 	if attached.Channel != channel.BoardChannelName || attached.Name != "board:plan" || len(attached.Routes) != 1 || attached.Routes[0].Name != "board:plan" {
 		t.Fatalf("attach result=%+v", attached)
 	}
-	for _, want := range []string{board.Link, `reply channel="board:plan"`, "[board plan · <part> · msg N]", "Approved your message M", "never their word for a push", testStarterHTML} {
+	for _, want := range []string{board.Link, `reply channel="board:plan"`, "[board plan · <part> · msg N]", "Approved your message M", "never their word for a push", testStarterHTML,
+		"and no text, a caption at most: a reply with text and a file splits, and reply_to rides only the first part",
+		`reply_to set to the approve line's own id, the N in its "[board plan · <part> · msg N]" header, not the M it approves`} {
 		if !strings.Contains(attached.Notice, want) {
 			t.Errorf("attach notice lacks %q:\n%s", want, attached.Notice)
 		}
@@ -368,6 +375,51 @@ func TestNoStructuredAttachBuildsABoardRoute(t *testing.T) {
 	}
 	if holder, _ := b.Routes.Holder(firstBoard); holder != stub || len(otherStub.Routes()) != 0 {
 		t.Fatalf("board holder=%v, other session routes=%v", holder, otherStub.Routes())
+	}
+}
+
+func TestBoardSelectorNeverMeansATopic(t *testing.T) {
+	b, telegram, _, boards := newBoardBroker(t)
+	peer, stub, _ := connectSession(t, b, 101, boardCWD, boardSession)
+	if plain := attachVia(t, peer, ipc.AttachReq{Expr: "Board:plan"}); plain.OK || plain.NeedsConfirmation || plain.Err != boardAttachShapeRefusal {
+		t.Fatalf("Board:plan without + => %+v, want the +board:<name> hint", plain)
+	}
+	if attached := attachVia(t, peer, ipc.AttachReq{Expr: "+Board:plan"}); !attached.OK || attached.Name != "board:plan" || !stub.HasRoute(firstBoard) {
+		t.Fatalf("+Board:plan => %+v, routes %v; want board plan, never a topic proposal", attached, stub.Routes())
+	}
+	if refused := attachVia(t, peer, ipc.AttachReq{Expr: "+BOARD:Plan"}); refused.OK || !strings.Contains(refused.Err, channel.BoardNamePattern) || boards.boardCount() != 1 {
+		t.Fatalf("+BOARD:Plan => %+v, want the board-name rule", refused)
+	}
+	for _, req := range []ipc.AttachReq{
+		{Expr: "create board:x"}, {Expr: "+create Board:x"}, {Name: "board:x", Create: true}, {Name: " BOARD:x"}, {Name: "board:plan", Add: true},
+	} {
+		if attached := attachVia(t, peer, req); attached.OK || attached.NeedsConfirmation || attached.Err != boardTopicNameRefusal {
+			t.Fatalf("attach %+v => %+v, want the topic name refused", req, attached)
+		}
+	}
+	telegram.mu.Lock()
+	created := telegram.createCalls
+	telegram.mu.Unlock()
+	if len(created) != 0 {
+		t.Fatalf("a board:-named topic was created: %+v", created)
+	}
+
+	// A topic already named board:x (made outside C3) never answers that selector.
+	named := MakeRouteKey("telegram", -100, ptrI64Val(900))
+	b.mutateMappings(func(mf *mappings.MappingsFile) {
+		telegram := mf.Channels["telegram"]
+		telegram.Topics = append(telegram.Topics, mappings.Topic{ChatID: -100, TopicID: 900, Name: "board:x", Group: "main"})
+		mf.Channels["telegram"] = telegram
+	})
+	holder := b.Stubs.Register("claude", 12, boardCWD, nil)
+	claimConfirmed(t, b, holder, named)
+	for _, selector := range []string{"board:x", "Board:X"} {
+		if got, err := b.resolveHeldRoute(holder, selector); err == nil {
+			t.Fatalf("%q => %v, want no route (only a board answers it)", selector, got)
+		}
+	}
+	if got, err := b.resolveHeldRoute(holder, "telegram"); err != nil || got != named {
+		t.Fatalf(`"telegram" => %v, %v; want the topic`, got, err)
 	}
 }
 
@@ -753,21 +805,154 @@ func TestPermissionPreviewNeverReachesABoard(t *testing.T) {
 			t.Fatalf("board got %+v", replies)
 		}
 	})
+	for _, isKeyboardCapable := range []bool{false, true} {
+		t.Run(fmt.Sprintf("only boards are held, keyboards declared %v", isKeyboardCapable), func(t *testing.T) {
+			b, _, _, boards := newBoardBroker(t)
+			boards.isKeyboardCapable = isKeyboardCapable
+			stub := b.Stubs.Register("claude", 11, boardCWD, nil)
+			claimConfirmed(t, b, stub, firstBoard)
+			claimConfirmed(t, b, stub, secondBoard)
+			stub.SetOutputRoute(firstBoard)
+			permissionRequest(t, b, stub, "perm-boards")
+			replies := boards.sendRepliesSnapshot()
+			if len(replies) != 2 {
+				t.Fatalf("board notices=%+v, want one per board", replies)
+			}
+			for _, reply := range replies {
+				if reply.Text != boardPermissionNotice || len(reply.Buttons) != 0 {
+					t.Fatalf("board notice=%+v, want %q without a preview or keyboard", reply, boardPermissionNotice)
+				}
+			}
+		})
+	}
+	t.Run("a board that declares keyboards is never the prompt's route", func(t *testing.T) {
+		b, telegram, _, boards := newBoardBroker(t)
+		boards.isKeyboardCapable = true
+		stub := b.Stubs.Register("claude", 11, boardCWD, nil)
+		claimConfirmed(t, b, stub, c3TopicKey)
+		claimConfirmed(t, b, stub, firstBoard)
+		stub.SetOutputRoute(firstBoard)
+		permissionRequest(t, b, stub, "perm-declared")
+		if replies := telegram.sendRepliesSnapshot(); len(replies) != 1 || len(replies[0].Buttons) == 0 {
+			t.Fatalf("telegram prompt=%+v, want the keyboard there", replies)
+		}
+		if replies := boards.sendRepliesSnapshot(); len(replies) != 0 {
+			t.Fatalf("board got %+v", replies)
+		}
+	})
+}
+
+func TestQuestionsNeverReachABoard(t *testing.T) {
+	ask := func(t *testing.T, b *Broker, peer *ipc.Conn, stub *Stub) ipc.AskRegisteredMsg {
+		t.Helper()
+		go b.handleAskRegister(stub.ConnValue().(*ipc.Conn), stub, []byte(`{"ask_id":"q1","question":"Ship it?","options":["yes","no"]}`))
+		var registered ipc.AskRegisteredMsg
+		if err := json.Unmarshal(readOp(t, peer, ipc.OpAskRegistered), &registered); err != nil {
+			t.Fatal(err)
+		}
+		return registered
+	}
+	t.Run("a board output with a topic held", func(t *testing.T) {
+		b, telegram, _, boards := newBoardBroker(t)
+		boards.isKeyboardCapable = true
+		peer, stub, _ := connectSession(t, b, 101, boardCWD, "")
+		claimConfirmed(t, b, stub, c3TopicKey)
+		claimConfirmed(t, b, stub, firstBoard)
+		stub.SetOutputRoute(firstBoard)
+		if registered := ask(t, b, peer, stub); !registered.OK {
+			t.Fatalf("ask=%+v, want it on the topic", registered)
+		}
+		if replies := telegram.sendRepliesSnapshot(); len(replies) != 1 || replies[0].Text != "Ship it?" {
+			t.Fatalf("telegram=%+v, want the question", replies)
+		}
+		if replies := boards.sendRepliesSnapshot(); len(replies) != 0 {
+			t.Fatalf("board got %+v", replies)
+		}
+	})
 	t.Run("only boards are held", func(t *testing.T) {
+		b, _, _, boards := newBoardBroker(t)
+		boards.isKeyboardCapable = true
+		peer, stub, _ := connectSession(t, b, 101, boardCWD, "")
+		claimConfirmed(t, b, stub, firstBoard)
+		stub.SetOutputRoute(firstBoard)
+		if registered := ask(t, b, peer, stub); registered.OK {
+			t.Fatalf("ask=%+v, want it refused", registered)
+		}
+		if replies := boards.sendRepliesSnapshot(); len(replies) != 0 {
+			t.Fatalf("board got %+v", replies)
+		}
+	})
+}
+
+// TestBrokerTextsNeverLandInABoardsLog: a text the broker sends a session's
+// routes goes to its first non-board route; a board gets at most a strip-only
+// text (isStatusText's prefixes), which never reaches its log or page.
+func TestBrokerTextsNeverLandInABoardsLog(t *testing.T) {
+	stripOnly := func(t *testing.T, boards *fakeBoardChannel, want int) {
+		t.Helper()
+		replies := boards.sendRepliesSnapshot()
+		if len(replies) != want {
+			t.Fatalf("board texts=%+v, want %d", replies, want)
+		}
+		for _, reply := range replies {
+			if !strings.HasPrefix(reply.Text, "⏸ Permission") && !strings.HasPrefix(reply.Text, "⚠️") {
+				t.Fatalf("board text %q would be a log line", reply.Text)
+			}
+		}
+	}
+	t.Run("a restart refusal goes to the web chat, not the board output", func(t *testing.T) {
+		b, _, web, boards := newBoardBroker(t)
+		boards.isKeyboardCapable = true
+		stub := b.Stubs.Register("claude", 11, boardCWD, nil)
+		claimConfirmed(t, b, stub, webChatKey)
+		claimConfirmed(t, b, stub, firstBoard)
+		stub.SetOutputRoute(firstBoard)
+		b.BeginControlledRestart()
+		permissionRequest(t, b, stub, "perm-restart")
+		if replies := web.sendRepliesSnapshot(); len(replies) != 1 || replies[0].Text != restartPermRefused {
+			t.Fatalf("web=%+v, want the refusal", replies)
+		}
+		stripOnly(t, boards, 0)
+	})
+	t.Run("a boards-only restart refusal is strip-only", func(t *testing.T) {
 		b, _, _, boards := newBoardBroker(t)
 		stub := b.Stubs.Register("claude", 11, boardCWD, nil)
 		claimConfirmed(t, b, stub, firstBoard)
 		claimConfirmed(t, b, stub, secondBoard)
 		stub.SetOutputRoute(firstBoard)
-		permissionRequest(t, b, stub, "perm-boards")
-		replies := boards.sendRepliesSnapshot()
-		if len(replies) != 2 {
-			t.Fatalf("board notices=%+v, want one per board", replies)
+		b.BeginControlledRestart()
+		permissionRequest(t, b, stub, "perm-restart")
+		stripOnly(t, boards, 2)
+	})
+	t.Run("the update notice reaches a board's strip only", func(t *testing.T) {
+		b, telegram, _, boards := newBoardBroker(t)
+		stub := b.Stubs.Register("claude", 11, boardCWD, nil)
+		claimConfirmed(t, b, stub, c3TopicKey)
+		claimConfirmed(t, b, stub, firstBoard)
+		b.notifyUpdateRestart("v9.9.9")
+		if replies := telegram.sendRepliesSnapshot(); len(replies) != 1 || !strings.HasPrefix(replies[0].Text, "c3 updated to v9.9.9") {
+			t.Fatalf("telegram=%+v", replies)
 		}
-		for _, reply := range replies {
-			if reply.Text != boardPermissionNotice || len(reply.Buttons) != 0 {
-				t.Fatalf("board notice=%+v, want %q without a preview or keyboard", reply, boardPermissionNotice)
-			}
+		stripOnly(t, boards, 1)
+	})
+	t.Run("a retranscribe with a board output records on the topic", func(t *testing.T) {
+		b, _, _, _ := newBoardBroker(t)
+		b.Plugins.OnVoiceReceived(func(context.Context, c3types.VoicePayload) (string, error) { return "fresh transcript", nil })
+		stub := b.Stubs.Register("claude", 11, boardCWD, nil)
+		claimConfirmed(t, b, stub, c3TopicKey)
+		claimConfirmed(t, b, stub, firstBoard)
+		stub.SetOutputRoute(firstBoard)
+		agentSide, brokerSide := newConnPair(t)
+		raw, _ := json.Marshal(ipc.RetranscribeReq{Op: ipc.OpRetranscribe, ID: "r", FileID: "vf", MessageID: 999})
+		go b.handleRetranscribe(brokerSide, stub, raw)
+		if resp := readRetranscribeResp(t, agentSide); resp.Err != "" || resp.Text != "fresh transcript" {
+			t.Fatalf("retranscribe=%+v", resp)
+		}
+		if rows, err := b.Queue.Peek(queueRouteKey(firstBoard), -1); err != nil || len(rows) != 0 {
+			t.Fatalf("board queue rows=%+v err=%v, want none", rows, err)
+		}
+		if rows, err := b.Queue.Peek(queueRouteKey(c3TopicKey), -1); err != nil || len(rows) != 1 || !strings.Contains(rows[0].Text, "voice message 999") {
+			t.Fatalf("topic queue rows=%+v err=%v, want the transcript update", rows, err)
 		}
 	})
 }

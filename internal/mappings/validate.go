@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 	"unicode"
+
+	"github.com/Andrometiq/c3/internal/channel"
 )
 
 // Validate returns nil if the MappingsFile is internally consistent, or a
@@ -30,6 +32,9 @@ func (mf *MappingsFile) Validate() error {
 		return fmt.Errorf("mappings: unsupported schema_version %d (want 1)", mf.SchemaVersion)
 	}
 	for chanName, cc := range mf.Channels {
+		if chanName == channel.BoardChannelName {
+			return fmt.Errorf("mappings: channel %q takes no stanza: boards run on the web channel's listener and login", chanName)
+		}
 		if chanName == "web" {
 			if err := validateWebChannelConfig(cc); err != nil {
 				return err

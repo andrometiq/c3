@@ -96,7 +96,7 @@ func TestFrontIdentityCountsOnlyFromTheFrontAddress(t *testing.T) {
 		t.Fatalf("C3 login on the front=%d, want 403 (only the front's identity counts there)", w.Code)
 	}
 	direct := request(http.MethodGet, "/board/plan/state", "", nil, false)
-	direct.RemoteAddr = frontAddress + ":43210"
+	direct.RemoteAddr = "192.0.2.99:43210"
 	direct.Header.Set(frontHeader, frontOperator)
 	if w := serve(c, direct); w.Code != http.StatusUnauthorized {
 		t.Fatalf("identity header off the front=%d, want 401", w.Code)
@@ -134,12 +134,58 @@ func TestFrontIdentityCountsOnlyFromTheFrontAddress(t *testing.T) {
 	}
 }
 
+// TestFrontAddressReachesNothingUnderAnotherName: the front also proxies this
+// port under other names; a request from the front's address under any Host
+// but the front origin reaches no route, so the web chat stays off the front.
+// A loopback front address can't be told from a local client: there the Host
+// alone decides (a known residual).
+func TestFrontAddressReachesNothingUnderAnotherName(t *testing.T) {
+	c, _, cookie := newFrontTest(t)
+	alias := func(method, path string) *http.Request {
+		r := frontRequest(method, path, "", frontAddress, frontOperator)
+		r.Host = "laptop--8371.example.test"
+		r.AddCookie(cookie)
+		return r
+	}
+	for _, route := range []struct{ method, path string }{
+		{http.MethodGet, "/"}, {http.MethodGet, "/login"}, {http.MethodGet, "/events"}, {http.MethodPost, "/send"},
+		{http.MethodGet, "/healthz"}, {http.MethodGet, "/board"}, {http.MethodGet, "/board/plan"}, {http.MethodGet, "/board/plan/state"},
+	} {
+		if w := serve(c, alias(route.method, route.path)); w.Code != http.StatusNotFound {
+			t.Fatalf("front address, alias Host, %s %s=%d, want 404", route.method, route.path, w.Code)
+		}
+	}
+	if w := serve(c, frontRequest(http.MethodGet, "/board/plan/state", "", frontAddress, frontOperator)); w.Code != http.StatusOK {
+		t.Fatalf("front origin board state=%d, want 200", w.Code)
+	}
+	if w := serve(c, request(http.MethodGet, "/", "", cookie, false)); w.Code != http.StatusOK {
+		t.Fatalf("direct web chat from another peer=%d, want 200", w.Code)
+	}
+
+	c.cfg.Front.From = "127.0.0.1"
+	local := request(http.MethodGet, "/", "", cookie, false)
+	local.RemoteAddr = "127.0.0.1:43210"
+	if w := serve(c, local); w.Code != http.StatusOK {
+		t.Fatalf("loopback front address: local web chat=%d, want 200 (the Host decides)", w.Code)
+	}
+}
+
 func TestOnlyTheOperatorIdentityIsTheOwner(t *testing.T) {
 	c, host, _ := newFrontTest(t)
 	const guest = "guest@example.test"
+	// The operator's frame capability, minted on the front: the guest's
+	// request with it must be refused for who asks, not for a missing cap.
+	var view boardStateView
+	if state := serve(c, frontRequest(http.MethodGet, "/board/plan/state", "", frontAddress, frontOperator)); state.Code != http.StatusOK || json.Unmarshal(state.Body.Bytes(), &view) != nil || view.Cap == "" {
+		t.Fatalf("operator state=%d %s", state.Code, state.Body.String())
+	}
+	operatorPage := "/board/plan/page?cap=" + view.Cap
+	if w := serve(c, frontRequest(http.MethodGet, operatorPage, "", frontAddress, frontOperator)); w.Code != http.StatusOK {
+		t.Fatalf("operator page with their cap=%d, want 200", w.Code)
+	}
 	for _, route := range []struct{ method, path, body string }{
 		{http.MethodGet, "/board", ""}, {http.MethodGet, "/board/plan", ""}, {http.MethodGet, "/board/plan/state", ""},
-		{http.MethodGet, "/board/plan/events", ""}, {http.MethodGet, "/board/plan/page", ""},
+		{http.MethodGet, "/board/plan/events", ""}, {http.MethodGet, operatorPage, ""},
 		{http.MethodGet, "/board/assets/board.js", ""}, {http.MethodPost, "/board/plan/close", ""},
 		{http.MethodPost, "/board/plan/act", `{"client_id":"g","op":"comment","part":"1","text":"let me in"}`},
 	} {

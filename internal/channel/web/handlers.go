@@ -48,7 +48,8 @@ func (c *Channel) routes() http.Handler {
 	mux.HandleFunc("POST /board/{name}/act", c.handleBoardAct)
 	mux.HandleFunc("POST /board/{name}/close", c.handleBoardClose)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if c.isFrontRequest(r) && !isBoardPath(r.URL.Path) {
+		// The front reaches board routes only, and only under its own origin.
+		if c.isFrontRequest(r) && !isBoardPath(r.URL.Path) || c.isOffFrontAlias(r) {
 			http.NotFound(w, r)
 			return
 		}

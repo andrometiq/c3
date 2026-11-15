@@ -4,11 +4,15 @@ import (
 	"context"
 	"encoding/json"
 	"net"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/Andrometiq/c3/internal/c3types"
+	"github.com/Andrometiq/c3/internal/capability"
 	"github.com/Andrometiq/c3/internal/channel"
 	"github.com/Andrometiq/c3/internal/ipc"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 var (
@@ -17,20 +21,52 @@ var (
 	boardTestBoard   = ipc.RouteRef{Channel: channel.BoardChannelName, ChatID: 1, Name: "board:plan"}
 )
 
-func boardAttachTurn(t *testing.T, a *adapter, args map[string]any, resp ipc.AttachedMsg) {
+func boardAttachTurn(t *testing.T, a *adapter, args map[string]any, resp ipc.AttachedMsg) string {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	done := make(chan struct{})
+	done := make(chan string, 1)
 	go func() {
-		_, _ = a.toolAttach(ctx, newAttachReq(t, args))
-		close(done)
+		result, _ := a.toolAttach(ctx, newAttachReq(t, args))
+		text := ""
+		if result != nil && len(result.Content) == 1 {
+			if content, ok := result.Content[0].(*mcp.TextContent); ok {
+				text = content.Text
+			}
+		}
+		done <- text
 	}()
 	drivePendingAttached(t, a, resp)
 	select {
-	case <-done:
+	case text := <-done:
+		return text
 	case <-ctx.Done():
 		t.Fatal("toolAttach did not return")
+	}
+	return ""
+}
+
+// TestBoardAttachRepeatsNoChannelGuidance: a board attach carries the output
+// channel's manifest, whose guidance the agent already has.
+func TestBoardAttachRepeatsNoChannelGuidance(t *testing.T) {
+	titleScope(t)
+	a := newAdapterWithDummyConn(t)
+	telegram := c3types.Capabilities{Channel: "telegram", RichText: true, InlineKeyboards: true}
+	a.initGuidanceChannel = telegram.Channel
+	guidance := capability.GuidanceFor(telegram)
+	board := boardAttachTurn(t, a, map[string]any{"expr": "+board:plan"}, ipc.AttachedMsg{
+		Op: ipc.OpAttached, OK: true, Channel: channel.BoardChannelName, ChatID: 1, Name: "board:plan", Capabilities: &telegram,
+		Routes: []ipc.RouteRef{boardTestTopic, boardTestBoard}, Output: &boardTestTopic,
+	})
+	if board == "" || strings.Contains(board, guidance) {
+		t.Fatalf("board attach result repeats the output channel's guidance:\n%s", board)
+	}
+	web := c3types.Capabilities{Channel: "web", RichText: true}
+	switched := boardAttachTurn(t, a, map[string]any{"expr": "web"}, ipc.AttachedMsg{
+		Op: ipc.OpAttached, OK: true, Channel: "web", ChatID: 42, Name: "web", Capabilities: &web,
+	})
+	if !strings.Contains(switched, capability.GuidanceFor(web)) {
+		t.Fatalf("a switch to another channel lacks its guidance:\n%s", switched)
 	}
 }
 

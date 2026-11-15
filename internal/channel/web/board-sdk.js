@@ -159,6 +159,7 @@
   let sheet = null;
   let foldStyle = null;
   let openPart = null;
+  let isSending = false; // Ctrl/Cmd+Enter can press send again while one is in flight
   let pressedQuote = "";
 
   function el(tag, attributes = {}, ...children) {
@@ -251,8 +252,8 @@
 
   async function send() {
     const part = openPart, text = sheet.text.value.trim();
-    if (!text || board.closed) return;
-    sheet.send.disabled = true;
+    if (!text || board.closed || isSending) return;
+    isSending = sheet.send.disabled = true;
     try {
       await comment(part, text, { quote: quotes.get(part) });
       drafts.delete(part);
@@ -262,6 +263,7 @@
     } catch (error) {
       sheet.error.textContent = `Not sent: ${REASONS[error.message] ?? error.message}.`;
     } finally {
+      isSending = false;
       draw();
     }
   }
@@ -318,7 +320,8 @@
     sheet.typing.hidden = !(board.typing && thread.at(-1)?.dir === "in");
     sheet.quote.textContent = quotes.get(part) ?? "";
     sheet.quoteRow.hidden = !quotes.has(part);
-    sheet.text.disabled = sheet.send.disabled = board.closed;
+    sheet.text.disabled = board.closed;
+    sheet.send.disabled = board.closed || isSending;
     sheet.text.placeholder = board.closed ? "This board is closed." : `About ${part}…`;
   }
 

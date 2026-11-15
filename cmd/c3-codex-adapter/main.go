@@ -1628,10 +1628,12 @@ func (a *adapter) toolAttach(ctx context.Context, req *mcp.CallToolRequest) (*mc
 		// A successful attach can switch channels after initialize. Surface the
 		// just-attached manifest immediately only when it differs from the channel
 		// whose guidance the agent already received (or that channel was unknown).
+		// The manifest names its own channel: a board attach carries the output
+		// channel's, so attached.Channel ("board") would repeat that guidance.
 		if attached.OK && attached.Capabilities != nil {
-			attachedChannel := attached.Channel
+			attachedChannel := attached.Capabilities.Channel
 			if attachedChannel == "" {
-				attachedChannel = attached.Capabilities.Channel
+				attachedChannel = attached.Channel
 			}
 			if a.initGuidanceChannel == "" || attachedChannel != a.initGuidanceChannel {
 				text += "\n\n" + capability.GuidanceFor(*attached.Capabilities)

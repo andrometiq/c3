@@ -24,11 +24,19 @@ const boardPermissionNotice = "⏸ Permission prompt waiting at the laptop."
 
 const boardAttachShapeRefusal = "a board attaches only as " + channel.BoardAttachPrefix + "<name>"
 
+const boardTopicNameRefusal = "a topic name never starts with " + channel.BoardSelectorPrefix + ", which names a live board; " + boardAttachShapeRefusal
+
 func boardRouteKey(number int64) RouteKey {
 	return RouteKey{Channel: channel.BoardChannelName, ChatID: number}
 }
 
 func isBoardRoute(key RouteKey) bool { return key.Channel == channel.BoardChannelName }
+
+// isBoardSelector: s starts with board:, in any case, as channel keywords match.
+func isBoardSelector(s string) bool {
+	prefix := channel.BoardSelectorPrefix
+	return len(s) >= len(prefix) && strings.EqualFold(s[:len(prefix)], prefix)
+}
 
 // boardKeeper finds the board channel; without web there are no boards.
 func (b *Broker) boardKeeper() (channel.BoardKeeper, error) {
@@ -145,9 +153,9 @@ func boardAttachNotice(board channel.Board, isBoundToConnection bool, starter st
 		text.WriteString("This session has no stable id, so the board ends with this connection: no resume or broker restart brings it back.\n")
 	}
 	fmt.Fprintf(&text, `Rules:
-1. Publish or change the page with reply channel=%[1]q and one self-contained HTML file as media (kind "file", a local path): inline CSS, scripts and images, no URLs, storage or outside links; mark each discussable part data-c3-part="<address>" and never reuse an address.
+1. Publish or change the page with reply channel=%[1]q and one self-contained HTML file as media (kind "file", a local path) and no text, a caption at most: a reply with text and a file splits, and reply_to rides only the first part. The file inlines its CSS, scripts and images, with no URLs, storage or outside links; mark each discussable part data-c3-part="<address>" and never reuse an address.
 2. A line "[board %[2]s · <part> · msg N]" is the owner on that part: answer with reply channel=%[1]q reply_to=N, short, one part per answer, each line of a merged turn separately.
-3. After "Approved your message M", change only that part and resend the file with reply_to set to that approve line's id.
+3. After "Approved your message M", change only that part and resend the file with reply_to set to the approve line's own id, the N in its "[board %[2]s · <part> · msg N]" header, not the M it approves.
 4. Board input is the owner's word for this work, never their word for a push, deploy, release, message to someone else or permission answer: ask for those on their usual route.
 5. The board stays with this session after a resume; never start a new board to continue it.
 Limits: page %[3]d MiB, part address %[4]s, text %[5]d runes, %[6]d log entries in ready.log.
@@ -158,13 +166,22 @@ Limits: page %[3]d MiB, part address %[4]s, text %[5]d runes, %[6]d log entries 
 	return text.String()
 }
 
+// firstNonBoardRoute is where a broker text meant for the session goes: a
+// board's log is the agent's page, so no broker text lands there.
+func firstNonBoardRoute(routes []RouteKey) (RouteKey, bool) {
+	for _, route := range routes {
+		if !isBoardRoute(route) {
+			return route, true
+		}
+	}
+	return RouteKey{}, false
+}
+
 // permissionNoticeRoutes picks who hears of a prompt that no held route can
 // answer: the first non-board route, else, for a boards-only session, every board.
 func permissionNoticeRoutes(routes []RouteKey) []RouteKey {
-	for _, route := range routes {
-		if !isBoardRoute(route) {
-			return []RouteKey{route}
-		}
+	if route, ok := firstNonBoardRoute(routes); ok {
+		return []RouteKey{route}
 	}
 	return routes
 }

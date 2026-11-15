@@ -3,6 +3,8 @@ package ipc
 import (
 	"fmt"
 	"strings"
+
+	"github.com/Andrometiq/c3/internal/channel"
 )
 
 // FormatAttached renders an AttachedMsg as the user-facing string the
@@ -24,6 +26,8 @@ func FormatAttached(a *AttachedMsg) string {
 		s := fmt.Sprintf("attached to %q", a.Name)
 		if a.Channel == "web" {
 			s += " (on-the-go chat)"
+		} else if a.Channel == channel.BoardChannelName {
+			s += " (live board)"
 		} else if a.TopicID != nil {
 			s += fmt.Sprintf(" (chat %d, thread %d)", a.ChatID, *a.TopicID)
 		} else {

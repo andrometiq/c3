@@ -3,6 +3,8 @@ package ipc
 import (
 	"strings"
 	"testing"
+
+	"github.com/Andrometiq/c3/internal/channel"
 )
 
 // TestFormatAttached_OKWithTopic verifies the OK-with-thread shape used
@@ -33,6 +35,15 @@ func TestFormatAttached_OKWeb(t *testing.T) {
 	msg := &AttachedMsg{OK: true, Channel: "web", Name: "web", ChatID: 42}
 	if got, want := FormatAttached(msg), `attached to "web" (on-the-go chat)`; got != want {
 		t.Fatalf("FormatAttached(ok+web)=%q, want %q", got, want)
+	}
+}
+
+// TestFormatAttached_BoardIsALiveBoardNeverADM: a board attach carries the
+// board's number in ChatID and no topic, which the DM shape would misname.
+func TestFormatAttached_BoardIsALiveBoardNeverADM(t *testing.T) {
+	msg := &AttachedMsg{OK: true, Channel: channel.BoardChannelName, Name: "board:plan", ChatID: 3}
+	if got, want := FormatAttached(msg), `attached to "board:plan" (live board)`; got != want {
+		t.Fatalf("FormatAttached(ok+board)=%q, want %q", got, want)
 	}
 }
 

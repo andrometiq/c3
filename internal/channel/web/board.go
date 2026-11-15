@@ -32,6 +32,8 @@ type boardChannel struct {
 	key        []byte
 	boards     map[string]*boardState
 	lastNumber int64
+
+	heldCountFailure sync.Once // a held-count error is logged once per run
 }
 
 // boardState is one board in memory, guarded by boardChannel.mu.
@@ -88,7 +90,8 @@ func (b *boardChannel) Name() string { return channel.BoardChannelName }
 
 func (b *boardChannel) Capabilities() c3types.Capabilities {
 	return c3types.Capabilities{
-		Channel: channel.BoardChannelName, RichText: true, MaxMessageRunes: channel.BoardTextMaxRunes,
+		// RichText false: the shell and the SDK's threads show text as typed.
+		Channel: channel.BoardChannelName, RichText: false, MaxMessageRunes: channel.BoardTextMaxRunes,
 		EditMessages: true, Typing: true, Reactions: true, MediaKinds: []c3types.MediaKind{c3types.MediaFile},
 		OriginalFile: true, MaxSendBytes: channel.BoardPageMaxBytes,
 		Inbound: c3types.InboundCaps{SupportsReplyContext: true},
@@ -195,7 +198,8 @@ func (b *boardChannel) logf(format string, args ...any) {
 }
 
 // SendReply takes the session's text, or one HTML file as the board's next
-// page. Held and other status texts go to the strip only.
+// page. Held and other status texts go to the strip only; a text that answers
+// a message (ReplyTo) is always logged, whatever it starts with.
 func (b *boardChannel) SendReply(args c3types.ReplyArgs) (int64, error) {
 	if args.Channel != "" && args.Channel != channel.BoardChannelName || args.TopicID != nil {
 		return 0, errors.New("board: destination is not a board route")
@@ -209,7 +213,7 @@ func (b *boardChannel) SendReply(args c3types.ReplyArgs) (int64, error) {
 	if strings.TrimSpace(args.Text) == "" {
 		return 0, errors.New("board: empty message")
 	}
-	if isStatusText(args.Text) {
+	if args.ReplyTo == nil && isStatusText(args.Text) {
 		err := b.withBoard(args.ChatID, func(board *boardState) error {
 			board.broadcast(jsonEvent("notice", map[string]string{"text": args.Text}))
 			return nil
@@ -245,6 +249,7 @@ func (b *boardChannel) sendPage(args c3types.ReplyArgs) (int64, error) {
 		if err := saveBoardRecord(directory, record); err != nil {
 			return err
 		}
+		dropExpiredBoardRevision(directory, record.Rev)
 		board.record = record
 		entry = boardLogEntry{Dir: "out", ID: board.nextID(), Op: "page", Text: args.Media[0].Caption, ReplyTo: replyToID(args.ReplyTo), Rev: record.Rev}
 		if len(warnings) != 0 {
@@ -290,6 +295,9 @@ func (b *boardChannel) EditMessage(args c3types.EditArgs) (*c3types.EditResult, 
 }
 
 func (b *boardChannel) React(args c3types.ReactArgs) error {
+	if args.Channel != "" && args.Channel != channel.BoardChannelName {
+		return errors.New("board: destination is not a board route")
+	}
 	if !isBoardEmoji(args.Emoji) {
 		return fmt.Errorf("board: %q is not one emoji", args.Emoji)
 	}
@@ -340,7 +348,8 @@ func (b *boardChannel) SetRouteHolder(chatID int64, topicID *int64, holder *chan
 }
 
 // refreshWaiting reads the held count without the store lock (a BoardHost
-// call) and tells the board's viewers when it changed.
+// call) and tells the board's viewers when it changed. Without a count (the
+// durable queue is off for this run) the waiting count keeps its last value.
 func (b *boardChannel) refreshWaiting(number int64) {
 	_, extension := b.boardHost()
 	if extension == nil {
@@ -348,7 +357,7 @@ func (b *boardChannel) refreshWaiting(number int64) {
 	}
 	count, err := extension.HeldCount(number)
 	if err != nil {
-		b.logf("board: held count for board %d: %v", number, err)
+		b.heldCountFailure.Do(func() { b.logf("board: no held counts, waiting counts keep their last value: %v", err) })
 		return
 	}
 	_ = b.withBoard(number, func(board *boardState) error {
