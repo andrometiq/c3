@@ -105,6 +105,52 @@ type PresenceNotifier interface {
 	SetRouteHolder(chatID int64, topicID *int64, holder *RouteHolder)
 }
 
+// BoardOwner is the one session that may claim a board. Stored with the board.
+type BoardOwner struct {
+	CLI       string `json:"cli"`
+	SessionID string `json:"session_id"` // stable session id
+	CWD       string `json:"cwd"`
+}
+
+// Board is one stored board. Its route is (board, Number, no topic).
+type Board struct {
+	Number   int64 // assigned once by the board channel, never reused
+	Name     string
+	Owner    BoardOwner
+	Link     string // the shell URL a viewer opens
+	IsClosed bool   // closed from the strip: read-only, never claimed again
+}
+
+// BoardKeeper is implemented by the board channel (internal/channel/web) and
+// called by the broker to create, find and name boards.
+type BoardKeeper interface {
+	// CreateBoard stores a new board for owner. A taken name returns the
+	// stored board unchanged with isCreated false, whoever owns it.
+	CreateBoard(name string, owner BoardOwner) (board Board, isCreated bool, err error)
+	BoardByName(name string) (Board, bool)
+	BoardByNumber(number int64) (Board, bool)
+	Boards() []Board
+	// StarterHTML is the embedded starter page a new board's attach result carries.
+	StarterHTML() (string, error)
+}
+
+// BoardHost is the host extension the board channel calls on the broker
+// (broker.BrokerHost). Boards are keyed by number.
+type BoardHost interface {
+	// CloseBoardRoute releases the board's route, re-picks the holder's
+	// output, drops the route from its session record and tells the session.
+	CloseBoardRoute(number int64) error
+	// HeldCount is how many inbound messages wait in the board's queue.
+	HeldCount(number int64) (int, error)
+}
+
+// BoardProvider is implemented by a channel that serves boards on its own
+// listener and login (web). The broker registers BoardChannel's result right
+// after that channel starts, and never when it fails to start. Never nil.
+type BoardProvider interface {
+	BoardChannel() Channel
+}
+
 // LocalAudioProvider is the optional retained-audio bridge implemented by a
 // channel whose voice file IDs resolve to files on the broker's local disk.
 // Implementations must accept only channel-minted IDs and fail closed for

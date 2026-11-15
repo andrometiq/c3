@@ -79,12 +79,26 @@ func registerConfiguredChannels(br *broker.Broker, mf *mappings.MappingsFile, te
 		if registration.factory == nil {
 			continue
 		}
-		if err := br.RegisterChannel(registration.factory()); err != nil {
-			log.Printf("c3-broker: channel %s failed to start: %v — continuing with other channels", registration.name, err)
-			fmt.Fprintf(os.Stderr, "c3-broker: channel %s failed to start: %v — continuing\n", registration.name, err)
+		transport := registration.factory()
+		if !registerChannel(br, registration.name, transport) {
+			continue
+		}
+		if provider, ok := transport.(channel.BoardProvider); ok {
+			registerChannel(br, channel.BoardChannelName, provider.BoardChannel())
 		}
 	}
 	br.StartVoiceRecovery()
+}
+
+// registerChannel starts one transport; a failure is logged and leaves the
+// others running.
+func registerChannel(br *broker.Broker, name string, transport channel.Channel) bool {
+	if err := br.RegisterChannel(transport); err != nil {
+		log.Printf("c3-broker: channel %s failed to start: %v — continuing with other channels", name, err)
+		fmt.Fprintf(os.Stderr, "c3-broker: channel %s failed to start: %v — continuing\n", name, err)
+		return false
+	}
+	return true
 }
 
 // Exit codes follow BSD sysexits(3) where applicable so shell scripts can

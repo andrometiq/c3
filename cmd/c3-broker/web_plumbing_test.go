@@ -176,6 +176,44 @@ func TestRegisterConfiguredChannelsDoesNotConstructDisabledWeb(t *testing.T) {
 	}
 }
 
+type boardProvidingChannel struct {
+	*registrationChannel
+	board *registrationChannel
+}
+
+func (c *boardProvidingChannel) BoardChannel() channel.Channel { return c.board }
+
+func TestBoardChannelRegistersOnlyWhenWebStarts(t *testing.T) {
+	for _, test := range []struct {
+		name          string
+		webStartError error
+		wantBoard     bool
+	}{
+		{name: "web started", wantBoard: true},
+		{name: "web failed", webStartError: errors.New("listen: address in use")},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			b := newRegistrationBroker(t, registrationMappings(nil))
+			defer b.Shutdown()
+			boardChannel := &registrationChannel{name: channel.BoardChannelName}
+			webChannel := &boardProvidingChannel{
+				registrationChannel: &registrationChannel{name: "web", startErr: test.webStartError},
+				board:               boardChannel,
+			}
+			registerConfiguredChannels(b, b.Mappings(),
+				func() channel.Channel { return &registrationChannel{name: "telegram"} },
+				func() channel.Channel { return webChannel },
+			)
+			_, err := b.Channel(channel.BoardChannelName)
+			if isRegistered := err == nil; isRegistered != test.wantBoard || boardChannel.started != test.wantBoard {
+				t.Fatalf("board registered=%v started=%v, want %v", isRegistered, boardChannel.started, test.wantBoard)
+			}
+		})
+	}
+}
+
 func TestRunStatusPrintsWebListener(t *testing.T) {
 	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
