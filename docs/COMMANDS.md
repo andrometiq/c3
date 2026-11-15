@@ -106,12 +106,16 @@ once").
 | `"dm"` / `"DM"` (case-insensitive) | `target = "dm"` (DM disambiguation may fire) |
 | `"web"` / `"telegram"` (case-insensitive) | channel selector |
 | `"+<selector>"` (for example `+web`, `+c3`) | parse `<selector>` normally, set `add = true` |
+| `"+board:<name>"`                  | make or re-hold that live board (prefix in any case), always added ([BOARD.md](BOARD.md)) |
 | `"<int>"`                          | `topic_id = <int>`                           |
 | `"create <name>"`                  | `name = <name>, create = true`               |
 | `"-y <name>"` / `"yes <name>"`     | `name = <name>, create = true`               |
 | `"<other string>"`                 | `name = <string>`                            |
 
 Whitespace is trimmed. Unparsable input falls through to `name`.
+`board:<name>` without `+`, any structured attach naming the `board`
+channel, and a topic name starting `board:` are refused: only the session that made a board can hold it, and only
+through this expr.
 
 `+web` / `+c3` add that route to the held set and make it output. The
 structured equivalent is `add=true`. Without `+` or `add=true`, an explicit

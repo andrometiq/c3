@@ -40,8 +40,10 @@ may bind only loopback or a Tailscale address (`100.64.0.0/10` or
 `fd7a:115c:a1e0::/48`). Web refuses to start unless Telegram is already
 registered and `master_user_id` is nonzero and in `allowlist.users`. Only
 `enabled`, `listen`, `public_url`, `tls`, and `front` (boards behind an
-authenticated HTTPS front) are legal in the web stanza.
-`c3-broker status` prints them and the live CA fingerprint when TLS is on.
+authenticated HTTPS front, [BOARD.md](BOARD.md#the-authenticated-https-front))
+are legal in the web stanza. `c3-broker status` prints `enabled`, `listen`,
+`public_url` and `tls`, and the live CA fingerprint when TLS is on; it does not
+print `front`.
 
 ## Attach and use it
 
@@ -304,6 +306,17 @@ directory, and 0600 file mode. The file store and conversation replay each keep
 their newest 200 entries independently. A replayed card can therefore outlive
 its file; Open performs a HEAD check, marks a missing file **expired**, and
 disables the card rather than opening a broken viewer.
+
+## Live boards
+
+A session can also publish a live board: one HTML page per board, served on
+this listener at `/board/<name>` under the same login, in the same sandboxed
+frame and CSP as documents. The owner comments on and approves the page part by
+part, and only the session that made a board can hold it
+(`attach +board:<name>`). Boards are their own routes and never touch the web
+chat's stream, replay or message ids. The `front` key puts boards, and only
+boards, behind an authenticated HTTPS front. Routes, trust, storage and the
+front are in [BOARD.md](BOARD.md).
 
 ## Drive view
 

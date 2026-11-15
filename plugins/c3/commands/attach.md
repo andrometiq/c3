@@ -1,6 +1,6 @@
 ---
 description: Attach this session to a route. A bare target switches; +<target> adds it to the held set and makes it output.
-argument-hint: "[empty | [+]dm | [+]web | [+]<topic-id> | [+]<name> | \"create <name>\" | \"-y <name>\"]"
+argument-hint: "[empty | [+]dm | [+]web | [+]<topic-id> | [+]<name> | +board:<name> | \"create <name>\" | \"-y <name>\"]"
 allowed-tools: ["mcp__plugin_c3_c3__attach", "mcp__plugin_c3_c3__topics", "AskUserQuestion"]
 ---
 
@@ -11,6 +11,8 @@ Call `mcp__plugin_c3_c3__attach` with `expr` set to the user's argument string (
 - Returns a proposal (`create` / `use_existing_other_group` / `disambiguate_dm` / `force_steal`) requiring confirmation
 
 A bare target such as `web` or `c3` SWITCHES: it claims that route and releases the session's other routes. A `+` target such as `+web` or `+c3` ADDS the route, keeps the routes already held, and makes the added route the output. The structured equivalent is `add=true`. Adding a route this session already holds is refused. If the target is held by another session, use the ordinary `force_steal` proposal and explicit confirmation flow below; never steal automatically.
+
+`+board:<name>` makes or re-holds a live board: a page the owner comments on and approves part by part from a phone or browser. It is always added beside the held routes and never moves the output route unless nothing else is held. Only the session that made a board can hold it; anyone else is refused, even with `steal`, and re-attaching a board this session already holds is harmless. The result carries the board's link, the rules for answering on it and, for a new board, the starter page. Follow the `c3:board` skill from there.
 
 If the response is **needs_confirmation** with proposal action:
 

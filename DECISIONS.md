@@ -3,6 +3,42 @@
 Entries are newest first. This is the public architecture record: it records
 rulings and rationale, never private operational details.
 
+## D042: Live boards belong to the session that made them
+
+**Date:** 2026-11-15
+
+**Decision:** A board is one agent session's live HTML page that the owner can
+comment on and approve part by part from any browser. Each board is its own
+route (board, number, no topic) on a separate in-tree `board` channel served by
+the web listener, claimed only with the attach expr `+board:<name>`. Only the
+session that made it (same CLI, stable session id and cwd) can hold it; steal
+never evicts its owner, and recovery restores it after a resume or a broker
+restart. One agent answering every board was rejected: each board is bound to
+the exact session that produced it.
+
+The agent's whole HTML file is resent as the single truth for every change. C3
+inlines its SDK into the page, which runs in a sandboxed frame inside C3's
+shell; the SDK swaps only the parts whose content changed and reloads the frame
+for anything else. The shell is the only writer of agent strings to its own
+document (as text), the only one that reloads the frame, and loads the frame
+with an HMAC capability bound to the board and the viewer; COOP cuts any opener
+and the shell's CSP pins the frame to that board's page.
+
+An authenticated HTTPS front (`channels.web.front`) may stand in for C3's own
+login on board routes only: a request is the operator only when its TCP peer is
+the front's address and the front's identity header names the configured
+operator. Front requests reach only `/board` routes, and a capability minted on
+one path never opens the page on the other.
+
+Wire additions accepted during the build: an SSE `notice` event for strip-only
+texts (never forwarded to the frame) and `holder` in `status`. Claude's attach
+tool description does not mention boards, so running Claude sessions keep their
+in-place upgrade; the plugin skill teaches `+board:<name>`. Board text is plain:
+the threads show it as typed. The line budget was about 2,130 non-test lines of
+code; the slice added about 3,100 (155 deleted), mostly because boards are a
+second full channel in the web package. Board act dedup lives in memory and does
+not survive a broker restart.
+
 ## D041: Health only reports; outbound evidence has two kinds
 
 **Date:** 2026-10-01
