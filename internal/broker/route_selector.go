@@ -72,9 +72,9 @@ func sessionAttachmentMatchesStub(attachment mappings.SessionAttachment, stub *S
 }
 
 // resolveHeldRoute is the trust boundary for caller-supplied route selectors.
-// A selector may name a held channel or a held Telegram topic. Exactly one held
-// route must match; unknown and ambiguous values fail closed and never fall
-// back to the output route.
+// A selector may name a held channel, a held Telegram topic or a held board
+// (board:<name>). Exactly one held route must match; unknown and ambiguous
+// values fail closed and never fall back to the output route.
 func (b *Broker) resolveHeldRoute(stub *Stub, selector string) (RouteKey, error) {
 	selector = strings.TrimSpace(selector)
 	if selector == "" {
@@ -86,7 +86,7 @@ func (b *Broker) resolveHeldRoute(stub *Stub, selector string) (RouteKey, error)
 	var matches []RouteKey
 	for _, route := range stub.Routes() {
 		matched := strings.EqualFold(route.Channel, selector)
-		if !matched && route.Channel == "telegram" {
+		if !matched && (route.Channel == "telegram" || isBoardRoute(route)) {
 			ref := b.routeRefForKey(route)
 			matched = ref.Name != "" && strings.EqualFold(ref.Name, selector)
 		}
@@ -154,7 +154,7 @@ func (b *Broker) routeRefForKey(key RouteKey) mappings.RouteRef {
 			ref.Name = fmt.Sprintf("topic-%d", key.TopicID)
 		}
 	} else {
-		ref.Name = nonTopicRouteName(key.Channel)
+		ref.Name = b.nonTopicRouteName(key)
 	}
 	return ref
 }
@@ -199,6 +199,9 @@ func (b *Broker) withRouteSet(stub *Stub, msg ipc.AttachedMsg) ipc.AttachedMsg {
 
 func (b *Broker) routeLabel(key RouteKey) string {
 	ref := b.routeRefForKey(key)
+	if isBoardRoute(key) {
+		return ref.Name
+	}
 	if ref.Name == "" || strings.EqualFold(ref.Name, ref.Channel) {
 		return ref.Channel
 	}

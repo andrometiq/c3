@@ -40,6 +40,7 @@ import (
 
 	"github.com/gorilla/websocket"
 
+	"github.com/Andrometiq/c3/internal/channel"
 	"github.com/Andrometiq/c3/internal/ipc"
 )
 
@@ -416,7 +417,9 @@ func (a *adapter) fireRecover(ctx context.Context, conn *ipc.Conn, stableID, cwd
 			a.amu.Unlock()
 			return // a detach superseded this recovery's route snapshot
 		}
-		a.rememberAttachLocked(rememberedIdentityReq(cwd, resp.ChatID, resp.TopicID, resp.Group))
+		if resp.Channel != channel.BoardChannelName { // a topic-less board would replay as a DM attach
+			a.rememberAttachLocked(rememberedIdentityReq(cwd, resp.ChatID, resp.TopicID, resp.Group))
+		}
 		// Route state becomes visible only AFTER the replay identity above is
 		// remembered (same goroutine): once the session can name its topic, a
 		// broker restart is guaranteed to find a replayable claim.

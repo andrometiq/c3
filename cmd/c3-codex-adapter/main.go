@@ -66,6 +66,7 @@ import (
 	"github.com/Andrometiq/c3/internal/broker"
 	"github.com/Andrometiq/c3/internal/c3types"
 	"github.com/Andrometiq/c3/internal/capability"
+	"github.com/Andrometiq/c3/internal/channel"
 	"github.com/Andrometiq/c3/internal/ipc"
 	"github.com/Andrometiq/c3/internal/mcptools"
 	"github.com/Andrometiq/c3/internal/mode"
@@ -800,12 +801,12 @@ func (a *adapter) replayLastAttach() {
 	if len(a.routes) > 0 {
 		requests = nil
 		for _, route := range a.routes {
-			if a.outputRoute != nil && routeKeyFor(route.Channel, route.ChatID, route.TopicID) == routeKeyFor(a.outputRoute.Channel, a.outputRoute.ChatID, a.outputRoute.TopicID) {
+			if route.Channel == channel.BoardChannelName || (a.outputRoute != nil && routeKeyFor(route.Channel, route.ChatID, route.TopicID) == routeKeyFor(a.outputRoute.Channel, a.outputRoute.ChatID, a.outputRoute.TopicID)) {
 				continue
 			}
 			requests = append(requests, rememberedRouteReq(a.lastAttach.CWD, route))
 		}
-		if a.outputRoute != nil {
+		if a.outputRoute != nil && a.outputRoute.Channel != channel.BoardChannelName {
 			requests = append(requests, rememberedRouteReq(a.lastAttach.CWD, *a.outputRoute))
 		}
 	}
@@ -841,7 +842,7 @@ func (a *adapter) applyReleaseLocked(routes []ipc.RouteRef, output *ipc.RouteRef
 		cwd = a.lastAttach.CWD
 	}
 	a.lastAttach = nil
-	if output != nil {
+	if output != nil && output.Channel != channel.BoardChannelName {
 		a.rememberAttachLocked(rememberedRouteReq(cwd, *output))
 	}
 	if len(routes) == 0 {
@@ -1214,7 +1215,7 @@ func (a *adapter) dispatchReleaseResult(raw []byte) {
 			a.amu.Unlock()
 			if resp.Output == nil {
 				termtitle.Clear()
-			} else {
+			} else if resp.Output.Channel != channel.BoardChannelName {
 				termtitle.EmitAttach(&ipc.AttachedMsg{OK: true, Name: resp.Output.Name, Group: resp.Output.Group})
 			}
 		}
@@ -1333,7 +1334,7 @@ func (a *adapter) registerTools(srv *mcp.Server) {
 		{
 			tool: &mcp.Tool{
 				Name:        "attach",
-				Description: "Attach this Codex session to a Telegram topic or the web route. Either pass `expr` (the raw selector string the broker parses, including 'web') or structured args. Prefix a target with `+` (e.g. expr `+web`, `+c3`) to ADD it to your held routes and make it the output route, instead of switching (the default). Structured: `add=true`. Same proposal-flow semantics as Claude Code's attach. If your CLI host's policy layer rejects this call (e.g. Codex approvals_reviewer=auto_review surfacing 'unacceptable risk rejection'), re-invoke with `policy_rejected=true` so the user sees the actionable next-step (tenant admin approval) rather than a silent failure.",
+				Description: "Attach this Codex session to a Telegram topic or the web route. Either pass `expr` (the raw selector string the broker parses, including 'web') or structured args. Prefix a target with `+` (e.g. expr `+web`, `+c3`) to ADD it to your held routes and make it the output route, instead of switching (the default). Structured: `add=true`. Same proposal-flow semantics as Claude Code's attach. If your CLI host's policy layer rejects this call (e.g. Codex approvals_reviewer=auto_review surfacing 'unacceptable risk rejection'), re-invoke with `policy_rejected=true` so the user sees the actionable next-step (tenant admin approval) rather than a silent failure. Expr `+board:<name>` makes or re-holds a live board that only this session can hold; the result gives its link and the rules for answering on it.",
 				InputSchema: map[string]any{
 					"type": "object",
 					"properties": map[string]any{
@@ -1606,7 +1607,8 @@ func (a *adapter) toolAttach(ctx context.Context, req *mcp.CallToolRequest) (*mc
 		return toolErrorResult("canceled"), nil
 	case res := <-ch:
 		attached, _ := res.Result["_attached"].(ipc.AttachedMsg)
-		if attached.OK {
+		// A board is never remembered for replay or shown as the title: recovery restores it.
+		if attached.OK && attached.Channel != channel.BoardChannelName {
 			// D3 (adapter-ipc-3): remember the successful attach so a broker
 			// restart re-claims this route via replayLastAttach. §3d1: a
 			// bare-resolved attach is remembered as its resolved identity so a

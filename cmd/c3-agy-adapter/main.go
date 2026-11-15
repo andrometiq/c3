@@ -31,6 +31,7 @@ import (
 
 	"github.com/Andrometiq/c3/internal/broker"
 	"github.com/Andrometiq/c3/internal/c3types"
+	"github.com/Andrometiq/c3/internal/channel"
 	"github.com/Andrometiq/c3/internal/ipc"
 	"github.com/Andrometiq/c3/internal/mcptools"
 	"github.com/Andrometiq/c3/internal/mode"
@@ -735,7 +736,9 @@ func (a *adapter) fireRecover(ctx context.Context, stableID, cwd string) {
 			log.Printf("recover-session: session=%s registered (no prior attachment to re-claim)", stableID)
 			return
 		}
-		a.rememberAttach(rememberedIdentityReq(cwd, resp.ChatID, resp.TopicID, resp.Group))
+		if resp.Channel != channel.BoardChannelName { // a topic-less board would replay as a DM attach
+			a.rememberAttach(rememberedIdentityReq(cwd, resp.ChatID, resp.TopicID, resp.Group))
+		}
 		log.Printf("recover-session: auto-attached to %q (queued=%d)", resp.Name, resp.QueuedCount)
 		if text := renderAgyRecoverNotice(resp); text != "" {
 			a.emitRecoverNotice(text)
@@ -1279,7 +1282,8 @@ func (a *adapter) toolAttach(ctx context.Context, req *mcp.CallToolRequest) (*mc
 		return toolErrorResult("canceled"), nil
 	case res := <-ch:
 		attached, _ := res.Result["_attached"].(ipc.AttachedMsg)
-		if attached.OK {
+		// A board is never remembered for replay or shown as the title: recovery restores it.
+		if attached.OK && attached.Channel != channel.BoardChannelName {
 			a.rememberAttach(resolvedAttachReq(attachReq, attached))
 			termtitle.EmitAttach(&attached)
 		}
@@ -1506,7 +1510,7 @@ func (a *adapter) registerTools(srv *mcp.Server) {
 		{
 			tool: &mcp.Tool{
 				Name:        "attach",
-				Description: "Attach this session to a Telegram topic. Empty = silently re-attach this session's own topic, or (first time) show a picker. Prefix a target with `+` (e.g. expr `+web`, `+c3`) to ADD it to your held routes and make it the output route, instead of switching (the default). Structured: `add=true`. `target='dm'` for DM. `name='X'` for a topic name. `topic_id=N` to claim a known thread. `create=true` to confirm creation. `steal=true` only after user-confirmed force_steal.",
+				Description: "Attach this session to a Telegram topic. Empty = silently re-attach this session's own topic, or (first time) show a picker. Prefix a target with `+` (e.g. expr `+web`, `+c3`) to ADD it to your held routes and make it the output route, instead of switching (the default). Structured: `add=true`. `target='dm'` for DM. `name='X'` for a topic name. `topic_id=N` to claim a known thread. `create=true` to confirm creation. `steal=true` only after user-confirmed force_steal. Expr `+board:<name>` makes or re-holds a live board that only this session can hold; the result gives its link and the rules for answering on it.",
 				InputSchema: map[string]any{
 					"type": "object",
 					"properties": map[string]any{

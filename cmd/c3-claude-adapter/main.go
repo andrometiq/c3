@@ -62,6 +62,7 @@ import (
 	"github.com/Andrometiq/c3/internal/buildidentity"
 	"github.com/Andrometiq/c3/internal/c3types"
 	"github.com/Andrometiq/c3/internal/capability"
+	"github.com/Andrometiq/c3/internal/channel"
 	"github.com/Andrometiq/c3/internal/hostid"
 	"github.com/Andrometiq/c3/internal/ipc"
 	"github.com/Andrometiq/c3/internal/mcptools"
@@ -2156,7 +2157,8 @@ func (a *adapter) toolAttach(ctx context.Context, req *mcp.CallToolRequest) (*mc
 		return toolErrorResult("canceled"), nil
 	case res := <-ch:
 		attached, _ := res.Result["_attached"].(ipc.AttachedMsg)
-		if attached.OK {
+		// A board is never remembered for replay or shown as the title: recovery restores it.
+		if attached.OK && attached.Channel != channel.BoardChannelName {
 			// §3d1: remember the RESOLVED identity for a bare attach so a
 			// post-broker-restart replay re-binds the same topic explicitly.
 			a.rememberAttachForIdentity(resolvedAttachReq(attachReq, attached), attachStableID)
@@ -3064,7 +3066,9 @@ func (a *adapter) fireRecoverLocked(ctx context.Context, entry sessionhandoff.En
 		// precisely because such topics occur). rememberedIdentityReq maps
 		// resp.TopicID==nil → {Target:"dm"} and a topic → {TopicID, Group}, which a
 		// fresh broker re-claims via attachByTopicID (item B, shared with item C).
-		a.rememberAttachForIdentity(rememberedIdentityReq(entry.CWD, resp.ChatID, resp.TopicID, resp.Group), entry.StableSessionID)
+		if resp.Channel != channel.BoardChannelName { // a topic-less board would replay as a DM attach
+			a.rememberAttachForIdentity(rememberedIdentityReq(entry.CWD, resp.ChatID, resp.TopicID, resp.Group), entry.StableSessionID)
+		}
 		log.Printf("recover-session: auto-attached to %q (queued=%d)", resp.Name, resp.QueuedCount)
 		if text := renderRecoverNotice(resp); text != "" {
 			// Defer rather than emit now: this may run in the resume idle gap,

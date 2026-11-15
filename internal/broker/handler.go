@@ -602,7 +602,7 @@ func (b *Broker) handleRecoverSession(conn *ipc.Conn, stub *Stub, raw []byte, ro
 					resp.Group = tp.Group
 				}
 			} else {
-				resp.Name = nonTopicRouteName(key.Channel)
+				resp.Name = b.nonTopicRouteName(key)
 			}
 		}
 		resp.Routes, resp.Output = b.routeSetRefs(stub)
@@ -611,7 +611,9 @@ func (b *Broker) handleRecoverSession(conn *ipc.Conn, stub *Stub, raw []byte, ro
 		// when it fires in the resume idle gap (2026-06-24), so the Telegram
 		// message is the reliable signal that auto-attach-on-resume happened.
 		// Async so a slow send never delays this recover response.
-		go b.sendRecoverWelcome(stub, key, resp.Name, cnt)
+		if !isBoardRoute(key) {
+			go b.sendRecoverWelcome(stub, key, resp.Name, cnt)
+		}
 	}
 	_ = conn.WriteJSON(resp)
 }
@@ -853,11 +855,13 @@ func (b *Broker) handlePermissionRequest(_ *ipc.Conn, stub *Stub, raw []byte) {
 		break
 	}
 	if route == nil {
-		b.sendPermissionNotice(routes[0], req)
+		for _, notice := range permissionNoticeRoutes(routes) {
+			b.sendPermissionNotice(notice, req)
+		}
 		return
 	}
 	for _, candidate := range routes {
-		if candidate == *route {
+		if candidate == *route || isBoardRoute(candidate) {
 			continue
 		}
 		candidateChannel, err := b.Channel(candidate.Channel)
@@ -951,6 +955,9 @@ func (b *Broker) sendPermissionNotice(route RouteKey, req ipc.PermissionReq) {
 		topicID = &topic
 	}
 	text := fmt.Sprintf("⏸ Permission needed at the laptop: %s — %s", req.ToolName, req.Preview)
+	if isBoardRoute(route) {
+		text = boardPermissionNotice
+	}
 	if _, err := ch.SendReply(c3types.ReplyArgs{
 		Channel: route.Channel, ChatID: route.ChatID, TopicID: topicID,
 		Text: text, Markup: c3types.MarkupNone,
@@ -1330,7 +1337,7 @@ func (b *Broker) stubMatchesPID(s *Stub, reqPID int) (rule string, ok bool) {
 // "topic-<id>" fallback so we never surface a bare integer.
 func pingTopicLabel(b *Broker, key RouteKey) string {
 	if !key.HasTopic {
-		return nonTopicRouteName(key.Channel)
+		return b.nonTopicRouteName(key)
 	}
 	if tp, ok := b.Mappings().LookupTopicByID(key.Channel, key.ChatID, key.TopicID); ok && tp.Name != "" {
 		return tp.Name
@@ -1444,7 +1451,7 @@ func (b *Broker) handleListSessions(conn *ipc.Conn, raw []byte) {
 // (its consumer doesn't want the group qualifier).
 func sessionTopicLabel(b *Broker, key RouteKey) string {
 	if !key.HasTopic {
-		return nonTopicRouteName(key.Channel)
+		return b.nonTopicRouteName(key)
 	}
 	tp, ok := b.Mappings().LookupTopicByID(key.Channel, key.ChatID, key.TopicID)
 	if !ok || tp.Name == "" {

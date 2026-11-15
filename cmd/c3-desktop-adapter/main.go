@@ -41,6 +41,7 @@ import (
 
 	"github.com/Andrometiq/c3/internal/broker"
 	"github.com/Andrometiq/c3/internal/c3types"
+	"github.com/Andrometiq/c3/internal/channel"
 	"github.com/Andrometiq/c3/internal/ipc"
 	"github.com/Andrometiq/c3/internal/mcptools"
 	"github.com/Andrometiq/c3/internal/mode"
@@ -432,6 +433,12 @@ func (a *adapter) recoverBroker(ctx context.Context) bool {
 			log.Printf("broker reconnected (attempt %d)", attempt)
 			a.clearBrokerDownAdvisory()
 			a.replayLastAttach()
+			// The per-process id outlives the broker: register it again after the
+			// replay so the broker restores every recorded route. Off this
+			// goroutine, which must stay free to read the response.
+			if a.recoverFired.CompareAndSwap(true, false) {
+				go a.fireRecover(ctx, sessionID(), desktopCWD())
+			}
 			return true
 		}
 		log.Printf("broker reconnect attempt %d failed: %v (retry in %v)", attempt, err, backoff)
@@ -528,7 +535,9 @@ func (a *adapter) fireRecover(ctx context.Context, stableID, cwd string) {
 			log.Printf("recover-session: session=%s registered (no prior attachment to re-claim)", stableID)
 			return
 		}
-		a.rememberAttach(rememberedIdentityReq(cwd, resp.ChatID, resp.TopicID, resp.Group))
+		if resp.Channel != channel.BoardChannelName { // a topic-less board would replay as a DM attach
+			a.rememberAttach(rememberedIdentityReq(cwd, resp.ChatID, resp.TopicID, resp.Group))
+		}
 		log.Printf("recover-session: re-attached to %q (queued=%d)", resp.Name, resp.QueuedCount)
 		if text := renderDesktopRecoverNotice(resp); text != "" {
 			a.emitRecoverNotice(text)
@@ -1129,7 +1138,8 @@ func (a *adapter) toolAttach(ctx context.Context, req *mcp.CallToolRequest) (*mc
 		return toolErrorResult("canceled"), nil
 	case res := <-ch:
 		attached, _ := res.Result["_attached"].(ipc.AttachedMsg)
-		if attached.OK {
+		// A board is never remembered for replay or shown as the title: recovery restores it.
+		if attached.OK && attached.Channel != channel.BoardChannelName {
 			a.rememberAttach(resolvedAttachReq(attachReq, attached))
 			termtitle.EmitAttach(&attached)
 		}
@@ -1507,7 +1517,7 @@ func (a *adapter) registerTools(srv *mcp.Server) {
 		{
 			tool: &mcp.Tool{
 				Name:        "attach",
-				Description: "Attach this session to a Telegram topic. Empty = show a picker of suggested topics for the user to choose (never guess). Prefix a target with `+` (e.g. expr `+web`, `+c3`) to ADD it to your held routes and make it the output route, instead of switching (the default). Structured: `add=true`. `target='dm'` for DM. `name='X'` for a topic name. `topic_id=N` to claim a known thread. `create=true` to confirm creation. `steal=true` only after user-confirmed force_steal.",
+				Description: "Attach this session to a Telegram topic. Empty = show a picker of suggested topics for the user to choose (never guess). Prefix a target with `+` (e.g. expr `+web`, `+c3`) to ADD it to your held routes and make it the output route, instead of switching (the default). Structured: `add=true`. `target='dm'` for DM. `name='X'` for a topic name. `topic_id=N` to claim a known thread. `create=true` to confirm creation. `steal=true` only after user-confirmed force_steal. Expr `+board:<name>` makes or re-holds a live board that only this session can hold; the result gives its link and the rules for answering on it.",
 				InputSchema: map[string]any{
 					"type": "object",
 					"properties": map[string]any{

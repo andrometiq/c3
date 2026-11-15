@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Andrometiq/c3/internal/channel"
 	"github.com/Andrometiq/c3/internal/ipc"
 )
 
@@ -181,7 +182,9 @@ func (a *adapter) fireRecoverEpoch(ctx context.Context, stableID, cwd string, ep
 			log.Printf("recover-session: session=%s registered (no prior attachment to re-claim)", stableID)
 			return
 		}
-		a.rememberAttach(rememberedIdentityReq(cwd, resp.ChatID, resp.TopicID, resp.Group))
+		if resp.Channel != channel.BoardChannelName { // a topic-less board would replay as a DM attach
+			a.rememberAttach(rememberedIdentityReq(cwd, resp.ChatID, resp.TopicID, resp.Group))
+		}
 		log.Printf("recover-session: auto-attached to %q (queued=%d)", resp.Name, resp.QueuedCount)
 		if text := renderGrokRecoverNotice(resp); text != "" {
 			a.emitRecoverNotice(text)

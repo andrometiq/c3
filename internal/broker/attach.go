@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/Andrometiq/c3/internal/c3types"
+	"github.com/Andrometiq/c3/internal/channel"
 	"github.com/Andrometiq/c3/internal/ipc"
 	"github.com/Andrometiq/c3/internal/mappings"
 )
@@ -71,7 +72,24 @@ func (b *Broker) handleAttach(conn *ipc.Conn, stub *Stub, raw []byte) {
 		return
 	}
 
+	// Only the expr +board:<name> reaches a board (spaces after + allowed, as
+	// for topics); every other shape that names the board channel is refused,
+	// stanza or not, so no structured path can build or steal a board route.
+	expr := strings.TrimSpace(req.Expr)
+	if selector := strings.TrimSpace(strings.TrimPrefix(expr, "+")); strings.HasPrefix(selector, channel.BoardSelectorPrefix) {
+		if !strings.HasPrefix(expr, "+") {
+			_ = conn.WriteJSON(ipc.AttachedMsg{Op: ipc.OpAttached, OK: false, Err: boardAttachShapeRefusal})
+			return
+		}
+		b.attachBoard(conn, stub, strings.TrimPrefix(selector, channel.BoardSelectorPrefix), req.Steal, req.Replay)
+		return
+	}
+
 	chanName, resolveErr := b.resolveAttachChannel(&req, stub)
+	if chanName == channel.BoardChannelName {
+		_ = conn.WriteJSON(ipc.AttachedMsg{Op: ipc.OpAttached, OK: false, Err: boardAttachShapeRefusal})
+		return
+	}
 	if chanName == "" {
 		if resolveErr != "" {
 			_ = conn.WriteJSON(ipc.AttachedMsg{Op: ipc.OpAttached, OK: false, Err: resolveErr})
@@ -169,7 +187,7 @@ func (b *Broker) handleAttach(conn *ipc.Conn, stub *Stub, raw []byte) {
 func (b *Broker) attachBare(conn *ipc.Conn, stub *Stub, chanName, cwd, group string, steal, replay, add bool) {
 	// (i) Already attached — idempotent OK, no re-claim, no re-peek.
 	if cur := stub.OutputRoute(); cur != nil {
-		name, groupName := nonTopicRouteName(cur.Channel), ""
+		name, groupName := b.nonTopicRouteName(*cur), ""
 		var topicID *int64
 		if cur.HasTopic {
 			t := cur.TopicID
@@ -198,7 +216,7 @@ func (b *Broker) attachBare(conn *ipc.Conn, stub *Stub, chanName, cwd, group str
 	// stamp both straight onto the response (no withBacklog re-peek, which would
 	// re-introduce the §3c double-peek TOCTOU on this manual path).
 	if key, cnt, preview, ok := b.recoverSession(stub); ok {
-		name, groupName := nonTopicRouteName(key.Channel), ""
+		name, groupName := b.nonTopicRouteName(key), ""
 		if sa, ok := b.lookupSessionAttachment(stub.CLI, stub.StableSessionIDValue()); ok {
 			name = sa.Name
 			groupName = sa.Group
@@ -212,7 +230,7 @@ func (b *Broker) attachBare(conn *ipc.Conn, stub *Stub, chanName, cwd, group str
 					name = fmt.Sprintf("topic-%d", key.TopicID)
 				}
 			} else {
-				name = nonTopicRouteName(key.Channel)
+				name = b.nonTopicRouteName(key)
 			}
 		}
 		var topicID *int64
@@ -912,15 +930,16 @@ func (b *Broker) heldByDifferentLiveSession(key RouteKey, stub *Stub) (*Stub, bo
 // steal=true).
 //
 // Switch mode preserves the legacy invariant by claiming the new route first
-// and releasing every other held route only after success. Add mode keeps prior
-// channels, refuses a second route on the same channel, and makes the new route
-// output.
+// and releasing every other held route but boards only after success. Add mode
+// keeps prior channels, refuses a second route on the same channel, and makes
+// the new route output. A board is always added, one of many, and becomes
+// output only when the session held nothing.
 //
 // steal=true: the user has confirmed displacement of any existing holder.
 // Force-release first, then claim. Only this path can evict a live PID's
 // claim; everything else returns force_steal proposal for confirmation.
 func (b *Broker) tryClaim(conn *ipc.Conn, stub *Stub, key RouteKey, label string, steal, replay, add bool) bool {
-	if add {
+	if add && !isBoardRoute(key) {
 		for _, held := range stub.Routes() {
 			if held.Channel != key.Channel {
 				continue
@@ -1006,7 +1025,7 @@ func (b *Broker) tryClaim(conn *ipc.Conn, stub *Stub, key RouteKey, label string
 	oldOutput := stub.OutputRoute()
 	if !add {
 		for _, held := range stub.Routes() {
-			if held == key {
+			if held == key || isBoardRoute(held) {
 				continue
 			}
 			b.Routes.Release(held, stub.ConnID)
@@ -1017,8 +1036,10 @@ func (b *Broker) tryClaim(conn *ipc.Conn, stub *Stub, key RouteKey, label string
 	// This is a legitimate, human-driven explicit/steal claim — confirm the route so
 	// the destructive consume paths (spec §5 tripwire) will service it.
 	stub.MarkRouteConfirmed(key)
-	stub.SetOutputRoute(key)
-	b.enqueueOutputRoleChange(stub, oldOutput, &key)
+	if !isBoardRoute(key) || oldOutput == nil {
+		stub.SetOutputRoute(key)
+		b.enqueueOutputRoleChange(stub, oldOutput, &key)
+	}
 	// …and it retires the user-detached barrier: someone who detaches and then
 	// deliberately attaches again must be honored. Only RECOVERY stays blocked,
 	// which is why this clear lives in tryClaim (the explicit-claim site) and NOT in
@@ -1028,7 +1049,7 @@ func (b *Broker) tryClaim(conn *ipc.Conn, stub *Stub, key RouteKey, label string
 	// barrier standing, because nothing about the user's detach was reversed.
 	stub.SetExplicitlyDetached(false)
 	b.rearmDelivery(stub)
-	if isFresh {
+	if isFresh && !isBoardRoute(key) {
 		go b.sendWelcome(stub, key, label)
 	}
 	return true
@@ -1349,6 +1370,10 @@ func (b *Broker) recoverSession(stub *Stub) (RouteKey, int, []ipc.QueuedItem, bo
 	claimedKeys := make([]RouteKey, 0, len(refs))
 	for _, ref := range refs {
 		key := routeKeyFromRef(ref)
+		if isBoardRoute(key) && !b.isBoardClaimableBy(key.ChatID, stub) {
+			log.Printf("recover: SKIPPED session=%s route=%q (board closed, gone or not this session's)", sid, ref.Name)
+			continue
+		}
 		if _, held := b.heldByDifferentLiveSession(key, stub); held {
 			log.Printf("recover: SKIPPED session=%s route=%q (held by another live session)", sid, ref.Name)
 			continue
@@ -1401,9 +1426,13 @@ func (b *Broker) recordCurrentRoutesForStable(stub *Stub) {
 	b.recordSessionAttachment(stub)
 }
 
-func nonTopicRouteName(channelName string) string {
-	if channelName == "web" {
+// nonTopicRouteName names a route without a topic: web, board:<name> or dm.
+func (b *Broker) nonTopicRouteName(key RouteKey) string {
+	switch key.Channel {
+	case "web":
 		return "web"
+	case channel.BoardChannelName:
+		return b.boardSelector(key.ChatID)
 	}
 	return "dm"
 }
@@ -1579,12 +1608,14 @@ func (b *Broker) resolveAttachChannel(req *ipc.AttachReq, stub *Stub) (string, s
 	if req.Channel != "" {
 		return req.Channel, ""
 	}
+	// A board is never the channel a bare attach resolves to: it has no stanza,
+	// and attachBare answers a board output from the held set anyway.
 	if !attachTargetSpecified(req) {
-		if cur := stub.OutputRoute(); cur != nil {
+		if cur := stub.OutputRoute(); cur != nil && !isBoardRoute(*cur) {
 			return cur.Channel, ""
 		}
 		if sid := stub.StableSessionIDValue(); sid != "" {
-			if sa, ok := b.lookupSessionAttachment(stub.CLI, sid); ok && sa.Recoverable(time.Now(), SessionAttachmentTTL) {
+			if sa, ok := b.lookupSessionAttachment(stub.CLI, sid); ok && sa.Recoverable(time.Now(), SessionAttachmentTTL) && sa.Channel != channel.BoardChannelName {
 				return sa.Channel, ""
 			}
 		}
