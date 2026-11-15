@@ -104,7 +104,9 @@ func AttachmentBodyLabel(attachments []Attachment) string {
 
 // RenderInboundBody returns the unchanged text of a discrete inbound. For a
 // merged delivery it renders the non-empty source texts in batch order, keeping
-// message, sender, and forwarding attribution attached to each fragment.
+// message, sender, and forwarding attribution attached to each fragment. A
+// fragment text with a line that could read as another fragment's header or as
+// the metadata line is %q-quoted, as RenderQueuedInbound quotes a forged body.
 func RenderInboundBody(in *Inbound) string {
 	if len(in.Merged) == 0 {
 		return in.Text
@@ -125,9 +127,13 @@ func RenderInboundBody(in *Inbound) string {
 			}
 		}
 		if source.ForwardOrigin != nil {
-			fmt.Fprintf(&prefix, " fwd %s", source.ForwardOrigin.Name)
+			fmt.Fprintf(&prefix, " fwd %s", lineSafeName(source.ForwardOrigin.Name))
 		}
-		fmt.Fprintf(&prefix, "] %s", source.Text)
+		text := source.Text
+		if bodyCouldForgeLine(text, fragmentPrefixes) {
+			text = fmt.Sprintf("%q", text)
+		}
+		fmt.Fprintf(&prefix, "] %s", text)
 		fragments = append(fragments, prefix.String())
 	}
 	return strings.Join(fragments, "\n")
@@ -138,8 +144,24 @@ func RenderInboundBody(in *Inbound) string {
 // once the body is rendered bare, which is what makes attribution forgeable.
 var metaPrefixes = []string{"from=", "message_id=", "reply_to", "attachment=", "event=", "merged=", "fwd:", "c3_test_injected="}
 
-// bodyCouldForgeMeta reports whether any line of a message body could be read as
-// the metadata line RenderQueuedInbound appends.
+// fragmentPrefixes are the line starts a merged fragment's own text must not
+// have: the "[msg" that opens every fragment header, and the metadata tokens.
+var fragmentPrefixes = append([]string{"[msg"}, metaPrefixes...)
+
+// lineSafeName keeps a free-text name (a display name or chat title) on the
+// line it is rendered on: line breaks become spaces, invisible runes are dropped.
+func lineSafeName(name string) string {
+	return strings.Map(func(r rune) rune {
+		if IsLineBreak(r) {
+			return ' '
+		}
+		return DropInvisibleRune(r)
+	}, name)
+}
+
+// bodyCouldForgeLine reports whether any line of a message body could be read as
+// a line C3 writes itself: one that starts with any of prefixes. With
+// metaPrefixes that is the metadata line RenderQueuedInbound appends.
 //
 // The compact form (approved 2026-07-24) puts the body bare on its own lines and
 // the metadata last. The form it replaced rendered the body through %q, which
@@ -151,13 +173,13 @@ var metaPrefixes = []string{"from=", "message_id=", "reply_to", "attachment=", "
 //
 // Every mandatory line break counts and invisible runes are dropped first, so
 // neither a vertical tab nor a leading U+200B can hide a forged line.
-func bodyCouldForgeMeta(text string) bool {
+func bodyCouldForgeLine(text string, prefixes []string) bool {
 	if !strings.ContainsFunc(text, IsLineBreak) {
 		return false // a single-line body can never produce a second line
 	}
 	for _, line := range strings.FieldsFunc(text, IsLineBreak) {
 		s := strings.TrimSpace(strings.Map(DropInvisibleRune, line))
-		for _, p := range metaPrefixes {
+		for _, p := range prefixes {
 			if strings.HasPrefix(s, p) {
 				return true
 			}
@@ -197,7 +219,7 @@ func RenderQueuedInbound(in *Inbound) string {
 	// approved bare-text form is preserved for every ordinary message. Escaping
 	// collapses it to one %q-quoted line, exactly the unambiguous representation
 	// this format replaced.
-	if bodyCouldForgeMeta(text) {
+	if bodyCouldForgeLine(text, metaPrefixes) {
 		text = fmt.Sprintf("%q", text)
 	}
 	if text == "" {
@@ -233,7 +255,7 @@ func RenderQueuedInbound(in *Inbound) string {
 	if len(in.Merged) > 0 {
 		meta = append(meta, fmt.Sprintf("merged=%d", len(in.Merged)))
 	} else if in.ForwardOrigin != nil {
-		meta = append(meta, "fwd:"+in.ForwardOrigin.Name)
+		meta = append(meta, "fwd:"+lineSafeName(in.ForwardOrigin.Name))
 	}
 	if in.IsEvent() {
 		meta = append(meta, "event="+string(in.Kind))

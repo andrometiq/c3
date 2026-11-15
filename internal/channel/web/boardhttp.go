@@ -500,7 +500,7 @@ func (act boardAct) logText() string {
 }
 
 // couldForgeBoardLine reports a line the session would read as C3's own
-// "[board " line, as bodyCouldForgeMeta does for the metadata line. Invisible
+// "[board " line, as bodyCouldForgeLine does for the metadata line. Invisible
 // runes are dropped first, so none can hide the prefix.
 func couldForgeBoardLine(text string) bool {
 	for _, line := range strings.FieldsFunc(text, c3types.IsLineBreak) {
