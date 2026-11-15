@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>Board</title>
+<style>
+:root { --ink: #1f2328; --muted: #59636e; --paper: #fff; --line: #d1d9e0; --live: #1a7f37; --ended: #9a6700; --closed: #818b98; }
+@media (prefers-color-scheme: dark) { :root { --ink: #e6edf3; --muted: #9198a1; --paper: #0d1117; --line: #3d444d; --live: #3fb950; --ended: #d29922; --closed: #656c76; } }
+html, body { margin: 0; height: 100%; background: var(--paper); color: var(--ink); font: 14px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; }
+body { display: flex; flex-direction: column; height: 100dvh; }
+#strip { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 12px; padding: 6px 16px; border-bottom: 1px solid var(--line); }
+#title { flex: 1 1 8em; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-weight: 600; }
+#session, #waiting, #typing, #notice { color: var(--muted); overflow-wrap: anywhere; }
+#session::before { content: ""; display: inline-block; width: 8px; height: 8px; margin-right: 6px; border-radius: 50%; background: var(--ended); }
+[data-mode="live"] #session::before { background: var(--live); }
+[data-mode="closed"] #session::before { background: var(--closed); }
+#notice { flex-basis: 100%; margin: 0; }
+#waiting:empty, #notice:empty, [hidden] { display: none; }
+#close { min-height: 32px; padding: 2px 12px; border: 1px solid var(--line); border-radius: 6px; background: none; color: inherit; font: inherit; }
+#page { flex: 1; width: 100%; border: 0; }
+</style>
+</head>
+<body>
+<header id="strip"><span id="title">Board</span><span id="session">Connecting…</span><span id="waiting"></span><span id="typing" hidden>Typing…</span><button id="close" type="button" hidden>Close</button><p id="notice" role="status"></p></header>
+<iframe id="page" sandbox="allow-scripts" title="The board's page"></iframe>
+<script src="/board/assets/board.js"></script>
+</body>
+</html>

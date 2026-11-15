@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>Board title</title>
+<!--
+  A C3 board page: one self-contained file (inline CSS, scripts and data: images; no URLs, storage or outside links).
+  Mark each part the owner can talk about with data-c3-part="<address>" (letters, digits . _ : -, at most 64) and
+  never reuse an address. Keep scripts outside parts and use delegated listeners: C3 swaps an approved part's
+  inner HTML in place. Anything changed outside parts reloads the page. c3.threads() draws each part's thread.
+-->
+<style>
+  :root { --ink: #1f2328; --muted: #59636e; --paper: #fff; --card: #f6f8fa; --line: #d1d9e0; }
+  @media (prefers-color-scheme: dark) { :root { --ink: #e6edf3; --muted: #9198a1; --paper: #0d1117; --card: #151b23; --line: #3d444d; } }
+  body { margin: 0; background: var(--paper); color: var(--ink); font: 16px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 760px; margin: 0 auto; padding: 16px; }
+  h1 { margin: 0 0 4px; font-size: 24px; }
+  .lead { margin: 0 0 16px; color: var(--muted); }
+  section { margin: 0 0 12px; padding: 12px 16px; border: 1px solid var(--line); border-radius: 10px; background: var(--card); }
+  section h2 { margin: 0 0 4px; font-size: 17px; }
+  section p { margin: 0; }
+  .address { color: var(--muted); font-weight: 400; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Board title</h1>
+  <p class="lead">Tap a part to talk about it. Select words in it first to quote them.</p>
+  <section data-c3-part="1">
+    <h2><span class="address">1</span> First part</h2>
+    <p>What it is, its state, and what it waits on.</p>
+  </section>
+  <section data-c3-part="2">
+    <h2><span class="address">2</span> Second part</h2>
+    <p>One part per thing the owner may want changed.</p>
+  </section>
+  <section data-c3-part="3">
+    <h2><span class="address">3</span> Third part</h2>
+    <p>After an approve, change only that part and send the whole file again.</p>
+  </section>
+</main>
+<script>c3.threads();</script>
+</body>
+</html>
