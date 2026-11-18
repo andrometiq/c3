@@ -58,7 +58,8 @@ The page API (C3 inlines it as the page's first script, as `window.c3`):
 - A page that draws its own threads calls `c3.focus(part)` when one opens and `c3.focus(null)`
   when it closes. Only C3's strip records; the page can't. A voice note is an `action` with `op:
   "voice"` (and `segment`, `has_more` for a part of a long recording), then `edit`s of its `id`
-  with `status` `heard` (`text` is the transcript), `slow`, `no_speech` or `failed`. Before C3 has
+  with `status` `heard` (`text` is the transcript), `slow`, `no_speech` or `failed`; a part that
+  never reached C3 has its own `status`, `cancelled` or `refused`, and no edits. Before C3 has
   it, `voice` events carry the upload: `{key, part, status: "sending" | "sent" | "not_sent", id,
   error}`. `c3.keep(value)` (JSON, at most 64 KiB) returns as `ready.kept` after
   a frame reload (not after the owner reloads the browser tab).
@@ -96,9 +97,12 @@ in a merged turn each line starts with its own `[msg N]`.
   your message M.` is a reaction. Both are the owner's input on that part.
 - `[board <name> · <part> · msg N] Voice note:` with `[Transcribed voice]: …` on the next line is
   the owner talking about that part; answer it like a typed line, with `reply_to=N`. `Voice note
-  (part 2; more follows):` is a long recording sent in parts: wait for the part marked `the last`
-  before you act on it. If the next line says transcription failed, retranscribe once as it says;
-  the owner's page already shows that it failed or heard no speech.
+  (part 2; more follows):` is a long recording sent in parts. Parts can arrive out of order: act
+  only once parts 1 to N are all in, where N is the part marked `the last`, and reply to that
+  part. A part that says it was not sent (cancelled, or C3 couldn't take it) still counts as in. If
+  the next line says transcription failed, retranscribe once as it says; the owner's page already
+  shows that it failed or heard no speech. Your replies never change what the page shows for a
+  voice note: only C3 does.
 
 ## 5. After `Approved your message M`
 

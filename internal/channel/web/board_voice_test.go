@@ -3,9 +3,13 @@ package web
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -159,44 +163,262 @@ func TestVoicePartsTellTheSessionWhetherMoreFollows(t *testing.T) {
 }
 
 // A voice act's transcript, and C3's notices about it, arrive as edits of the
-// act with its live status, not as the session's messages; the same notice on
-// anything but a voice act stays an ordinary message.
+// act with its live status, not as the session's messages.
 func TestVoiceStatusArrivesAsAnEditOfTheAct(t *testing.T) {
 	c, _, cookie := newBoardTest(t)
 	plan := createBoard(t, c, "plan")
 	stream, stop := startBoardSSE(t, c, cookie, "plan", "")
 	defer stop()
-	voice := logVoiceAct(t, c, "plan", "1.5")
-	if _, err := c.board.SendReadback(c3types.ReadbackArgs{ChatID: plan.Number, ReplyTo: &voice, Transcript: "make it shorter"}); err != nil {
+	heard, quiet, broken := logVoiceAct(t, c, "plan", "1.5"), logVoiceAct(t, c, "plan", "2"), logVoiceAct(t, c, "plan", "3")
+	if _, err := c.board.SendReadback(c3types.ReadbackArgs{ChatID: plan.Number, ReplyTo: &heard, Transcript: "make it shorter"}); err != nil {
 		t.Fatal(err)
 	}
-	for _, notice := range []string{c3types.VoiceSlowNotice, c3types.VoiceNoSpeechNotice, c3types.VoiceTranscriptionFailureNoticePrefix + " — see logs / try again."} {
-		if id, err := c.board.SendReply(c3types.ReplyArgs{Channel: channel.BoardChannelName, ChatID: plan.Number, ReplyTo: &voice, Text: notice}); err != nil || id != voice {
-			t.Fatalf("notice %q: id=%d err=%v", notice, id, err)
+	for _, status := range []c3types.VoiceStatusArgs{
+		{ChatID: plan.Number, MessageID: quiet, Status: c3types.VoiceStatusSlow, Text: "slow"},
+		{ChatID: plan.Number, MessageID: quiet, Status: c3types.VoiceStatusNoSpeech, Text: "nothing"},
+		{ChatID: plan.Number, MessageID: broken, Status: c3types.VoiceStatusFailed, Text: c3types.VoiceTranscriptionFailureNoticePrefix + " — see logs / try again."},
+	} {
+		if err := c.board.SendVoiceStatus(status); err != nil {
+			t.Fatalf("%+v: %v", status, err)
 		}
-	}
-	answer, err := c.board.SendReply(c3types.ReplyArgs{Channel: channel.BoardChannelName, ChatID: plan.Number, ReplyTo: &voice, Text: "Shorter it is."})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := c.board.SendReply(c3types.ReplyArgs{Channel: channel.BoardChannelName, ChatID: plan.Number, ReplyTo: &answer, Text: c3types.VoiceNoSpeechNotice}); err != nil {
-		t.Fatal(err)
 	}
 	log := boardLog(t, c, "plan")
 	got := make([]string, 0, len(log))
-	for _, entry := range log[1:] {
-		got = append(got, entry.Dir+" "+entry.Op+" "+entry.Status+" "+entry.Part)
+	for _, entry := range log[3:] {
+		got = append(got, fmt.Sprintf("%s %s %d %s %s %q", entry.Dir, entry.Op, entry.ID, entry.Status, entry.Part, entry.Text))
 	}
-	want := []string{"in edit heard 1.5", "in edit slow 1.5", "in edit no_speech 1.5", "in edit failed 1.5", "out message  1.5", "out message  1.5"}
-	if strings.Join(got, "|") != strings.Join(want, "|") || log[1].ID != voice || log[1].Text != "make it shorter" {
-		t.Fatalf("log=%q (first edit %+v), want %q", got, log[1], want)
+	want := []string{
+		fmt.Sprintf("in edit %d heard 1.5 %q", heard, "make it shorter"),
+		fmt.Sprintf("in edit %d slow 2 %q", quiet, c3types.VoiceSlowNotice),
+		fmt.Sprintf("in edit %d no_speech 2 %q", quiet, c3types.VoiceNoSpeechNotice),
+		fmt.Sprintf("in edit %d failed 3 %q", broken, c3types.VoiceTranscriptionFailureNoticePrefix+" — see logs / try again."),
+	}
+	if strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Fatalf("log=%q, want %q", got, want)
 	}
 	events := func() string { _, body := stream.snapshot(); return body }
 	waitFor(t, func() bool { return strings.Count(events(), "event: edit\n") == 4 })
-	if strings.Count(events(), "event: action\n") != 1 {
-		t.Fatalf("stream=%s, want the voice act as the only action", events())
+	if strings.Count(events(), "event: action\n") != 3 {
+		t.Fatalf("stream=%s, want the three voice acts as the only actions", events())
+	}
+	answer, err := c.board.SendReply(c3types.ReplyArgs{Channel: channel.BoardChannelName, ChatID: plan.Number, ReplyTo: &heard, Text: "Shorter it is."})
+	if err != nil {
+		t.Fatal(err)
 	}
 	if _, err := c.board.SendReadback(c3types.ReadbackArgs{ChatID: plan.Number, ReplyTo: &answer, Transcript: "forged"}); err == nil {
 		t.Fatal("a readback edited the session's own message")
+	}
+	if err := c.board.SendVoiceStatus(c3types.VoiceStatusArgs{ChatID: plan.Number, MessageID: answer, Status: c3types.VoiceStatusFailed, Text: "forged"}); err == nil {
+		t.Fatal("a voice status edited the session's own message")
+	}
+}
+
+// Only the broker sets a voice act's status: whatever the session's reply
+// says, it is the session's own message, and a read-only board takes none.
+func TestSessionReplyNeverSetsAVoiceStatus(t *testing.T) {
+	c, _, _ := newBoardTest(t)
+	plan := createBoard(t, c, "plan")
+	voice := logVoiceAct(t, c, "plan", "1.5")
+	notices := []string{c3types.VoiceSlowNotice, c3types.VoiceNoSpeechNotice, c3types.VoiceTranscriptionFailureNoticePrefix + " — see logs / try again."}
+	for _, notice := range notices {
+		if id, err := c.board.SendReply(c3types.ReplyArgs{Channel: channel.BoardChannelName, ChatID: plan.Number, ReplyTo: &voice, Text: notice}); err != nil || id == voice {
+			t.Fatalf("reply %q: id=%d err=%v, want a message of its own", notice, id, err)
+		}
+	}
+	for _, entry := range boardLog(t, c, "plan")[1:] {
+		if entry.Dir != "out" || entry.Op != "message" || entry.Status != "" || entry.ReplyTo != voice {
+			t.Fatalf("entry=%+v, want the session's answer to the voice act", entry)
+		}
+	}
+	if err := c.board.withBoard(plan.Number, func(board *boardState) error { board.record.Closed = true; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.board.SendReply(c3types.ReplyArgs{Channel: channel.BoardChannelName, ChatID: plan.Number, ReplyTo: &voice, Text: notices[1]}); !errors.Is(err, errBoardClosed) {
+		t.Fatalf("reply on a read-only board: err=%v, want closed", err)
+	}
+	if len(boardLog(t, c, "plan")) != 1+len(notices) {
+		t.Fatal("a read-only board logged the session's reply")
+	}
+}
+
+// A voice act takes one final status (heard, no speech or failed), and a slow
+// one only before it; a read-only board still takes the owner's act's status.
+func TestVoiceActTakesOneFinalStatus(t *testing.T) {
+	c, _, _ := newBoardTest(t)
+	plan := createBoard(t, c, "plan")
+	voice := logVoiceAct(t, c, "plan", "1.5")
+	status := func(name string) error {
+		return c.board.SendVoiceStatus(c3types.VoiceStatusArgs{ChatID: plan.Number, MessageID: voice, Status: name, Text: "C3's notice"})
+	}
+	if err := status("transcribed"); err == nil {
+		t.Fatal("an unknown status was taken")
+	}
+	if err := status(c3types.VoiceStatusSlow); err != nil {
+		t.Fatal(err)
+	}
+	if err := status(c3types.VoiceStatusSlow); !errors.Is(err, errVoiceSettled) {
+		t.Fatalf("second slow: err=%v, want settled", err)
+	}
+	if err := c.board.withBoard(plan.Number, func(board *boardState) error { board.record.Closed = true; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.board.SendReadback(c3types.ReadbackArgs{ChatID: plan.Number, ReplyTo: &voice, Transcript: "make it shorter"}); err != nil {
+		t.Fatalf("transcript after slow, on a read-only board: %v", err)
+	}
+	for _, name := range []string{c3types.VoiceStatusFailed, c3types.VoiceStatusNoSpeech, c3types.VoiceStatusSlow} {
+		if err := status(name); !errors.Is(err, errVoiceSettled) {
+			t.Fatalf("%s after heard: err=%v, want settled", name, err)
+		}
+	}
+	if _, err := c.board.SendReadback(c3types.ReadbackArgs{ChatID: plan.Number, ReplyTo: &voice, Transcript: "something else"}); !errors.Is(err, errVoiceSettled) {
+		t.Fatalf("second transcript: err=%v, want settled", err)
+	}
+	if log := boardLog(t, c, "plan"); len(log) != 3 || log[2].Status != c3types.VoiceStatusHeard || log[2].Text != "make it shorter" {
+		t.Fatalf("log=%+v, want the act, slow, then the one transcript", log)
+	}
+}
+
+// Every part of a long recording reaches the session, so it can tell when it
+// has them all: a part whose audio never reached C3 comes as a line saying so,
+// with its number and whether more follow.
+func TestEveryPartOfARecordingReachesTheSession(t *testing.T) {
+	c, host, cookie := newBoardTest(t)
+	createBoard(t, c, "plan")
+	unsent := func(client, segment, more, reason string) map[string]string {
+		return map[string]string{"X-Client-Id": client, "X-Board-Part": "1.5", "X-Voice-Segment": segment, "X-Voice-More": more, "X-Voice-Unsent": reason}
+	}
+	for _, test := range []struct {
+		name    string
+		headers map[string]string
+		body    []byte
+	}{
+		{"whole recording", unsent("bad-1", "", "", "cancelled"), nil},
+		{"cancelled with more", unsent("bad-2", "2", "1", "cancelled"), nil},
+		{"unknown reason", unsent("bad-3", "2", "", "lost"), nil},
+		{"with audio", unsent("bad-4", "2", "", "refused"), []byte("audio")},
+	} {
+		if response := postVoice(c, cookie, "plan", test.body, test.headers); response.Code != http.StatusBadRequest {
+			t.Fatalf("%s: status=%d %s, want 400", test.name, response.Code, response.Body)
+		}
+	}
+	refused := postVoice(c, cookie, "plan", nil, unsent("part-2", "2", "1", "refused"))
+	cancelled := postVoice(c, cookie, "plan", nil, unsent("part-3", "3", "", "cancelled"))
+	retry := postVoice(c, cookie, "plan", nil, unsent("part-3", "3", "", "cancelled"))
+	if refused.Code != http.StatusAccepted || cancelled.Code != http.StatusAccepted || retry.Body.String() != cancelled.Body.String() {
+		t.Fatalf("refused=%d %s cancelled=%d %s retry=%s", refused.Code, refused.Body, cancelled.Code, cancelled.Body, retry.Body)
+	}
+	emitted := host.emittedSnapshot()
+	if len(emitted) != 2 {
+		t.Fatalf("emitted %d inbounds, want the two parts", len(emitted))
+	}
+	want := []string{
+		"[board plan · 1.5 · msg " + itoa(emitted[0].MessageID) + "] Voice note (part 2; more follows): C3 couldn't take this part; it was not sent.",
+		"[board plan · 1.5 · msg " + itoa(emitted[1].MessageID) + "] Voice note (part 3, the last): the recording was cancelled; this part was not sent.",
+	}
+	for i, inbound := range emitted {
+		if inbound.Text != want[i] || len(inbound.Attachments) != 0 {
+			t.Fatalf("inbound %d=%+v, want %q with no audio", i, inbound, want[i])
+		}
+	}
+	log := boardLog(t, c, "plan")
+	if len(log) != 2 || log[0].Op != "voice" || log[0].Segment != 2 || !log[0].HasMore || log[0].Status != "refused" ||
+		log[1].Op != "voice" || log[1].Segment != 3 || log[1].HasMore || log[1].Status != "cancelled" {
+		t.Fatalf("log=%+v, want parts 2 (refused, more) and 3 (cancelled, the last)", log)
+	}
+}
+
+// The board skill tells the session that parts can arrive out of order, and
+// to act only once it has every part up to the one marked the last.
+func TestBoardSkillWaitsForEveryPartUpToTheLast(t *testing.T) {
+	skill, err := os.ReadFile(filepath.Join("..", "..", "..", "plugins", "c3", "skills", "board", "SKILL.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, rule := range []string{"out of order", "parts 1 to N are all in", "N is the part marked `the last`"} {
+		if !strings.Contains(string(skill), rule) {
+			t.Errorf("the board skill does not say %q", rule)
+		}
+	}
+}
+
+// fakeFFmpeg puts an ffmpeg first on PATH that writes a small file in place
+// of the transcode. With a gate directory it first creates gate/started and
+// waits for gate/release, so a test can act while a voice note transcodes.
+func fakeFFmpeg(t *testing.T, gate string) {
+	t.Helper()
+	directory := t.TempDir()
+	script := "#!/bin/sh\n"
+	if gate != "" {
+		script += fmt.Sprintf("touch '%s'\nwhile [ ! -e '%s' ]; do sleep 0.01; done\n", filepath.Join(gate, "started"), filepath.Join(gate, "release"))
+		t.Cleanup(func() { _ = os.WriteFile(filepath.Join(gate, "release"), nil, 0o600) })
+	}
+	script += "for output; do :; done\nprintf 'OggS' > \"$output\"\n"
+	if err := os.WriteFile(filepath.Join(directory, "ffmpeg"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", directory+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+// A voice act's client id names its audio with its part, segment and whether
+// more follow: a retry that changes any of them is a conflict, as for a text act.
+func TestVoiceRetryMustRepeatThePartFields(t *testing.T) {
+	fakeFFmpeg(t, "")
+	c, host, cookie := newBoardTest(t)
+	createBoard(t, c, "plan")
+	headers := func(changes map[string]string) map[string]string {
+		fields := map[string]string{"X-Client-Id": "voice-1", "X-Board-Part": "1.5", "X-Voice-Segment": "1", "X-Voice-More": "1"}
+		for key, value := range changes {
+			fields[key] = value
+		}
+		return fields
+	}
+	audio := []byte("the same audio")
+	first := postVoice(c, cookie, "plan", audio, headers(nil))
+	if first.Code != http.StatusAccepted {
+		t.Fatalf("first=%d %s", first.Code, first.Body)
+	}
+	for _, changes := range []map[string]string{{"X-Board-Part": "2"}, {"X-Voice-Segment": "2"}, {"X-Voice-More": ""}} {
+		if response := postVoice(c, cookie, "plan", audio, headers(changes)); response.Code != http.StatusConflict {
+			t.Fatalf("retry with %v: status=%d %s, want 409", changes, response.Code, response.Body)
+		}
+	}
+	if retry := postVoice(c, cookie, "plan", audio, headers(nil)); retry.Code != http.StatusAccepted || retry.Body.String() != first.Body.String() {
+		t.Fatalf("retry=%d %s, want the first act", retry.Code, retry.Body)
+	}
+	if len(host.emittedSnapshot()) != 1 || len(boardLog(t, c, "plan")) != 1 {
+		t.Fatal("a conflicting retry reached the session or the log")
+	}
+}
+
+// A board made read-only while a voice act's audio transcodes takes it no
+// more: it is refused, not sent, logged or kept.
+func TestVoiceActOnABoardMadeReadOnlyDuringTranscodeIsRefused(t *testing.T) {
+	gate := t.TempDir()
+	fakeFFmpeg(t, gate)
+	c, host, cookie := newBoardTest(t)
+	plan := createBoard(t, c, "plan")
+	responses := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		responses <- postVoice(c, cookie, "plan", []byte("audio"), map[string]string{"X-Client-Id": "voice-1", "X-Board-Part": "1"})
+	}()
+	waitFor(t, func() bool { _, err := os.Stat(filepath.Join(gate, "started")); return err == nil })
+	if err := c.board.withBoard(plan.Number, func(board *boardState) error { board.record.Closed = true; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(gate, "release"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if response := <-responses; response.Code != http.StatusConflict {
+		t.Fatalf("status=%d %s, want 409", response.Code, response.Body)
+	}
+	if len(host.emittedSnapshot()) != 0 || len(boardLog(t, c, "plan")) != 0 {
+		t.Fatal("a voice act for a read-only board reached the session or the log")
+	}
+	directory, err := c.voiceDirectoryPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if files, _ := filepath.Glob(filepath.Join(directory, "*")); len(files) != 0 {
+		t.Fatalf("the refused recording was kept: %v", files)
 	}
 }

@@ -97,7 +97,7 @@ func extendVoiceDeadline(w http.ResponseWriter) {
 
 func (c *Channel) acceptVoiceInbound(ctx context.Context, sessionID string, current session, clientID, mediaType string, body []byte) (int64, int, error) {
 	key := clientMessageKey{sessionID: sessionID, clientID: clientID}
-	return c.acceptVoice(ctx, c.webChatInbound(), key, currentSender(current), mediaType, body, func(inbound *c3types.Inbound, duration float64) {
+	return c.acceptVoice(ctx, c.webChatInbound(), key, currentSender(current), mediaType, "", body, func(inbound *c3types.Inbound, duration float64) {
 		voice := true
 		c.publish(streamEvent{kind: "own", payload: streamPayload{
 			MessageID: inbound.MessageID, ClientID: clientID, Timestamp: streamTimestamp(inbound.Timestamp),
@@ -108,10 +108,11 @@ func (c *Channel) acceptVoiceInbound(ctx context.Context, sessionID string, curr
 
 // acceptVoice is acceptInbound for a voice note: it stores and transcodes the
 // audio once per client id, emits it as a voice attachment on the route, and
-// gives the sender's copy to echo with the note's duration.
-func (c *Channel) acceptVoice(ctx context.Context, route inboundRoute, key clientMessageKey, sender c3types.Sender, mediaType string, body []byte, echo func(inbound *c3types.Inbound, duration float64)) (int64, int, error) {
+// gives the sender's copy to echo with the note's duration. A client id names
+// the audio together with fields, the note's own fields ("" in the web chat).
+func (c *Channel) acceptVoice(ctx context.Context, route inboundRoute, key clientMessageKey, sender c3types.Sender, mediaType, fields string, body []byte, echo func(inbound *c3types.Inbound, duration float64)) (int64, int, error) {
 	now := c.now()
-	hash := sha256.Sum256(body)
+	hash := voiceHash(fields, body)
 	pruned := false
 	c.clientMu.Lock()
 	for existingKey, existing := range route.records {
@@ -163,6 +164,14 @@ func (c *Channel) acceptVoice(ctx context.Context, route inboundRoute, key clien
 		record.voiceSize = size
 		record.voiceDuration = duration
 	}
+	if route.checkOpen != nil {
+		if err := route.checkOpen(); err != nil {
+			c.dropVoiceFile(record)
+			messageID := record.messageID
+			record.mu.Unlock()
+			return messageID, 0, err
+		}
+	}
 	inbound := &c3types.Inbound{
 		Channel: route.channel, ChatID: route.chatID, MessageID: record.messageID,
 		Sender: sender, Timestamp: now, ConvKind: c3types.ConvKindDM,
@@ -192,19 +201,36 @@ func (c *Channel) acceptVoice(ctx context.Context, route inboundRoute, key clien
 		c.pruneVoiceFiles()
 		return messageID, http.StatusAccepted, nil
 	default:
-		path, _ := c.localAudioPath(record.voiceFileID, false)
-		if path != "" {
-			_ = os.Remove(path)
-		}
-		record.voiceFileID = ""
-		record.voiceSize = 0
-		record.voiceDuration = 0
+		c.dropVoiceFile(record)
 		record.status = http.StatusForbidden
 		messageID := record.messageID
 		record.mu.Unlock()
 		route.persist("client-message insert")
 		return messageID, http.StatusForbidden, nil
 	}
+}
+
+// voiceHash names a voice note for its client id: the audio, and the note's
+// own fields when it has any (a board part's place in its recording).
+func voiceHash(fields string, body []byte) [32]byte {
+	if fields == "" {
+		return sha256.Sum256(body) // the web chat's persisted records hold this
+	}
+	digest := sha256.New()
+	digest.Write([]byte(fields))
+	digest.Write([]byte{0})
+	digest.Write(body)
+	var hash [32]byte
+	copy(hash[:], digest.Sum(nil))
+	return hash
+}
+
+// dropVoiceFile deletes a record's stored recording, which no message carries.
+func (c *Channel) dropVoiceFile(record *clientMessage) {
+	if path, _ := c.localAudioPath(record.voiceFileID, false); path != "" {
+		_ = os.Remove(path)
+	}
+	record.voiceFileID, record.voiceSize, record.voiceDuration = "", 0, 0
 }
 
 func currentSender(current session) c3types.Sender {

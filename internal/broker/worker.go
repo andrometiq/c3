@@ -1050,10 +1050,7 @@ func (w *RouteWorker) echoReadback(in *c3types.Inbound, transcript, failNotice s
 	// say is decided where the failures are known, not here. With a single voice
 	// note exactly one of these fires, which is the behavior this has always had.
 	if failNotice != "" {
-		if _, serr := ch.SendReply(c3types.ReplyArgs{
-			Channel: in.Channel, ChatID: in.ChatID, TopicID: in.TopicID, ReplyTo: &in.MessageID,
-			Text: c3types.WithTestInjectionMarker(in, failNotice) + heldSuffix,
-		}); serr != nil {
+		if serr := sendVoiceNotice(ch, in, failureStatus(failNotice), failNotice, heldSuffix); serr != nil {
 			log.Printf("readback notice chan=%s chat=%d topic=%s msg=%d: send failed (non-fatal): %v",
 				w.key.Channel, w.key.ChatID, TopicKeyStr(w.key), in.MessageID, serr)
 		} else {
@@ -1083,6 +1080,30 @@ func (w *RouteWorker) echoReadback(in *c3types.Inbound, transcript, failNotice s
 		log.Printf("readback chan=%s chat=%d topic=%s msg=%d: SendReadback failed (non-fatal): %v",
 			w.key.Channel, w.key.ChatID, TopicKeyStr(w.key), in.MessageID, serr)
 	}
+}
+
+// sendVoiceNotice tells the sender C3's notice about voice note in: on the
+// note itself where the channel shows its status there (never through
+// SendReply, which the session's replies take), else as a reply quoting it.
+func sendVoiceNotice(ch channel.Channel, in *c3types.Inbound, status, notice, suffix string) error {
+	if statusSender, ok := ch.(channel.VoiceStatusSender); ok {
+		return statusSender.SendVoiceStatus(c3types.VoiceStatusArgs{
+			ChatID: in.ChatID, TopicID: in.TopicID, MessageID: in.MessageID, Status: status, Text: notice,
+		})
+	}
+	_, err := ch.SendReply(c3types.ReplyArgs{
+		Channel: in.Channel, ChatID: in.ChatID, TopicID: in.TopicID, ReplyTo: &in.MessageID,
+		Text: c3types.WithTestInjectionMarker(in, notice) + suffix,
+	})
+	return err
+}
+
+// failureStatus is the status a final voice notice reports.
+func failureStatus(notice string) string {
+	if notice == c3types.VoiceNoSpeechNotice {
+		return c3types.VoiceStatusNoSpeech
+	}
+	return c3types.VoiceStatusFailed
 }
 
 // flushEvent forwards a single synthesized channel EVENT (poll_result /

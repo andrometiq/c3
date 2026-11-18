@@ -270,6 +270,12 @@ func wireGoldens() []wireGolden {
 			omitEmpty: nil,
 		},
 		{
+			name:      "VoiceStatusArgs",
+			value:     VoiceStatusArgs{ChatID: -1001, TopicID: ptrInt64(7), MessageID: 42, Status: VoiceStatusFailed, Text: "notice"},
+			keys:      []string{"ChatID", "TopicID", "MessageID", "Status", "Text"},
+			omitEmpty: nil,
+		},
+		{
 			name: "VoicePayload",
 			value: VoicePayload{
 				Channel: "telegram", ChatID: -1001, TopicID: ptrInt64(7),

@@ -13,11 +13,13 @@
     message: ({ id, reply_to, part, text, at }) => ({ id, reply_to, part, text, ts: at }),
     edit: ({ id, text, status }) => ({ id, text, status }),
     reaction: ({ ref, text, from }) => ({ ref, emoji: text, from }),
-    action: ({ id, op, part, text, ref, from, segment, has_more }) => ({ id, op, part, text, ref, from, segment, has_more }),
+    action: ({ id, op, part, text, ref, from, segment, has_more, status }) => ({ id, op, part, text, ref, from, segment, has_more, status }),
   };
-  // A voice note's line: the shell's upload status, then C3's (an edit of the voice act: heard is its transcript).
+  // A voice note's line: the shell's upload status, then C3's (an edit of the voice act: heard is its transcript). A
+  // part of a long recording that never reached C3 is a voice act with its own status, cancelled or refused.
   const VOICE_STATES = { sending: "Sending…", sent: "Transcribing…", transcribing: "Transcribing…",
-    slow: "Transcribing… taking longer, C3 keeps trying.", no_speech: "No speech heard.", failed: "Couldn't transcribe it." };
+    slow: "Transcribing… taking longer, C3 keeps trying.", no_speech: "No speech heard.", failed: "Couldn't transcribe it.",
+    cancelled: "Cancelled, not sent.", refused: "Not sent: C3 refused it." };
   const listeners = Object.fromEntries(KINDS.map((kind) => [kind, new Set()]));
   const calls = new Map();
   let nextCall = 1;
@@ -347,7 +349,7 @@
       const reason = entry.upload.status === "not_sent" && `Not sent: ${REASONS[entry.upload.error] ?? entry.upload.error}.`;
       return label + (reason || VOICE_STATES[entry.upload.status]);
     }
-    const status = statuses.get(entry.id) ?? "transcribing";
+    const status = statuses.get(entry.id) ?? entry.status ?? "transcribing";
     return label + (status === "heard" ? edits.get(entry.id) : VOICE_STATES[status]);
   }
 

@@ -44,7 +44,10 @@ type inboundRoute struct {
 	persist func(reason string)
 	nextID  func() int64
 	line    func(*c3types.Inbound) // sets Text (and ReplyTo) once MessageID is known; nil sends the content as is
-	echo    func(inbound *c3types.Inbound, clientID string)
+	// checkOpen tells whether the route still takes a voice note once its audio
+	// is transcoded, just before it is emitted; nil always does.
+	checkOpen func() error
+	echo      func(inbound *c3types.Inbound, clientID string)
 }
 
 func (c *Channel) webChatInbound() inboundRoute {

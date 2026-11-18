@@ -43,7 +43,9 @@
   let voiceNotice = "";
   let voiceNoticeTimer = 0;
   let voiceKeys = 0;
+  let isClosing = false; // Make read-only is waiting for the voice acts on their way
   const uploads = new Map(); // key -> the frame's view of a recording on its way to C3
+  const sending = new Set(); // every voice act's promise until C3 answers it
 
   const sleep = (ms) => new Promise((resolve) => { setTimeout(resolve, ms); });
   const toFrame = (message) => frame.contentWindow.postMessage(message, "*");
@@ -73,7 +75,7 @@
   function drawVoice() {
     strip.voice.hidden = !state || state.closed;
     strip.mic.hidden = !canRecord;
-    strip.mic.disabled = recording ? recording.isOpening : !focusedPart;
+    strip.mic.disabled = recording ? recording.isOpening : !focusedPart || isClosing;
     strip.mic.ariaPressed = String(Boolean(recording));
     strip.mic.textContent = !recording ? "🎤 Talk" : recording.isOpening ? "Opening…" : `■ Send ${clock(performance.now() - recording.started)}`;
     strip.cancel.hidden = !recording;
@@ -91,7 +93,7 @@
 
   async function startRecording() {
     const part = focusedPart;
-    if (recording || !part || state.closed) return;
+    if (recording || !part || state.closed || isClosing) return;
     let isCancelled = false;
     recording = { part, started: performance.now(), isOpening: true, stop: () => { isCancelled = true; } };
     showVoice("");
@@ -106,64 +108,94 @@
     drawVoice();
   }
 
-  /** The mic on for part: every VOICE.segmentMs the recording so far goes out as a numbered part, and recording goes on. */
+  /** The mic on for part: every VOICE.segmentMs the recording so far goes out as a numbered part, and recording goes on.
+   *  Once a part has gone out, the recording always ends with a last part the session sees: its audio, or a line that
+   *  it was not sent. */
   function record(part, stream) {
     const started = performance.now();
     const type = VOICE_TYPES.find((candidate) => MediaRecorder.isTypeSupported?.(candidate)) ?? "";
     let segment = 1;
-    let isFinished = false;
+    let finished = null; // finish()'s promise: settled once C3 has answered the recording's last act
     let current = startSegment();
     const ticker = setInterval(drawVoice, 250);
     const rotation = setInterval(() => {
       const ended = current;
       current = startSegment(); // the next part starts before this one stops, so no word falls between them
-      ended.end({ segment, hasMore: true });
+      beforeClosing(ended.end({ segment, hasMore: true }));
       segment += 1;
     }, VOICE.segmentMs);
 
+    /** A recorder for the next part; end(fields) stops it and returns its upload, settled once C3 answers it. */
     function startSegment() {
       const recorder = type ? new MediaRecorder(stream, { mimeType: type }) : new MediaRecorder(stream);
       const chunks = [];
       let ending = null; // end()'s fields for the upload, or false to drop it
+      const uploaded = new Promise((resolve) => {
+        recorder.addEventListener("stop", () => {
+          if (ending === null) finish(false); // the microphone went away: what it heard goes out as the last part
+          resolve(ending && upload({ part, blob: new Blob(chunks, { type: recorder.mimeType || type || "audio/webm" }), ...ending }));
+        }, { once: true });
+      });
       recorder.addEventListener("dataavailable", (event) => { if (event.data.size) chunks.push(event.data); });
-      recorder.addEventListener("stop", () => {
-        if (ending === null) finish(false); // the microphone went away: what it heard goes out as the last part
-        if (ending) upload({ part, blob: new Blob(chunks, { type: recorder.mimeType || type || "audio/webm" }), ...ending });
-      }, { once: true });
       recorder.addEventListener("error", () => finish(false), { once: true });
       recorder.start(VOICE.timesliceMs);
-      return { end: (fields) => { ending = fields; if (recorder.state !== "inactive") recorder.stop(); } };
+      return { end: (fields) => { ending = fields; if (recorder.state !== "inactive") recorder.stop(); return uploaded; } };
     }
 
     function finish(isCancelled) {
-      if (isFinished) return;
-      isFinished = true;
+      if (finished) return finished;
       clearInterval(ticker);
       clearInterval(rotation);
       const isTooShort = segment === 1 && performance.now() - started < VOICE.minMs;
-      current.end(isCancelled || isTooShort ? false : segment > 1 ? { segment } : {});
+      const isDropped = isCancelled || isTooShort;
+      const last = segment > 1 ? { part, segment } : { part };
+      finished = beforeClosing(current.end(isDropped ? false : { segment: last.segment })
+        .then(() => isDropped && last.segment && sendUnsent(last, "cancelled")));
       stream.getTracks().forEach((track) => track.stop());
       recording = null;
-      showVoice(isTooShort && !isCancelled ? "Too short: nothing sent." : "", true);
+      showVoice(isTooShort && !isCancelled ? "Too short: nothing sent." : isCancelled && last.segment ? `Recording cancelled after part ${segment - 1}.` : "", true);
+      return finished;
     }
     return { part, started, isOpening: false, stop: finish };
   }
 
-  /** Sends one recording; a lost connection, 429 or 503 is retried with the same client_id, so C3 takes it once. */
-  async function upload({ part, blob, segment, hasMore }) {
-    const voice = { key: `voice-${++voiceKeys}`, part, segment, has_more: Boolean(hasMore) };
-    const headers = { "Content-Type": blob.type, "X-Client-Id": randomID(), "X-Board-Part": part,
-      ...(segment && { "X-Voice-Segment": String(segment) }), ...(hasMore && { "X-Voice-More": "1" }) };
+  /** Make read-only waits for promise: a voice act on its way to C3. */
+  function beforeClosing(promise) {
+    const done = () => sending.delete(promise);
+    sending.add(promise);
+    promise.then(done, done);
+    return promise;
+  }
+
+  const voiceHeaders = ({ part, segment, hasMore }) => ({ "X-Board-Part": part,
+    ...(segment && { "X-Voice-Segment": String(segment) }), ...(hasMore && { "X-Voice-More": "1" }) });
+
+  /** Posts one voice act; a lost connection, 429 or 503 is retried with the same client_id, so C3 takes it once. */
+  async function postVoice(headers, body, onAttempt = () => {}) {
+    const request = { method: "POST", headers: { ...headers, "X-Client-Id": randomID() }, body };
     for (let attempt = 0; ; attempt++) {
-      tellVoice({ ...voice, status: "sending", attempt });
-      const response = await fetch(`${base}/act`, { method: "POST", headers, body: blob }).catch(() => null);
-      if (response?.ok) return tellVoice({ ...voice, status: "sent", id: (await response.json().catch(() => ({}))).id });
-      if (response && response.status !== 429 && response.status !== 503) {
-        const rule = (await response.json().catch(() => ({}))).error;
-        return tellVoice({ ...voice, status: "not_sent", error: rule || "unavailable" });
-      }
+      onAttempt(attempt);
+      const response = await fetch(`${base}/act`, request).catch(() => null);
+      if (response?.ok) return { id: (await response.json().catch(() => ({}))).id };
+      if (response && response.status !== 429 && response.status !== 503) return { error: (await response.json().catch(() => ({}))).error || "unavailable" };
       await sleep(Number(response?.headers.get("Retry-After")) * 1000 || Math.min(VOICE.retryMs * 2 ** attempt, RETRY_MAX_MS));
     }
+  }
+
+  /** The act for a part whose audio never reached C3 (cancelled or refused), so the session still sees every part. */
+  const sendUnsent = (fields, reason) => postVoice({ "Content-Type": "audio/webm", ...voiceHeaders(fields), "X-Voice-Unsent": reason }, "");
+
+  /** Sends one recording. A part C3 refuses still reaches the session, as a line saying it was not sent. */
+  async function upload({ part, blob, segment, hasMore }) {
+    const voice = { key: `voice-${++voiceKeys}`, part, segment, has_more: Boolean(hasMore) };
+    const sent = await postVoice({ "Content-Type": blob.type, ...voiceHeaders({ part, segment, hasMore }) }, blob,
+      (attempt) => tellVoice({ ...voice, status: "sending", attempt }));
+    if (!sent.error) return tellVoice({ ...voice, status: "sent", id: sent.id });
+    tellVoice({ ...voice, status: "not_sent", error: sent.error });
+    const unsent = segment ? await sendUnsent({ part, segment, hasMore }, "refused") : {};
+    // The refused part's line in the log takes its row's place in the frame.
+    if (unsent.id && isFrameReady) toFrame({ c3: "voice", voice: { ...voice, status: "not_sent", error: sent.error, id: unsent.id } });
+    return undefined;
   }
 
   /** An upload's status, for the line under the mic and for the page (c3.on("voice")). */
@@ -195,7 +227,7 @@
       if (data.live !== state.live || data.closed !== state.closed) strip.notice.textContent = "";
       if (data.closed && recording) {
         recording.stop(true);
-        strip.notice.textContent = "The board is read-only now: the recording was not sent.";
+        strip.notice.textContent = "The board is read-only now: the recording stopped.";
       }
       Object.assign(state, { live: data.live, waiting: data.waiting, closed: data.closed });
       if ("holder" in data) state.holder = data.holder;
@@ -296,11 +328,20 @@
     onFrameMessage(event.data);
   });
 
+  // A recording going on ends first (after a part has gone out, with its last act), and every voice act on its way
+  // reaches C3 before the board stops taking acts.
   strip.close.addEventListener("click", async () => {
     if (!confirm("This makes the board read-only for good.")) return;
+    const wasRecording = Boolean(recording);
+    isClosing = true;
+    recording?.stop(true);
+    if (sending.size) strip.notice.textContent = "Sending the voice notes on their way first…";
+    await Promise.all(sending);
     const response = await fetch(`${base}/close`, { method: "POST" }).catch(() => null);
+    isClosing = false;
     if (response?.ok) receive("status", { ...state, closed: true });
-    else strip.notice.textContent = "Making it read-only failed. Try again.";
+    strip.notice.textContent = !response?.ok ? "Making it read-only failed. Try again." : wasRecording ? "The board is read-only now: the recording stopped." : "";
+    drawVoice();
   });
 
   strip.mic.addEventListener("click", (event) => { // a real tap only: the shell's own control, never the page
@@ -309,7 +350,7 @@
     else startRecording();
   });
   strip.cancel.addEventListener("click", () => recording?.stop(true));
-  addEventListener("beforeunload", (event) => { if (recording || uploads.size) event.preventDefault(); });
+  addEventListener("beforeunload", (event) => { if (recording || sending.size) event.preventDefault(); });
 
   // The stream carries no log line it missed while down (a tab that saw no `id:` sends no Last-Event-ID), so each
   // open re-reads /state; C3 registers the stream before answering, so that /state holds every line it won't carry.
@@ -369,7 +410,7 @@
   /** After a reconnect: the lines and status the stream missed, through receive(), which drops lines already held. */
   function catchUp(fresh) {
     Object.assign(state, { cap: fresh.cap, title: fresh.title });
-    for (const entry of fresh.log) receive(entry.dir === "in" ? "action" : entry.op, entry);
+    for (const entry of fresh.log) receive(entry.dir === "in" && entry.op !== "edit" ? "action" : entry.op, entry);
     receive("status", fresh);
     if (fresh.rev === state.rev) return;
     const { rev } = fresh; // its page line fell out of the history: show that revision from scratch

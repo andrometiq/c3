@@ -67,14 +67,7 @@ var (
 	errNoBoard       = errors.New("board: no such board")
 	errBoardsStopped = errors.New("board: channel not started")
 	errNotVoice      = errors.New("board: message is no voice act on this board")
-)
-
-// A voice act's live status, as the edit that ends or updates its transcription.
-const (
-	voiceHeard    = "heard"
-	voiceNoSpeech = "no_speech"
-	voiceSlow     = "slow"
-	voiceFailed   = "failed"
+	errVoiceSettled  = errors.New("board: the voice act already has its status")
 )
 
 var (
@@ -82,6 +75,7 @@ var (
 	_ channel.BoardKeeper        = (*boardChannel)(nil)
 	_ channel.PresenceNotifier   = (*boardChannel)(nil)
 	_ channel.ReadbackSender     = (*boardChannel)(nil)
+	_ channel.VoiceStatusSender  = (*boardChannel)(nil)
 	_ channel.LocalAudioProvider = (*boardChannel)(nil)
 	_ channel.BoardProvider      = (*Channel)(nil)
 )
@@ -224,12 +218,6 @@ func (b *boardChannel) SendReply(args c3types.ReplyArgs) (int64, error) {
 	if strings.TrimSpace(args.Text) == "" {
 		return 0, errors.New("board: empty message")
 	}
-	if status := voiceNoticeStatus(args.Text); status != "" && args.ReplyTo != nil {
-		err := b.setVoiceStatus(args.ChatID, *args.ReplyTo, status, args.Text)
-		if !errors.Is(err, errNotVoice) {
-			return *args.ReplyTo, err
-		}
-	}
 	if args.ReplyTo == nil && isStatusText(args.Text) {
 		err := b.withBoard(args.ChatID, func(board *boardState) error {
 			board.broadcast(jsonEvent("notice", map[string]string{"text": args.Text}))
@@ -327,37 +315,69 @@ func (b *boardChannel) React(args c3types.ReactArgs) error {
 	})
 }
 
-// SendReadback lands a voice act's transcript as an edit of that act.
+// SendReadback lands a voice act's transcript as an edit of that act. Only
+// the broker calls it, as it alone calls SendVoiceStatus.
 func (b *boardChannel) SendReadback(args c3types.ReadbackArgs) (int64, error) {
 	if args.TopicID != nil || args.ReplyTo == nil {
 		return 0, errors.New("board: a readback names a voice act on a board")
 	}
-	return *args.ReplyTo, b.setVoiceStatus(args.ChatID, *args.ReplyTo, voiceHeard, args.Transcript)
+	return *args.ReplyTo, b.setVoiceStatus(args.ChatID, *args.ReplyTo, c3types.VoiceStatusHeard, args.Transcript)
 }
 
-// voiceNoticeStatus names the voice status a C3 readback notice reports, or "".
-func voiceNoticeStatus(text string) string {
-	switch {
-	case text == c3types.VoiceNoSpeechNotice:
-		return voiceNoSpeech
-	case text == c3types.VoiceSlowNotice:
-		return voiceSlow
-	case isVoiceReadbackNotice(text):
-		return voiceFailed
+// SendVoiceStatus lands C3's notice about a voice act (no speech, failed,
+// slow) as an edit of that act. A no-speech or slow edit carries C3's own
+// wording, whatever the text.
+func (b *boardChannel) SendVoiceStatus(args c3types.VoiceStatusArgs) error {
+	if args.TopicID != nil {
+		return errors.New("board: boards have no topics")
+	}
+	text := voiceStatusText(args.Status, args.Text)
+	if strings.TrimSpace(text) == "" {
+		return fmt.Errorf("board: no voice status %q with text %q", args.Status, args.Text)
+	}
+	return b.setVoiceStatus(args.ChatID, args.MessageID, args.Status, text)
+}
+
+// voiceStatusText is what a status edit keeps: C3's own wording for no speech
+// and slow, the broker's notice for a failure, and "" for any other status.
+func voiceStatusText(status, notice string) string {
+	switch status {
+	case c3types.VoiceStatusNoSpeech:
+		return c3types.VoiceNoSpeechNotice
+	case c3types.VoiceStatusSlow:
+		return c3types.VoiceSlowNotice
+	case c3types.VoiceStatusFailed:
+		return notice
 	}
 	return ""
 }
 
 // setVoiceStatus logs a status edit of voice act id, also on a board made
-// read-only since: it finishes the owner's own earlier act.
+// read-only since: it finishes the owner's own earlier act. An act takes one
+// final status, and a slow one only before it.
 func (b *boardChannel) setVoiceStatus(number, id int64, status, text string) error {
 	return b.withBoard(number, func(board *boardState) error {
 		voice, ok := board.entry(id)
 		if !ok || voice.Dir != "in" || voice.Op != "voice" {
 			return fmt.Errorf("%w: %d", errNotVoice, id)
 		}
+		if previous := board.voiceStatus(voice); previous != "" && (previous != c3types.VoiceStatusSlow || status == c3types.VoiceStatusSlow) {
+			return fmt.Errorf("%w: %d is %s", errVoiceSettled, id, previous)
+		}
 		return b.appendLocked(board, boardLogEntry{Dir: "in", ID: id, Op: "edit", Part: voice.Part, Text: text, From: voice.From, Status: status})
 	})
+}
+
+// voiceStatus is a voice act's latest status: its own for a part that was
+// never sent, else its last status edit's, or "".
+func (board *boardState) voiceStatus(voice boardLogEntry) string {
+	status := voice.Status
+	for _, entry := range board.log {
+		if entry.ID == voice.ID && entry.Dir == "in" && entry.Op == "edit" && entry.Status != "" {
+			status = entry.Status
+		}
+	}
+	return status
 }
 
 // LocalAudioPath resolves a voice act's audio, which the web channel stores.

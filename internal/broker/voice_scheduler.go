@@ -792,12 +792,13 @@ func (s *VoiceScheduler) finishAttempt(key voiceScheduleKey, out voiceAttemptRes
 	s.Wake()
 }
 
-// takeSlowNoticeLocked claims the entry's one "taking longer" Telegram reply
-// once the note has waited voiceSlowNoticeAfter since arrival. It returns the
-// message to reply to, or nil. Transcript-only (manual, no chat message)
-// targets never get one.
+// takeSlowNoticeLocked claims the entry's one "taking longer" notice (a
+// Telegram reply, a board's status on the note) once the note has waited
+// voiceSlowNoticeAfter since arrival. It returns the message it is about, or
+// nil. Transcript-only (manual, no chat message) targets never get one.
 func (s *VoiceScheduler) takeSlowNoticeLocked(entry *voiceEntry, now time.Time) *c3types.Inbound {
-	if entry.slowNoticed || entry.key.route.Channel != "telegram" || now.Sub(entry.arrived) < voiceSlowNoticeAfter {
+	route := entry.key.route
+	if entry.slowNoticed || route.Channel != "telegram" && !isBoardRoute(route) || now.Sub(entry.arrived) < voiceSlowNoticeAfter {
 		return nil
 	}
 	for _, target := range entry.targets {
@@ -818,10 +819,7 @@ func (s *VoiceScheduler) sendSlowNotice(in c3types.Inbound) {
 	if err != nil {
 		return
 	}
-	if _, err := ch.SendReply(c3types.ReplyArgs{
-		Channel: in.Channel, ChatID: in.ChatID, TopicID: in.TopicID, ReplyTo: &in.MessageID,
-		Text: c3types.WithTestInjectionMarker(&in, voiceSlowNoticeText),
-	}); err != nil {
+	if err := sendVoiceNotice(ch, &in, c3types.VoiceStatusSlow, voiceSlowNoticeText, ""); err != nil {
 		log.Printf("voice scheduler: slow-note reply chan=%s chat=%d msg=%d failed (not retried): %v", in.Channel, in.ChatID, in.MessageID, err)
 	}
 }

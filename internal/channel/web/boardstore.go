@@ -56,8 +56,10 @@ type boardLogEntry struct {
 	// whether more parts follow it.
 	Segment int  `json:"segment,omitempty"`
 	HasMore bool `json:"has_more,omitempty"`
-	// Status is a voice act's edit: heard (Text is the transcript),
-	// no_speech, slow (still transcribing) or failed (Text is C3's notice).
+	// Status is a voice act's status. On its edit: heard (Text is the
+	// transcript), no_speech, slow (still transcribing) or failed (Text is
+	// C3's notice). On the act of a part that never reached C3: cancelled or
+	// refused.
 	Status string `json:"status,omitempty"`
 }
 

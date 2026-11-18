@@ -70,6 +70,14 @@ type ReadbackSender interface {
 	SendReadback(c3types.ReadbackArgs) (sentMessageID int64, err error)
 }
 
+// VoiceStatusSender is the optional renderer of a channel that shows C3's
+// notices about a voice note (no speech, failed, slow) on the note itself. The
+// broker sends them through it instead of SendReply, so a session's reply,
+// which always goes through SendReply, can never pose as one.
+type VoiceStatusSender interface {
+	SendVoiceStatus(c3types.VoiceStatusArgs) error
+}
+
 // HeldReadbackSender can include a queue count without changing transcript data.
 type HeldReadbackSender interface {
 	SendReadbackWithHeld(c3types.ReadbackArgs, int) (int64, error)
