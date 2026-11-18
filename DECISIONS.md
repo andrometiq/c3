@@ -3,6 +3,35 @@
 Entries are newest first. This is the public architecture record: it records
 rulings and rationale, never private operational details.
 
+## D044: One sign-in through the front covers the web chat and boards
+
+**Date:** 2026-11-19
+
+**Decision:** The authenticated HTTPS front (`channels.web.front`), which until
+now opened only boards, also opens the web chat, under the same check: a request
+on the front's `Host` is the operator only when its TCP peer is the front's
+address and the identity header holds exactly the configured operator. Signing in
+at the front is the whole sign-in, with no second step. Off the front nothing
+changes: C3's Telegram link and cookie are the only sign-in there, and the header
+never counts.
+
+On the front anyone else gets one uniform 403 on every path, so an unvouched
+caller learns nothing about which routes exist. C3's own login pages send the
+operator to the chat, and the token exchange, fresh link, logout and health
+check are 404 there, so the front can neither mint, spend nor end a C3 login.
+
+The front viewer's per-browser chat state is keyed by `front:<operator>`, which
+no cookie hashes to, and lives in memory only: no C3 session is made for it, so
+nothing it creates can sign in off the front, and C3's cookie never signs in on
+it. Rejected: minting a C3 cookie session behind the front, which would put a
+front-made credential in the store that the direct path trusts. The cost: all
+browsers through the front share one spoken-replies setting, it resets on a
+broker restart, and a send retried across a restart is delivered again, as a
+board act already is.
+
+When a front is set, the web attach result names its origin; the Telegram login
+link still points at the direct path.
+
 ## D043: Boards are kept for good
 
 **Date:** 2026-11-18

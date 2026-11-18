@@ -103,9 +103,10 @@ sit in the broker's queue. An unreadable `board.json` stops the board channel fr
 
 ## The authenticated HTTPS front
 
-A phone off the tailnet reaches boards through an authenticated HTTPS front: a proxy that signs the
-owner in, forwards board requests to the web listener with the browser's `Host`, and names the
-signed-in identity in a header. In the web stanza (all four keys, once any is set):
+A phone off the tailnet reaches boards and the web chat through an authenticated HTTPS front: a
+proxy that signs the owner in, forwards requests to the web listener with the browser's `Host`, and
+names the signed-in identity in a header. One sign-in there covers both, with no C3 login. In the
+web stanza (all four keys, once any is set):
 
 ```json
 "front": {"origin": "https://boards.example.com", "from": "192.0.2.10",
@@ -114,17 +115,21 @@ signed-in identity in a header. In the web stanza (all four keys, once any is se
 
 A request whose `Host` is the front's (in any case, with or without one trailing dot, an IP
 literal in any form, the port compared as a number with an empty one meaning 443; a port that isn't
-a number counts too) reaches only `/board` and `/board/*` (else 404), and a request from the
-front's address under any other `Host` gets 404 (unless `from` is loopback), so the web chat stays
-off the front. So the front must pass the browser's `Host` unchanged: under any other its requests
-are not the front's (404, or with a loopback `from` the web chat, which wants C3's own login). A
-health check from the front gets 404 on `/healthz` under the front's name, and under any other
-unless `from` is loopback; check `/board` under the front's name instead, where 403 without the
-operator's identity means C3 is up. A request is the operator only when its TCP peer is `from` and
-the header holds exactly one value, equal to `operator`; any other identity gets 403. C3's own
-login never counts on the front, and the header never counts off it. C3 trusts anything that can
-send from `from` as the front, so run the front where nothing else can reach the web listener, or
-fence the listener's port to the front's own user there. With a front set, board links use its origin. `c3-broker status` does not print `front`.
+a number counts too) is the operator only when its TCP peer is `from` and the header holds exactly
+one value, equal to `operator`. The operator reaches every board and web chat route; anyone else
+gets the same `403 {"error":"forbidden"}` on every path. C3's own login never counts on the front,
+and the header never counts off it. On the front, `GET /login` and `GET /auth` go to `/`, and C3's
+token exchange, fresh-link endpoint, logout and `/healthz` are 404; the Telegram login link opens
+the web chat directly, never through the front ([WEB.md](WEB.md#through-an-authenticated-https-front)).
+A request from the front's address under any other `Host` gets 404 (unless `from` is loopback). So
+the front must pass the browser's `Host` unchanged: under any other its requests are not the
+front's (404, or with a loopback `from` the direct web chat, which wants C3's own login). A health
+check from the front can ask any path under the front's name: 403 without the operator's identity
+means C3 is up. C3 trusts anything that can send from `from` as the front, so run the front where
+nothing else can reach the web listener, or fence the listener's port to the front's own user
+there. C3 can't end a stream the front keeps open after the owner signs out there; the front closes
+it. With a front set, board links and the web chat's link in the attach result use its origin.
+`c3-broker status` does not print `front`.
 
 ## Residual leaks
 

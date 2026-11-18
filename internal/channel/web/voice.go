@@ -37,9 +37,9 @@ func (c *Channel) handleVoiceNote(w http.ResponseWriter, r *http.Request) {
 		writeSendError(w, http.StatusForbidden, "not allowed")
 		return
 	}
-	sessionID, current, ok := c.authenticate(r, true)
-	if !ok {
-		writeSendError(w, http.StatusUnauthorized, "sign in again")
+	viewer, status := c.boardViewer(r, true)
+	if status != 0 {
+		writeSendError(w, status, "sign in again")
 		return
 	}
 	clientID := strings.TrimSpace(r.Header.Get("X-Client-Id"))
@@ -64,7 +64,7 @@ func (c *Channel) handleVoiceNote(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	messageID, status, err := c.acceptVoiceInbound(r.Context(), sessionID, current, clientID, mediaType, body)
+	messageID, status, err := c.acceptVoiceInbound(r.Context(), viewer, clientID, mediaType, body)
 	switch {
 	case errors.Is(err, errClientIDConflict):
 		writeSendError(w, http.StatusConflict, err.Error())
@@ -90,8 +90,8 @@ func (c *Channel) handleVoiceNote(w http.ResponseWriter, r *http.Request) {
 	_, _ = fmt.Fprintf(w, "{\"message_id\":%d}\n", messageID)
 }
 
-func (c *Channel) acceptVoiceInbound(ctx context.Context, sessionID string, current session, clientID, mediaType string, body []byte) (int64, int, error) {
-	key := clientMessageKey{sessionID: sessionID, clientID: clientID}
+func (c *Channel) acceptVoiceInbound(ctx context.Context, viewer boardViewer, clientID, mediaType string, body []byte) (int64, int, error) {
+	key := clientMessageKey{sessionID: viewer.id, clientID: clientID}
 	now := c.now()
 	hash := sha256.Sum256(body)
 	pruned := false
@@ -147,7 +147,7 @@ func (c *Channel) acceptVoiceInbound(ctx context.Context, sessionID string, curr
 	}
 	inbound := &c3types.Inbound{
 		Channel: Name, ChatID: c.operatorID, MessageID: record.messageID,
-		Sender: currentSender(current), Timestamp: now, ConvKind: c3types.ConvKindDM,
+		Sender: viewer.sender, Timestamp: now, ConvKind: c3types.ConvKindDM,
 		Kind: c3types.InboundMessage, V: c3types.InboundRecordVersion,
 		Attachments: []c3types.Attachment{{
 			Kind: "voice", FileID: record.voiceFileID, MIME: "audio/ogg", Size: record.voiceSize,
@@ -188,10 +188,6 @@ func (c *Channel) acceptVoiceInbound(ctx context.Context, sessionID string, curr
 		c.persistSessions("client-message insert")
 		return messageID, http.StatusForbidden, nil
 	}
-}
-
-func currentSender(current session) c3types.Sender {
-	return c3types.Sender{UserID: current.userID, Username: current.username}
 }
 
 func (c *Channel) storeVoice(parent context.Context, mediaType string, body []byte) (string, int64, float64, error) {

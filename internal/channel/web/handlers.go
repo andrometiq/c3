@@ -12,7 +12,6 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/Andrometiq/c3/internal/c3types"
 	"github.com/Andrometiq/c3/internal/channel"
 )
 
@@ -48,9 +47,11 @@ func (c *Channel) routes() http.Handler {
 	mux.HandleFunc("POST /board/{name}/act", c.handleBoardAct)
 	mux.HandleFunc("POST /board/{name}/close", c.handleBoardClose)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// The front reaches board routes only, and only under its own origin.
-		if c.isFrontRequest(r) && !isBoardPath(r.URL.Path) || c.isOffFrontAlias(r) {
+		if c.isOffFrontAlias(r) {
 			http.NotFound(w, r)
+			return
+		}
+		if c.isFrontRequest(r) && !c.admitFrontRequest(w, r) {
 			return
 		}
 		isRead := r.Method == http.MethodGet || r.Method == http.MethodHead
@@ -70,8 +71,8 @@ func (c *Channel) routes() http.Handler {
 const documentContentSecurityPolicy = "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; font-src data:; media-src data:; base-uri 'none'; form-action 'none'; frame-ancestors 'self'; sandbox allow-scripts"
 
 func (c *Channel) handleFile(w http.ResponseWriter, r *http.Request) {
-	if _, _, ok := c.authenticate(r, false); !ok {
-		http.Error(w, "authentication required", http.StatusUnauthorized)
+	if _, status := c.boardViewer(r, false); status != 0 {
+		http.Error(w, "authentication required", status)
 		return
 	}
 	path, err := c.localFilePath(r.PathValue("token"))
@@ -146,8 +147,8 @@ func (c *Channel) handleIndex(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	if _, _, ok := c.authenticate(r, false); !ok {
-		http.Redirect(w, r, "/login", http.StatusSeeOther)
+	if _, status := c.boardViewer(r, false); status != 0 {
+		refuseBoardPage(w, r, status)
 		return
 	}
 	c.servePage(w, "page.html")
@@ -279,9 +280,9 @@ func (c *Channel) handleSend(w http.ResponseWriter, r *http.Request) {
 		writeSendError(w, http.StatusForbidden, "not allowed")
 		return
 	}
-	sessionID, current, ok := c.authenticate(r, true)
-	if !ok {
-		writeSendError(w, http.StatusUnauthorized, "sign in again")
+	viewer, status := c.boardViewer(r, true)
+	if status != 0 {
+		writeSendError(w, status, "sign in again")
 		return
 	}
 	var body struct {
@@ -305,9 +306,8 @@ func (c *Channel) handleSend(w http.ResponseWriter, r *http.Request) {
 		writeSendError(w, http.StatusRequestEntityTooLarge, "message too long")
 		return
 	}
-	key := clientMessageKey{sessionID: sessionID, clientID: body.ClientID}
-	sender := c3types.Sender{UserID: current.userID, Username: current.username}
-	messageID, status, err := c.acceptInbound(c.webChatInbound(), key, sender, body.Text)
+	key := clientMessageKey{sessionID: viewer.id, clientID: body.ClientID}
+	messageID, status, err := c.acceptInbound(c.webChatInbound(), key, viewer.sender, body.Text)
 	if errors.Is(err, errClientIDConflict) {
 		writeSendError(w, status, err.Error())
 		return
@@ -376,9 +376,9 @@ func (c *Channel) handleEvents(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
-	sessionID, _, ok := c.authenticate(r, true)
-	if !ok {
-		http.Error(w, "authentication required", http.StatusUnauthorized)
+	viewer, status := c.boardViewer(r, true)
+	if status != 0 {
+		http.Error(w, "authentication required", status)
 		return
 	}
 	flusher, ok := w.(http.Flusher)
@@ -392,11 +392,11 @@ func (c *Channel) handleEvents(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	flusher.Flush()
 
-	client, replay, incomplete := c.connectStream(sessionID, r.Header.Get("Last-Event-ID"))
-	defer c.removeStream(sessionID, client)
+	client, replay, incomplete := c.connectStream(viewer.id, r.Header.Get("Last-Event-ID"))
+	defer c.removeStream(viewer.id, client)
 	c.authMu.Lock()
-	current := c.sessions[sessionID]
-	voice := current != nil && current.voice
+	voiceFlag := c.voiceFlagLocked(viewer)
+	voice := voiceFlag != nil && *voiceFlag
 	c.authMu.Unlock()
 	if err := writeSSE(w, streamEvent{kind: "prefs", payload: streamPayload{Voice: &voice}}); err != nil {
 		return

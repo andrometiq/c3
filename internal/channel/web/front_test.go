@@ -1,12 +1,17 @@
 package web
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os/exec"
+	"regexp"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/Andrometiq/c3/internal/c3types"
 	"github.com/Andrometiq/c3/internal/mappings"
 )
 
@@ -47,27 +52,53 @@ func serve(c *Channel, r *http.Request) *httptest.ResponseRecorder {
 	return w
 }
 
-func TestFrontHostReachesOnlyBoardRoutes(t *testing.T) {
-	c, _, cookie := newFrontTest(t)
-	for _, path := range []string{"/board", "/board/plan", "/board/plan/state", "/board/assets/board.js"} {
+// TestFrontVouchedOperatorReachesEveryRouteAndAnyoneElseGetsOne403: on the
+// front's Host the operator the front vouches for reaches the web chat and
+// boards alike; any other request, a C3 login included, gets the same 403 on
+// every path, never a login page or the fresh-link endpoint.
+func TestFrontVouchedOperatorReachesEveryRouteAndAnyoneElseGetsOne403(t *testing.T) {
+	c, host, cookie := newFrontTest(t)
+	for _, path := range []string{"/", "/sw.js", "/manifest.webmanifest", "/board", "/board/plan", "/board/plan/state", "/board/assets/board.js"} {
 		if w := serve(c, frontRequest(http.MethodGet, path, "", frontAddress, frontOperator)); w.Code != http.StatusOK {
 			t.Fatalf("front operator GET %s=%d, want 200", path, w.Code)
 		}
 	}
-	for _, route := range []struct{ method, path string }{
-		{http.MethodGet, "/"}, {http.MethodGet, "/login"}, {http.MethodPost, "/login/link"}, {http.MethodGet, "/auth"},
-		{http.MethodPost, "/send"}, {http.MethodGet, "/events"}, {http.MethodGet, "/files/00112233445566778899aabbccddeeff"},
-		{http.MethodGet, "/healthz"}, {http.MethodGet, "/sw.js"}, {http.MethodGet, "/boards"}, {http.MethodGet, "/board/../send"},
-	} {
-		r := frontRequest(route.method, route.path, "", frontAddress, frontOperator)
-		r.AddCookie(cookie)
-		w := serve(c, r)
-		if w.Code != http.StatusNotFound {
-			t.Fatalf("front %s %s=%d, want it kept off the front", route.method, route.path, w.Code)
+	chat, _ := pages.ReadFile("page.html")
+	if w := serve(c, frontRequest(http.MethodGet, "/", "", frontAddress, frontOperator)); w.Body.String() != string(chat) {
+		t.Fatal("front operator GET / is not the web chat page")
+	}
+	requesters := map[string]func(method, path string) *http.Request{
+		"C3 login, no identity": func(method, path string) *http.Request {
+			r := frontRequest(method, path, "", frontAddress)
+			r.AddCookie(cookie)
+			return r
+		},
+		"another identity": func(method, path string) *http.Request {
+			return frontRequest(method, path, "", frontAddress, "guest@example.test")
+		},
+		"two identities": func(method, path string) *http.Request {
+			return frontRequest(method, path, "", frontAddress, frontOperator, frontOperator)
+		},
+		"another peer": func(method, path string) *http.Request {
+			return frontRequest(method, path, "", "192.0.2.99", frontOperator)
+		},
+	}
+	for name, requester := range requesters {
+		for _, route := range []struct{ method, path string }{
+			{http.MethodGet, "/"}, {http.MethodGet, "/login"}, {http.MethodPost, "/login/link"}, {http.MethodGet, "/auth"},
+			{http.MethodPost, "/auth"}, {http.MethodPost, "/logout"}, {http.MethodPost, "/send"}, {http.MethodGet, "/events"},
+			{http.MethodPost, "/voice"}, {http.MethodPost, "/voice-note"}, {http.MethodGet, "/audio/unlock"},
+			{http.MethodGet, "/files/00112233445566778899aabbccddeeff"}, {http.MethodGet, "/healthz"}, {http.MethodGet, "/sw.js"},
+			{http.MethodGet, "/no-such-route"}, {http.MethodGet, "/board/plan"}, {http.MethodGet, "/board/plan/state"},
+		} {
+			w := serve(c, requester(route.method, route.path))
+			if w.Code != http.StatusForbidden || w.Body.String() != "{\"error\":\"forbidden\"}\n" || w.Header().Get("Set-Cookie") != "" {
+				t.Fatalf("%s: front %s %s=%d %q, want the uniform 403", name, route.method, route.path, w.Code, w.Body.String())
+			}
 		}
 	}
-	if w := serve(c, request(http.MethodGet, "/healthz", "", nil, false)); w.Code != http.StatusOK {
-		t.Fatalf("direct /healthz=%d: the front rule leaked off the front", w.Code)
+	if host.loginDeliveries != 0 {
+		t.Fatalf("a refused front request sent %d login links", host.loginDeliveries)
 	}
 	if board, _ := c.board.BoardByName("plan"); board.Link != frontOrigin+"/board/plan" {
 		t.Fatalf("link %q, want the front's", board.Link)
@@ -75,6 +106,223 @@ func TestFrontHostReachesOnlyBoardRoutes(t *testing.T) {
 	w := serve(c, frontRequest(http.MethodGet, "/board/plan", "", frontAddress, frontOperator))
 	if !strings.HasSuffix(w.Header().Get("Content-Security-Policy"), "; frame-src "+frontOrigin+"/board/plan/page") {
 		t.Fatalf("front shell frame-src: %q", w.Header().Get("Content-Security-Policy"))
+	}
+}
+
+// TestOffTheFrontOnlyTheC3LoginSignsIn: off the front the identity header
+// never counts, for the web chat as for boards; C3's own login does.
+func TestOffTheFrontOnlyTheC3LoginSignsIn(t *testing.T) {
+	c, host, cookie := newFrontTest(t)
+	withHeader := func(method, path, body string, cookie *http.Cookie) *http.Request {
+		r := request(method, path, body, cookie, true)
+		r.Header.Set(frontHeader, frontOperator)
+		return r
+	}
+	if w := serve(c, withHeader(http.MethodGet, "/", "", nil)); w.Code != http.StatusSeeOther || w.Header().Get("Location") != "/login" {
+		t.Fatalf("identity header off the front GET /=%d %q, want the C3 login", w.Code, w.Header().Get("Location"))
+	}
+	if w := serve(c, withHeader(http.MethodGet, "/login", "", nil)); w.Code != http.StatusOK {
+		t.Fatalf("off the front GET /login=%d, want the login page", w.Code)
+	}
+	if w := serve(c, withHeader(http.MethodPost, "/send", `{"text":"header only","client_id":"h"}`, nil)); w.Code != http.StatusUnauthorized {
+		t.Fatalf("identity header off the front POST /send=%d, want 401", w.Code)
+	}
+	if w := serve(c, withHeader(http.MethodPost, "/send", `{"text":"signed in","client_id":"h"}`, cookie)); w.Code != http.StatusAccepted {
+		t.Fatalf("C3 login off the front POST /send=%d, want 202", w.Code)
+	}
+	if emitted := host.emittedSnapshot(); len(emitted) != 1 || emitted[0].Text != "signed in" {
+		t.Fatalf("emitted %+v, want only the signed-in send", emitted)
+	}
+}
+
+// TestFrontViewerChatStateNeverSignsInOffTheFront: the front's operator gets
+// the web chat's per-viewer state (client ids, stream, presence, spoken
+// replies, audio, documents, voice notes) under the front viewer id, which no
+// cookie hashes to and which is never persisted; C3's login state is untouched.
+func TestFrontViewerChatStateNeverSignsInOffTheFront(t *testing.T) {
+	c, host, cookie := newFrontTest(t)
+	audio := []byte("ID3-front-audio")
+	host.synthesize = func(context.Context, c3types.SpeechRequest) (c3types.SpeechResult, error) {
+		return c3types.SpeechResult{Audio: audio, MIME: "audio/mpeg", Provider: "fake"}, nil
+	}
+	front := func(method, path, body string) *httptest.ResponseRecorder {
+		r := frontRequest(method, path, body, frontAddress, frontOperator)
+		r.AddCookie(cookie) // ignored on the front: the state must land on the front viewer
+		return serve(c, r)
+	}
+
+	send := front(http.MethodPost, "/send", `{"text":"from the front","client_id":"f1"}`)
+	retry := front(http.MethodPost, "/send", `{"text":"from the front","client_id":"f1"}`)
+	emitted := host.emittedSnapshot()
+	if send.Code != http.StatusAccepted || retry.Code != http.StatusAccepted || send.Body.String() != retry.Body.String() ||
+		len(emitted) != 1 || emitted[0].Sender.UserID != 42 || emitted[0].Sender.Username != "operator" {
+		t.Fatalf("front send=%d %s retry=%d %s emitted %+v", send.Code, send.Body, retry.Code, retry.Body, emitted)
+	}
+	if conflict := front(http.MethodPost, "/send", `{"text":"changed","client_id":"f1"}`); conflict.Code != http.StatusConflict {
+		t.Fatalf("front client id reuse=%d, want 409", conflict.Code)
+	}
+	c.clientMu.Lock()
+	_, isFrontKey := c.clientMessages[clientMessageKey{sessionID: c.frontViewerID(), clientID: "f1"}]
+	c.clientMu.Unlock()
+	if !isFrontKey {
+		t.Fatal("the front send's client id is not keyed by the front viewer")
+	}
+
+	streamContext, cancel := context.WithCancel(context.Background())
+	stream := newStreamRecorder()
+	done := make(chan struct{})
+	go func() {
+		c.routes().ServeHTTP(stream, frontRequest(http.MethodGet, "/events", "", frontAddress, frontOperator).WithContext(streamContext))
+		close(done)
+	}()
+	defer func() { cancel(); <-done }()
+	waitFor(t, func() bool { _, body := stream.snapshot(); return strings.Contains(body, "event: presence") })
+	if voice := front(http.MethodPost, "/voice", `{"enabled":true}`); voice.Code != http.StatusNoContent {
+		t.Fatalf("front voice preference=%d %s", voice.Code, voice.Body)
+	}
+	waitFor(t, func() bool { _, body := stream.snapshot(); return strings.Contains(body, `"voice":true`) })
+	c.authMu.Lock()
+	isCookieVoice := c.sessions[sessionKey(cookie.Value)].voice
+	sessionCount := len(c.sessions)
+	c.authMu.Unlock()
+	if isCookieVoice || sessionCount != 1 {
+		t.Fatalf("the front changed C3 login state: cookie voice %v, sessions %d", isCookieVoice, sessionCount)
+	}
+	if _, err := c.SendReply(c3types.ReplyArgs{Channel: Name, ChatID: 42, Text: "spoken answer"}); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, func() bool { _, body := stream.snapshot(); return strings.Contains(body, "event: audio") })
+	_, body := stream.snapshot()
+	audioURL := regexp.MustCompile(`"url":"(/audio/[^"]+)"`).FindStringSubmatch(body)
+	if len(audioURL) != 2 {
+		t.Fatalf("no audio URL in the front stream: %q", body)
+	}
+	if w := front(http.MethodGet, audioURL[1], ""); w.Code != http.StatusOK || w.Body.String() != string(audio) {
+		t.Fatalf("front audio=%d %q", w.Code, w.Body.String())
+	}
+	if w := front(http.MethodGet, "/audio/unlock", ""); w.Code != http.StatusOK {
+		t.Fatalf("front audio unlock=%d", w.Code)
+	}
+	source := writeDocumentSource(t, t.TempDir(), "report.html", "<!doctype html><title>report</title>")
+	token, _, err := c.storeDocument(source, "report.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if w := front(http.MethodGet, "/files/"+token, ""); w.Code != http.StatusOK {
+		t.Fatalf("front document=%d", w.Code)
+	}
+
+	forged := &http.Cookie{Name: sessionCookieName, Value: c.frontViewerID()}
+	for name, cookie := range map[string]*http.Cookie{"no cookie": nil, "the front viewer id as a cookie": forged} {
+		for _, path := range []string{audioURL[1], "/files/" + token} {
+			if w := serve(c, request(http.MethodGet, path, "", cookie, false)); w.Code != http.StatusUnauthorized {
+				t.Fatalf("off the front, %s, GET %s=%d, want 401", name, path, w.Code)
+			}
+		}
+		if w := serve(c, request(http.MethodPost, "/send", `{"text":"x","client_id":"f1"}`, cookie, true)); w.Code != http.StatusUnauthorized {
+			t.Fatalf("off the front, %s, POST /send=%d, want 401", name, w.Code)
+		}
+	}
+
+	t.Run("voice note", func(t *testing.T) {
+		if _, err := exec.LookPath("ffmpeg"); err != nil {
+			t.Skip("ffmpeg not available")
+		}
+		r := frontRequest(http.MethodPost, "/voice-note", string(sineWAV(t, time.Second)), frontAddress, frontOperator)
+		r.Header.Set("Content-Type", "audio/wav")
+		r.Header.Set("X-Client-Id", "front-voice")
+		w := serve(c, r)
+		rows := host.emittedSnapshot()
+		last := rows[len(rows)-1]
+		if w.Code != http.StatusAccepted || len(last.Attachments) != 1 || last.Attachments[0].Kind != "voice" || last.Sender.UserID != 42 {
+			t.Fatalf("front voice note=%d %s, last emitted %+v", w.Code, w.Body, last)
+		}
+	})
+
+	// The front's client ids sit beside C3's login in memory; reloading the
+	// saved state must keep that login, not reject the file as corrupt.
+	if err := c.loadState(host); err != nil {
+		t.Fatal(err)
+	}
+	if w := serve(c, request(http.MethodGet, "/", "", cookie, false)); w.Code != http.StatusOK {
+		t.Fatalf("C3 login after a state reload=%d, want 200", w.Code)
+	}
+}
+
+// TestFrontKeepsTheSameOriginRules: a vouched request still needs same-origin
+// evidence for a POST, and the stream refuses a foreign Origin.
+func TestFrontKeepsTheSameOriginRules(t *testing.T) {
+	c, _, _ := newFrontTest(t)
+	post := func(path, body, origin, fetchSite string) int {
+		r := frontRequest(http.MethodPost, path, body, frontAddress, frontOperator)
+		r.Header.Del("Origin")
+		if origin != "" {
+			r.Header.Set("Origin", origin)
+		}
+		if fetchSite != "" {
+			r.Header.Set("Sec-Fetch-Site", fetchSite)
+		}
+		return serve(c, r).Code
+	}
+	const foreign = "https://elsewhere.example.test"
+	for _, path := range []string{"/send", "/voice", "/speak", "/voice-note"} {
+		if code := post(path, `{}`, foreign, ""); code != http.StatusForbidden {
+			t.Fatalf("front POST %s from a foreign origin=%d, want 403", path, code)
+		}
+		if code := post(path, `{}`, "", ""); code != http.StatusForbidden {
+			t.Fatalf("front POST %s without origin evidence=%d, want 403", path, code)
+		}
+	}
+	if code := post("/send", `{"text":"same site","client_id":"s1"}`, "", "same-origin"); code != http.StatusAccepted {
+		t.Fatalf("front POST /send with Sec-Fetch-Site=%d, want 202", code)
+	}
+	if code := post("/send", `{"text":"front origin","client_id":"s2"}`, frontOrigin, ""); code != http.StatusAccepted {
+		t.Fatalf("front POST /send from the front origin=%d, want 202", code)
+	}
+	events := frontRequest(http.MethodGet, "/events", "", frontAddress, frontOperator)
+	events.Header.Set("Origin", foreign)
+	if w := serve(c, events); w.Code != http.StatusForbidden {
+		t.Fatalf("front stream from a foreign origin=%d, want 403", w.Code)
+	}
+}
+
+// TestFrontHasNoC3SignIn: on the front the operator's sign-in pages lead to
+// the chat, and C3's token exchange, fresh link, logout and health check don't
+// exist; the Telegram login link still opens off the front.
+func TestFrontHasNoC3SignIn(t *testing.T) {
+	c, host, cookie := newFrontTest(t)
+	for _, path := range []string{"/login", "/auth"} {
+		if w := serve(c, frontRequest(http.MethodGet, path, "", frontAddress, frontOperator)); w.Code != http.StatusSeeOther || w.Header().Get("Location") != "/" {
+			t.Fatalf("front GET %s=%d %q, want 303 to /", path, w.Code, w.Header().Get("Location"))
+		}
+	}
+	link, err := c.MintLoginLink(42)
+	if err != nil || !strings.HasPrefix(link, c.baseURL+"/auth#") {
+		t.Fatalf("login link %q %v, want it off the front", link, err)
+	}
+	token := tokenFromLink(t, link)
+	if w := serve(c, frontRequest(http.MethodPost, "/auth", `{"token":"`+token+`"}`, frontAddress, frontOperator)); w.Code != http.StatusNotFound || w.Header().Get("Set-Cookie") != "" {
+		t.Fatalf("front POST /auth=%d cookie %q, want 404 and no cookie", w.Code, w.Header().Get("Set-Cookie"))
+	}
+	if w := postAuth(c, token); w.Code != http.StatusSeeOther || w.Header().Get("Set-Cookie") == "" {
+		t.Fatalf("the link off the front after a front try=%d, want it unspent", w.Code)
+	}
+	if w := serve(c, frontRequest(http.MethodPost, "/login/link", "", frontAddress, frontOperator)); w.Code != http.StatusNotFound || host.loginDeliveries != 0 {
+		t.Fatalf("front fresh link=%d, deliveries %d; want 404 and none", w.Code, host.loginDeliveries)
+	}
+	logout := frontRequest(http.MethodPost, "/logout", "", frontAddress, frontOperator)
+	logout.AddCookie(cookie)
+	if w := serve(c, logout); w.Code != http.StatusNotFound {
+		t.Fatalf("front logout=%d, want 404", w.Code)
+	}
+	if w := serve(c, request(http.MethodGet, "/", "", cookie, false)); w.Code != http.StatusOK {
+		t.Fatalf("C3 login after a front logout=%d, want it kept", w.Code)
+	}
+	if w := serve(c, frontRequest(http.MethodGet, "/healthz", "", frontAddress, frontOperator)); w.Code != http.StatusNotFound {
+		t.Fatalf("front /healthz=%d, want 404", w.Code)
+	}
+	if w := serve(c, request(http.MethodGet, "/healthz", "", nil, false)); w.Code != http.StatusOK {
+		t.Fatalf("direct /healthz=%d: the front rule leaked off the front", w.Code)
 	}
 }
 
@@ -188,12 +436,12 @@ func TestFrontHostCountsInEverySpellingOfItsName(t *testing.T) {
 		t.Helper()
 		chat, state := serve(c, local(host, "/")).Code, serve(c, local(host, "/board/plan/state")).Code
 		switch {
-		case chat == http.StatusNotFound && state == http.StatusForbidden:
+		case chat == http.StatusForbidden && state == http.StatusForbidden:
 			return true
 		case chat == http.StatusOK && state == http.StatusOK:
 			return false
 		}
-		t.Fatalf("Host %q: / =%d, /board/plan/state =%d; want the front's 404/403 or the web chat's 200/200", host, chat, state)
+		t.Fatalf("Host %q: / =%d, /board/plan/state =%d; want the front's 403/403 or the web chat's 200/200", host, chat, state)
 		return false
 	}
 	for _, host := range []string{

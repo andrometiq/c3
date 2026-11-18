@@ -57,9 +57,9 @@ func (c *Channel) handleVoicePreference(w http.ResponseWriter, r *http.Request) 
 		writeSendError(w, http.StatusForbidden, "not allowed")
 		return
 	}
-	sessionID, _, ok := c.authenticate(r, true)
-	if !ok {
-		writeSendError(w, http.StatusUnauthorized, "sign in again")
+	viewer, status := c.boardViewer(r, true)
+	if status != 0 {
+		writeSendError(w, status, "sign in again")
 		return
 	}
 	var body struct {
@@ -71,24 +71,28 @@ func (c *Channel) handleVoicePreference(w http.ResponseWriter, r *http.Request) 
 	}
 
 	c.authMu.Lock()
-	current := c.sessions[sessionID]
-	if current == nil {
+	voiceFlag := c.voiceFlagLocked(viewer)
+	if voiceFlag == nil {
 		c.authMu.Unlock()
 		writeSendError(w, http.StatusUnauthorized, "sign in again")
 		return
 	}
-	previous := current.voice
+	previous := *voiceFlag
 	if previous == *body.Enabled {
 		c.authMu.Unlock()
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
-	current.voice = *body.Enabled
+	*voiceFlag = *body.Enabled
 	c.authMu.Unlock()
-	if err := c.saveSessions(); err != nil {
+	var err error
+	if !viewer.isFront { // the front viewer's preference lives in memory only
+		err = c.saveSessions()
+	}
+	if err != nil {
 		c.authMu.Lock()
-		if current := c.sessions[sessionID]; current != nil && current.voice == *body.Enabled {
-			current.voice = previous
+		if voiceFlag := c.voiceFlagLocked(viewer); voiceFlag != nil && *voiceFlag == *body.Enabled {
+			*voiceFlag = previous
 		}
 		c.authMu.Unlock()
 		if c.host != nil {
@@ -98,7 +102,7 @@ func (c *Channel) handleVoicePreference(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	voice := *body.Enabled
-	c.broadcastSession(sessionID, streamEvent{kind: "prefs", payload: streamPayload{Voice: &voice}})
+	c.broadcastSession(viewer.id, streamEvent{kind: "prefs", payload: streamPayload{Voice: &voice}})
 	c.emitVoicePreferenceNotice(voice)
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -125,22 +129,42 @@ func (c *Channel) emitVoicePreferenceNotice(enabled bool) {
 	}
 }
 
-func (c *Channel) hasVoiceSession() bool {
-	if !c.HasLiveSession(c.operatorID) {
-		return false
+// voiceFlagLocked is the viewer's spoken-replies preference: the front
+// viewer's, kept in memory only, or its web session's, nil once that session
+// is gone. authMu must be held.
+func (c *Channel) voiceFlagLocked(viewer boardViewer) *bool {
+	if viewer.isFront {
+		return &c.frontVoice
 	}
+	if current := c.sessions[viewer.id]; current != nil {
+		return &current.voice
+	}
+	return nil
+}
+
+// voiceViewers names the operator's viewers with spoken replies on.
+func (c *Channel) voiceViewers() map[string]bool {
 	enabled := make(map[string]bool)
 	c.authMu.Lock()
+	defer c.authMu.Unlock()
 	for sessionID, current := range c.sessions {
 		if current.userID == c.operatorID && current.voice {
 			enabled[sessionID] = true
 		}
 	}
-	c.authMu.Unlock()
+	if c.frontVoice {
+		enabled[c.frontViewerID()] = true
+	}
+	return enabled
+}
+
+func (c *Channel) hasVoiceSession() bool {
+	c.HasLiveSession(c.operatorID) // evicts idle web sessions and closes their streams
+	enabled := c.voiceViewers()
 	c.streamMu.Lock()
 	defer c.streamMu.Unlock()
-	for sessionID := range enabled {
-		if len(c.streams[sessionID]) != 0 {
+	for viewerID := range enabled {
+		if len(c.streams[viewerID]) != 0 {
 			return true
 		}
 	}
@@ -247,8 +271,8 @@ func (c *Channel) handleSpeak(w http.ResponseWriter, r *http.Request) {
 		writeSendError(w, http.StatusForbidden, "not allowed")
 		return
 	}
-	if _, _, ok := c.authenticate(r, true); !ok {
-		writeSendError(w, http.StatusUnauthorized, "sign in again")
+	if _, status := c.boardViewer(r, true); status != 0 {
+		writeSendError(w, status, "sign in again")
 		return
 	}
 	var body struct {
@@ -452,8 +476,8 @@ func (c *Channel) audioTokenForMessage(messageID int64) (string, bool) {
 
 func (c *Channel) handleAudio(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Content-Type-Options", "nosniff")
-	if _, _, ok := c.authenticate(r, false); !ok {
-		http.Error(w, "authentication required", http.StatusUnauthorized)
+	if _, status := c.boardViewer(r, false); status != 0 {
+		http.Error(w, "authentication required", status)
 		return
 	}
 	audio, ok := c.audioForToken(r.PathValue("token"))
@@ -466,8 +490,8 @@ func (c *Channel) handleAudio(w http.ResponseWriter, r *http.Request) {
 
 func (c *Channel) handleAudioUnlock(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Content-Type-Options", "nosniff")
-	if _, _, ok := c.authenticate(r, false); !ok {
-		http.Error(w, "authentication required", http.StatusUnauthorized)
+	if _, status := c.boardViewer(r, false); status != 0 {
+		http.Error(w, "authentication required", status)
 		return
 	}
 	audio, err := pages.ReadFile("unlock.mp3")

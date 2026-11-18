@@ -100,6 +100,7 @@ type Channel struct {
 	failedAuth        map[string]time.Time
 	loginLinkTimes    []time.Time
 	loginLinkInFlight bool
+	frontVoice        bool // the front viewer's spoken-replies preference, never persisted
 
 	clientMu            sync.Mutex
 	clientMessages      map[clientMessageKey]*clientMessage

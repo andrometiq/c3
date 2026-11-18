@@ -251,14 +251,7 @@ func (c *Channel) broadcastSession(sessionID string, event streamEvent) {
 }
 
 func (c *Channel) broadcastVoiceSessions(event streamEvent) {
-	enabled := make(map[string]bool)
-	c.authMu.Lock()
-	for sessionID, current := range c.sessions {
-		if current.voice {
-			enabled[sessionID] = true
-		}
-	}
-	c.authMu.Unlock()
+	enabled := c.voiceViewers()
 	c.streamMu.Lock()
 	defer c.streamMu.Unlock()
 	for sessionID, clients := range c.streams {

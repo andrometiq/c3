@@ -204,6 +204,34 @@ func TestAttachWebClaimsOperatorRouteAndSendsLoginLink(t *testing.T) {
 	}
 }
 
+// TestAttachWebNamesTheFrontWhenOneIsConfigured: with a front set, the attach
+// result tells the session the web chat's front origin; the Telegram login
+// link is still the web channel's own.
+func TestAttachWebNamesTheFrontWhenOneIsConfigured(t *testing.T) {
+	const frontOrigin = "https://chat.example.test"
+	for _, hasFront := range []bool{false, true} {
+		b, telegramChannel, webChannel := brokerWithWeb(t, nil)
+		if hasFront {
+			mf := b.Mappings().Clone()
+			web := mf.Channels["web"]
+			web.Front = mappings.WebFront{Origin: frontOrigin, From: "192.0.2.10", IdentityHeader: "X-Front-User", Operator: "owner@example.test"}
+			mf.Channels["web"] = web
+			b.SetMappings(mf)
+		}
+		peer, done := peerPair(t, b)
+		helloAck(t, peer, "/workspace/project")
+		attached := readAttach(t, peer, ipc.AttachReq{Op: ipc.OpAttach, Expr: "web"})
+		done()
+		b.Shutdown()
+		if !attached.OK || strings.Contains(attached.Notice, frontOrigin) != hasFront || !strings.Contains(attached.Notice, "sent to your Telegram DM") {
+			t.Fatalf("front %v: attach web notice %q", hasFront, attached.Notice)
+		}
+		if replies := telegramChannel.sendRepliesSnapshot(); len(replies) != 1 || !strings.Contains(replies[0].Text, webChannel.link) {
+			t.Fatalf("front %v: login DM %+v, want the web channel's own link", hasFront, replies)
+		}
+	}
+}
+
 func TestAttachStructuredTopicNamedWebStillUsesTelegram(t *testing.T) {
 	b, _, _ := brokerWithWeb(t, nil)
 	defer b.Shutdown()

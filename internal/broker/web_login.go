@@ -139,7 +139,9 @@ func webLoginLinkText(stub *Stub, requestedBy, link string) string {
 		cli, cwd, sessionID, link)
 }
 
-func webAttachGuidance(delivery webLoginDelivery, err error, tlsEnabled bool) string {
+// webAttachGuidance tells the session how the owner opens the web chat: the
+// Telegram link off the front, and frontOrigin, when set, behind the front.
+func webAttachGuidance(delivery webLoginDelivery, err error, tlsEnabled bool, frontOrigin string) string {
 	prefix := ""
 	switch {
 	case err != nil:
@@ -152,12 +154,15 @@ func webAttachGuidance(delivery webLoginDelivery, err error, tlsEnabled bool) st
 	default:
 		prefix = "A web login link was sent to your Telegram DM."
 	}
-	guidance := []string{
-		prefix,
+	guidance := []string{prefix}
+	if frontOrigin != "" {
+		guidance = append(guidance, "The web chat is also at "+strings.TrimSuffix(frontOrigin, "/")+", where the authenticated front signs the owner in with no link.")
+	}
+	guidance = append(guidance,
 		"Use reply-tool (\"Telegram\") mode so `reply` lands on the claimed web route.",
 		"Turn on 🔊 Voice on the page to hear replies; a system notice tells you when it is on.",
 		"Permission prompts and `ask` must be answered at the laptop; use pre-approved permissions for an on-the-go drive.",
-	}
+	)
 	if tlsEnabled {
 		guidance = append(guidance, `Phone browsers need the C3 web CA installed once — run "c3-broker web ca" to send it.`)
 	}

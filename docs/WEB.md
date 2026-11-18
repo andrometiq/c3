@@ -39,8 +39,8 @@ path, query, fragment, or user information when `tls` is enabled. A TLS listener
 may bind only loopback or a Tailscale address (`100.64.0.0/10` or
 `fd7a:115c:a1e0::/48`). Web refuses to start unless Telegram is already
 registered and `master_user_id` is nonzero and in `allowlist.users`. Only
-`enabled`, `listen`, `public_url`, `tls`, and `front` (boards behind an
-authenticated HTTPS front, [BOARD.md](BOARD.md#the-authenticated-https-front))
+`enabled`, `listen`, `public_url`, `tls`, and `front` (the web chat and boards
+behind an authenticated HTTPS front, [Sign-in flow](#through-an-authenticated-https-front))
 are legal in the web stanza. `c3-broker status` prints `enabled`, `listen`,
 `public_url` and `tls`, and the live CA fingerprint when TLS is on; it does not
 print `front`.
@@ -133,6 +133,31 @@ It never accepts a user id from the browser. The endpoint allows one successful
 request per minute and five per hour. The local command `c3-broker web link`
 also asks the running broker to mint and DM a link; it never prints the secret.
 
+### Through an authenticated HTTPS front
+
+With `front` set, one sign-in covers the web chat and boards: the front signs
+the owner in and C3 asks for nothing more. The attach result names the front's
+origin, and the Telegram link above still opens the web chat directly (laptop or
+tailnet). The rules for a request whose `Host` is the front's (how the `Host` is
+compared, the stanza and fencing the front are in
+[BOARD.md](BOARD.md#the-authenticated-https-front)):
+
+- It is the operator only when its TCP peer is `from` and the identity header
+  holds exactly one value, equal to `operator`. Anything else gets the same
+  `403 {"error":"forbidden"}` on every path; C3's own cookie never counts there.
+- The operator reaches every web chat and board route. `GET /login` and
+  `GET /auth` go to `/`; the token exchange, the fresh-link endpoint, logout and
+  `/healthz` are 404, so the front can't mint, spend or end a C3 login.
+- Off the front nothing changes: the identity header never counts, and a request
+  from the front's address under another `Host` gets 404 (unless `from` is
+  loopback).
+- The front viewer's chat state (client ids, streams, the spoken-replies
+  preference) is keyed by `front:<operator>`, which no cookie hashes to, and is
+  never written to disk: every browser through the front shares one
+  spoken-replies setting, it resets to off when the broker restarts, and a send
+  retried across a broker restart is delivered again (as on a board).
+- Logout in the page does nothing on the front; sign out at the front.
+
 ## Phone access over the tailnet (private CA)
 
 1. Set the tailnet `listen` address, matching HTTPS `public_url`, and `tls: true`.
@@ -172,7 +197,7 @@ locks. C3 asks an active recorder to stop and save its assembled blob as an
 IndexedDB draft on page hide, but browser termination can still outrun that
 asynchronous recorder and database work.
 
-## Security model (T1–T19)
+## Security model (T1–T20)
 
 1. The send body contains only `text` and `client_id`. C3 rejects extra JSON and
    stamps channel, route, operator, message kind, version, and time itself before
@@ -236,6 +261,10 @@ asynchronous recorder and database work.
     claim that an extension check identifies harmless content. Exploiting the
     files-directory symlink TOCTOU between its `Lstat` and the `O_NOFOLLOW` file
     open requires write access to the state parent, normally as the broker uid.
+20. With `front` set, the front is a second agent-driving credential: whoever
+    can send from `from` with the operator's identity drives the session. Fence
+    the listener to the front as [BOARD.md](BOARD.md#the-authenticated-https-front)
+    says. Same-origin and SSE Origin rules apply on the front as off it.
 
 ## Transport behavior and limitations
 
@@ -314,9 +343,9 @@ this listener at `/board/<name>` under the same login, in the same sandboxed
 frame and CSP as documents. The owner comments on and approves the page part by
 part, and only the session that made a board can hold it
 (`attach +board:<name>`). Boards are their own routes and never touch the web
-chat's stream, replay or message ids. The `front` key puts boards, and only
-boards, behind an authenticated HTTPS front. Routes, trust, storage and the
-front are in [BOARD.md](BOARD.md).
+chat's stream, replay or message ids. The `front` key puts the web chat and
+boards behind one authenticated HTTPS front ([Sign-in flow](#through-an-authenticated-https-front)).
+Routes, trust, storage and the front are in [BOARD.md](BOARD.md).
 
 ## Drive view
 

@@ -11,21 +11,51 @@ import (
 	"github.com/Andrometiq/c3/internal/c3types"
 )
 
-// The authenticated HTTPS front (channels.web.front) serves boards only. A
-// request whose Host is the front's reaches only board routes, and it is the
-// operator only when its TCP peer is the front's address and the identity
-// header names the operator; C3's own login never counts there.
+// The authenticated HTTPS front (channels.web.front) serves the web chat and
+// boards. A request whose Host is the front's is the operator only when its
+// TCP peer is the front's address and the identity header names the operator;
+// C3's own login never counts there, and the header never counts elsewhere.
 
 const frontViewerPrefix = "front:"
 
-// boardViewer is who asks for a board route. Its id is what a frame
-// capability names: the web session key, or frontViewerPrefix plus identity.
+// boardViewer is who asks for a web-chat or board route (named for boards,
+// which used it first). Its id keys the viewer's streams, client ids and frame
+// capabilities: the web session key, a SHA-256 hex digest, or for the front
+// frontViewerPrefix plus identity, which no cookie hashes to.
 type boardViewer struct {
-	id     string
-	sender c3types.Sender
+	id      string
+	sender  c3types.Sender
+	isFront bool
 }
 
 func (c *Channel) hasFront() bool { return c.cfg.Front.Origin != "" }
+
+func (c *Channel) frontViewerID() string { return frontViewerPrefix + c.cfg.Front.Operator }
+
+// frontClosedPaths are C3's own sign-in, sign-out and health endpoints, which
+// don't exist on the front: the front signs the operator in and out.
+var frontClosedPaths = map[string]bool{"/login": true, "/login/link": true, "/auth": true, "/logout": true, "/healthz": true}
+
+// admitFrontRequest applies the front's rules before any route and reports
+// whether the request goes on. Anyone the front doesn't vouch for gets the
+// same 403 on every path; the operator's GET of a sign-in page goes to the
+// chat, and the other closed paths are 404.
+func (c *Channel) admitFrontRequest(w http.ResponseWriter, r *http.Request) bool {
+	if !c.isFrontOperator(r) {
+		writeBoardError(w, http.StatusForbidden, "forbidden")
+		return false
+	}
+	cleaned := path.Clean(r.URL.Path)
+	if !frontClosedPaths[cleaned] {
+		return true
+	}
+	if r.Method == http.MethodGet && (cleaned == "/login" || cleaned == "/auth") {
+		http.Redirect(w, r, "/", http.StatusSeeOther)
+	} else {
+		http.NotFound(w, r)
+	}
+	return false
+}
 
 // isFrontRequest: the Host is the front origin's, compared canonically. A Host
 // whose port can't be parsed counts when its name is the front's, since the
@@ -87,17 +117,18 @@ func (c *Channel) isFrontOperator(r *http.Request) bool {
 	return c.isFrontPeer(r) && len(identities) == 1 && identities[0] == c.cfg.Front.Operator
 }
 
-// boardViewer returns the viewer of a board request, or the status that
-// refuses it: 403 on the front for anyone but the operator, 401 elsewhere
-// without a live web login.
+// boardViewer returns the viewer of a web-chat or board request, or the
+// status that refuses it: 403 on the front for anyone but the operator, 401
+// elsewhere without a live web login.
 func (c *Channel) boardViewer(r *http.Request, touch bool) (boardViewer, int) {
 	if c.isFrontRequest(r) {
 		if !c.isFrontOperator(r) {
 			return boardViewer{}, http.StatusForbidden
 		}
 		return boardViewer{
-			id:     frontViewerPrefix + c.cfg.Front.Operator,
-			sender: c3types.Sender{UserID: c.operatorID, Username: "operator"},
+			id:      c.frontViewerID(),
+			sender:  c3types.Sender{UserID: c.operatorID, Username: "operator"},
+			isFront: true,
 		}, 0
 	}
 	key, current, ok := c.authenticate(r, touch)
@@ -116,7 +147,7 @@ func (c *Channel) capabilityViewers(r *http.Request) []string {
 		if !c.isFrontOperator(r) {
 			return nil
 		}
-		return []string{frontViewerPrefix + c.cfg.Front.Operator}
+		return []string{c.frontViewerID()}
 	}
 	now := c.now()
 	var viewers []string
@@ -153,10 +184,4 @@ func (c *Channel) boardLinkBase() string {
 		return strings.TrimSuffix(normalizeOrigin(c.cfg.Front.Origin), "/")
 	}
 	return c.baseURL
-}
-
-// isBoardPath judges the cleaned path, so "/board/../send" is not a board path.
-func isBoardPath(rawPath string) bool {
-	cleaned := path.Clean(rawPath)
-	return cleaned == "/board" || strings.HasPrefix(cleaned, "/board/")
 }

@@ -344,6 +344,9 @@ func (c *Channel) saveSessions() error {
 	c.clientMu.Lock()
 	stored.ClientMessages = make([]persistedClientMessage, 0, len(c.clientMessages))
 	for key, record := range c.clientMessages {
+		if _, isSession := touches[key.sessionID]; !isSession {
+			continue // a front viewer's ids, or a gone session's, are not reloadable
+		}
 		record.mu.Lock()
 		outcome := ""
 		if record.status == http.StatusAccepted {
