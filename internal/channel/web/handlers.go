@@ -53,7 +53,7 @@ func (c *Channel) routes() http.Handler {
 		}
 		// A boards-only front (local from) keeps its rules from before D044:
 		// each board handler refuses anyone but the front's operator.
-		if c.isFrontRequest(r) && c.isChatOnFront && !c.admitFrontRequest(w, r) {
+		if c.isFrontRequest(r) && c.isChatOnFront() && !c.admitFrontRequest(w, r) {
 			return
 		}
 		isRead := r.Method == http.MethodGet || r.Method == http.MethodHead

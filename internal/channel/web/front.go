@@ -41,7 +41,11 @@ func (c *Channel) isLocalAddress(address string) bool {
 	if ip == nil || ip.IsLoopback() || ip.IsUnspecified() {
 		return true
 	}
-	hostAddresses, err := c.interfaceAddresses()
+	listAddresses := c.interfaceAddresses
+	if listAddresses == nil {
+		listAddresses = net.InterfaceAddrs
+	}
+	hostAddresses, err := listAddresses()
 	if err != nil {
 		return true
 	}
@@ -67,7 +71,14 @@ func interfaceIP(address net.Addr) net.IP {
 // board routes only, as before D044: a local from can't tell the front from
 // any process on this host.
 func (c *Channel) isFrontRoute(r *http.Request) bool {
-	return c.isChatOnFront || isBoardPath(r.URL.Path)
+	return c.isChatOnFront() || isBoardPath(r.URL.Path)
+}
+
+// isChatOnFront: the front serves the web chat, only while its from is not
+// local. It is judged on every request, not once at start, because this
+// host's addresses change after start (a tailnet or DHCP address coming up).
+func (c *Channel) isChatOnFront() bool {
+	return c.hasFront() && !c.isLocalAddress(c.cfg.Front.From)
 }
 
 // isBoardPath judges the cleaned path, so "/board/../send" is not a board path.
@@ -227,7 +238,7 @@ func (c *Channel) requestOrigin(r *http.Request) string {
 // ChatFrontOrigin is where the authenticated front serves the web chat, or ""
 // when it doesn't: no front, or a local from that keeps it to boards.
 func (c *Channel) ChatFrontOrigin() string {
-	if !c.isChatOnFront {
+	if !c.isChatOnFront() {
 		return ""
 	}
 	return c.boardLinkBase()

@@ -16,8 +16,8 @@ second step. Off the front nothing changes: C3's Telegram link and cookie are th
 only sign-in there, and the header never counts.
 
 A local `from` (loopback, or one of this host's own addresses, which the web
-channel reads from the host's interfaces when it starts; an unreadable list
-counts as local) keeps the rule from before: the front's `Host` reaches board
+channel reads from the host's interfaces on every front request, since an
+address can come up after start; an unreadable list counts as local) keeps the rule from before: the front's `Host` reaches board
 routes only, every other path 404. Such a `from` can't tell the front from any
 process on this host, and a port fence can't separate the front from the owner's
 own browser there, so opening the chat would let any local process drive the

@@ -31,7 +31,7 @@ func newFrontTest(t *testing.T) (*Channel, *fakeBoardHost, *http.Cookie) {
 	c, host, cookie := newBoardTest(t)
 	c.cfg.Front = mappings.WebFront{Origin: frontOrigin, From: frontAddress, IdentityHeader: frontHeader, Operator: frontOperator}
 	c.allowedOrigin[frontOrigin] = true
-	c.isChatOnFront = true // as Start sets it for a from on another host
+	c.interfaceAddresses = func() ([]net.Addr, error) { return nil, nil } // from is on another host
 	createBoard(t, c, "plan")
 	return c, host, cookie
 }
@@ -39,7 +39,6 @@ func newFrontTest(t *testing.T) (*Channel, *fakeBoardHost, *http.Cookie) {
 // useLocalFrom points the front at a local from, as Start would see it.
 func useLocalFrom(c *Channel) {
 	c.cfg.Front.From = "127.0.0.1"
-	c.isChatOnFront = false
 }
 
 // frontRequest is what the front forwards: its Host, its address as the TCP
@@ -591,6 +590,28 @@ func TestFrontWithALocalFromServesBoardsOnly(t *testing.T) {
 				t.Fatalf("%s: front operator %s %s=%d, want 404", setup.name, route.method, route.path, code)
 			}
 		}
+	}
+}
+
+// TestFrontChatClosesWhenFromBecomesLocalAfterStart: whether from is local is
+// judged on every request, so a from that becomes one of this host's own
+// addresses after start (a tailnet address coming up late) closes the web chat
+// on the front at once, and the channel stops naming the front as the chat.
+func TestFrontChatClosesWhenFromBecomesLocalAfterStart(t *testing.T) {
+	hostAddresses := []net.Addr{&net.IPNet{IP: net.ParseIP("198.51.100.7"), Mask: net.CIDRMask(24, 32)}}
+	c, host := startFrontChannel(t, frontAddress, func() ([]net.Addr, error) { return hostAddresses, nil })
+	send := func(clientID string) int {
+		return serve(c, frontRequest(http.MethodPost, "/send", `{"text":"through the front","client_id":"`+clientID+`"}`, frontAddress, frontOperator)).Code
+	}
+	if code := send("before"); code != http.StatusAccepted || c.ChatFrontOrigin() != frontOrigin {
+		t.Fatalf("from on another host: send=%d origin %q, want 202 and the front", code, c.ChatFrontOrigin())
+	}
+	hostAddresses = append(hostAddresses, &net.IPNet{IP: net.ParseIP(frontAddress), Mask: net.CIDRMask(24, 32)})
+	if code := send("after"); code != http.StatusNotFound || c.ChatFrontOrigin() != "" || len(host.emittedSnapshot()) != 1 {
+		t.Fatalf("from became local: send=%d origin %q emitted %d, want 404, no front, one message", code, c.ChatFrontOrigin(), len(host.emittedSnapshot()))
+	}
+	if state := serve(c, frontRequest(http.MethodGet, "/board/plan/state", "", frontAddress, frontOperator)).Code; state != http.StatusOK {
+		t.Fatalf("from became local: board state=%d, want 200 (boards stay on the front)", state)
 	}
 }
 

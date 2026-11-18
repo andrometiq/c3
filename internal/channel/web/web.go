@@ -89,7 +89,6 @@ type Channel struct {
 	listen        string
 	baseURL       string
 	allowedOrigin map[string]bool
-	isChatOnFront bool // set at Start: the front's from is neither loopback nor this host's own address
 
 	idMu             sync.Mutex
 	nextReplyID      int64
@@ -313,11 +312,10 @@ func (c *Channel) Start(ctx context.Context, host channel.Host) error {
 	if c.cfg.PublicURL != "" {
 		allowedOrigins[normalizeOrigin(c.cfg.PublicURL)] = true
 	}
-	c.isChatOnFront = c.hasFront() && !c.isLocalAddress(c.cfg.Front.From)
 	if c.hasFront() {
 		allowedOrigins[normalizeOrigin(c.cfg.Front.Origin)] = true
-		if !c.isChatOnFront {
-			host.Logf("web: front.from %s is local (loopback, this host's own address, or interfaces unreadable); the front serves boards only, not the web chat", c.cfg.Front.From)
+		if !c.isChatOnFront() {
+			host.Logf("web: front.from %s is local (loopback, this host's own address, or interfaces unreadable); the front serves boards only, not the web chat, while it stays local", c.cfg.Front.From)
 		}
 	}
 

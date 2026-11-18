@@ -173,8 +173,9 @@ counts off it. What the front reaches depends on `from`:
   `GET /login` and `GET /auth` go to `/`, and C3's token exchange, fresh-link endpoint, logout and
   `/healthz` are 404; the Telegram login link opens the web chat directly, never through the front
   ([WEB.md](WEB.md#through-an-authenticated-https-front)).
-- **A local `from`** (loopback or this host's own address; an unreadable interface list counts too,
-  and the web channel logs that the front serves boards only): the front reaches only `/board` and
+- **A local `from`** (loopback or this host's own address, checked on every front request since an
+  address can come up after start; an unreadable interface list counts too, and the web channel logs
+  at start when the front serves boards only): the front reaches only `/board` and
   `/board/*` (else 404), so the web chat stays off it. Such a `from` can't tell the front from any
   process on this host, the owner's own browser included.
 
