@@ -39,7 +39,8 @@ C3's tools off can't hold a board yet. Background for people: `docs/BOARD.md` in
   that checks `event.target.closest(...)`). After an approve C3 replaces the part's inner HTML
   in place: scripts in it don't run and listeners on its old nodes are gone.
 - Keep the starter's `c3.threads()` call. It draws each part's thread (lines, a text box, the
-  owner's selected text as a quote, Approve on your answers). A tap on a link, button or input
+  owner's selected text as a quote, Approve on your answers, voice notes with their status) and
+  tells C3 which part the owner is on, so C3's mic strip under the page records for that part. A tap on a link, button or input
   inside a part goes to that control, not to the thread.
 - Never call `location.reload()` or navigate the page. Only C3's shell reloads the frame.
 - Optional: a part may be `<script type="application/json" data-c3-part="…">` data that your
@@ -52,8 +53,14 @@ The page API (C3 inlines it as the page's first script, as `window.c3`):
   {ref})`, `c3.react(ref, emoji)` return a Promise of `{id}` and reject with an Error whose
   message is the rule (`closed`, `rate`, `too_big`, `offline`, `invalid`, …). A `ref` names
   one of your messages. A tap is how the page's own buttons speak ("pick option B").
-- `c3.on(kind, fn)` for `message`, `edit`, `reaction`, `action`, `update`, `status`; it returns
-  an unsubscribe function. `c3.keep(value)` (JSON, at most 64 KiB) returns as `ready.kept` after
+- `c3.on(kind, fn)` for `message`, `edit`, `reaction`, `action`, `update`, `status`, `voice`; it
+  returns an unsubscribe function.
+- A page that draws its own threads calls `c3.focus(part)` when one opens and `c3.focus(null)`
+  when it closes. Only C3's strip records; the page can't. A voice note is an `action` with `op:
+  "voice"` (and `segment`, `has_more` for a part of a long recording), then `edit`s of its `id`
+  with `status` `heard` (`text` is the transcript), `slow`, `no_speech` or `failed`. Before C3 has
+  it, `voice` events carry the upload: `{key, part, status: "sending" | "sent" | "not_sent", id,
+  error}`. `c3.keep(value)` (JSON, at most 64 KiB) returns as `ready.kept` after
   a frame reload (not after the owner reloads the browser tab).
 
 ## 3. Publish and share
@@ -87,6 +94,11 @@ in a merged turn each line starts with its own `[msg N]`.
 - A question you can't answer from what you know gets a short answer in the thread saying so.
 - `Tapped "<value>" on your message M.` came from a control on the page, and `Reacted <emoji> to
   your message M.` is a reaction. Both are the owner's input on that part.
+- `[board <name> · <part> · msg N] Voice note:` with `[Transcribed voice]: …` on the next line is
+  the owner talking about that part; answer it like a typed line, with `reply_to=N`. `Voice note
+  (part 2; more follows):` is a long recording sent in parts: wait for the part marked `the last`
+  before you act on it. If the next line says transcription failed, retranscribe once as it says;
+  the owner's page already shows that it failed or heard no speech.
 
 ## 5. After `Approved your message M`
 

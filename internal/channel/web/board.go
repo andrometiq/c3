@@ -66,13 +66,24 @@ var (
 	errBoardClosed   = errors.New("board: the board is closed")
 	errNoBoard       = errors.New("board: no such board")
 	errBoardsStopped = errors.New("board: channel not started")
+	errNotVoice      = errors.New("board: message is no voice act on this board")
+)
+
+// A voice act's live status, as the edit that ends or updates its transcription.
+const (
+	voiceHeard    = "heard"
+	voiceNoSpeech = "no_speech"
+	voiceSlow     = "slow"
+	voiceFailed   = "failed"
 )
 
 var (
-	_ channel.Channel          = (*boardChannel)(nil)
-	_ channel.BoardKeeper      = (*boardChannel)(nil)
-	_ channel.PresenceNotifier = (*boardChannel)(nil)
-	_ channel.BoardProvider    = (*Channel)(nil)
+	_ channel.Channel            = (*boardChannel)(nil)
+	_ channel.BoardKeeper        = (*boardChannel)(nil)
+	_ channel.PresenceNotifier   = (*boardChannel)(nil)
+	_ channel.ReadbackSender     = (*boardChannel)(nil)
+	_ channel.LocalAudioProvider = (*boardChannel)(nil)
+	_ channel.BoardProvider      = (*Channel)(nil)
 )
 
 func newBoardChannel(web *Channel) *boardChannel {
@@ -213,6 +224,12 @@ func (b *boardChannel) SendReply(args c3types.ReplyArgs) (int64, error) {
 	if strings.TrimSpace(args.Text) == "" {
 		return 0, errors.New("board: empty message")
 	}
+	if status := voiceNoticeStatus(args.Text); status != "" && args.ReplyTo != nil {
+		err := b.setVoiceStatus(args.ChatID, *args.ReplyTo, status, args.Text)
+		if !errors.Is(err, errNotVoice) {
+			return *args.ReplyTo, err
+		}
+	}
 	if args.ReplyTo == nil && isStatusText(args.Text) {
 		err := b.withBoard(args.ChatID, func(board *boardState) error {
 			board.broadcast(jsonEvent("notice", map[string]string{"text": args.Text}))
@@ -308,6 +325,44 @@ func (b *boardChannel) React(args c3types.ReactArgs) error {
 		}
 		return b.appendLocked(board, boardLogEntry{Dir: "out", Op: "reaction", Part: target.Part, Text: args.Emoji, Ref: args.MessageID})
 	})
+}
+
+// SendReadback lands a voice act's transcript as an edit of that act.
+func (b *boardChannel) SendReadback(args c3types.ReadbackArgs) (int64, error) {
+	if args.TopicID != nil || args.ReplyTo == nil {
+		return 0, errors.New("board: a readback names a voice act on a board")
+	}
+	return *args.ReplyTo, b.setVoiceStatus(args.ChatID, *args.ReplyTo, voiceHeard, args.Transcript)
+}
+
+// voiceNoticeStatus names the voice status a C3 readback notice reports, or "".
+func voiceNoticeStatus(text string) string {
+	switch {
+	case text == c3types.VoiceNoSpeechNotice:
+		return voiceNoSpeech
+	case text == c3types.VoiceSlowNotice:
+		return voiceSlow
+	case isVoiceReadbackNotice(text):
+		return voiceFailed
+	}
+	return ""
+}
+
+// setVoiceStatus logs a status edit of voice act id, also on a board made
+// read-only since: it finishes the owner's own earlier act.
+func (b *boardChannel) setVoiceStatus(number, id int64, status, text string) error {
+	return b.withBoard(number, func(board *boardState) error {
+		voice, ok := board.entry(id)
+		if !ok || voice.Dir != "in" || voice.Op != "voice" {
+			return fmt.Errorf("%w: %d", errNotVoice, id)
+		}
+		return b.appendLocked(board, boardLogEntry{Dir: "in", ID: id, Op: "edit", Part: voice.Part, Text: text, From: voice.From, Status: status})
+	})
+}
+
+// LocalAudioPath resolves a voice act's audio, which the web channel stores.
+func (b *boardChannel) LocalAudioPath(fileID string) (string, error) {
+	return b.web.LocalAudioPath(fileID)
 }
 
 func (b *boardChannel) DownloadAttachment(string) (string, error) {
@@ -507,10 +562,11 @@ func (board *boardState) statusEvent(isTyping bool) boardEvent {
 	})
 }
 
-// entryEvent names a viewer's action "action" and the session's entries by op.
+// entryEvent names a viewer's action "action" and every other entry by op,
+// so a voice act's transcript is an "edit" like the session's own edits.
 func entryEvent(entry boardLogEntry) boardEvent {
 	event := jsonEvent(entry.Op, entry)
-	if entry.Dir == "in" {
+	if entry.Dir == "in" && entry.Op != "edit" {
 		event.kind = "action"
 	}
 	event.seq = entry.Seq

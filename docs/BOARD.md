@@ -1,8 +1,8 @@
 # Live boards
 
 A board is one HTML page that a CLI session writes and C3 serves on the [web channel](WEB.md)'s
-listener. The owner taps a part, types, reads the answer in that part's thread and approves it;
-the session changes that part and C3 redraws only it. Agents learn the rules from the plugin
+listener. The owner taps a part, types or talks, reads the answer in that part's thread and
+approves it; the session changes that part and C3 redraws only it. Agents learn the rules from the plugin
 skill (`plugins/c3/skills/board/SKILL.md`) and from each board's attach result.
 
 ## Routes and ownership
@@ -24,8 +24,9 @@ skill (`plugins/c3/skills/board/SKILL.md`) and from each board's attach result.
   and broker restart restore the board from the session's record (30 days, with
   `auto_attach_on_resume` on, the default); else its session re-holds it with `attach`. An
   in-place conversation switch leaves it waiting for its own conversation.
-- **Close** in the strip makes the board read-only for good: C3 releases the route, drops it from
-  the session's record and tells the session; later actions get 409.
+- **Make read-only** in the strip ("This makes the board read-only for good.") does that: C3
+  releases the route, drops it from the session's record and tells the session; later actions get
+  409.
 
 ## What each side sees
 
@@ -36,6 +37,15 @@ The session gets one line per action, drawn by C3 from checked fields, each with
 [board plan · 1.5 · msg 413] Approved your message 418.
 [board plan · 1.5 · msg 414] Tapped "pick-b" on your message 418.
 [board plan · 1.5 · msg 415] Reacted 👍 to your message 418.
+```
+
+A voice note arrives once the broker has transcribed it, its transcript (or why there is none)
+under C3's line; a long recording arrives as numbered parts:
+
+```text
+[board plan · 1.5 · msg 416] Voice note:
+[Transcribed voice]: make this shorter
+[board plan · 1.5 · msg 417] Voice note (part 1; more follows):
 ```
 
 A quote comes first as `> ` lines; a ref also arrives as the reply context. Owner text with a line
@@ -57,16 +67,33 @@ not the approved message's (418).
 | Route | What it is |
 |---|---|
 | `GET /board` | this broker's boards |
-| `GET /board/<name>` | the shell: a strip (title, live session, waiting, typing, Close) over the page's frame |
+| `GET /board/<name>` | the shell: a strip (title, live session, waiting, typing, Make read-only) over the page's frame, and the mic strip under it |
 | `GET /board/<name>/state` | title, rev, frame capability, viewer, live, holder, waiting, closed, last 500 log entries |
 | `GET /board/<name>/page?cap=…` | the page with the SDK inlined; `&rev=N&raw=1` gives a stored revision as `text/plain` |
 | `GET /board/<name>/events` | SSE `message`, `edit`, `reaction`, `action`, `page`, `status`, `notice`; `id:` is the log seq, `Last-Event-ID` replays after it |
-| `POST /board/<name>/act` | `{client_id, op, …}`, op `comment`, `approve`, `tap` or `react`; 202 `{id}` |
+| `POST /board/<name>/act` | `{client_id, op, …}`, op `comment`, `approve`, `tap` or `react`; or a voice act (below); 202 `{id}` |
 | `POST /board/<name>/close` | empty body; 204, or 500 `close_failed` (repeat to retry) |
 
 Shell assets are under `/board/assets/`. Errors are `{"error": <rule>}`: `invalid` 400,
 `unauthorized` 401, `forbidden` 403, `not_found` 404, `closed` or `conflict` 409, `too_big` 413,
-`rate` 429, `offline` 503 with `Retry-After`.
+`unreadable` 422, `rate` 429, `offline` 503 with `Retry-After`.
+
+## Voice
+
+The shell draws a mic strip under the page's frame. The page names the part the owner is on with
+`c3.focus(part)` (`c3.threads()` does it as a thread opens and closes); the strip's **🎤 Talk** is
+enabled only then and names that part. A tap records, **■ Send** sends, **Cancel** drops it; under
+400 ms nothing is sent. A recording keeps the part it started for. Recording never stops on its own:
+every five minutes the shell sends what it has as a numbered part and records on.
+
+Each recording is a voice act: `POST /board/<name>/act` with the `audio/*` body (at most 12 MiB) and
+headers `X-Client-Id`, `X-Board-Part`, and for a part of a longer recording `X-Voice-Segment` (1, 2,
+…) with `X-Voice-More: 1` on all but the last. It gets an act's checks, rate and `client_id` retry,
+then the web chat's ffmpeg transcode (422 `unreadable` when that fails) and the broker's STT. Its log
+entry `{op: "voice", part, segment, has_more}` is at once in the stream; its outcome is an `edit` of
+that entry with `status`: `heard` (text: the transcript), `slow` (still trying), `no_speech` or
+`failed` (text: C3's notice). The shell tells the frame each upload's own status (`sending`, `sent`
+with the entry's `id`, `not_sent` with the rule), and the SDK passes all of it as events.
 
 ## Trust
 
@@ -82,6 +109,10 @@ Shell assets are under `/board/assets/`. Errors are `{"error": <rule>}`: `invali
   sends `Cross-Origin-Opener-Policy: same-origin` (no `top.opener` for the page), refuses framing,
   takes messages only from its frame, writes agent strings only as text and keeps `notice` out of
   the frame.
+- **Microphone.** Only the shell records: one `getUserMedia` call, reached only from a trusted tap
+  on its own mic button; the shell draws the recording state and its part itself. The frame has no
+  microphone (sandboxed, opaque origin, no `allow`). The page can only name a part, so its script can
+  never hear the owner or send a voice act.
 - **Acts.** Each re-checks sign-in, same origin and board; the body is decoded strictly per op and
   can't name a sender. Part `^[A-Za-z0-9._:-]{1,64}$`, text and note 16,000 runes, quote 2,000,
   tap value 64 bytes, 30 new acts a minute per board; a `ref` must name a session message; a
@@ -98,8 +129,9 @@ Shell assets are under `/board/assets/`. Errors are `{"error": <rule>}`: `invali
 `boards/` under the web state directory (`$XDG_STATE_HOME/c3/web`, else `~/.local/state/c3/web`),
 directories 0700, files 0600: `capability.key` (the cap key) and per board `board.json` (number,
 owner, title, rev, closed), `pages/<rev>.html` (the last 5; `rev` picks the served one) and
-`log.jsonl` (append-only: seq, at, dir, id, op, part, text, ref, reply_to, from). Held actions
-sit in the broker's queue. An unreadable `board.json` stops the board channel from starting.
+`log.jsonl` (append-only: seq, at, dir, id, op, part, text, ref, reply_to, from, and for voice
+segment, has_more, status). Held actions sit in the broker's queue. Voice recordings are the web
+chat's: `voice/` under the web state directory, the newest 200 kept for both. An unreadable `board.json` stops the board channel from starting.
 
 ## The authenticated HTTPS front
 
@@ -138,6 +170,6 @@ prefetch, which it could not observe):
 So a page could leak what it holds plus the viewer's IP address. Today only the owner views a
 board, and a page holds only what its agent already has; this must be closed before others view.
 
-**Not yet:** others watching (and, if the owner allows, typing), voice, a C3-drawn Approve the
+**Not yet:** others watching (and, if the owner allows, typing), spoken replies, a C3-drawn Approve the
 page can't press, boards for CLIs whose host turns C3's tools off, handing a board to a new
 conversation, page history past 500 entries, a list across machines.

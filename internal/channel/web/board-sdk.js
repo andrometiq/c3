@@ -4,17 +4,20 @@
 (() => {
   "use strict";
 
-  const KINDS = ["message", "edit", "reaction", "action", "update", "status"];
+  const KINDS = ["message", "edit", "reaction", "action", "update", "status", "voice"];
   const CONTROLS = "a[href], button, input, select, textarea, label, summary, [contenteditable]";
   const QUOTE_RUNES = 2000;
-  const REASONS = { closed: "the board is closed", rate: "too many this minute, wait a moment", too_big: "too long",
+  const REASONS = { closed: "the board is read-only", rate: "too many this minute, wait a moment", too_big: "too long",
     offline: "C3 can't be reached, try again", invalid: "C3 refused it" };
   const VIEWS = {
     message: ({ id, reply_to, part, text, at }) => ({ id, reply_to, part, text, ts: at }),
-    edit: ({ id, text }) => ({ id, text }),
+    edit: ({ id, text, status }) => ({ id, text, status }),
     reaction: ({ ref, text, from }) => ({ ref, emoji: text, from }),
-    action: ({ id, op, part, text, ref, from }) => ({ id, op, part, text, ref, from }),
+    action: ({ id, op, part, text, ref, from, segment, has_more }) => ({ id, op, part, text, ref, from, segment, has_more }),
   };
+  // A voice note's line: the shell's upload status, then C3's (an edit of the voice act: heard is its transcript).
+  const VOICE_STATES = { sending: "Sending…", sent: "Transcribing…", transcribing: "Transcribing…",
+    slow: "Transcribing… taking longer, C3 keeps trying.", no_speech: "No speech heard.", failed: "Couldn't transcribe it." };
   const listeners = Object.fromEntries(KINDS.map((kind) => [kind, new Set()]));
   const calls = new Map();
   let nextCall = 1;
@@ -34,6 +37,7 @@
     body: Object.fromEntries(Object.entries(fields).filter(([, value]) => value !== undefined)),
   });
   const comment = (part, text, { quote } = {}) => act({ op: "comment", part, text, quote });
+  const focus = (part) => request("focus", { value: part ?? null });
   const approve = (ref, { part, note } = {}) => act({ op: "approve", ref, part, note });
 
   function on(kind, handler) {
@@ -67,6 +71,10 @@
       emit(message.kind, VIEWS[message.kind](message.entry));
     } else if (message.c3 === "page") {
       applyPage(message);
+    } else if (message.c3 === "voice") {
+      voices.set(message.voice.key, message.voice);
+      draw();
+      emit("voice", { ...message.voice });
     }
   });
 
@@ -154,6 +162,7 @@
   // c3.threads(): a tap on a part opens its breakout, a sheet drawn outside every part, so no swap touches it.
   const drafts = new Map();
   const quotes = new Map();
+  const voices = new Map(); // the shell's uploads by key, shown until their voice act is in the log
   const approving = new Set();
   let isThreaded = false;
   let sheet = null;
@@ -238,6 +247,7 @@
     sheet ??= makeSheet();
     openPart = part;
     if (quote) quotes.set(part, quote);
+    focus(part).catch(reportError);
     sheet.text.value = drafts.get(part) ?? "";
     sheet.error.textContent = "";
     sheet.host.hidden = false;
@@ -246,6 +256,7 @@
   }
 
   function closeSheet() {
+    if (openPart !== null) focus(null).catch(reportError);
     openPart = null;
     if (sheet) sheet.host.hidden = true;
   }
@@ -287,7 +298,7 @@
     const approves = new Map(), isSettled = new Map();
     for (const entry of board.log) {
       if (entry.dir === "in" && entry.op === "approve") approves.set(entry.id, entry.part);
-      if (entry.dir === "in" && entry.op === "comment") isSettled.set(entry.part, false);
+      if (entry.dir === "in" && (entry.op === "comment" || entry.op === "voice")) isSettled.set(entry.part, false);
       if (entry.dir === "out" && entry.op === "page" && approves.has(entry.reply_to)) isSettled.set(approves.get(entry.reply_to), true);
     }
     return [...isSettled].filter(([part, settled]) => settled && part).map(([part]) => part);
@@ -304,30 +315,45 @@
   }
 
   function drawSheet(part, isSettled) {
-    const thread = board.log.filter((entry) => entry.part === part && !["edit", "reaction", "react"].includes(entry.op));
-    const ids = new Set(thread.map((entry) => entry.id));
-    const edits = new Map(), reactions = new Map(), approved = new Set();
+    const logged = board.log.filter((entry) => entry.part === part && !["edit", "reaction", "react"].includes(entry.op));
+    const ids = new Set(logged.map((entry) => entry.id));
+    const uploading = [...voices.values()].filter((voice) => voice.part === part && !ids.has(voice.id))
+      .map((voice) => ({ dir: "in", op: "voice", part, from: board.viewer?.name, segment: voice.segment, upload: voice }));
+    const thread = [...logged, ...uploading];
+    const edits = new Map(), statuses = new Map(), reactions = new Map(), approved = new Set();
     for (const entry of board.log) {
       if (entry.op === "edit") edits.set(entry.id, entry.text);
+      if (entry.op === "edit" && entry.status) statuses.set(entry.id, entry.status);
       if ((entry.op === "reaction" || entry.op === "react") && ids.has(entry.ref)) reactions.set(entry.ref, `${reactions.get(entry.ref) ?? ""}${entry.text}`);
       if (entry.op === "approve") approved.add(entry.ref);
     }
     const isAtBottom = sheet.lines.scrollHeight - sheet.lines.scrollTop - sheet.lines.clientHeight < 8;
     sheet.address.textContent = `On ${part}`;
     sheet.state.textContent = isSettled ? "Settled" : "";
-    sheet.lines.replaceChildren(...thread.map((entry) => line(entry, edits, reactions, approved)));
+    sheet.lines.replaceChildren(...thread.map((entry) => line(entry, edits, reactions, approved, statuses)));
     if (isAtBottom) sheet.lines.scrollTop = sheet.lines.scrollHeight;
     sheet.typing.hidden = !(board.typing && thread.at(-1)?.dir === "in");
     sheet.quote.textContent = quotes.get(part) ?? "";
     sheet.quoteRow.hidden = !quotes.has(part);
     sheet.text.disabled = board.closed;
     sheet.send.disabled = board.closed || isSending;
-    sheet.text.placeholder = board.closed ? "This board is closed." : `About ${part}…`;
+    sheet.text.placeholder = board.closed ? "This board is read-only." : `About ${part}…`;
   }
 
-  function line(entry, edits, reactions, approved) {
+  /** A voice note's text: its transcript once heard, else where it is on its way. */
+  function voiceText(entry, edits, statuses) {
+    const label = `🎤 ${entry.segment ? `Part ${entry.segment}: ` : ""}`;
+    if (entry.upload) {
+      const reason = entry.upload.status === "not_sent" && `Not sent: ${REASONS[entry.upload.error] ?? entry.upload.error}.`;
+      return label + (reason || VOICE_STATES[entry.upload.status]);
+    }
+    const status = statuses.get(entry.id) ?? "transcribing";
+    return label + (status === "heard" ? edits.get(entry.id) : VOICE_STATES[status]);
+  }
+
+  function line(entry, edits, reactions, approved, statuses) {
     const who = entry.dir === "out" ? "Agent" : entry.from === board.viewer?.name ? "You" : entry.from;
-    const text = {
+    const text = entry.op === "voice" ? voiceText(entry, edits, statuses) : {
       approve: `Approved message ${entry.ref}.`, tap: `Tapped “${entry.text}”.`,
       page: entry.text || "Updated the page.", message: edits.get(entry.id) ?? entry.text,
     }[entry.op] ?? entry.text;
@@ -382,7 +408,7 @@ textarea { flex: 1; min-width: 0; box-sizing: border-box; resize: vertical; padd
 `;
 
   window.c3 = Object.freeze({
-    ready, comment, approve, on, threads,
+    ready, comment, approve, on, threads, focus,
     tap: (part, value, { ref } = {}) => act({ op: "tap", part, value, ref }),
     react: (ref, emoji) => act({ op: "react", ref, emoji }),
     keep: (value) => request("keep", { value: JSON.stringify(value) }),

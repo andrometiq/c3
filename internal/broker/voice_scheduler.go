@@ -28,7 +28,7 @@ const (
 	defaultVoiceRetryExpiry = 24 * time.Hour
 	maxVoiceResultHooks     = 32
 	voiceSlowNoticeAfter    = 2 * time.Minute
-	voiceSlowNoticeText     = "Got this voice note. Transcription is taking longer than usual; C3 is retrying."
+	voiceSlowNoticeText     = c3types.VoiceSlowNotice
 )
 
 var (
@@ -1164,8 +1164,12 @@ func (s *VoiceScheduler) transcribe(ctx context.Context, attempt voiceAttempt) v
 		// The handler's retained copy, looked up now: it decides whether the
 		// recovery text may say the audio is saved.
 		retained := s.broker.voiceCachedPath(chanName, att.FileID)
+		notice := sttFailureNotice
+		if reason == "empty" && isBoardRoute(attempt.key.route) {
+			notice = c3types.VoiceNoSpeechNotice // a board shows "no speech heard", not a failure
+		}
 		return voiceAttemptResult{
-			segmentText: sttFailureText(att, reason, retained), notice: sttFailureNotice, detail: reason,
+			segmentText: sttFailureText(att, reason, retained), notice: notice, detail: reason,
 		}
 	}
 	return voiceAttemptResult{

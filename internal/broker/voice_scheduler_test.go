@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/Andrometiq/c3/internal/c3types"
+	"github.com/Andrometiq/c3/internal/channel"
 	"github.com/Andrometiq/c3/internal/mappings"
 )
 
@@ -601,5 +602,28 @@ func TestBrokerShutdownJoinsVoiceBeforeStoppingWorkers(t *testing.T) {
 	b.Workers.mu.Unlock()
 	if !workersStopped {
 		t.Fatal("worker pool was not stopped after voice scheduler joined")
+	}
+}
+
+// A board voice note STT heard nothing in reads "no speech heard", not a
+// failure; the same empty outcome elsewhere keeps the failure notice.
+func TestVoiceSchedulerEmptyTranscriptOnABoardIsNoSpeech(t *testing.T) {
+	_, scheduler, _ := schedulerHarness(t)
+	scheduler.broker.Plugins.OnVoiceReceived(func(context.Context, c3types.VoicePayload) (string, error) {
+		return "[STT FAILED: empty — see /var/log/c3/broker.log]", nil
+	})
+	att := c3types.Attachment{Kind: "voice", FileID: "quiet", MIME: "audio/ogg", Size: 10}
+	for _, test := range []struct {
+		channel string
+		want    string
+	}{{channel.BoardChannelName, c3types.VoiceNoSpeechNotice}, {"web", sttFailureNotice}} {
+		inbound := c3types.Inbound{Channel: test.channel, ChatID: 3, MessageID: 9, Attachments: []c3types.Attachment{att}}
+		result := scheduler.transcribe(context.Background(), voiceAttempt{
+			key:     voiceScheduleKey{route: MakeRouteKey(test.channel, 3, nil), messageID: 9, fileID: att.FileID},
+			inbound: inbound, attachment: att,
+		})
+		if result.success || result.notice != test.want || !strings.Contains(result.segmentText, "empty") {
+			t.Errorf("%s: result=%+v, want notice %q and the agent's failure text", test.channel, result, test.want)
+		}
 	}
 }

@@ -52,6 +52,13 @@ type boardLogEntry struct {
 	ReplyTo int64     `json:"reply_to"`
 	From    string    `json:"from"`
 	Rev     int64     `json:"rev,omitempty"`
+	// A voice act's part of a longer recording (0 for a whole one), and
+	// whether more parts follow it.
+	Segment int  `json:"segment,omitempty"`
+	HasMore bool `json:"has_more,omitempty"`
+	// Status is a voice act's edit: heard (Text is the transcript),
+	// no_speech, slow (still transcribing) or failed (Text is C3's notice).
+	Status string `json:"status,omitempty"`
 }
 
 // loadBoards reads every board. A board whose record is unreadable, or two

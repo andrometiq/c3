@@ -463,7 +463,8 @@ func TestEventsReplayFromLastEventID(t *testing.T) {
 }
 
 // harnessHost plays the agent at Emit, the boundary the broker proves: each
-// comment, tap and react gets a reply_to answer, each approve a page whose
+// comment, tap, react and voice note gets a reply_to answer (a voice note its
+// transcript first, as the broker's STT readback), each approve a page whose
 // approved part changed. An ended board holds its inbounds until it resumes.
 type harnessHost struct {
 	*fakeBoardHost
@@ -498,9 +499,15 @@ func (host *harnessHost) answer(inbound *c3types.Inbound) {
 		host.t.Logf("harness: unparsed line %q", inbound.Text)
 		return
 	}
+	replyTo := inbound.MessageID
+	if len(inbound.Attachments) == 1 && inbound.Attachments[0].Kind == "voice" {
+		// The broker's STT, played: the transcript names the stored audio.
+		time.Sleep(300 * time.Millisecond)
+		_, _ = host.c.board.SendReadback(c3types.ReadbackArgs{ChatID: inbound.ChatID, ReplyTo: &replyTo,
+			Transcript: fmt.Sprintf("(harness transcript of %d bytes)", inbound.Attachments[0].Size)})
+	}
 	_ = host.c.board.SendTyping(inbound.ChatID, nil)
 	time.Sleep(400 * time.Millisecond)
-	replyTo := inbound.MessageID
 	if match[4] == "" || match[2] == "" {
 		_, _ = host.c.board.SendReply(c3types.ReplyArgs{Channel: channel.BoardChannelName, ChatID: inbound.ChatID, ReplyTo: &replyTo,
 			Text: fmt.Sprintf("Answer to msg %d on part %q.", inbound.MessageID, match[2])})

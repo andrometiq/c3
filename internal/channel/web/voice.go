@@ -30,9 +30,7 @@ const (
 var errVoiceDecode = errors.New("could not decode audio")
 
 func (c *Channel) handleVoiceNote(w http.ResponseWriter, r *http.Request) {
-	controller := http.NewResponseController(w)
-	_ = controller.SetReadDeadline(time.Now().Add(95 * time.Second))
-	_ = controller.SetWriteDeadline(time.Now().Add(95 * time.Second))
+	extendVoiceDeadline(w)
 	if !c.sameOrigin(r) {
 		writeSendError(w, http.StatusForbidden, "not allowed")
 		return
@@ -90,29 +88,49 @@ func (c *Channel) handleVoiceNote(w http.ResponseWriter, r *http.Request) {
 	_, _ = fmt.Fprintf(w, "{\"message_id\":%d}\n", messageID)
 }
 
+// extendVoiceDeadline gives a voice upload time to arrive and be transcoded.
+func extendVoiceDeadline(w http.ResponseWriter) {
+	controller := http.NewResponseController(w)
+	_ = controller.SetReadDeadline(time.Now().Add(95 * time.Second))
+	_ = controller.SetWriteDeadline(time.Now().Add(95 * time.Second))
+}
+
 func (c *Channel) acceptVoiceInbound(ctx context.Context, sessionID string, current session, clientID, mediaType string, body []byte) (int64, int, error) {
 	key := clientMessageKey{sessionID: sessionID, clientID: clientID}
+	return c.acceptVoice(ctx, c.webChatInbound(), key, currentSender(current), mediaType, body, func(inbound *c3types.Inbound, duration float64) {
+		voice := true
+		c.publish(streamEvent{kind: "own", payload: streamPayload{
+			MessageID: inbound.MessageID, ClientID: clientID, Timestamp: streamTimestamp(inbound.Timestamp),
+			Voice: &voice, DurationSeconds: duration, Text: c3types.WithTestInjectionMarker(inbound, ""),
+		}})
+	})
+}
+
+// acceptVoice is acceptInbound for a voice note: it stores and transcodes the
+// audio once per client id, emits it as a voice attachment on the route, and
+// gives the sender's copy to echo with the note's duration.
+func (c *Channel) acceptVoice(ctx context.Context, route inboundRoute, key clientMessageKey, sender c3types.Sender, mediaType string, body []byte, echo func(inbound *c3types.Inbound, duration float64)) (int64, int, error) {
 	now := c.now()
 	hash := sha256.Sum256(body)
 	pruned := false
 	c.clientMu.Lock()
-	for existingKey, existing := range c.clientMessages {
+	for existingKey, existing := range route.records {
 		if now.Sub(existing.created) >= clientMessageTTL {
-			delete(c.clientMessages, existingKey)
+			delete(route.records, existingKey)
 			pruned = true
 		}
 	}
-	record := c.clientMessages[key]
+	record := route.records[key]
 	c.clientMu.Unlock()
 	if record == nil {
 		candidate := &clientMessage{
-			messageID: c.nextInboundMessageID(), textHash: hash, kind: "voice", created: now,
+			messageID: route.nextID(), textHash: hash, kind: "voice", created: now,
 		}
 		c.clientMu.Lock()
-		record = c.clientMessages[key]
+		record = route.records[key]
 		if record == nil {
 			record = candidate
-			c.clientMessages[key] = record
+			route.records[key] = record
 		}
 		c.clientMu.Unlock()
 	}
@@ -122,7 +140,7 @@ func (c *Channel) acceptVoiceInbound(ctx context.Context, sessionID string, curr
 		messageID := record.messageID
 		record.mu.Unlock()
 		if pruned {
-			c.persistSessions("stale client-message pruning")
+			route.persist("stale client-message pruning")
 		}
 		return messageID, http.StatusConflict, errClientIDConflict
 	}
@@ -130,7 +148,7 @@ func (c *Channel) acceptVoiceInbound(ctx context.Context, sessionID string, curr
 		messageID, status := record.messageID, record.status
 		record.mu.Unlock()
 		if pruned {
-			c.persistSessions("stale client-message pruning")
+			route.persist("stale client-message pruning")
 		}
 		return messageID, status, nil
 	}
@@ -146,32 +164,31 @@ func (c *Channel) acceptVoiceInbound(ctx context.Context, sessionID string, curr
 		record.voiceDuration = duration
 	}
 	inbound := &c3types.Inbound{
-		Channel: Name, ChatID: c.operatorID, MessageID: record.messageID,
-		Sender: currentSender(current), Timestamp: now, ConvKind: c3types.ConvKindDM,
+		Channel: route.channel, ChatID: route.chatID, MessageID: record.messageID,
+		Sender: sender, Timestamp: now, ConvKind: c3types.ConvKindDM,
 		Kind: c3types.InboundMessage, V: c3types.InboundRecordVersion,
 		Attachments: []c3types.Attachment{{
 			Kind: "voice", FileID: record.voiceFileID, MIME: "audio/ogg", Size: record.voiceSize,
 		}},
 	}
-	switch c.host.GateInbound(inbound) {
+	if route.line != nil {
+		route.line(inbound)
+	}
+	switch route.host.GateInbound(inbound) {
 	case channel.GateInboundAllow:
-		if !c.host.Emit(inbound) {
+		if !route.host.Emit(inbound) {
 			messageID := record.messageID
 			record.mu.Unlock()
 			if pruned {
-				c.persistSessions("stale client-message pruning")
+				route.persist("stale client-message pruning")
 			}
 			return messageID, http.StatusServiceUnavailable, nil
 		}
 		record.status = http.StatusAccepted
 		messageID, duration := record.messageID, record.voiceDuration
 		record.mu.Unlock()
-		c.persistSessions("client-message insert")
-		voice := true
-		c.publish(streamEvent{kind: "own", payload: streamPayload{
-			MessageID: messageID, ClientID: clientID, Timestamp: streamTimestamp(inbound.Timestamp),
-			Voice: &voice, DurationSeconds: duration, Text: c3types.WithTestInjectionMarker(inbound, ""),
-		}})
+		route.persist("client-message insert")
+		echo(inbound, duration)
 		c.pruneVoiceFiles()
 		return messageID, http.StatusAccepted, nil
 	default:
@@ -185,7 +202,7 @@ func (c *Channel) acceptVoiceInbound(ctx context.Context, sessionID string, curr
 		record.status = http.StatusForbidden
 		messageID := record.messageID
 		record.mu.Unlock()
-		c.persistSessions("client-message insert")
+		route.persist("client-message insert")
 		return messageID, http.StatusForbidden, nil
 	}
 }

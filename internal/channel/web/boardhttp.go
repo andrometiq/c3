@@ -8,6 +8,7 @@ import (
 	"html"
 	"io"
 	"io/fs"
+	"mime"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -32,6 +33,8 @@ const (
 	boardShellCSP       = "default-src 'self'; script-src 'self'; style-src 'unsafe-inline'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'"
 	boardRawCSP         = "default-src 'none'; sandbox"
 	boardRetryAfterBusy = "2"
+	// A long recording comes as numbered parts of a few minutes each.
+	boardVoiceMaxSegment = 999
 )
 
 // boardAct is the body of POST /board/<name>/act, decoded strictly: a viewer
@@ -46,6 +49,9 @@ type boardAct struct {
 	Note     string `json:"note"`
 	Value    string `json:"value"`
 	Emoji    string `json:"emoji"`
+	// A voice act's place in a longer recording; never decoded from JSON.
+	Segment int  `json:"-"`
+	HasMore bool `json:"-"`
 }
 
 // boardOpFields lists, per op, the fields it needs and the ones it may add.
@@ -285,6 +291,10 @@ func pageTitle(page []byte, fallback string) string {
 }
 
 func (c *Channel) handleBoardAct(w http.ResponseWriter, r *http.Request) {
+	if isAudioRequest(r) {
+		c.handleBoardVoice(w, r)
+		return
+	}
 	c.postDeadline(w, r)
 	if !c.sameOrigin(r) {
 		writeBoardError(w, http.StatusForbidden, "forbidden")
@@ -338,6 +348,108 @@ func (c *Channel) handleBoardAct(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(status)
 		_ = json.NewEncoder(w).Encode(map[string]int64{"id": messageID})
 	}
+}
+
+func isAudioRequest(r *http.Request) bool {
+	mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	return err == nil && strings.HasPrefix(strings.ToLower(mediaType), "audio/")
+}
+
+// handleBoardVoice takes a voice act: the recording as the body, its fields as
+// headers, under an act's checks. The audio is transcoded and stored like a
+// web chat voice note, and the broker transcribes it for the session.
+func (c *Channel) handleBoardVoice(w http.ResponseWriter, r *http.Request) {
+	extendVoiceDeadline(w)
+	if !c.sameOrigin(r) {
+		writeBoardError(w, http.StatusForbidden, "forbidden")
+		return
+	}
+	viewer, ok := c.boardRequest(w, r, true)
+	if !ok {
+		return
+	}
+	act, isValid := voiceAct(r.Header)
+	if !isValid {
+		writeBoardError(w, http.StatusBadRequest, "invalid")
+		return
+	}
+	mediaType, _, _ := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	r.Body = http.MaxBytesReader(w, r.Body, voiceBodyLimit)
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			writeBoardError(w, http.StatusRequestEntityTooLarge, "too_big")
+		} else {
+			writeBoardError(w, http.StatusBadRequest, "invalid")
+		}
+		return
+	}
+	name := r.PathValue("name")
+	key := clientMessageKey{scope: name, sessionID: viewer.id, clientID: act.ClientID}
+	host, _ := c.board.boardHost()
+	admitted, number, retryAfter, err := c.board.admit(name, act, !c.hasClientMessage(c.boardClientMessages, key))
+	if err == nil && host == nil {
+		err = errBoardsStopped
+	}
+	if err != nil {
+		if retryAfter > 0 {
+			w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
+		}
+		writeBoardStoreError(w, err)
+		return
+	}
+	route := c.boardInbound(host, name, number, admitted)
+	messageID, status, err := c.acceptVoice(r.Context(), route, key, viewer.sender, mediaType, body, func(inbound *c3types.Inbound, _ float64) {
+		entry := boardLogEntry{Dir: "in", ID: inbound.MessageID, Op: "voice", Part: act.Part, From: inbound.Sender.Username, Segment: act.Segment, HasMore: act.HasMore}
+		if err := c.board.withBoard(number, func(board *boardState) error { return c.board.appendLocked(board, entry) }); err != nil {
+			c.board.logf("board: log %q voice act %d: %v", name, inbound.MessageID, err)
+		}
+	})
+	c.board.refreshWaiting(number)
+	switch {
+	case errors.Is(err, errClientIDConflict):
+		writeBoardError(w, status, "conflict")
+	case errors.Is(err, errVoiceDecode):
+		writeBoardError(w, http.StatusUnprocessableEntity, "unreadable")
+	case err != nil:
+		c.board.logf("board: store %q voice act: %v", name, err)
+		writeBoardError(w, http.StatusInternalServerError, "unavailable")
+	case status == http.StatusForbidden:
+		writeBoardError(w, status, "forbidden")
+	case status == http.StatusServiceUnavailable:
+		w.Header().Set("Retry-After", boardRetryAfterBusy)
+		writeBoardError(w, status, "offline")
+	default:
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		_ = json.NewEncoder(w).Encode(map[string]int64{"id": messageID})
+	}
+}
+
+// voiceAct reads a voice act's fields from its headers: X-Client-Id,
+// X-Board-Part (the part the shell recorded for) and, for a part of a longer
+// recording, X-Voice-Segment (1, 2, …) with X-Voice-More: 1 on all but the last.
+func voiceAct(header http.Header) (boardAct, bool) {
+	act := boardAct{Op: "voice", ClientID: strings.TrimSpace(header.Get("X-Client-Id")), Part: header.Get("X-Board-Part")}
+	if act.ClientID == "" || len(act.ClientID) > boardClientIDBytes || !channel.IsValidBoardPart(act.Part) {
+		return boardAct{}, false
+	}
+	segment, more := header.Get("X-Voice-Segment"), header.Get("X-Voice-More")
+	if segment != "" {
+		number, err := strconv.Atoi(segment)
+		if err != nil || number < 1 || number > boardVoiceMaxSegment || strconv.Itoa(number) != segment {
+			return boardAct{}, false
+		}
+		act.Segment = number
+	}
+	switch {
+	case more == "1" && act.Segment > 0:
+		act.HasMore = true
+	case more != "":
+		return boardAct{}, false
+	}
+	return act, true
 }
 
 // check validates a decoded act: the op's fields and only those, each in its
@@ -460,6 +572,16 @@ func boardLine(name string, act boardAct, messageID int64) string {
 	}
 	header += fmt.Sprintf(" · msg %d]", messageID)
 	switch act.Op {
+	case "voice":
+		// The broker adds the transcript (or why there is none) on the next line.
+		switch {
+		case act.HasMore:
+			return fmt.Sprintf("%s Voice note (part %d; more follows):", header, act.Segment)
+		case act.Segment > 0:
+			return fmt.Sprintf("%s Voice note (part %d, the last):", header, act.Segment)
+		default:
+			return header + " Voice note:"
+		}
 	case "comment":
 		if act.Quote == "" {
 			return header + " " + act.Text
