@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/Andrometiq/c3/internal/c3types"
+	"github.com/Andrometiq/c3/internal/channel"
 	"github.com/Andrometiq/c3/internal/mappings"
 )
 
@@ -601,5 +602,104 @@ func TestBrokerShutdownJoinsVoiceBeforeStoppingWorkers(t *testing.T) {
 	b.Workers.mu.Unlock()
 	if !workersStopped {
 		t.Fatal("worker pool was not stopped after voice scheduler joined")
+	}
+}
+
+// A board voice note STT heard nothing in reads "no speech heard", not a
+// failure; the same empty outcome elsewhere keeps the failure notice.
+func TestVoiceSchedulerEmptyTranscriptOnABoardIsNoSpeech(t *testing.T) {
+	_, scheduler, _ := schedulerHarness(t)
+	scheduler.broker.Plugins.OnVoiceReceived(func(context.Context, c3types.VoicePayload) (string, error) {
+		return "[STT FAILED: empty — see /var/log/c3/broker.log]", nil
+	})
+	att := c3types.Attachment{Kind: "voice", FileID: "quiet", MIME: "audio/ogg", Size: 10}
+	for _, test := range []struct {
+		channel string
+		want    string
+	}{{channel.BoardChannelName, c3types.VoiceNoSpeechNotice}, {"web", sttFailureNotice}} {
+		inbound := c3types.Inbound{Channel: test.channel, ChatID: 3, MessageID: 9, Attachments: []c3types.Attachment{att}}
+		result := scheduler.transcribe(context.Background(), voiceAttempt{
+			key:     voiceScheduleKey{route: MakeRouteKey(test.channel, 3, nil), messageID: 9, fileID: att.FileID},
+			inbound: inbound, attachment: att,
+		})
+		if result.success || result.notice != test.want || !strings.Contains(result.segmentText, "empty") {
+			t.Errorf("%s: result=%+v, want notice %q and the agent's failure text", test.channel, result, test.want)
+		}
+	}
+}
+
+// voiceStatusChannel is a board: it shows C3's notices about a voice note on
+// the note itself.
+type voiceStatusChannel struct {
+	*fakeChannel
+	statusMu sync.Mutex
+	statuses []c3types.VoiceStatusArgs
+}
+
+func (*voiceStatusChannel) Name() string { return channel.BoardChannelName }
+
+func (v *voiceStatusChannel) SendVoiceStatus(args c3types.VoiceStatusArgs) error {
+	v.statusMu.Lock()
+	defer v.statusMu.Unlock()
+	v.statuses = append(v.statuses, args)
+	return nil
+}
+
+func (v *voiceStatusChannel) statusSnapshot() []c3types.VoiceStatusArgs {
+	v.statusMu.Lock()
+	defer v.statusMu.Unlock()
+	return append([]c3types.VoiceStatusArgs(nil), v.statuses...)
+}
+
+func registerVoiceStatusChannel(b *Broker) *voiceStatusChannel {
+	board := &voiceStatusChannel{fakeChannel: &fakeChannel{}}
+	b.chMu.Lock()
+	b.channels[board.Name()] = &channelRegistration{Channel: board}
+	b.chMu.Unlock()
+	return board
+}
+
+// On a channel that shows a voice note's status, C3's notices about the note
+// go on the note itself, never through SendReply, the session's own path.
+func TestBoardVoiceNoticesGoOnTheNoteNeverThroughReplies(t *testing.T) {
+	b, w, _, _ := shadowFixture(t)
+	board := registerVoiceStatusChannel(b)
+	in := &c3types.Inbound{Channel: channel.BoardChannelName, ChatID: 3, MessageID: 9}
+	w.echoReadback(in, "", c3types.VoiceNoSpeechNotice)
+	w.echoReadback(in, "", sttFailureNotice)
+	got := board.statusSnapshot()
+	if len(got) != 2 || got[0].MessageID != 9 || got[0].ChatID != 3 || got[0].Status != c3types.VoiceStatusNoSpeech ||
+		got[1].Status != c3types.VoiceStatusFailed || got[1].Text != sttFailureNotice {
+		t.Fatalf("statuses=%+v, want no_speech then failed on message 9", got)
+	}
+	if replies := board.sendRepliesSnapshot(); len(replies) != 0 {
+		t.Fatalf("a voice notice went out as a reply: %+v", replies)
+	}
+}
+
+// A board voice note still not transcribed two minutes on shows "slow" on the
+// note, once, as Telegram gets its reply; the web chat still gets none.
+func TestSlowNoticeReachesABoardVoiceNote(t *testing.T) {
+	b, scheduler, clock := schedulerHarness(t)
+	board := registerVoiceStatusChannel(b)
+	arrived := clock.Now()
+	entry := func(channelName string) *voiceEntry {
+		in := c3types.Inbound{Channel: channelName, ChatID: 3, MessageID: 9}
+		return &voiceEntry{key: voiceScheduleKey{route: MakeRouteKey(channelName, 3, nil), messageID: 9}, arrived: arrived,
+			targets: map[string]voiceResolveTarget{"record": {inbound: in}}}
+	}
+	later := arrived.Add(voiceSlowNoticeAfter)
+	if notice := scheduler.takeSlowNoticeLocked(entry("web"), later); notice != nil {
+		t.Fatalf("the web chat got a slow notice: %+v", notice)
+	}
+	onBoard := entry(channel.BoardChannelName)
+	notice := scheduler.takeSlowNoticeLocked(onBoard, later)
+	if notice == nil || scheduler.takeSlowNoticeLocked(onBoard, later) != nil {
+		t.Fatal("want exactly one slow notice for the board voice note")
+	}
+	scheduler.sendSlowNotice(*notice)
+	got := board.statusSnapshot()
+	if len(got) != 1 || got[0].MessageID != 9 || got[0].Status != c3types.VoiceStatusSlow || len(board.sendRepliesSnapshot()) != 0 {
+		t.Fatalf("statuses=%+v replies=%+v, want one slow status on message 9", got, board.sendRepliesSnapshot())
 	}
 }

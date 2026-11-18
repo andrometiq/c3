@@ -23,7 +23,8 @@ func readPage(t *testing.T, name string) string {
 // frame's own page URL, and it calls no HTML or code sink.
 func TestShellWritesAgentStringsOnlyToAllowedSinks(t *testing.T) {
 	shell := readPage(t, "board.js")
-	allowed := map[string]bool{"textContent": true, "title": true, "hidden": true, "mode": true, "src": true, "typing": true, "holder": true, "rev": true}
+	allowed := map[string]bool{"textContent": true, "title": true, "hidden": true, "mode": true, "src": true, "typing": true, "holder": true, "rev": true,
+		"disabled": true, "ariaPressed": true}
 	for _, match := range regexp.MustCompile(`\.([A-Za-z_$][\w$]*)\s*=[^=]`).FindAllStringSubmatch(shell, -1) {
 		if !allowed[match[1]] {
 			t.Errorf("board.js assigns .%s, which is not an allowed sink", match[1])
@@ -137,4 +138,55 @@ func TestStarterIsPartsAndOneThreadsCall(t *testing.T) {
 			t.Errorf("starter contains %q", blocked)
 		}
 	}
+}
+
+// Only the shell opens the microphone, and only from a real tap on its own
+// button: the frame gets no microphone, and no frame message reaches the
+// recorder (the page can only name the part it is on).
+func TestOnlyTheShellsOwnButtonOpensTheMicrophone(t *testing.T) {
+	shell := readPage(t, "board.js")
+	if strings.Count(shell, "getUserMedia(") != 1 || !strings.Contains(functionBody(t, shell, "async function startRecording("), "getUserMedia(") {
+		t.Fatal("board.js opens the microphone outside startRecording")
+	}
+	starts := regexp.MustCompile(`startRecording\(\)`).FindAllStringIndex(shell, -1)
+	click := strings.Index(shell, `strip.mic.addEventListener("click", (event) => {`)
+	trusted := strings.Index(shell, "if (!event.isTrusted) return;")
+	if len(starts) != 2 || click < 0 || trusted < click || starts[1][0] < trusted || starts[1][0]-click > 300 {
+		t.Fatalf("startRecording is called %d times; want once, from the mic's click listener after its isTrusted check", len(starts)-1)
+	}
+	handler := functionBody(t, shell, "async function onFrameMessage(")
+	for _, recorder := range []string{"startRecording", "recording", "getUserMedia", "MediaRecorder", "upload("} {
+		if strings.Contains(handler, recorder) {
+			t.Errorf("a frame message reaches %q", recorder)
+		}
+	}
+	frame := regexp.MustCompile(`<iframe[^>]*>`).FindString(readPage(t, "board.html"))
+	if strings.Contains(frame, "allow=") || strings.Contains(frame, "allow-same-origin") {
+		t.Errorf("board.html frame %q delegates a permission or its origin", frame)
+	}
+}
+
+// The strip's Close is "Make read-only", and its confirm says what it does.
+func TestMakeReadOnlySaysItIsForGood(t *testing.T) {
+	if !strings.Contains(readPage(t, "board.html"), `<button id="close" type="button" hidden>Make read-only</button>`) {
+		t.Error("board.html's close button is not labelled Make read-only")
+	}
+	if !strings.Contains(readPage(t, "board.js"), `confirm("This makes the board read-only for good.")`) {
+		t.Error("board.js does not confirm that read-only is for good")
+	}
+}
+
+// functionBody is a top-level shell function's source, from its declaration to
+// its closing brace at the shell's indent.
+func functionBody(t *testing.T, source, declaration string) string {
+	t.Helper()
+	start := strings.Index(source, declaration)
+	if start < 0 {
+		t.Fatalf("no %q", declaration)
+	}
+	end := strings.Index(source[start:], "\n  }\n")
+	if end < 0 {
+		t.Fatalf("%q has no end", declaration)
+	}
+	return source[start : start+end]
 }

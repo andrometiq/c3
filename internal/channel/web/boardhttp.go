@@ -8,6 +8,7 @@ import (
 	"html"
 	"io"
 	"io/fs"
+	"mime"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -32,6 +33,13 @@ const (
 	boardShellCSP       = "default-src 'self'; script-src 'self'; style-src 'unsafe-inline'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'"
 	boardRawCSP         = "default-src 'none'; sandbox"
 	boardRetryAfterBusy = "2"
+	// A long recording comes as numbered parts of a few minutes each.
+	boardVoiceMaxSegment = 999
+	// Why a part of a recording never reached C3 (X-Voice-Unsent), also its
+	// stand-in act's log status: the owner cancelled the recording, or C3
+	// refused the part's upload.
+	voiceUnsentCancelled = "cancelled"
+	voiceUnsentRefused   = "refused"
 )
 
 // boardAct is the body of POST /board/<name>/act, decoded strictly: a viewer
@@ -46,6 +54,11 @@ type boardAct struct {
 	Note     string `json:"note"`
 	Value    string `json:"value"`
 	Emoji    string `json:"emoji"`
+	// A voice act's place in a longer recording, and for a part that never
+	// reached C3 why; never decoded from JSON.
+	Segment int    `json:"-"`
+	HasMore bool   `json:"-"`
+	Unsent  string `json:"-"`
 }
 
 // boardOpFields lists, per op, the fields it needs and the ones it may add.
@@ -285,6 +298,10 @@ func pageTitle(page []byte, fallback string) string {
 }
 
 func (c *Channel) handleBoardAct(w http.ResponseWriter, r *http.Request) {
+	if isAudioRequest(r) {
+		c.handleBoardVoice(w, r)
+		return
+	}
 	c.postDeadline(w, r)
 	if !c.sameOrigin(r) {
 		writeBoardError(w, http.StatusForbidden, "forbidden")
@@ -338,6 +355,132 @@ func (c *Channel) handleBoardAct(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(status)
 		_ = json.NewEncoder(w).Encode(map[string]int64{"id": messageID})
 	}
+}
+
+func isAudioRequest(r *http.Request) bool {
+	mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	return err == nil && strings.HasPrefix(strings.ToLower(mediaType), "audio/")
+}
+
+// handleBoardVoice takes a voice act: the recording as the body, its fields as
+// headers, under an act's checks. The audio is transcoded and stored like a
+// web chat voice note, and the broker transcribes it for the session. A part
+// of a recording that never reached C3 comes with no body, as a line saying so,
+// so the session still sees every part.
+func (c *Channel) handleBoardVoice(w http.ResponseWriter, r *http.Request) {
+	extendVoiceDeadline(w)
+	if !c.sameOrigin(r) {
+		writeBoardError(w, http.StatusForbidden, "forbidden")
+		return
+	}
+	viewer, ok := c.boardRequest(w, r, true)
+	if !ok {
+		return
+	}
+	act, isValid := voiceAct(r.Header)
+	if !isValid {
+		writeBoardError(w, http.StatusBadRequest, "invalid")
+		return
+	}
+	mediaType, _, _ := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	r.Body = http.MaxBytesReader(w, r.Body, voiceBodyLimit)
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			writeBoardError(w, http.StatusRequestEntityTooLarge, "too_big")
+		} else {
+			writeBoardError(w, http.StatusBadRequest, "invalid")
+		}
+		return
+	}
+	if act.Unsent != "" && len(body) != 0 {
+		writeBoardError(w, http.StatusBadRequest, "invalid")
+		return
+	}
+	name := r.PathValue("name")
+	key := clientMessageKey{scope: name, sessionID: viewer.id, clientID: act.ClientID}
+	host, _ := c.board.boardHost()
+	admitted, number, retryAfter, err := c.board.admit(name, act, !c.hasClientMessage(c.boardClientMessages, key))
+	if err == nil && host == nil {
+		err = errBoardsStopped
+	}
+	if err != nil {
+		if retryAfter > 0 {
+			w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
+		}
+		writeBoardStoreError(w, err)
+		return
+	}
+	route := c.boardInbound(host, name, number, admitted)
+	var messageID int64
+	var status int
+	if act.Unsent != "" {
+		messageID, status, err = c.acceptInbound(route, key, viewer.sender, act.voiceFields())
+	} else {
+		messageID, status, err = c.acceptVoice(r.Context(), route, key, viewer.sender, mediaType, act.voiceFields(), body,
+			func(inbound *c3types.Inbound, _ float64) { route.echo(inbound, act.ClientID) })
+	}
+	c.board.refreshWaiting(number)
+	switch {
+	case errors.Is(err, errClientIDConflict):
+		writeBoardError(w, status, "conflict")
+	case errors.Is(err, errBoardClosed), errors.Is(err, errNoBoard), errors.Is(err, errBoardsStopped):
+		writeBoardStoreError(w, err) // made read-only (or gone) while the audio was transcoded
+	case errors.Is(err, errVoiceDecode):
+		writeBoardError(w, http.StatusUnprocessableEntity, "unreadable")
+	case err != nil:
+		c.board.logf("board: store %q voice act: %v", name, err)
+		writeBoardError(w, http.StatusInternalServerError, "unavailable")
+	case status == http.StatusForbidden:
+		writeBoardError(w, status, "forbidden")
+	case status == http.StatusServiceUnavailable:
+		w.Header().Set("Retry-After", boardRetryAfterBusy)
+		writeBoardError(w, status, "offline")
+	default:
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		_ = json.NewEncoder(w).Encode(map[string]int64{"id": messageID})
+	}
+}
+
+// voiceAct reads a voice act's fields from its headers: X-Client-Id,
+// X-Board-Part (the part the shell recorded for) and, for a part of a longer
+// recording, X-Voice-Segment (1, 2, …) with X-Voice-More: 1 on all but the
+// last, and X-Voice-Unsent (cancelled: the last part; refused: any) for a
+// part whose audio never reached C3.
+func voiceAct(header http.Header) (boardAct, bool) {
+	act := boardAct{Op: "voice", ClientID: strings.TrimSpace(header.Get("X-Client-Id")), Part: header.Get("X-Board-Part")}
+	if act.ClientID == "" || len(act.ClientID) > boardClientIDBytes || !channel.IsValidBoardPart(act.Part) {
+		return boardAct{}, false
+	}
+	segment, more := header.Get("X-Voice-Segment"), header.Get("X-Voice-More")
+	if segment != "" {
+		number, err := strconv.Atoi(segment)
+		if err != nil || number < 1 || number > boardVoiceMaxSegment || strconv.Itoa(number) != segment {
+			return boardAct{}, false
+		}
+		act.Segment = number
+	}
+	switch {
+	case more == "1" && act.Segment > 0:
+		act.HasMore = true
+	case more != "":
+		return boardAct{}, false
+	}
+	act.Unsent = header.Get("X-Voice-Unsent")
+	isUnsentValid := act.Unsent == "" || act.Segment > 0 &&
+		(act.Unsent == voiceUnsentRefused || act.Unsent == voiceUnsentCancelled && !act.HasMore)
+	if !isUnsentValid {
+		return boardAct{}, false
+	}
+	return act, true
+}
+
+// voiceFields are a voice act's own fields, which a retry of its client id
+// must repeat along with the audio.
+func (act boardAct) voiceFields() string {
+	return fmt.Sprintf("voice part=%s segment=%d more=%t unsent=%s", act.Part, act.Segment, act.HasMore, act.Unsent)
 }
 
 // check validates a decoded act: the op's fields and only those, each in its
@@ -442,8 +585,10 @@ func (c *Channel) boardInbound(host channel.Host, name string, number int64, act
 				inbound.ReplyTo = &c3types.ReplyContext{MessageID: act.Ref}
 			}
 		},
+		checkOpen: func() error { return c.board.withOpenBoard(number, func(*boardState) error { return nil }) },
 		echo: func(inbound *c3types.Inbound, _ string) {
-			entry := boardLogEntry{Dir: "in", ID: inbound.MessageID, Op: act.Op, Part: act.Part, Text: act.logText(), Ref: act.Ref, From: inbound.Sender.Username}
+			entry := boardLogEntry{Dir: "in", ID: inbound.MessageID, Op: act.Op, Part: act.Part, Text: act.logText(), Ref: act.Ref, From: inbound.Sender.Username,
+				Segment: act.Segment, HasMore: act.HasMore, Status: act.Unsent}
 			if err := c.board.withBoard(number, func(board *boardState) error { return c.board.appendLocked(board, entry) }); err != nil {
 				c.board.logf("board: log %q action %d: %v", name, inbound.MessageID, err)
 			}
@@ -460,6 +605,8 @@ func boardLine(name string, act boardAct, messageID int64) string {
 	}
 	header += fmt.Sprintf(" · msg %d]", messageID)
 	switch act.Op {
+	case "voice":
+		return header + " " + voiceLine(act)
 	case "comment":
 		if act.Quote == "" {
 			return header + " " + act.Text
@@ -479,6 +626,26 @@ func boardLine(name string, act boardAct, messageID int64) string {
 	default:
 		return fmt.Sprintf("%s Reacted %s to your message %d.", header, act.Emoji, act.Ref)
 	}
+}
+
+// voiceLine names a voice act's place in its recording. The broker adds the
+// transcript (or why there is none) on the next line; a part that never
+// reached C3 says so instead.
+func voiceLine(act boardAct) string {
+	line := "Voice note:"
+	switch {
+	case act.HasMore:
+		line = fmt.Sprintf("Voice note (part %d; more follows):", act.Segment)
+	case act.Segment > 0:
+		line = fmt.Sprintf("Voice note (part %d, the last):", act.Segment)
+	}
+	switch act.Unsent {
+	case voiceUnsentCancelled:
+		return line + " the recording was cancelled; this part was not sent."
+	case voiceUnsentRefused:
+		return line + " C3 couldn't take this part; it was not sent."
+	}
+	return line
 }
 
 // logText is the viewer's own words for the log: a quote as "> " lines first.
