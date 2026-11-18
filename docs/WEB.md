@@ -101,7 +101,8 @@ Say **“start on-the-go mode”** or **“switch to the web chat”**
 request: `attach +web` adds the web route, keeps the Telegram topic held for
 input, makes web output so replies land in the browser, and announces Drive
 mode in one line. The attach response sends or confirms the Telegram DM login
-link as usual.
+link as usual, or, behind a front that serves the web chat, names the front's
+origin instead.
 
 When **🔊 Voice** is turned on or off, the web chat sends the agent a system
 notice saying **“Spoken replies ON”** or **“Spoken replies OFF.”** While it is
@@ -119,7 +120,8 @@ The agent then announces Telegram mode. Permission prompts and
 
 1. After a successful `attach web`, the broker checks for a live browser
    session. If none exists, it creates a 10-minute, single-use login link and
-   sends it to the configured Telegram operator DM with previews disabled.
+   sends it to the configured Telegram operator DM with previews disabled
+   (not when the web chat is served through a front, below).
 2. The link opens `/auth`; its secret is after `#`, so it never reaches the
    server in the request URL, logs, referrer, or a preview fetch.
 3. Choose **Open in browser** from Telegram. In-app browsers commonly use a
@@ -135,11 +137,17 @@ also asks the running broker to mint and DM a link; it never prints the secret.
 
 ### Through an authenticated HTTPS front
 
-With `front` set, one sign-in covers the web chat and boards: the front signs
-the owner in and C3 asks for nothing more. The attach result names the front's
-origin, and the Telegram link above still opens the web chat directly (laptop or
-tailnet). The rules for a request whose `Host` is the front's (how the `Host` is
-compared, the stanza and fencing the front are in
+With `front` set and its `from` on another host (not loopback and not one of
+this host's own addresses, read from the host's interfaces when the web channel
+starts), one sign-in covers the web chat and boards: the front signs the owner
+in and C3 asks for nothing more. `attach web` then sends no Telegram login link
+and its result names the front's origin; the Telegram link above, from
+`c3-broker web link` or the login page's fresh link, still opens the web chat
+directly (laptop or tailnet). A local `from` can't tell the front from any
+process on this host, the owner's own browser included, so with one the front
+serves boards only, as before, and attach sends the Telegram link as above. The
+rules for a request whose `Host` is the front's when it serves the chat (how the
+`Host` is compared, the stanza and fencing the front are in
 [BOARD.md](BOARD.md#the-authenticated-https-front)):
 
 - It is the operator only when its TCP peer is `from` and the identity header
@@ -261,10 +269,12 @@ asynchronous recorder and database work.
     claim that an extension check identifies harmless content. Exploiting the
     files-directory symlink TOCTOU between its `Lstat` and the `O_NOFOLLOW` file
     open requires write access to the state parent, normally as the broker uid.
-20. With `front` set, the front is a second agent-driving credential: whoever
-    can send from `from` with the operator's identity drives the session. Fence
-    the listener to the front as [BOARD.md](BOARD.md#the-authenticated-https-front)
-    says. Same-origin and SSE Origin rules apply on the front as off it.
+20. With `front` set and `from` on another host, the front is a second
+    agent-driving credential: whoever can send from `from` with the operator's
+    identity drives the session. Fence the listener to the front as
+    [BOARD.md](BOARD.md#the-authenticated-https-front) says. Same-origin and SSE
+    Origin rules apply on the front as off it. A local `from` never opens the
+    web chat on the front, since any process on this host could send from it.
 
 ## Transport behavior and limitations
 
@@ -344,7 +354,8 @@ frame and CSP as documents. The owner comments on and approves the page part by
 part, and only the session that made a board can hold it
 (`attach +board:<name>`). Boards are their own routes and never touch the web
 chat's stream, replay or message ids. The `front` key puts the web chat and
-boards behind one authenticated HTTPS front ([Sign-in flow](#through-an-authenticated-https-front)).
+boards behind one authenticated HTTPS front, the web chat only when the front
+runs on another host ([Sign-in flow](#through-an-authenticated-https-front)).
 Routes, trust, storage and the front are in [BOARD.md](BOARD.md).
 
 ## Drive view

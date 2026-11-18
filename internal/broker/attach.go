@@ -592,12 +592,17 @@ func (b *Broker) attachWeb(conn *ipc.Conn, stub *Stub, steal, replay, add bool) 
 		return
 	}
 	b.recordSessionAttachment(stub)
-	delivery, linkErr := b.sendWebLoginLink(stub, "attach web", true, true)
+	frontOrigin := b.webChatFrontOrigin()
+	var delivery webLoginDelivery
+	var linkErr error
+	if frontOrigin == "" { // behind the front the owner is already signed in
+		delivery, linkErr = b.sendWebLoginLink(stub, "attach web", true, true)
+	}
 	_ = conn.WriteJSON(b.withRouteSet(stub, b.withBacklog(key, ipc.AttachedMsg{
 		Op: ipc.OpAttached, OK: true, Status: ipc.AttachStatusOK,
 		Channel: "web", ChatID: key.ChatID, Name: "web",
 		Capabilities: b.capsForChannel("web"),
-		Notice:       webAttachGuidance(delivery, linkErr, b.webTLSEnabled(), b.Mappings().Channels["web"].Front.Origin),
+		Notice:       webAttachGuidance(delivery, linkErr, b.webTLSEnabled(), frontOrigin),
 	})))
 }
 

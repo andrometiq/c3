@@ -89,6 +89,7 @@ type Channel struct {
 	listen        string
 	baseURL       string
 	allowedOrigin map[string]bool
+	isChatOnFront bool // set at Start: the front's from is neither loopback nor this host's own address
 
 	idMu             sync.Mutex
 	nextReplyID      int64
@@ -126,6 +127,7 @@ type Channel struct {
 	failedAttemptDelay time.Duration
 	heartbeatInterval  time.Duration
 	listenFunc         func(network, address string) (net.Listener, error)
+	interfaceAddresses func() ([]net.Addr, error)
 
 	speechMu      sync.Mutex
 	speechActive  int
@@ -152,6 +154,7 @@ var _ channel.PresenceNotifier = (*Channel)(nil)
 var _ channel.LocalAudioProvider = (*Channel)(nil)
 var _ channel.ReadbackSender = (*Channel)(nil)
 var _ channel.CertificateProvider = (*Channel)(nil)
+var _ channel.ChatFrontProvider = (*Channel)(nil)
 
 // New returns an unstarted channel.
 func New() *Channel {
@@ -310,8 +313,12 @@ func (c *Channel) Start(ctx context.Context, host channel.Host) error {
 	if c.cfg.PublicURL != "" {
 		allowedOrigins[normalizeOrigin(c.cfg.PublicURL)] = true
 	}
+	c.isChatOnFront = c.hasFront() && !c.isLocalAddress(c.cfg.Front.From)
 	if c.hasFront() {
 		allowedOrigins[normalizeOrigin(c.cfg.Front.Origin)] = true
+		if !c.isChatOnFront {
+			host.Logf("web: front.from %s is local (loopback, this host's own address, or interfaces unreadable); the front serves boards only, not the web chat", c.cfg.Front.From)
+		}
 	}
 
 	childContext, cancel := context.WithCancel(ctx)
@@ -443,6 +450,9 @@ func (c *Channel) ensureState() {
 	}
 	if c.listenFunc == nil {
 		c.listenFunc = net.Listen
+	}
+	if c.interfaceAddresses == nil {
+		c.interfaceAddresses = net.InterfaceAddrs
 	}
 	if c.voiceRetention == 0 {
 		c.voiceRetention = defaultVoiceRetention

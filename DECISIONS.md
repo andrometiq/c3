@@ -8,17 +8,26 @@ rulings and rationale, never private operational details.
 **Date:** 2026-11-19
 
 **Decision:** The authenticated HTTPS front (`channels.web.front`), which until
-now opened only boards, also opens the web chat, under the same check: a request
-on the front's `Host` is the operator only when its TCP peer is the front's
-address and the identity header holds exactly the configured operator. Signing in
-at the front is the whole sign-in, with no second step. Off the front nothing
-changes: C3's Telegram link and cookie are the only sign-in there, and the header
-never counts.
+now opened only boards, also opens the web chat when its `from` is on another
+host, under the same check: a request on the front's `Host` is the operator only
+when its TCP peer is the front's address and the identity header holds exactly
+the configured operator. Signing in at the front is the whole sign-in, with no
+second step. Off the front nothing changes: C3's Telegram link and cookie are the
+only sign-in there, and the header never counts.
 
-On the front anyone else gets one uniform 403 on every path, so an unvouched
-caller learns nothing about which routes exist. C3's own login pages send the
-operator to the chat, and the token exchange, fresh link, logout and health
-check are 404 there, so the front can neither mint, spend nor end a C3 login.
+A local `from` (loopback, or one of this host's own addresses, which the web
+channel reads from the host's interfaces when it starts; an unreadable list
+counts as local) keeps the rule from before: the front's `Host` reaches board
+routes only, every other path 404. Such a `from` can't tell the front from any
+process on this host, and a port fence can't separate the front from the owner's
+own browser there, so opening the chat would let any local process drive the
+session. The cost: a front on C3's own host serves boards only.
+
+On a front that serves the chat anyone else gets one uniform 403 on every path,
+so an unvouched caller learns nothing about which routes exist. C3's own login
+pages send the operator to the chat, and the token exchange, fresh link, logout
+and health check are 404 there, so the front can neither mint, spend nor end a
+C3 login.
 
 The front viewer's per-browser chat state is keyed by `front:<operator>`, which
 no cookie hashes to, and lives in memory only: no C3 session is made for it, so
@@ -29,8 +38,11 @@ browsers through the front share one spoken-replies setting, it resets on a
 broker restart, and a send retried across a restart is delivered again, as a
 board act already is.
 
-When a front is set, the web attach result names its origin; the Telegram login
-link still points at the direct path.
+When the running web channel serves the chat on the front, `attach web` sends
+no Telegram login link (the front already signs the owner in) and its result
+names the front's origin, read from the channel, not from reloaded mappings. The
+Telegram link from `c3-broker web link` or the login page's fresh link still
+opens the direct path.
 
 ## D043: Boards are kept for good
 

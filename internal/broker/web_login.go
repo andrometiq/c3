@@ -106,6 +106,21 @@ func (b *Broker) webTLSEnabled() bool {
 	return err == nil
 }
 
+// webChatFrontOrigin is where the running web channel serves its chat through
+// an authenticated front, or "" when it doesn't. The channel's answer counts,
+// not the live mappings: it enforces the front it read at Start.
+func (b *Broker) webChatFrontOrigin() string {
+	webChannel, err := b.Channel("web")
+	if err != nil {
+		return ""
+	}
+	front, ok := webChannel.(channel.ChatFrontProvider)
+	if !ok {
+		return ""
+	}
+	return front.ChatFrontOrigin()
+}
+
 func (b *Broker) rollbackWebLoginLinkTimestamp(userID int64, reservedAt, previous time.Time, hadPrevious bool) {
 	b.loginLinkMu.Lock()
 	defer b.loginLinkMu.Unlock()
@@ -139,11 +154,13 @@ func webLoginLinkText(stub *Stub, requestedBy, link string) string {
 		cli, cwd, sessionID, link)
 }
 
-// webAttachGuidance tells the session how the owner opens the web chat: the
-// Telegram link off the front, and frontOrigin, when set, behind the front.
+// webAttachGuidance tells the session how the owner opens the web chat: at
+// frontOrigin when the front serves it (no link sent), else by the Telegram link.
 func webAttachGuidance(delivery webLoginDelivery, err error, tlsEnabled bool, frontOrigin string) string {
 	prefix := ""
 	switch {
+	case frontOrigin != "":
+		prefix = "Open the web chat at " + frontOrigin + "; the authenticated front signs the owner in, so no Telegram login link was sent (`c3-broker web link` sends one for the direct path)."
 	case err != nil:
 		log.Printf("web attach: login-link delivery failed: %v", err)
 		prefix = "The web route was claimed, but its Telegram login link could not be sent; run `c3-broker web link`."
@@ -154,15 +171,12 @@ func webAttachGuidance(delivery webLoginDelivery, err error, tlsEnabled bool, fr
 	default:
 		prefix = "A web login link was sent to your Telegram DM."
 	}
-	guidance := []string{prefix}
-	if frontOrigin != "" {
-		guidance = append(guidance, "The web chat is also at "+strings.TrimSuffix(frontOrigin, "/")+", where the authenticated front signs the owner in with no link.")
-	}
-	guidance = append(guidance,
+	guidance := []string{
+		prefix,
 		"Use reply-tool (\"Telegram\") mode so `reply` lands on the claimed web route.",
 		"Turn on 🔊 Voice on the page to hear replies; a system notice tells you when it is on.",
 		"Permission prompts and `ask` must be answered at the laptop; use pre-approved permissions for an on-the-go drive.",
-	)
+	}
 	if tlsEnabled {
 		guidance = append(guidance, `Phone browsers need the C3 web CA installed once — run "c3-broker web ca" to send it.`)
 	}

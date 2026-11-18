@@ -141,7 +141,11 @@ A successful `attach web` switches to the operator's web route and releases
 the session's other routes. `attach +web` instead keeps those routes held and
 makes web output. If the browser has
 no live authenticated session, the broker sends a login link through the
-Telegram DM and the attach response says so. The response also reminds the
+Telegram DM and the attach response says so. When the running web channel
+serves the chat through an authenticated HTTPS front (`front` with its `from`
+on another host, [WEB.md](WEB.md#through-an-authenticated-https-front)), the
+broker sends no link and the response names the front's origin instead;
+`c3-broker web link` still sends one for the direct path. The response also reminds the
 agent to use reply-tool (“Telegram”) mode so `reply` lands on the claimed web
 route, that **🔊 Voice** can read replies aloud, and that permission
 prompts/`ask` still require the laptop. The attach tool result includes the

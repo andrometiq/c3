@@ -166,6 +166,13 @@ type CertificateProvider interface {
 	CACertificatePEM() (pem []byte, sha256Fingerprint string, err error)
 }
 
+// ChatFrontProvider is the optional bridge implemented by a web channel that
+// can serve its chat through an authenticated front. ChatFrontOrigin is that
+// front's origin as the running channel enforces it, or "" when it serves none.
+type ChatFrontProvider interface {
+	ChatFrontOrigin() string
+}
+
 // Host is what the broker passes to a Channel. Subset of plugin.Host scoped
 // to channel concerns (config + emit + log + done + gate).
 type Host interface {

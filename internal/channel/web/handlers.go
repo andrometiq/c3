@@ -47,11 +47,13 @@ func (c *Channel) routes() http.Handler {
 	mux.HandleFunc("POST /board/{name}/act", c.handleBoardAct)
 	mux.HandleFunc("POST /board/{name}/close", c.handleBoardClose)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if c.isOffFrontAlias(r) {
+		if c.isOffFrontAlias(r) || c.isFrontRequest(r) && !c.isFrontRoute(r) {
 			http.NotFound(w, r)
 			return
 		}
-		if c.isFrontRequest(r) && !c.admitFrontRequest(w, r) {
+		// A boards-only front (local from) keeps its rules from before D044:
+		// each board handler refuses anyone but the front's operator.
+		if c.isFrontRequest(r) && c.isChatOnFront && !c.admitFrontRequest(w, r) {
 			return
 		}
 		isRead := r.Method == http.MethodGet || r.Method == http.MethodHead

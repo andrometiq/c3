@@ -12,9 +12,10 @@ import (
 )
 
 // The authenticated HTTPS front (channels.web.front) serves the web chat and
-// boards. A request whose Host is the front's is the operator only when its
-// TCP peer is the front's address and the identity header names the operator;
-// C3's own login never counts there, and the header never counts elsewhere.
+// boards, or boards only when its from is local. A request whose Host is the
+// front's is the operator only when its TCP peer is the front's address and
+// the identity header names the operator; C3's own login never counts there,
+// and the header never counts elsewhere.
 
 const frontViewerPrefix = "front:"
 
@@ -31,6 +32,49 @@ type boardViewer struct {
 func (c *Channel) hasFront() bool { return c.cfg.Front.Origin != "" }
 
 func (c *Channel) frontViewerID() string { return frontViewerPrefix + c.cfg.Front.Operator }
+
+// isLocalAddress: address is loopback or one of this host's own, so a request
+// from it may be any local process, the operator's own browser included. An
+// unreadable interface list counts as local.
+func (c *Channel) isLocalAddress(address string) bool {
+	ip := net.ParseIP(address)
+	if ip == nil || ip.IsLoopback() || ip.IsUnspecified() {
+		return true
+	}
+	hostAddresses, err := c.interfaceAddresses()
+	if err != nil {
+		return true
+	}
+	for _, hostAddress := range hostAddresses {
+		if interfaceIP(hostAddress).Equal(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+func interfaceIP(address net.Addr) net.IP {
+	switch address := address.(type) {
+	case *net.IPNet:
+		return address.IP
+	case *net.IPAddr:
+		return address.IP
+	}
+	return nil
+}
+
+// isFrontRoute: the front reaches this route. With a local from it reaches
+// board routes only, as before D044: a local from can't tell the front from
+// any process on this host.
+func (c *Channel) isFrontRoute(r *http.Request) bool {
+	return c.isChatOnFront || isBoardPath(r.URL.Path)
+}
+
+// isBoardPath judges the cleaned path, so "/board/../send" is not a board path.
+func isBoardPath(rawPath string) bool {
+	cleaned := path.Clean(rawPath)
+	return cleaned == "/board" || strings.HasPrefix(cleaned, "/board/")
+}
 
 // frontClosedPaths are C3's own sign-in, sign-out and health endpoints, which
 // don't exist on the front: the front signs the operator in and out.
@@ -118,10 +162,13 @@ func (c *Channel) isFrontOperator(r *http.Request) bool {
 }
 
 // boardViewer returns the viewer of a web-chat or board request, or the
-// status that refuses it: 403 on the front for anyone but the operator, 401
-// elsewhere without a live web login.
+// status that refuses it: on the front 404 for a route it doesn't reach and
+// 403 for anyone but the operator, elsewhere 401 without a live web login.
 func (c *Channel) boardViewer(r *http.Request, touch bool) (boardViewer, int) {
 	if c.isFrontRequest(r) {
+		if !c.isFrontRoute(r) {
+			return boardViewer{}, http.StatusNotFound
+		}
 		if !c.isFrontOperator(r) {
 			return boardViewer{}, http.StatusForbidden
 		}
@@ -175,6 +222,15 @@ func (c *Channel) requestOrigin(r *http.Request) string {
 		return origin
 	}
 	return c.baseURL
+}
+
+// ChatFrontOrigin is where the authenticated front serves the web chat, or ""
+// when it doesn't: no front, or a local from that keeps it to boards.
+func (c *Channel) ChatFrontOrigin() string {
+	if !c.isChatOnFront {
+		return ""
+	}
+	return c.boardLinkBase()
 }
 
 // boardLinkBase is where a board's shell link points: the front when one is

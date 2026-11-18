@@ -3,6 +3,8 @@ package web
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os/exec"
@@ -29,8 +31,15 @@ func newFrontTest(t *testing.T) (*Channel, *fakeBoardHost, *http.Cookie) {
 	c, host, cookie := newBoardTest(t)
 	c.cfg.Front = mappings.WebFront{Origin: frontOrigin, From: frontAddress, IdentityHeader: frontHeader, Operator: frontOperator}
 	c.allowedOrigin[frontOrigin] = true
+	c.isChatOnFront = true // as Start sets it for a from on another host
 	createBoard(t, c, "plan")
 	return c, host, cookie
+}
+
+// useLocalFrom points the front at a local from, as Start would see it.
+func useLocalFrom(c *Channel) {
+	c.cfg.Front.From = "127.0.0.1"
+	c.isChatOnFront = false
 }
 
 // frontRequest is what the front forwards: its Host, its address as the TCP
@@ -38,7 +47,7 @@ func newFrontTest(t *testing.T) (*Channel, *fakeBoardHost, *http.Cookie) {
 func frontRequest(method, path, body, peer string, identities ...string) *http.Request {
 	r := request(method, path, body, nil, false)
 	r.Host = "boards.example.test"
-	r.RemoteAddr = peer + ":43210"
+	r.RemoteAddr = net.JoinHostPort(peer, "43210")
 	r.Header.Set("Origin", frontOrigin)
 	for _, identity := range identities {
 		r.Header.Add(frontHeader, identity)
@@ -410,7 +419,7 @@ func TestFrontAddressReachesNothingUnderAnotherName(t *testing.T) {
 		t.Fatalf("direct web chat from another peer=%d, want 200", w.Code)
 	}
 
-	c.cfg.Front.From = "127.0.0.1"
+	useLocalFrom(c)
 	local := request(http.MethodGet, "/", "", cookie, false)
 	local.RemoteAddr = "127.0.0.1:43210"
 	if w := serve(c, local); w.Code != http.StatusOK {
@@ -419,13 +428,14 @@ func TestFrontAddressReachesNothingUnderAnotherName(t *testing.T) {
 }
 
 // TestFrontHostCountsInEverySpellingOfItsName: with a loopback front address
-// the Host alone keeps a request on the front's rules, so each spelling of the
-// front's own name a proxy may route as the front (case, one trailing dot, an
-// empty or zero-padded default port, an IP literal's form) counts as the front,
-// and so does its name with a port that can't be parsed. Another port does not.
+// the Host alone keeps a request on the front's rules (boards only), so each
+// spelling of the front's own name a proxy may route as the front (case, one
+// trailing dot, an empty or zero-padded default port, an IP literal's form)
+// counts as the front, and so does its name with a port that can't be parsed.
+// Another port does not.
 func TestFrontHostCountsInEverySpellingOfItsName(t *testing.T) {
 	c, _, cookie := newFrontTest(t)
-	c.cfg.Front.From = "127.0.0.1"
+	useLocalFrom(c)
 	local := func(host, path string) *http.Request {
 		r := request(http.MethodGet, path, "", cookie, false)
 		r.RemoteAddr = "127.0.0.1:43210"
@@ -436,12 +446,12 @@ func TestFrontHostCountsInEverySpellingOfItsName(t *testing.T) {
 		t.Helper()
 		chat, state := serve(c, local(host, "/")).Code, serve(c, local(host, "/board/plan/state")).Code
 		switch {
-		case chat == http.StatusForbidden && state == http.StatusForbidden:
+		case chat == http.StatusNotFound && state == http.StatusForbidden:
 			return true
 		case chat == http.StatusOK && state == http.StatusOK:
 			return false
 		}
-		t.Fatalf("Host %q: / =%d, /board/plan/state =%d; want the front's 403/403 or the web chat's 200/200", host, chat, state)
+		t.Fatalf("Host %q: / =%d, /board/plan/state =%d; want the front's 404/403 or the web chat's 200/200", host, chat, state)
 		return false
 	}
 	for _, host := range []string{
@@ -494,6 +504,93 @@ func TestOnlyTheOperatorIdentityIsTheOwner(t *testing.T) {
 	}
 	if board, _ := c.board.BoardByName("plan"); board.IsClosed {
 		t.Fatal("a guest closed the board")
+	}
+}
+
+// startFrontChannel starts web through Start behind a front whose from is
+// from, on a host whose interface list interfaceAddresses gives, with a board.
+func startFrontChannel(t *testing.T, from string, interfaceAddresses func() ([]net.Addr, error)) (*Channel, *fakeBoardHost) {
+	t.Helper()
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	host := newFakeBoardHost()
+	host.webConfig.Front = mappings.WebFront{Origin: frontOrigin, From: from, IdentityHeader: frontHeader, Operator: frontOperator}
+	c := New()
+	c.listenFunc = func(_, _ string) (net.Listener, error) { return newFakeListener(), nil }
+	c.interfaceAddresses = interfaceAddresses
+	if err := c.Start(t.Context(), host); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = c.Stop() })
+	c.board.assets = boardFixtures
+	if err := c.board.Start(t.Context(), host); err != nil {
+		t.Fatal(err)
+	}
+	createBoard(t, c, "plan")
+	return c, host
+}
+
+// TestFrontWithALocalFromServesBoardsOnly: a from that is loopback or one of
+// this host's own addresses can't tell the front from any local process, the
+// operator's own browser included, so there the front reaches board routes
+// only and every other route is 404, as before D044 (an unreadable interface
+// list counts as local). Only a from on another host opens the web chat, and
+// only then does the channel name the front as where the chat is.
+func TestFrontWithALocalFromServesBoardsOnly(t *testing.T) {
+	interfaces := func(addresses ...string) func() ([]net.Addr, error) {
+		return func() ([]net.Addr, error) {
+			var list []net.Addr
+			for _, address := range addresses {
+				list = append(list, &net.IPNet{IP: net.ParseIP(address), Mask: net.CIDRMask(24, 32)})
+			}
+			return list, nil
+		}
+	}
+	unreadable := func() ([]net.Addr, error) { return nil, errors.New("interfaces unreadable") }
+	for _, setup := range []struct {
+		name, from         string
+		interfaceAddresses func() ([]net.Addr, error)
+		isChatOnFront      bool
+	}{
+		{"loopback", "127.0.0.1", interfaces("198.51.100.7"), false},
+		{"IPv6 loopback", "::1", interfaces("198.51.100.7"), false},
+		{"this host's own address", frontAddress, interfaces("198.51.100.7", frontAddress), false},
+		{"unreadable interface list", frontAddress, unreadable, false},
+		{"another host", frontAddress, interfaces("198.51.100.7"), true},
+	} {
+		c, host := startFrontChannel(t, setup.from, setup.interfaceAddresses)
+		operator := func(method, path, body string) int {
+			return serve(c, frontRequest(method, path, body, setup.from, frontOperator)).Code
+		}
+		if state := operator(http.MethodGet, "/board/plan/state", ""); state != http.StatusOK {
+			t.Fatalf("%s: front operator board state=%d, want 200", setup.name, state)
+		}
+		if guest := serve(c, frontRequest(http.MethodGet, "/board/plan/state", "", setup.from, "guest@example.test")); guest.Code != http.StatusForbidden {
+			t.Fatalf("%s: front guest board state=%d, want 403", setup.name, guest.Code)
+		}
+		send := `{"text":"through the front","client_id":"f"}`
+		chat, sent := operator(http.MethodGet, "/", ""), operator(http.MethodPost, "/send", send)
+		if setup.isChatOnFront {
+			if chat != http.StatusOK || sent != http.StatusAccepted || len(host.emittedSnapshot()) != 1 || c.ChatFrontOrigin() != frontOrigin {
+				t.Fatalf("%s: front operator chat=%d send=%d emitted %d origin %q; want the web chat on the front", setup.name, chat, sent, len(host.emittedSnapshot()), c.ChatFrontOrigin())
+			}
+			continue
+		}
+		pastTheGate := httptest.NewRecorder()
+		c.handleSend(pastTheGate, frontRequest(http.MethodPost, "/send", send, setup.from, frontOperator))
+		if chat != http.StatusNotFound || sent != http.StatusNotFound || pastTheGate.Code != http.StatusNotFound || len(host.emittedSnapshot()) != 0 || c.ChatFrontOrigin() != "" {
+			t.Fatalf("%s: front operator chat=%d send=%d (handler alone %d) emitted %d origin %q; want boards only", setup.name, chat, sent, pastTheGate.Code, len(host.emittedSnapshot()), c.ChatFrontOrigin())
+		}
+		ended, end := context.WithCancel(t.Context())
+		end() // a stream that opens returns at once instead of hanging the test
+		for _, route := range []struct{ method, path string }{
+			{http.MethodGet, "/events"}, {http.MethodPost, "/voice"}, {http.MethodGet, "/audio/unlock"},
+			{http.MethodGet, "/files/00112233445566778899aabbccddeeff"}, {http.MethodGet, "/login"}, {http.MethodGet, "/healthz"},
+		} {
+			r := frontRequest(route.method, route.path, "", setup.from, frontOperator).WithContext(ended)
+			if code := serve(c, r).Code; code != http.StatusNotFound {
+				t.Fatalf("%s: front operator %s %s=%d, want 404", setup.name, route.method, route.path, code)
+			}
+		}
 	}
 }
 

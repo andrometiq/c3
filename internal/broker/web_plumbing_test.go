@@ -17,11 +17,12 @@ import (
 
 type webFakeChannel struct {
 	*fakeChannel
-	loginMu   sync.Mutex
-	live      bool
-	mintCalls int
-	link      string
-	mintErr   error
+	loginMu         sync.Mutex
+	live            bool
+	mintCalls       int
+	link            string
+	mintErr         error
+	chatFrontOrigin string
 }
 
 type slowTelegramChannel struct {
@@ -54,6 +55,7 @@ func (f *webFakeChannel) MintLoginLink(int64) (string, error) {
 	}
 	return f.link, f.mintErr
 }
+func (f *webFakeChannel) ChatFrontOrigin() string { return f.chatFrontOrigin }
 func (f *webFakeChannel) mintCount() int {
 	f.loginMu.Lock()
 	defer f.loginMu.Unlock()
@@ -204,17 +206,23 @@ func TestAttachWebClaimsOperatorRouteAndSendsLoginLink(t *testing.T) {
 	}
 }
 
-// TestAttachWebNamesTheFrontWhenOneIsConfigured: with a front set, the attach
-// result tells the session the web chat's front origin; the Telegram login
-// link is still the web channel's own.
-func TestAttachWebNamesTheFrontWhenOneIsConfigured(t *testing.T) {
-	const frontOrigin = "https://chat.example.test"
-	for _, hasFront := range []bool{false, true} {
-		b, telegramChannel, webChannel := brokerWithWeb(t, nil)
-		if hasFront {
+// TestAttachWebNamesTheFrontTheRunningWebChannelServes: the attach result
+// names the front only when the running web channel serves the chat there,
+// which a mappings reload can't change; the live mappings' front never counts.
+func TestAttachWebNamesTheFrontTheRunningWebChannelServes(t *testing.T) {
+	const reloadedOrigin, runningOrigin = "https://reloaded.example.test", "https://chat.example.test"
+	for _, setup := range []struct {
+		name, mappingsOrigin, channelOrigin, want, refused string
+	}{
+		{"front only in the reloaded mappings", reloadedOrigin, "", "sent to your Telegram DM", reloadedOrigin},
+		{"front the channel serves", "", runningOrigin, "Open the web chat at " + runningOrigin + ";", "sent to your Telegram DM"},
+	} {
+		b, _, webChannel := brokerWithWeb(t, nil)
+		webChannel.chatFrontOrigin = setup.channelOrigin
+		if setup.mappingsOrigin != "" {
 			mf := b.Mappings().Clone()
 			web := mf.Channels["web"]
-			web.Front = mappings.WebFront{Origin: frontOrigin, From: "192.0.2.10", IdentityHeader: "X-Front-User", Operator: "owner@example.test"}
+			web.Front = mappings.WebFront{Origin: setup.mappingsOrigin, From: "192.0.2.10", IdentityHeader: "X-Front-User", Operator: "owner@example.test"}
 			mf.Channels["web"] = web
 			b.SetMappings(mf)
 		}
@@ -223,12 +231,44 @@ func TestAttachWebNamesTheFrontWhenOneIsConfigured(t *testing.T) {
 		attached := readAttach(t, peer, ipc.AttachReq{Op: ipc.OpAttach, Expr: "web"})
 		done()
 		b.Shutdown()
-		if !attached.OK || strings.Contains(attached.Notice, frontOrigin) != hasFront || !strings.Contains(attached.Notice, "sent to your Telegram DM") {
-			t.Fatalf("front %v: attach web notice %q", hasFront, attached.Notice)
+		if !attached.OK || !strings.Contains(attached.Notice, setup.want) || strings.Contains(attached.Notice, setup.refused) {
+			t.Fatalf("%s: attach web notice %q, want %q and not %q", setup.name, attached.Notice, setup.want, setup.refused)
 		}
-		if replies := telegramChannel.sendRepliesSnapshot(); len(replies) != 1 || !strings.Contains(replies[0].Text, webChannel.link) {
-			t.Fatalf("front %v: login DM %+v, want the web channel's own link", hasFront, replies)
-		}
+	}
+}
+
+// TestAttachWebThroughTheFrontSendsNoTelegramLink: when the running web
+// channel serves the chat on the front, attach sends no Telegram login link
+// (the front already signs the owner in) and says where to open the chat; the
+// login page's fresh link and `c3-broker web link` still deliver one for the
+// direct path.
+func TestAttachWebThroughTheFrontSendsNoTelegramLink(t *testing.T) {
+	const frontOrigin = "https://chat.example.test"
+	b, telegramChannel, webChannel := brokerWithWeb(t, nil)
+	defer b.Shutdown()
+	webChannel.chatFrontOrigin = frontOrigin
+	peer, done := peerPair(t, b)
+	defer done()
+	helloAck(t, peer, "/workspace/project")
+	attached := readAttach(t, peer, ipc.AttachReq{Op: ipc.OpAttach, Expr: "web"})
+	if !attached.OK || !strings.Contains(attached.Notice, "Open the web chat at "+frontOrigin+";") || strings.Contains(attached.Notice, "sent to your Telegram DM") {
+		t.Fatalf("attach web through the front: notice %q", attached.Notice)
+	}
+	if replies := telegramChannel.sendRepliesSnapshot(); len(replies) != 0 || webChannel.mintCount() != 0 {
+		t.Fatalf("attach web through the front sent %d DMs, minted %d links; want none", len(replies), webChannel.mintCount())
+	}
+	if sent, err := NewBrokerHost(b, "web").SendWebLoginLink("requested from the web login page"); err != nil || !sent {
+		t.Fatalf("login page fresh link: sent=%v err=%v", sent, err)
+	}
+	if err := peer.WriteJSON(ipc.WebLoginLinkReq{Op: ipc.OpWebLoginLink}); err != nil {
+		t.Fatal(err)
+	}
+	var reply ipc.WebLoginLinkReply
+	if raw, err := peer.ReadFrame(); err != nil || json.Unmarshal(raw, &reply) != nil || !reply.OK {
+		t.Fatalf("c3-broker web link: %+v %v", reply, err)
+	}
+	if replies := telegramChannel.sendRepliesSnapshot(); len(replies) != 2 || !strings.Contains(replies[1].Text, webChannel.link) {
+		t.Fatalf("direct-path links %+v, want the login page's and web link's", replies)
 	}
 }
 
