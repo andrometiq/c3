@@ -3,6 +3,16 @@
 Entries are newest first. This is the public architecture record: it records
 rulings and rationale, never private operational details.
 
+## D043: Boards are kept for good
+
+**Date:** 2026-11-18
+
+**Decision:** C3 never deletes a board, open or closed. Its whole action log
+(every comment, answer and approval) is kept, and so are the last five page
+revisions. A later step keeps every revision as a diff history, the way a git
+history does, instead of dropping older pages. Closing a board makes it read-only;
+it does not remove it.
+
 ## D042: Live boards belong to the session that made them
 
 **Date:** 2026-11-15

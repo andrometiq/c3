@@ -63,6 +63,18 @@ The first is cleaner; the second is far easier to reason about when it misbehave
 - Mobile UI redesign of the web chat: taste-discovery first (reference links and a react loop
   with the operator before any build), then a phone-first pass over the whole page — driving
   view, composer, history, notices — as one designed surface rather than a stack of features.
+- A discussion canvas as a web workflow: one live page per discussion that plays as a narrated,
+  step-through diagram, where tapping any part opens a chat about that part in place and the agent
+  redraws only that part. It answers two problems of chat-driven work: walls of text, and losing the
+  thread when many points are discussed at once. Phone first; plain now, customizable later.
+- Two live-connected screens for one discussion: a laptop companion that shows the whole picture
+  and updates as the discussion moves, and the phone for touch (pinch zoom, circling a region) and
+  talking. Tap a part on the laptop, talk about it on the phone.
+- Board page history as diffs: keep every revision of a board's page as a diff chain (git-style),
+  so any earlier version can be shown or compared, instead of keeping only the last five.
+- Reply options beyond buttons: polls (multi-select, open answers) and rich text are available on
+  Telegram but agents reach only for buttons. Research which form fits which kind of question, teach
+  it in the MCP instructions, and refine from how agents actually use it.
 
 ## More channels
 
