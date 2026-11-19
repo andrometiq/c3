@@ -25,11 +25,11 @@ the layer under any form: per-part threads, voice notes, approvals, and redrawin
 - The session names the board as `channel="board:<name>"` on `reply`, `edit_message` and `react`,
   and lets go of it with `detach target=board:<name>`. `web` always means the web chat; a bare
   `board` with two boards held fails closed.
-- While the session is gone, the owner's actions queue and the strip says how many wait. Resume
+- While the session is gone, the owner's actions queue and the status circle says how many wait. Resume
   and broker restart restore the board from the session's record (30 days, with
   `auto_attach_on_resume` on, the default); else its session re-holds it with `attach`. An
   in-place conversation switch leaves it waiting for its own conversation.
-- **Make read-only** in the strip ("This makes the board read-only for good.") does that: C3
+- **Make read-only** in the status panel ("This makes the board read-only for good.") does that: C3
   releases the route, drops it from the session's record and tells the session; later actions get
   409.
 
@@ -65,7 +65,7 @@ reactions, and pages: one regular `.html`/`.htm` file of at most 5 MiB per reply
 next revision. Buttons, polls and other media are not taken. C3 lints a page for storage,
 `fetch(`/XHR, outside `src`/`href` URLs, forms and `target="_blank"`, warns the viewer and the
 broker log, and stores it anyway. Text is shown as typed (the channel declares no rich text). A
-reply without `reply_to` starting `📨 Held`, `⏸ Permission` or `⚠️` goes to the strip only; an
+reply without `reply_to` starting `📨 Held`, `⏸ Permission` or `⚠️` is only a notice in the shell; an
 answer carrying `reply_to` is always logged. The page reaches C3 only through the `window.c3` API, inlined as its first script.
 An agent sends a page with `text=""`: a reply with text and a file splits, and `reply_to` rides
 only the first part. After an approve, its `reply_to` is the approve line's own id (413 above),
@@ -76,7 +76,7 @@ not the approved message's (418).
 | Route | What it is |
 |---|---|
 | `GET /board` | this broker's boards |
-| `GET /board/<name>` | the shell: a strip (title, live session, waiting, typing, Make read-only) over the page's frame, and the mic strip under it |
+| `GET /board/<name>` | the shell: the page's frame filling the window, C3's status circle over its top-right corner, and C3's mic in the page's chat box |
 | `GET /board/<name>/state` | title, rev, frame capability, viewer, live, holder, waiting, closed, last 500 log entries |
 | `GET /board/<name>/page?cap=…` | the page with the SDK inlined; `&rev=N&raw=1` gives a stored revision as `text/plain` |
 | `GET /board/<name>/events` | SSE `message`, `edit`, `reaction`, `action`, `page`, `status`, `notice`; `id:` is the log seq, `Last-Event-ID` replays after it |
@@ -89,10 +89,20 @@ Shell assets are under `/board/assets/`. Errors are `{"error": <rule>}`: `invali
 
 ## Voice
 
-The shell draws a mic strip under the page's frame. The page names the part the owner is on with
-`c3.focus(part)` (`c3.threads()` does it as a thread opens and closes); the strip's **🎤 Talk** is
-enabled only then and names that part. A tap records, **■ Send** sends, **Cancel** drops it; under
-400 ms nothing is sent. A recording keeps the part it started for. Recording never stops on its own:
+The page fills the window. C3's own state is a small circle over its top-right corner: its dot is the
+session (green live, amber away or reconnecting, grey read-only, pulsing while the session types), and
+a badge shows while actions wait or a notice came that the owner hasn't seen. A tap opens its panel:
+the board's title, the live session (`cli · folder`), waiting and typing, the last notice, and
+**Make read-only**. A notice (a reply of that kind, a voice problem) shows a few seconds under the
+circle, then fades; it never reaches the frame.
+
+Voice sits in the page's chat, as in Telegram: while a thread's box is empty it has no Send, and C3
+draws its mic in that spot; typing brings Send back. The page tells C3 with `c3.focus(part, {dock,
+hasText})`: the part the owner is on, where its Send sits (an element the SDK follows through layout,
+scroll and keyboard, or a box in frame pixels) and whether the box has text (`c3.threads()` does all of
+it). `c3.focus(part)` alone puts the mic at the frame's bottom-right corner. A tap records; the mic
+turns into a send button and C3 draws a bar beside it with the time, the part and **Cancel**; under
+400 ms nothing is sent. A recording keeps the part it started for, and the bar names it. Recording never stops on its own:
 every five minutes the shell sends what it has as a numbered part and records on. Once a part has
 gone out, the recording always ends with a last part the session sees: Cancel sends a `cancelled`
 line in place of the last part's audio, and a part C3 refuses (413, 422, …) goes out again as a
@@ -129,21 +139,24 @@ passes all of it as events.
 - **Shell.** It runs only its own script file, pins `frame-src` to `<origin>/board/<name>/page`,
   sends `Cross-Origin-Opener-Policy: same-origin` (no `top.opener` for the page), refuses framing,
   takes messages only from its frame, writes agent strings only as text and keeps `notice` out of
-  the frame.
+  the frame. Its circle, panel, mic and recording bar sit over the frame, where the page can't draw.
 - **Microphone.** Only the shell records: one `getUserMedia` call, reached only from a trusted tap
   on its own mic button; the shell draws the recording state and its part itself. The frame has no
-  microphone (sandboxed, opaque origin, no `allow`). The page can only name a part, so its script can
-  never hear the owner or send a voice act.
+  microphone (sandboxed, opaque origin, no `allow`). The page can only name a part, its Send's spot and
+  whether its box has text, so its script can never hear the owner or send a voice act. A spot that
+  isn't four finite numbers is refused; the mic is a 44–56 px circle centred on the spot, kept inside
+  the frame's visible box with its row below the status circle, and the recording bar takes the
+  roomier side of that row, so no spot hides the circle, the mic or the recording state.
 - **Acts.** Each re-checks sign-in, same origin and board; the body is decoded strictly per op and
   can't name a sender. Part `^[A-Za-z0-9._:-]{1,64}$`, text and note 16,000 runes, quote 2,000,
   tap value 64 bytes, 30 new acts a minute per board; a `ref` must name a session message; a
   `client_id` retry is delivered once (not across a broker restart).
 - **Permissions.** A prompt's preview never reaches a board; a boards-only session gets
-  "⏸ Permission prompt waiting at the laptop." in the strip. Board input can't settle a prompt.
+  "⏸ Permission prompt waiting at the laptop." as a notice. Board input can't settle a prompt.
 - **A board yes.** The page's script can send any act, Approve included, without a tap. It reaches
   only the session that wrote the script, whose rule is that board input is the owner's word for
   that work, never for a push, deploy, release, message to someone else or permission answer.
-  The script can draw misleading UI in its frame; the strip names the live session.
+  The script can draw misleading UI in its frame; the status circle's panel names the live session.
 
 ## Storage
 

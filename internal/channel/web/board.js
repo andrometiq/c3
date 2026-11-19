@@ -1,5 +1,6 @@
-// C3's board shell: the strip, and the bridge between this board's sandboxed frame (the agent's page) and C3.
-// Only messages from the frame's own window are taken; agent strings reach this document only as text.
+// C3's board shell: the status circle and its panel, the mic, and the bridge between this board's sandboxed frame
+// (the agent's page, which fills the window) and C3. Only messages from the frame's own window are taken; agent
+// strings reach this document only as text.
 (() => {
   "use strict";
 
@@ -14,7 +15,11 @@
   const RETRY_MAX_MS = 30000;
   const TYPING_MS = 10000;
   // Voice, as the web chat records it; a long recording goes out as numbered parts while it goes on.
-  const VOICE = { minMs: 400, segmentMs: 5 * 60 * 1000, timesliceMs: 1000, retryMs: 2000, noticeMs: 4000 };
+  const VOICE = { minMs: 400, segmentMs: 5 * 60 * 1000, timesliceMs: 1000, retryMs: 2000 };
+  const NOTICE_MS = 5000; // a notice shows this long under the circle, then fades
+  // The mic is a circle this wide, kept this far inside the frame's visible box and from the status circle; the
+  // recording bar sits gapPx beside it. A page that names no spot gets it at the frame's bottom-right corner.
+  const MIC = { minPx: 44, maxPx: 56, marginPx: 4, gapPx: 6, defaultPx: 48, cornerPx: 16 };
   const VOICE_TYPES = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4"];
   const VOICE_REASONS = { closed: "the board is read-only", rate: "too many this minute", too_big: "too long",
     unreadable: "C3 couldn't read the recording", unauthorized: "signed out, reload to sign in", not_found: "this board can't be opened" };
@@ -22,8 +27,8 @@
   const name = location.pathname.split("/")[2] ?? "";
   const base = `/board/${name}`;
   const frame = document.getElementById("page");
-  const strip = Object.fromEntries(["strip", "title", "session", "waiting", "typing", "notice", "close", "voice", "mic", "about", "cancel"]
-    .map((id) => [id, document.getElementById(id)]));
+  const controls = Object.fromEntries(["status", "badge", "panel", "title", "session", "waiting", "typing", "notice", "close", "toast",
+    "mic", "recorder", "clock", "about", "cancel"].map((id) => [id, document.getElementById(id)]));
   const early = [];
   let state = null; // /state, kept current from the stream: the one copy this shell holds
   let lastSeq = 0;
@@ -35,13 +40,14 @@
   let syncs = 0;
   let retryMs = RETRY_MS;
   let typingTimer = 0;
+  let isPanelOpen = false;
+  let isNoticeUnseen = false; // a kept notice came while the panel was shut: the circle shows its badge
+  let toastFade = null;
   // Only this shell opens the microphone, after a real tap on its own button. The page only names the part the
-  // owner is on (c3.focus); a recording keeps the part it started for.
+  // owner is on, where its Send sits and whether its composer has text (c3.focus); a recording keeps its part.
   const canRecord = Boolean(window.isSecureContext && navigator.mediaDevices?.getUserMedia && window.MediaRecorder);
-  let focusedPart = null;
+  let composer = { part: null, dock: null, hasText: false }; // dock: the page's Send in frame CSS pixels, or null
   let recording = null; // {part, started, isOpening, stop(isCancelled)} while the mic is on
-  let voiceNotice = "";
-  let voiceNoticeTimer = 0;
   let voiceKeys = 0;
   let isClosing = false; // Make read-only is waiting for the voice acts on their way
   const uploads = new Map(); // key -> the frame's view of a recording on its way to C3
@@ -57,52 +63,109 @@
   const randomID = () => [...crypto.getRandomValues(new Uint8Array(16))].map((byte) => byte.toString(16).padStart(2, "0")).join("");
   const clock = (ms) => `${Math.floor(ms / 60000)}:${String(Math.floor(ms / 1000) % 60).padStart(2, "0")}`;
 
-  function drawStrip() {
+  function drawStatus() {
     const { live, waiting, closed, typing, holder } = state;
     const title = state.title || name;
-    strip.title.textContent = title;
+    controls.title.textContent = title;
     document.title = `${title} · board`;
-    strip.strip.dataset.mode = closed ? "closed" : live ? "live" : "ended";
+    document.body.dataset.mode = closed ? "closed" : !live ? "ended" : typing ? "typing" : "live";
     const folder = holder?.cwd?.split(/[\\/]/).filter(Boolean).pop() ?? holder?.cwd;
-    strip.session.textContent = closed ? "Read-only." : !live ? `Session ended.${waiting ? ` ${messages(waiting)} ${waiting === 1 ? "waits" : "wait"} for it.` : ""}`
+    controls.session.textContent = closed ? "Read-only." : !live ? `Session ended.${waiting ? ` ${messages(waiting)} ${waiting === 1 ? "waits" : "wait"} for it.` : ""}`
       : holder ? `${holder.cli} · ${folder}` : "Live";
-    strip.waiting.textContent = live && !closed && waiting ? `${messages(waiting)} waiting` : "";
-    strip.typing.hidden = !(live && typing);
-    strip.close.hidden = closed;
+    controls.waiting.textContent = live && !closed && waiting ? `${messages(waiting)} waiting` : "";
+    controls.typing.hidden = !(live && typing);
+    controls.close.hidden = closed;
+    drawBadge();
     drawVoice();
   }
 
+  /** The circle's badge: something waits for the session, or a kept notice the panel hasn't shown yet. */
+  function drawBadge() {
+    controls.badge.hidden = !(isNoticeUnseen || state && !state.closed && state.waiting > 0);
+  }
+
+  /** A notice under the circle for a few seconds, then it fades. A kept one (the default) stays in the panel and badges
+   *  the circle until the panel opens; notify("") clears it. Text only, and never the frame. */
+  function notify(text, isKept = true) {
+    if (isKept) {
+      controls.notice.textContent = text;
+      isNoticeUnseen = Boolean(text) && !isPanelOpen;
+      drawBadge();
+    }
+    toastFade?.cancel();
+    controls.toast.textContent = text;
+    controls.toast.hidden = !text;
+    if (!text) return;
+    toastFade = controls.toast.animate([{ opacity: 1, offset: 0.85 }, { opacity: 0 }], NOTICE_MS);
+    toastFade.finished.then(() => { controls.toast.hidden = true; }, () => {});
+  }
+
+  /** The mic shows where the page's Send sits while its composer is empty (not while that spot has no size: the page
+   *  hides it), and through a whole recording. */
   function drawVoice() {
-    strip.voice.hidden = !state || state.closed;
-    strip.mic.hidden = !canRecord;
-    strip.mic.disabled = recording ? recording.isOpening : !focusedPart || isClosing;
-    strip.mic.ariaPressed = String(Boolean(recording));
-    strip.mic.textContent = !recording ? "🎤 Talk" : recording.isOpening ? "Opening…" : `■ Send ${clock(performance.now() - recording.started)}`;
-    strip.cancel.hidden = !recording;
-    strip.about.textContent = !canRecord ? "Voice needs the HTTPS link."
-      : recording ? `Recording about ${recording.part}` : voiceNotice || (focusedPart ? `About ${focusedPart}` : "Open a part to talk about it.");
+    const hasSpot = composer.dock === null || composer.dock.width > 0 && composer.dock.height > 0;
+    const isShown = Boolean(recording) || composer.part !== null && !composer.hasText && hasSpot && Boolean(state) && !state.closed;
+    controls.mic.hidden = !isShown;
+    controls.recorder.hidden = !recording;
+    if (!isShown) return;
+    const frameBox = frame.getBoundingClientRect();
+    const mic = micBox(frameBox);
+    place(controls.mic, mic);
+    controls.mic.disabled = recording ? recording.isOpening : isClosing;
+    controls.mic.ariaPressed = String(Boolean(recording));
+    if (!recording) return;
+    place(controls.recorder, recorderBox(frameBox, mic));
+    controls.clock.textContent = recording.isOpening ? "" : clock(performance.now() - recording.started);
+    controls.about.textContent = recording.isOpening ? "Opening the mic…" : `About ${recording.part}`;
   }
 
-  /** A line under the mic until the next recording; one that may go stale clears after a few seconds. */
-  function showVoice(text, isBrief = false) {
-    clearTimeout(voiceNoticeTimer);
-    voiceNotice = text;
-    if (isBrief) voiceNoticeTimer = setTimeout(() => showVoice(""), VOICE.noticeMs);
-    drawVoice();
+  const clamp = (value, low, high) => Math.min(Math.max(value, low), high);
+  /** The part of the frame's box the window shows, MIC.marginPx in from each side. */
+  const visibleBox = (frameBox) => ({ left: Math.max(frameBox.left, 0) + MIC.marginPx, top: Math.max(frameBox.top, 0) + MIC.marginPx,
+    right: Math.min(frameBox.right, innerWidth) - MIC.marginPx, bottom: Math.min(frameBox.bottom, innerHeight) - MIC.marginPx });
+
+  /** Where the mic goes: centred on the page's Send spot, mapped through the frame's box, as a circle MIC.minPx to
+   *  MIC.maxPx wide, inside the frame's visible box, its row below the status circle. So no page can put it out of
+   *  sight, cover the circle with it or with the recording bar beside it, or shrink or blow up the shell's control. */
+  function micBox(frameBox) {
+    const corner = { x: frameBox.width - MIC.cornerPx - MIC.defaultPx, y: frameBox.height - MIC.cornerPx - MIC.defaultPx, width: MIC.defaultPx, height: MIC.defaultPx };
+    const dock = composer.dock ?? corner;
+    const size = clamp(Math.min(dock.width, dock.height), MIC.minPx, MIC.maxPx);
+    const view = visibleBox(frameBox);
+    const left = clamp(frameBox.left + dock.x + (dock.width - size) / 2, view.left, view.right - size);
+    let top = clamp(frameBox.top + dock.y + (dock.height - size) / 2, view.top, view.bottom - size);
+    const circleBottom = controls.status.getBoundingClientRect().bottom + MIC.marginPx;
+    if (top < circleBottom) top = circleBottom;
+    return { left, top, width: size, height: size };
+  }
+
+  /** The recording bar: the mic's row, on whichever side of it has more room inside the frame. */
+  function recorderBox(frameBox, mic) {
+    const view = visibleBox(frameBox);
+    const isLeft = mic.left - view.left >= view.right - (mic.left + mic.width);
+    const left = isLeft ? view.left : mic.left + mic.width + MIC.gapPx;
+    const right = isLeft ? mic.left - MIC.gapPx : view.right;
+    return { left, top: mic.top, width: right - left, height: mic.height };
+  }
+
+  /** Puts a shell control at box: numbers from micBox or recorderBox, never a page string. */
+  function place(element, box) {
+    for (const side of ["left", "top", "width", "height"]) element.style.setProperty(side, `${Math.round(box[side])}px`);
   }
 
   async function startRecording() {
-    const part = focusedPart;
+    const part = composer.part;
     if (recording || !part || state.closed || isClosing) return;
     let isCancelled = false;
     recording = { part, started: performance.now(), isOpening: true, stop: () => { isCancelled = true; } };
-    showVoice("");
+    drawVoice();
     const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } })
       .catch(() => null);
     if (!stream || isCancelled) {
       stream?.getTracks().forEach((track) => track.stop());
       recording = null;
-      return showVoice(stream ? "" : "Microphone unavailable: check the browser's permission.");
+      if (!stream) notify("Microphone unavailable: check the browser's permission.");
+      return drawVoice();
     }
     recording = record(part, stream);
     drawVoice();
@@ -153,7 +216,9 @@
         .then(() => isDropped && last.segment && sendUnsent(last, "cancelled")));
       stream.getTracks().forEach((track) => track.stop());
       recording = null;
-      showVoice(isTooShort && !isCancelled ? "Too short: nothing sent." : isCancelled && last.segment ? `Recording cancelled after part ${segment - 1}.` : "", true);
+      const outcome = isTooShort && !isCancelled ? "Too short: nothing sent." : isCancelled && last.segment ? `Recording cancelled after part ${segment - 1}.` : "";
+      if (outcome) notify(outcome, false);
+      drawVoice();
       return finished;
     }
     return { part, started, isOpening: false, stop: finish };
@@ -198,15 +263,11 @@
     return undefined;
   }
 
-  /** An upload's status, for the line under the mic and for the page (c3.on("voice")). */
+  /** An upload's status for the page (c3.on("voice"), which shows it in its chat); one C3 refused is also a notice. */
   function tellVoice(voice) {
     if (voice.status === "sending") uploads.set(voice.key, voice);
     else uploads.delete(voice.key);
-    const which = voice.segment ? `Part ${voice.segment}` : "Voice note";
-    if (!recording) {
-      if (voice.status === "not_sent") showVoice(`${which} not sent: ${VOICE_REASONS[voice.error] ?? "C3 refused it"}.`);
-      else showVoice(voice.status === "sent" ? `${which} sent.` : `Sending ${which.toLowerCase()}${voice.attempt ? " (retrying)" : ""}…`, voice.status === "sent");
-    }
+    if (voice.status === "not_sent") notify(`${voice.segment ? `Part ${voice.segment}` : "Voice note"} not sent: ${VOICE_REASONS[voice.error] ?? "C3 refused it"}.`);
     if (isFrameReady) toFrame({ c3: "voice", voice });
   }
 
@@ -215,19 +276,19 @@
     if (isTyping) typingTimer = setTimeout(() => setTyping(false), TYPING_MS);
     if (state.typing === isTyping && !isStatusNew) return;
     state.typing = isTyping;
-    drawStrip();
+    drawStatus();
     if (isFrameReady) toFrame({ c3: "status", status: frameStatus() });
   }
 
   function receive(kind, data) {
     if (!isSynced) return early.push([kind, data]);
     if (kind === "notice") {
-      strip.notice.textContent = data.text; // strip only: never the frame
+      notify(data.text); // the shell only: never the frame
     } else if (kind === "status") {
-      if (data.live !== state.live || data.closed !== state.closed) strip.notice.textContent = "";
+      if (data.live !== state.live || data.closed !== state.closed) notify("");
       if (data.closed && recording) {
         recording.stop(true);
-        strip.notice.textContent = "The board is read-only now: the recording stopped.";
+        notify("The board is read-only now: the recording stopped.");
       }
       Object.assign(state, { live: data.live, waiting: data.waiting, closed: data.closed });
       if ("holder" in data) state.holder = data.holder;
@@ -251,7 +312,7 @@
     const next = await readPage(entry.rev);
     const title = next === null ? "" : new DOMParser().parseFromString(next, "text/html").title.trim();
     if (title) state.title = title;
-    drawStrip();
+    drawStatus();
     if (next === null || !isFrameReady) {
       pageText = next;
       return reloadFrame();
@@ -262,7 +323,7 @@
 
   function reloadFrame() {
     isFrameReady = false;
-    focusedPart = null; // the new page names its part again
+    composer = { ...composer, part: null, hasText: false }; // the new page names its part again
     drawVoice();
     frame.src = pageURL();
   }
@@ -304,14 +365,25 @@
     }
   }
 
-  async function onFrameMessage({ op, call, body, value }) {
+  /** The composer a focus message names, or null if any field is malformed: the part (null: none), its Send's box in
+   *  frame CSS pixels (null: the default corner; kept for a recording when the part goes), whether it has text. */
+  function readComposer({ value, dock = null, hasText = false }) {
+    const isPart = value === null || typeof value === "string" && PART.test(value);
+    const isDock = dock === null || typeof dock === "object" && ["x", "y", "width", "height"].every((side) => Number.isFinite(dock[side]))
+      && dock.width >= 0 && dock.height >= 0;
+    if (!isPart || !isDock || typeof hasText !== "boolean") return null;
+    if (value === null) return { part: null, dock: composer.dock, hasText: false };
+    return { part: value, dock: dock && { x: dock.x, y: dock.y, width: dock.width, height: dock.height }, hasText };
+  }
+
+  async function onFrameMessage({ op, call, body, value, dock, hasText }) {
     if (op === "hello") return sendReady();
     if (op === "reload") return reloadFrame();
     if (op === "focus") {
-      const isPart = value === null || typeof value === "string" && PART.test(value);
-      if (isPart) focusedPart = value;
+      const next = readComposer({ value, dock, hasText });
+      if (next) composer = next;
       drawVoice();
-      return toFrame({ c3: "result", call, ...(isPart ? {} : { error: "invalid" }) });
+      return toFrame({ c3: "result", call, ...(next ? {} : { error: "invalid" }) });
     }
     if (op === "keep") {
       const isKept = typeof value === "string" && new TextEncoder().encode(value).length <= LIMITS.keepBytes;
@@ -330,26 +402,38 @@
 
   // A recording going on ends first (after a part has gone out, with its last act), and every voice act on its way
   // reaches C3 before the board stops taking acts.
-  strip.close.addEventListener("click", async () => {
+  controls.close.addEventListener("click", async () => {
     if (!confirm("This makes the board read-only for good.")) return;
+    controls.panel.hidePopover?.();
     const wasRecording = Boolean(recording);
     isClosing = true;
     recording?.stop(true);
-    if (sending.size) strip.notice.textContent = "Sending the voice notes on their way first…";
+    if (sending.size) notify("Sending the voice notes on their way first…");
     await Promise.all(sending);
     const response = await fetch(`${base}/close`, { method: "POST" }).catch(() => null);
     isClosing = false;
     if (response?.ok) receive("status", { ...state, closed: true });
-    strip.notice.textContent = !response?.ok ? "Making it read-only failed. Try again." : wasRecording ? "The board is read-only now: the recording stopped." : "";
+    notify(!response?.ok ? "Making it read-only failed. Try again." : wasRecording ? "The board is read-only now: the recording stopped." : "");
     drawVoice();
   });
+  controls.panel.addEventListener("toggle", (event) => {
+    isPanelOpen = event.newState === "open";
+    if (isPanelOpen) { // the panel shows the notice itself
+      isNoticeUnseen = false;
+      toastFade?.cancel();
+      controls.toast.hidden = true;
+    }
+    drawBadge();
+  });
 
-  strip.mic.addEventListener("click", (event) => { // a real tap only: the shell's own control, never the page
+  controls.mic.addEventListener("click", (event) => { // a real tap only: the shell's own control, never the page
     if (!event.isTrusted) return;
+    if (!canRecord) return notify("Voice needs the HTTPS link.", false);
     if (recording) recording.stop(false);
     else startRecording();
   });
-  strip.cancel.addEventListener("click", () => recording?.stop(true));
+  controls.cancel.addEventListener("click", () => recording?.stop(true));
+  addEventListener("resize", drawVoice);
   addEventListener("beforeunload", (event) => { if (recording || sending.size) event.preventDefault(); });
 
   // The stream carries no log line it missed while down (a tab that saw no `id:` sends no Last-Event-ID), so each
@@ -364,10 +448,10 @@
     });
   }
 
-  /** The strip while the stream is down or refused: the amber dot, never the last live state. */
+  /** The circle while the stream is down or refused: the amber dot, never the last live state. */
   function showOffline(text) {
-    strip.strip.dataset.mode = "offline";
-    strip.session.textContent = text;
+    document.body.dataset.mode = "offline";
+    controls.session.textContent = text;
   }
 
   async function reconnect() {
@@ -401,7 +485,7 @@
   function begin(fresh) {
     state = { ...fresh, typing: false };
     lastSeq = state.log.at(-1)?.seq ?? 0;
-    drawStrip();
+    drawStatus();
     const { rev } = state;
     pages = pages.then(async () => { pageText = rev > 0 ? await readPage(rev) : null; });
     reloadFrame();

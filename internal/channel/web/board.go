@@ -203,7 +203,7 @@ func (b *boardChannel) logf(format string, args ...any) {
 }
 
 // SendReply takes the session's text, or one HTML file as the board's next
-// page. Held and other status texts go to the strip only; a text that answers
+// page. Held and other status texts are shell notices only; a text that answers
 // a message (ReplyTo) is always logged, whatever it starts with.
 func (b *boardChannel) SendReply(args c3types.ReplyArgs) (int64, error) {
 	if args.Channel != "" && args.Channel != channel.BoardChannelName || args.TopicID != nil {

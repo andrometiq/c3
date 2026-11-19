@@ -2,36 +2,66 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, interactive-widget=resizes-content">
 <meta name="color-scheme" content="light dark">
 <title>Board</title>
 <style>
-:root { --ink: #1f2328; --muted: #59636e; --paper: #fff; --line: #d1d9e0; --live: #1a7f37; --ended: #9a6700; --closed: #818b98; }
-@media (prefers-color-scheme: dark) { :root { --ink: #e6edf3; --muted: #9198a1; --paper: #0d1117; --line: #3d444d; --live: #3fb950; --ended: #d29922; --closed: #656c76; } }
-html, body { margin: 0; height: 100%; background: var(--paper); color: var(--ink); font: 14px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; }
-body { display: flex; flex-direction: column; height: 100dvh; }
-#strip { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 12px; padding: 6px 16px; border-bottom: 1px solid var(--line); }
-#title { flex: 1 1 8em; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-weight: 600; }
-#session, #waiting, #typing, #notice { color: var(--muted); overflow-wrap: anywhere; }
-#session::before { content: ""; display: inline-block; width: 8px; height: 8px; margin-right: 6px; border-radius: 50%; background: var(--ended); }
-[data-mode="live"] #session::before { background: var(--live); }
-[data-mode="closed"] #session::before { background: var(--closed); }
-#notice { flex-basis: 100%; margin: 0; }
-#waiting:empty, #notice:empty, [hidden], #voice[hidden] { display: none; }
-#close, #cancel { min-height: 32px; padding: 2px 12px; border: 1px solid var(--line); border-radius: 6px; background: none; color: inherit; font: inherit; }
-#page { flex: 1; width: 100%; border: 0; }
-#voice { display: flex; align-items: center; gap: 10px; padding: 8px 16px calc(8px + env(safe-area-inset-bottom)); border-top: 1px solid var(--line); }
+:root { --ink: #1f2328; --muted: #59636e; --paper: #fff; --line: #d1d9e0; --accent: #0969da; --live: #1a7f37; --ended: #9a6700;
+  --closed: #818b98; --shadow: 0 1px 6px rgb(0 0 0 / 18%); }
+@media (prefers-color-scheme: dark) { :root { --ink: #e6edf3; --muted: #9198a1; --paper: #151b23; --line: #3d444d; --accent: #4493f8;
+  --live: #3fb950; --ended: #d29922; --closed: #656c76; --shadow: 0 1px 8px rgb(0 0 0 / 60%); } }
+html, body { margin: 0; height: 100%; background: var(--paper); color: var(--ink); font: 15px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; }
+body { height: 100dvh; overflow: hidden; }
+[hidden] { display: none !important; }
+button { font: inherit; color: inherit; cursor: pointer; -webkit-tap-highlight-color: transparent; }
+#page { display: block; width: 100%; height: 100%; border: 0; }
+/* The status circle, over the page's top-right corner: its dot is the session (green live, amber away, grey
+   read-only), a badge when something waits or a notice came, and a tap opens the panel. */
+#status { position: fixed; z-index: 2; top: calc(8px + env(safe-area-inset-top)); right: calc(8px + env(safe-area-inset-right));
+  width: 34px; height: 34px; padding: 0; display: grid; place-items: center; border: 1px solid var(--line); border-radius: 50%;
+  background: var(--paper); box-shadow: var(--shadow); }
+#dot { width: 12px; height: 12px; border-radius: 50%; background: var(--ended); }
+:is([data-mode="live"], [data-mode="typing"]) :is(#dot, #session-dot) { background: var(--live); }
+[data-mode="closed"] :is(#dot, #session-dot) { background: var(--closed); }
+@media (prefers-reduced-motion: no-preference) { [data-mode="typing"] #dot { animation: pulse 1.2s ease-in-out infinite; } }
+@keyframes pulse { 50% { opacity: 0.3; } }
+#badge { position: absolute; top: -3px; right: -3px; width: 10px; height: 10px; border: 2px solid var(--paper); border-radius: 50%; background: var(--accent); }
+#toast, #panel { position: fixed; z-index: 3; top: calc(50px + env(safe-area-inset-top)); right: calc(8px + env(safe-area-inset-right));
+  box-sizing: border-box; max-width: min(320px, calc(100vw - 16px)); margin: 0; border: 1px solid var(--line); border-radius: 12px;
+  background: var(--paper); color: var(--ink); box-shadow: var(--shadow); overflow-wrap: anywhere; }
+#toast { padding: 8px 12px; }
+#panel { left: auto; bottom: auto; width: 300px; padding: 12px 14px; display: none; gap: 4px; }
+#panel:popover-open { display: grid; }
+#panel p { margin: 0; color: var(--muted); }
+#panel .session { display: flex; align-items: center; gap: 8px; color: var(--ink); }
+#session-dot { flex: none; width: 8px; height: 8px; border-radius: 50%; background: var(--ended); }
+#waiting:empty, #notice:empty { display: none; }
+#close { justify-self: start; min-height: 40px; margin-top: 6px; padding: 2px 14px; border: 1px solid var(--line); border-radius: 8px; background: none; }
+/* The mic: drawn by C3 where the page's Send sits while its composer is empty; while recording, the bar beside it
+   shows the time, the part and Cancel. */
+#mic { position: fixed; z-index: 1; padding: 0; display: grid; place-items: center; border: 1px solid var(--line); border-radius: 50%;
+  background: var(--paper); color: var(--ink); }
+#mic[aria-pressed="true"] { border-color: var(--accent); background: var(--accent); color: #fff; }
+#mic:disabled { opacity: 0.55; cursor: default; }
+#mic svg { width: 24px; height: 24px; fill: currentColor; }
+#mic[aria-pressed="true"] .idle, #mic[aria-pressed="false"] .busy { display: none; }
+@media (prefers-reduced-motion: no-preference) { #mic[aria-pressed="true"] { animation: ring 1.6s ease-out infinite; } }
+@keyframes ring { from { box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 45%, transparent); } to { box-shadow: 0 0 0 12px transparent; } }
+#recorder { position: fixed; z-index: 1; box-sizing: border-box; display: flex; align-items: center; gap: 8px; padding: 0 4px 0 14px;
+  border: 1px solid var(--line); border-radius: 999px; background: var(--paper); box-shadow: var(--shadow); }
+#recorder::before { content: ""; flex: none; width: 10px; height: 10px; border-radius: 50%; background: var(--accent); }
+#clock { flex: none; font-variant-numeric: tabular-nums; font-weight: 600; }
 #about { flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; color: var(--muted); }
-#mic { min-height: 44px; min-width: 7em; padding: 4px 16px; border: 1px solid var(--ink); border-radius: 22px; background: none; color: inherit; font: inherit; font-weight: 600; }
-#mic[aria-pressed="true"] { background: var(--ink); color: var(--paper); }
-#mic:disabled { border-color: var(--line); color: var(--muted); }
-#cancel { min-height: 44px; }
+#cancel { flex: none; min-height: 36px; padding: 0 12px; border: 0; border-radius: 999px; background: none; color: var(--accent); font-weight: 600; }
 </style>
 </head>
 <body>
-<header id="strip"><span id="title">Board</span><span id="session">Connecting…</span><span id="waiting"></span><span id="typing" hidden>Typing…</span><button id="close" type="button" hidden>Make read-only</button><p id="notice" role="status"></p></header>
 <iframe id="page" sandbox="allow-scripts" title="The board's page"></iframe>
-<footer id="voice" hidden><button id="mic" type="button" aria-pressed="false" disabled>🎤 Talk</button><span id="about" role="status">Open a part to talk about it.</span><button id="cancel" type="button" hidden>Cancel</button></footer>
+<div id="recorder" hidden><span id="clock"></span><span id="about"></span><button id="cancel" type="button">Cancel</button></div>
+<button id="mic" type="button" aria-pressed="false" aria-label="Record a voice note" hidden><svg class="idle" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 14a3 3 0 0 0 3-3V5a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3Zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.93V21h2v-3.07A7 7 0 0 0 19 11h-2Z"/></svg><svg class="busy" viewBox="0 0 24 24" aria-hidden="true"><path d="M11 20V7.83l-5.6 5.6L4 12l8-8 8 8-1.4 1.43-5.6-5.6V20h-2Z"/></svg></button>
+<button id="status" type="button" popovertarget="panel" aria-label="Board status"><span id="dot"></span><span id="badge" hidden></span></button>
+<div id="panel" popover><strong id="title">Board</strong><p class="session"><span id="session-dot"></span><span id="session">Connecting…</span></p><p id="waiting"></p><p id="typing" hidden>Typing…</p><p id="notice"></p><button id="close" type="button" hidden>Make read-only</button></div>
+<p id="toast" role="status" hidden></p>
 <script src="/board/assets/board.js"></script>
 </body>
 </html>

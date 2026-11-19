@@ -39,8 +39,44 @@
     body: Object.fromEntries(Object.entries(fields).filter(([, value]) => value !== undefined)),
   });
   const comment = (part, text, { quote } = {}) => act({ op: "comment", part, text, quote });
-  const focus = (part) => request("focus", { value: part ?? null });
   const approve = (ref, { part, note } = {}) => act({ op: "approve", ref, part, note });
+
+  // c3.focus(part, {dock, hasText}): the part the owner is on, where the page's Send sits (an element C3 follows, or
+  // {x, y, width, height} in frame CSS pixels) and whether its composer has text. While it is empty, C3 draws its mic
+  // there; the page hides its Send (keeping its box) and shows it again once there is text. c3.focus(null) lets go.
+  let composer = { part: null, dock: null, hasText: false };
+  let toldComposer = ""; // the composer the shell has, so an unchanged one isn't sent again
+  let isDockQueued = false;
+
+  function focus(part, { dock = null, hasText = false } = {}) {
+    composer = { part: part ?? null, dock: part == null ? null : dock, hasText: Boolean(hasText) };
+    dockWatcher?.disconnect();
+    if (composer.dock instanceof Element) dockWatcher?.observe(composer.dock);
+    return tellComposer();
+  }
+
+  function tellComposer() {
+    const { part, dock, hasText } = composer;
+    const box = dock instanceof Element ? dock.getBoundingClientRect() : dock;
+    const message = { value: part, dock: box && { x: box.x, y: box.y, width: box.width, height: box.height }, hasText };
+    const key = JSON.stringify(message);
+    if (key === toldComposer) return Promise.resolve();
+    toldComposer = key;
+    return request("focus", message).catch((error) => { toldComposer = ""; throw error; });
+  }
+
+  /** The followed Send moved or resized (layout, scroll, keyboard): the shell hears its new box once per frame. */
+  function followDock() {
+    if (isDockQueued || !(composer.dock instanceof Element)) return;
+    isDockQueued = true;
+    requestAnimationFrame(() => {
+      isDockQueued = false;
+      tellComposer().catch(reportError);
+    });
+  }
+  const dockWatcher = typeof ResizeObserver === "function" ? new ResizeObserver(followDock) : null;
+  addEventListener("resize", followDock);
+  addEventListener("scroll", followDock, { capture: true, passive: true });
 
   function on(kind, handler) {
     if (!Object.hasOwn(listeners, kind)) throw new TypeError(`c3.on: unknown event "${kind}" (one of ${KINDS.join(", ")})`);
@@ -224,8 +260,9 @@
       quote: el("blockquote", { class: "quote" }),
       dropQuote: el("button", { type: "button", "aria-label": "Drop the quote" }, "×"),
       text: el("textarea", { rows: "2", "aria-label": "Your message" }),
-      send: el("button", { type: "button", class: "send" }, "Send"),
+      send: el("button", { type: "button", class: "send", "aria-label": "Send" }),
     };
+    parts.send.innerHTML = SEND_ICON;
     const style = el("style");
     style.textContent = SHEET_CSS;
     parts.quoteRow = el("div", { class: "quote-row" }, parts.quote, parts.dropQuote);
@@ -234,7 +271,10 @@
       el("div", { class: "compose" }, parts.text, parts.send)));
     parts.close.addEventListener("click", closeSheet);
     parts.dropQuote.addEventListener("click", () => { quotes.delete(openPart); draw(); });
-    parts.text.addEventListener("input", () => drafts.set(openPart, parts.text.value));
+    parts.text.addEventListener("input", () => {
+      drafts.set(openPart, parts.text.value);
+      drawComposer();
+    });
     parts.text.addEventListener("keydown", (event) => { if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) send(); });
     parts.send.addEventListener("click", send);
     parts.lines.addEventListener("click", (event) => {
@@ -249,11 +289,11 @@
     sheet ??= makeSheet();
     openPart = part;
     if (quote) quotes.set(part, quote);
-    focus(part).catch(reportError);
     sheet.text.value = drafts.get(part) ?? "";
     sheet.error.textContent = "";
     sheet.host.hidden = false;
     draw();
+    drawComposer();
     if (!matchMedia("(pointer: coarse)").matches) sheet.text.focus();
   }
 
@@ -261,6 +301,13 @@
     if (openPart !== null) focus(null).catch(reportError);
     openPart = null;
     if (sheet) sheet.host.hidden = true;
+  }
+
+  /** Send shows only while there is text; while the box is empty, C3's mic sits in its place. */
+  function drawComposer() {
+    const hasText = sheet.text.value.trim() !== "";
+    sheet.send.classList.toggle("blank", !hasText);
+    focus(openPart, { dock: sheet.send, hasText }).catch(reportError);
   }
 
   async function send() {
@@ -271,7 +318,10 @@
       await comment(part, text, { quote: quotes.get(part) });
       drafts.delete(part);
       quotes.delete(part);
-      if (openPart === part) sheet.text.value = "";
+      if (openPart === part) {
+        sheet.text.value = "";
+        drawComposer();
+      }
       sheet.error.textContent = "";
     } catch (error) {
       sheet.error.textContent = `Not sent: ${REASONS[error.message] ?? error.message}.`;
@@ -393,7 +443,10 @@ li.in { align-self: flex-end; background: var(--mine); }
 li button { display: block; margin-top: 6px; }
 button { font: inherit; min-height: 36px; padding: 4px 12px; border: 1px solid var(--line); border-radius: 8px;
   background: var(--paper); color: var(--ink); cursor: pointer; }
-.send { background: var(--accent); border-color: var(--accent); color: #fff; }
+.send { flex: none; display: grid; place-items: center; width: 44px; height: 44px; padding: 0; border-radius: 50%;
+  background: var(--accent); border-color: var(--accent); color: #fff; }
+.send svg { width: 22px; height: 22px; fill: currentColor; }
+.send.blank { visibility: hidden; }
 button:disabled { opacity: .55; cursor: default; }
 .typing { margin: 0; display: flex; align-items: center; gap: 8px; color: var(--muted); }
 .spinner { width: 14px; height: 14px; box-sizing: border-box; border: 2px solid var(--line); border-top-color: var(--accent);
@@ -408,6 +461,8 @@ button:disabled { opacity: .55; cursor: default; }
 textarea { flex: 1; min-width: 0; box-sizing: border-box; resize: vertical; padding: 8px 10px; border: 1px solid var(--line);
   border-radius: 8px; background: var(--paper); color: var(--ink); font: inherit; font-size: 16px; }
 `;
+
+  const SEND_ICON = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M11 20V7.83l-5.6 5.6L4 12l8-8 8 8-1.4 1.43-5.6-5.6V20h-2Z"/></svg>';
 
   window.c3 = Object.freeze({
     ready, comment, approve, on, threads, focus,

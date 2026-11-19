@@ -126,7 +126,7 @@ type Board struct {
 	Name     string
 	Owner    BoardOwner
 	Link     string // the shell URL a viewer opens
-	IsClosed bool   // closed from the strip: read-only, never claimed again
+	IsClosed bool   // made read-only from the shell: never claimed again
 }
 
 // BoardKeeper is implemented by the board channel (internal/channel/web) and

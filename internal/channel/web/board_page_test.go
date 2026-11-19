@@ -33,13 +33,22 @@ func TestShellWritesAgentStringsOnlyToAllowedSinks(t *testing.T) {
 	if sources := regexp.MustCompile(`\.src\s*=[^=][^\n]*`).FindAllString(shell, -1); len(sources) != 1 || sources[0] != ".src = pageURL();" {
 		t.Errorf("board.js .src assignments = %q, want only the frame's own page URL", sources)
 	}
-	for _, sink := range []string{"inner" + "HTML", "outer" + "HTML", "insertAdjacent", "document.write", "eval(", "Function(", "srcdoc", ".style", "href", "setAttribute", "location.assign", "location.replace", "location.reload", "location.href", "window.open", "createContextualFragment", "setTimeout(\"", "setTimeout('", "setTimeout(`"} {
+	for _, sink := range []string{"inner" + "HTML", "outer" + "HTML", "insertAdjacent", "document.write", "eval(", "Function(", "srcdoc", "href", "setAttribute", "location.assign", "location.replace", "location.reload", "location.href", "window.open", "createContextualFragment", "setTimeout(\"", "setTimeout('", "setTimeout(`"} {
 		if strings.Contains(shell, sink) {
 			t.Errorf("board.js uses %q", sink)
 		}
 	}
 	if regexp.MustCompile(`\blocation\s*=[^=]`).MatchString(shell) {
 		t.Error("board.js navigates by assigning location")
+	}
+	// Its one style sink places its own mic and recording bar, from rounded numbers only.
+	place := functionBody(t, shell, "function place(")
+	if strings.Count(shell, ".style") != 1 || !strings.Contains(place, ".style.setProperty(side, `${Math.round(box[side])}px`)") {
+		t.Error("board.js writes a style outside place(), or place() writes more than rounded pixel numbers")
+	}
+	if calls := regexp.MustCompile(`\bplace\([^)]*\)?\)`).FindAllString(shell, -1); strings.Join(calls, " ") != "place(controls.mic, mic) place(controls.recorder, recorderBox(frameBox, mic)) place(element, box)" ||
+		!strings.Contains(functionBody(t, shell, "function drawVoice("), "const mic = micBox(frameBox);") {
+		t.Errorf("board.js place() calls = %q, want only the mic at micBox and the bar at recorderBox", calls)
 	}
 
 	html := readPage(t, "board.html")
@@ -149,7 +158,7 @@ func TestOnlyTheShellsOwnButtonOpensTheMicrophone(t *testing.T) {
 		t.Fatal("board.js opens the microphone outside startRecording")
 	}
 	starts := regexp.MustCompile(`startRecording\(\)`).FindAllStringIndex(shell, -1)
-	click := strings.Index(shell, `strip.mic.addEventListener("click", (event) => {`)
+	click := strings.Index(shell, `controls.mic.addEventListener("click", (event) => {`)
 	trusted := strings.Index(shell, "if (!event.isTrusted) return;")
 	if len(starts) != 2 || click < 0 || trusted < click || starts[1][0] < trusted || starts[1][0]-click > 300 {
 		t.Fatalf("startRecording is called %d times; want once, from the mic's click listener after its isTrusted check", len(starts)-1)
@@ -166,13 +175,70 @@ func TestOnlyTheShellsOwnButtonOpensTheMicrophone(t *testing.T) {
 	}
 }
 
-// The strip's Close is "Make read-only", and its confirm says what it does.
+// The status panel's Close is "Make read-only", and its confirm says what it does.
 func TestMakeReadOnlySaysItIsForGood(t *testing.T) {
-	if !strings.Contains(readPage(t, "board.html"), `<button id="close" type="button" hidden>Make read-only</button>`) {
-		t.Error("board.html's close button is not labelled Make read-only")
+	panel := regexp.MustCompile(`<div id="panel" popover>.*?</div>`).FindString(readPage(t, "board.html"))
+	if !strings.Contains(panel, `<button id="close" type="button" hidden>Make read-only</button>`) {
+		t.Error("board.html's status panel has no close button labelled Make read-only")
 	}
 	if !strings.Contains(readPage(t, "board.js"), `confirm("This makes the board read-only for good.")`) {
 		t.Error("board.js does not confirm that read-only is for good")
+	}
+}
+
+// The page fills the window: no strip over it and no bar under it. C3's own
+// state is a small circle over its top-right corner, whose panel names the
+// board and the live session, and a notice is a toast under the circle.
+func TestShellIsTheFrameAndAStatusCircle(t *testing.T) {
+	html := readPage(t, "board.html")
+	body := html[strings.Index(html, "<body>"):]
+	if strings.Contains(html, "<header") || strings.Contains(html, "<footer") || !strings.HasPrefix(body, "<body>\n<iframe id=\"page\"") {
+		t.Error("board.html draws a bar around the frame, or the frame is not the body's first element")
+	}
+	if !regexp.MustCompile(`#page \{[^}]*width: 100%; height: 100%;`).MatchString(html) || !strings.Contains(html, "body { height: 100dvh; overflow: hidden; }") {
+		t.Error("board.html's frame does not fill the window")
+	}
+	status := regexp.MustCompile(`<button id="status"[^>]*>`).FindString(html)
+	panel := regexp.MustCompile(`<div id="panel" popover>.*?</div>`).FindString(html)
+	if !strings.Contains(status, `popovertarget="panel"`) || !strings.Contains(panel, `id="title"`) || !strings.Contains(panel, `id="session"`) || !strings.Contains(panel, `id="notice"`) {
+		t.Errorf("board.html status circle %q and panel %q: want the circle to open a panel naming the board, the session and the notice", status, panel)
+	}
+	if !strings.Contains(html, `<p id="toast" role="status" hidden></p>`) {
+		t.Error("board.html has no toast for notices")
+	}
+	shell := readPage(t, "board.js")
+	if !strings.Contains(functionBody(t, shell, "function receive("), "notify(data.text); // the shell only: never the frame") {
+		t.Error("board.js does not keep a notice in the shell")
+	}
+}
+
+// A page names where its Send sits, but can't use that to hide C3's own
+// controls: a malformed spot is refused, and the mic is a circle of a fixed
+// size range, kept inside the frame's visible box with its row below the
+// status circle, so the recording bar beside it can't meet the circle either.
+func TestPageCannotPlaceTheMicOverTheShellsOwnControls(t *testing.T) {
+	shell := readPage(t, "board.js")
+	if !strings.Contains(shell, "const MIC = { minPx: 44, maxPx: 56,") {
+		t.Error("board.js mic size range is not 44 to 56 px")
+	}
+	read := functionBody(t, shell, "function readComposer(")
+	if !strings.Contains(read, `every((side) => Number.isFinite(dock[side]))`) || !strings.Contains(read, `typeof hasText !== "boolean"`) {
+		t.Error("readComposer takes a spot or text state without checking it")
+	}
+	box := functionBody(t, shell, "function micBox(")
+	for _, clamp := range []string{
+		"const size = clamp(Math.min(dock.width, dock.height), MIC.minPx, MIC.maxPx);",
+		"const left = clamp(frameBox.left + dock.x + (dock.width - size) / 2, view.left, view.right - size);",
+		"let top = clamp(frameBox.top + dock.y + (dock.height - size) / 2, view.top, view.bottom - size);",
+		"const circleBottom = controls.status.getBoundingClientRect().bottom + MIC.marginPx;",
+		"if (top < circleBottom) top = circleBottom;",
+	} {
+		if !strings.Contains(box, clamp) {
+			t.Errorf("micBox lacks %q", clamp)
+		}
+	}
+	if !strings.Contains(functionBody(t, shell, "async function onFrameMessage("), "const next = readComposer({ value, dock, hasText });") {
+		t.Error("a focus message reaches the composer without readComposer")
 	}
 }
 

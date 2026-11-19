@@ -19,7 +19,7 @@ import (
 var _ channel.BoardHost = (*BrokerHost)(nil)
 
 // boardPermissionNotice is all a boards-only session's boards learn of a prompt:
-// no tool preview, and its ⏸ Permission prefix keeps it in the strip.
+// no tool preview, and its ⏸ Permission prefix keeps it a shell notice.
 const boardPermissionNotice = "⏸ Permission prompt waiting at the laptop."
 
 const boardAttachShapeRefusal = "a board attaches only as " + channel.BoardAttachPrefix + "<name>"

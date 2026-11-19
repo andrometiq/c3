@@ -189,7 +189,7 @@ func (b *Broker) notifyAttachedTopics(text string) {
 		}
 		routeText := text
 		if isBoardRoute(e.Key) {
-			routeText = "⚠️ " + text // strip only: never a line in the board's log
+			routeText = "⚠️ " + text // a shell notice only: never a line in the board's log
 		}
 		if _, err := ch.SendReply(c3types.ReplyArgs{
 			Channel: e.Key.Channel,
