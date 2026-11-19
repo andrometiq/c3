@@ -91,6 +91,9 @@ svg { fill: currentColor; }
 .meta .play { margin: -6px auto -6px -8px; width: 32px; height: 32px; font-size: 13px; }
 .msg .apply { display: block; width: 100%; min-height: 40px; margin: 6px 0 4px; border: 0; border-radius: 10px; background: var(--accent);
   color: #fff; font-weight: 650; }
+/* Where the owner's unread replies begin when the chat opened: a quiet rule with a word, fixed while it stays open. */
+.unread-line { display: flex; align-items: center; gap: 8px; margin: 4px 0; color: var(--accent); font-size: 12px; font-weight: 650; }
+.unread-line::before, .unread-line::after { content: ""; flex: 1; border-top: 1px solid currentColor; opacity: 0.4; }
 .note { align-self: center; max-width: 90%; padding: 2px 10px; color: var(--muted); font-size: 13px; text-align: center; }
 #chat-new { position: sticky; bottom: 4px; display: block; margin: -36px auto 0; min-height: 32px; padding: 0 14px; border: 1px solid var(--accent);
   border-radius: 999px; background: var(--paper); color: var(--accent); font-weight: 650; box-shadow: var(--shadow); }
@@ -116,8 +119,13 @@ svg { fill: currentColor; }
 .wave { flex: 1; min-width: 0; height: 28px; color: var(--accent); }
 #chat-send { background: var(--accent); color: #fff; }
 .mic[aria-pressed="true"] { background: var(--accent); color: #fff; }
-@media (prefers-reduced-motion: no-preference) { .mic[aria-pressed="true"] { animation: ring 1.6s ease-out infinite; } }
-@keyframes ring { from { box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 45%, transparent); } to { box-shadow: 0 0 0 12px transparent; } }
+/* While recording, a soft ring behind the mic swells with the voice (--level, 0 to 1, from the shell); it takes no taps
+   and leaves the button where it is. */
+.round.mic { position: relative; }
+@media (prefers-reduced-motion: no-preference) {
+  .mic[aria-pressed="true"]::before { content: ""; position: absolute; z-index: -1; inset: 0; border-radius: 50%; background: var(--accent);
+    opacity: 0.25; transform: scale(calc(1 + var(--level, 0) * 0.8)); pointer-events: none; }
+}
 .mic[aria-pressed="true"] .idle, .mic[aria-pressed="false"] .busy { display: none; }
 /* The docked mic, for a page that draws its own chat: drawn where the page's Send sits while its composer is empty;
    while recording, the bar beside it shows the time, the wave and Cancel. */

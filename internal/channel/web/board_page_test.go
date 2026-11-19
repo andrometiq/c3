@@ -43,10 +43,15 @@ func TestShellWritesAgentStringsOnlyToAllowedSinks(t *testing.T) {
 	if regexp.MustCompile(`\blocation\s*=[^=]`).MatchString(shell) {
 		t.Error("board.js navigates by assigning location")
 	}
-	// Its one style sink places its own mic and recording bar, from rounded numbers only.
+	// Its two style sinks take numbers only: place() puts its own mic and recording bar, ringTo() sizes the ring
+	// behind its mics from the recording's loudness.
 	place := functionBody(t, shell, "function place(")
-	if strings.Count(shell, ".style") != 1 || !strings.Contains(place, ".style.setProperty(side, `${Math.round(box[side])}px`)") {
-		t.Error("board.js writes a style outside place(), or place() writes more than rounded pixel numbers")
+	if strings.Count(shell, ".style") != 2 || !strings.Contains(place, ".style.setProperty(side, `${Math.round(box[side])}px`)") ||
+		!strings.Contains(functionBody(t, shell, "function ringTo("), `mic.style.setProperty("--level", level.toFixed(2));`) {
+		t.Error("board.js writes a style outside place() and ringTo(), or one of them writes more than a number")
+	}
+	if calls := regexp.MustCompile(`\bringTo\([^)]*\)`).FindAllString(shell, -1); strings.Join(calls, " ") != "ringTo(ring) ringTo(0) ringTo(level)" {
+		t.Errorf("board.js ringTo() calls = %q, want only the smoothed loudness and 0", calls)
 	}
 	if calls := regexp.MustCompile(`\bplace\([^)]*\)?\)`).FindAllString(shell, -1); strings.Join(calls, " ") != "place(controls.mic, mic) place(controls.recorder, recorderBox(frameBox, mic)) place(element, box)" ||
 		!strings.Contains(functionBody(t, shell, "function drawVoice("), "const mic = micBox(frameBox);") {
@@ -362,19 +367,31 @@ func TestThePanelShutsThroughTheShellsOwnLayer(t *testing.T) {
 	}
 }
 
-// The page can shut any chat but can't switch away from one the owner opened
-// from the panel, can't use the board-level chat, and its acts are marked.
-func TestThePageCantTakeOverTheOwnersChats(t *testing.T) {
+// The page can shut or switch any chat (the owner's next words then go to the
+// part on screen), but never opens the board-level chat, and its acts are
+// marked.
+func TestThePageSwitchesChatsButNeverOpensTheBoardLevelOne(t *testing.T) {
 	shell := readPage(t, "board.js")
-	if !strings.Contains(functionBody(t, shell, "async function onFrameMessage("), `: chat?.isOwners && request.part !== chat.part ? "owner" : openChat(request.part, request);`) ||
-		!strings.Contains(functionBody(t, shell, "function openChat("), "const isOwners = options === null || !isNew && chat.isOwners;") {
-		t.Error("the page can switch away from a chat the owner opened")
+	if !strings.Contains(functionBody(t, shell, "async function onFrameMessage("), `: request.part === null ? closeChat() : openChat(request.part, request);`) ||
+		strings.Contains(shell, `"owner"`) {
+		t.Error("the page can't switch a chat the owner opened from the panel, so the sheet keeps the old thread")
 	}
 	if !strings.Contains(functionBody(t, shell, "function readChat("), "PART.test(value) && value !== GENERAL") {
 		t.Error("the page can open the board-level chat")
 	}
 	if !strings.Contains(functionBody(t, shell, "async function onFrameMessage("), "await postAct({ ...body, from_page: true })") {
 		t.Error("the page's acts reach C3 unmarked")
+	}
+}
+
+// A chat that opens on unread replies marks where they begin and opens there:
+// the mark is taken once, when the chat opens, and drawn above that reply.
+func TestAChatOpensAtItsFirstUnreadReply(t *testing.T) {
+	shell := readPage(t, "board.js")
+	if !strings.Contains(functionBody(t, shell, "function openChat("), "unreadFrom: isNew ? firstUnread(part) : chat.unreadFrom") ||
+		!strings.Contains(functionBody(t, shell, "function threadRows("), `entry.id === chat.unreadFrom ? [element("li", "unread-line", "Unread")`) ||
+		!strings.Contains(functionBody(t, shell, "function drawChat("), "if (unreadLine) controls.chatScroll.scrollTop = unreadLine.offsetTop - 8;") {
+		t.Error("a chat with unread replies doesn't open at the first of them")
 	}
 }
 
