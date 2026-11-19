@@ -407,6 +407,11 @@
    *  that swells with the voice, so the owner sees at a glance that the mic hears them. Returns what stops it. */
   function listen(stream) {
     if (!audioContext) return () => {};
+    // A phone can suspend the context once the mic opens (seen on Android: the wave read stale near-silence), so
+    // it is resumed whenever it isn't running while this recording lasts.
+    const keepRunning = () => { if (audioContext.state !== "running") audioContext.resume().catch(() => {}); };
+    keepRunning();
+    audioContext.addEventListener("statechange", keepRunning);
     const analyser = audioContext.createAnalyser();
     const source = audioContext.createMediaStreamSource(stream);
     source.connect(analyser);
@@ -426,6 +431,7 @@
       ringTo(ring);
       if (now - barStarted < WAVE.stepMs) return;
       barStarted = now;
+      keepRunning();
       levels.push(levelAt(loudestDb, floorDb));
       if (levels.at(-1) > 0.05) litBars++;
       meterLine = `state=${audioContext.state};rate=${audioContext.sampleRate};frames=${frames};zero=${zeroFrames};` +
@@ -437,6 +443,7 @@
     });
     return () => {
       cancelAnimationFrame(request);
+      audioContext.removeEventListener("statechange", keepRunning);
       source.disconnect();
       ringTo(0);
     };
