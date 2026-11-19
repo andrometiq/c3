@@ -92,6 +92,7 @@
   let micSettlesAt = 0; // a press on a mic that began before this performance.now() is ignored
   let micPress = null; // {mic, at}: the last trusted pointerdown on a mic, which its click must follow
   let placedMic = ""; // where the docked mic was last put, to see it move
+  let meterLine = ""; // the wave meter's last numbers, sent with a voice note for C3's log
   let audioContext = null; // the wave's, made in the first tap on a mic: a phone runs one only after a tap
   const uploads = new Map(); // key -> the latest status of a recording on its way to C3
   const sending = new Set(); // every voice act's promise until C3 answers it
@@ -412,16 +413,23 @@
     const samples = new Float32Array(analyser.fftSize);
     const levels = [];
     let floorDb = WAVE.floorStartDb, loudestDb = -Infinity, ring = 0, barStarted = performance.now();
+    let frames = 0, zeroFrames = 0, peakDb = -Infinity, litBars = 0; // what the meter saw, for C3's log
     let request = requestAnimationFrame(function step(now) {
       request = requestAnimationFrame(step);
       analyser.getFloatTimeDomainData(samples);
       const decibels = decibelsOf(samples);
+      frames++;
+      if (decibels < -100) zeroFrames++;
+      peakDb = Math.max(peakDb, decibels);
       loudestDb = Math.max(loudestDb, decibels);
       ring += (levelAt(decibels, floorDb) - ring) * WAVE.ringEase; // smoothed over a few frames
       ringTo(ring);
       if (now - barStarted < WAVE.stepMs) return;
       barStarted = now;
       levels.push(levelAt(loudestDb, floorDb));
+      if (levels.at(-1) > 0.05) litBars++;
+      meterLine = `state=${audioContext.state};rate=${audioContext.sampleRate};frames=${frames};zero=${zeroFrames};` +
+        `peak=${Math.round(peakDb)};floor=${Math.round(floorDb)};lit=${litBars}`;
       levels.splice(0, levels.length - WAVE.levels);
       floorDb = clamp(floorDb + (loudestDb - floorDb) * (loudestDb < floorDb ? 1 : WAVE.floorRise), WAVE.floorMinDb, WAVE.floorMaxDb);
       loudestDb = -Infinity;
@@ -479,7 +487,7 @@
   }
 
   const voiceHeaders = ({ part, segment, hasMore, ref }) => ({ "X-Board-Part": part, ...(segment && { "X-Voice-Segment": String(segment) }),
-    ...(hasMore && { "X-Voice-More": "1" }), ...(ref && { "X-Reply-To": String(ref) }) });
+    ...(hasMore && { "X-Voice-More": "1" }), ...(ref && { "X-Reply-To": String(ref) }), ...(meterLine && { "X-Voice-Meter": meterLine }) });
 
   /** Posts one voice act; a lost connection, 429 or 503 is retried with the same client_id, so C3 takes it once. */
   async function postVoice(headers, body, onAttempt = () => {}) {

@@ -591,3 +591,25 @@ func TestARecordingOnABoardMadeReadOnlyEndsInTheLogOnly(t *testing.T) {
 		t.Fatalf("emitted %d lines, log %+v; want the end logged and not sent", len(test.host.emittedSnapshot()), log)
 	}
 }
+
+// The shell's wave meter reaches C3's log with each voice note, so a phone whose
+// wave stays flat can be told apart from one whose mic hears nothing; a line of
+// any other shape is dropped, so a client can't write its own log lines.
+func TestVoiceMeterLineIsLoggedOnlyWhenWellFormed(t *testing.T) {
+	c, host, cookie := newBoardTest(t)
+	createBoard(t, c, "plan")
+	meter := "state=running;rate=48000;frames=720;zero=0;peak=-7;floor=-52;lit=31"
+	postVoice(c, cookie, "plan", []byte("x"), map[string]string{"X-Client-Id": "m1", "X-Board-Part": "1", "X-Voice-Meter": meter})
+	postVoice(c, cookie, "plan", []byte("x"), map[string]string{"X-Client-Id": "m2", "X-Board-Part": "1", "X-Voice-Meter": "state=running; board: forged line"})
+	host.mu.Lock()
+	defer host.mu.Unlock()
+	var meters []string
+	for _, line := range host.logs {
+		if strings.Contains(line, "voice meter") {
+			meters = append(meters, line)
+		}
+	}
+	if len(meters) != 1 || !strings.Contains(meters[0], meter) {
+		t.Fatalf("meter lines logged = %q, want only the well-formed one", meters)
+	}
+}

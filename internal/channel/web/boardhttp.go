@@ -426,6 +426,9 @@ func isAudioRequest(r *http.Request) bool {
 // web chat voice note, and the broker transcribes it for the session. A part
 // of a recording that never reached C3 comes with no body, as a line saying so,
 // so the session still sees every part.
+// voiceMeterPattern is the shell's X-Voice-Meter line: short key=value pairs only.
+var voiceMeterPattern = regexp.MustCompile(`^[a-z]+=[A-Za-z0-9.-]{1,16}(;[a-z]+=[A-Za-z0-9.-]{1,16}){0,9}$`)
+
 func (c *Channel) handleBoardVoice(w http.ResponseWriter, r *http.Request) {
 	extendVoiceDeadline(w)
 	if !c.sameOrigin(r) {
@@ -440,6 +443,9 @@ func (c *Channel) handleBoardVoice(w http.ResponseWriter, r *http.Request) {
 	if !isValid {
 		writeBoardError(w, http.StatusBadRequest, "invalid")
 		return
+	}
+	if meter := r.Header.Get("X-Voice-Meter"); meter != "" && voiceMeterPattern.MatchString(meter) {
+		c.board.logf("board: %q voice meter %s", r.PathValue("name"), meter) // what the shell's wave measured
 	}
 	mediaType, _, _ := mime.ParseMediaType(r.Header.Get("Content-Type"))
 	r.Body = http.MaxBytesReader(w, r.Body, voiceBodyLimit)
