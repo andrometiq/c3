@@ -3,6 +3,24 @@
 Entries are newest first. This is the public architecture record: it records
 rulings and rationale, never private operational details.
 
+## D045: Boards serve understanding, not a format
+
+**Date:** 2026-11-19
+
+**Decision:** A board exists so the owner grasps the work and decides without a
+wall of text and without losing track when many points are open at once. It
+succeeds only if the owner understands and can work things out with the least
+effort; if the owner is lost or frustrated, it failed, whatever it looks like.
+So C3 never fixes a page format: the agent picks the representation the owner
+will digest most easily for each piece of work (a scroll-through list of points
+discussed one by one, playable screens and flows for non-technical readers, a
+narrated diagram for architecture and workflows, a comparison, a timeline), and
+the board skill teaches the choice. C3's part is the layer every form needs:
+per-part threads, voice notes, approvals, and redrawing only what changed. Next
+in that layer (ROADMAP): sending only the changed piece instead of the whole
+page, a zoomable canvas and slideshow for screens, and pointing at an exact spot
+or region to talk about it.
+
 ## D044: One sign-in through the front covers the web chat and boards
 
 **Date:** 2026-11-19

@@ -70,6 +70,19 @@ The first is cleaner; the second is far easier to reason about when it misbehave
 - Two live-connected screens for one discussion: a laptop companion that shows the whole picture
   and updates as the discussion moves, and the phone for touch (pinch zoom, circling a region) and
   talking. Tap a part on the laptop, talk about it on the phone.
+- Boards serve understanding, not a format (D045). The layer under any representation:
+  - **Partial updates:** the agent sends only the changed piece (a part's new content, a patch)
+    instead of the whole page, so heavy pages (images, video) don't make every change a full
+    resend and a full compare in the browser.
+  - **A zoomable canvas and slideshow** for screens: pinch or wheel zoom, pan, and step through
+    screens one by one.
+  - **Annotation:** circle a region or tap an exact spot on a screen and talk about it; the agent
+    receives the region (coordinates and the element or part it falls on) with the message.
+  - **Point states beyond decided:** open, closed, deferred (and others the agent names), shown on
+    the point and in the list.
+  - **Sample representations** the board skill can point to: a scroll-through list of points
+    (each with its illustration and its own discussion), playable screens and flows for
+    non-technical readers, and the narrated diagram for architecture and workflows.
 - Board page history as diffs: keep every revision of a board's page as a diff chain (git-style),
   so any earlier version can be shown or compared, instead of keeping only the last five.
 - Reply options beyond buttons: polls (multi-select, open answers) and rich text are available on

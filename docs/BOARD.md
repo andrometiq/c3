@@ -5,6 +5,11 @@ listener. The owner taps a part, types or talks, reads the answer in that part's
 approves it; the session changes that part and C3 redraws only it. Agents learn the rules from the plugin
 skill (`plugins/c3/skills/board/SKILL.md`) and from each board's attach result.
 
+**Why boards exist.** The owner must grasp the work and decide without a wall of text and without
+losing track of many points at once. A board succeeds only if they understand and can work things
+out with the least effort; the page's form is the agent's choice for each piece of work. C3 supplies
+the layer under any form: per-part threads, voice notes, approvals, and redrawing only what changed.
+
 ## Routes and ownership
 
 - `attach expr="+board:<name>"` (the prefix in any case) makes or re-holds a board; names match

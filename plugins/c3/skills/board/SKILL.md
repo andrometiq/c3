@@ -12,6 +12,15 @@ Only the session that made a board can hold it, and it stays with that session a
 Boards need C3's own tools (`attach`, `reply`). A CLI reached only through a host that turns
 C3's tools off can't hold a board yet. Background for people: `docs/BOARD.md` in the C3 repo.
 
+**Why a board at all.** It exists so the owner grasps the work and decides without facing a wall
+of text or losing track when many points are open at once. It succeeds only if they understand and
+can work things out with the least effort; if they are lost or frustrated, it failed, whatever it
+looks like. So the format is yours to choose, per piece of work: pick what this owner will digest
+most easily. A scroll-through list of points (each with its illustration and its own discussion,
+marked open, closed or deferred) suits most work; screens and flows they can play, pause and click
+suit features for non-technical people; a narrated diagram suits architecture and workflows; a
+comparison, a timeline or a before/after suits others. Short words, one point per part, no walls.
+
 ## 1. Make or re-hold the board
 
 1. Pick a name: `^[a-z0-9][a-z0-9-]{0,39}$` (lowercase letters, digits, `-`), not `assets`.
