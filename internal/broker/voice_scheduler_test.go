@@ -605,38 +605,45 @@ func TestBrokerShutdownJoinsVoiceBeforeStoppingWorkers(t *testing.T) {
 	}
 }
 
-// A board voice note STT heard nothing in reads "no speech heard", not a
-// failure; the same empty outcome elsewhere keeps the failure notice.
-func TestVoiceSchedulerEmptyTranscriptOnABoardIsNoSpeech(t *testing.T) {
+// A voice note STT heard nothing in reads "no speech heard" on every channel
+// (the web chat, a board, Telegram), not a failure; any other STT failure
+// keeps the failure notice.
+func TestEmptyTranscriptReadsNoSpeechHeardOnEveryChannel(t *testing.T) {
 	_, scheduler, _ := schedulerHarness(t)
+	reason := "empty"
 	scheduler.broker.Plugins.OnVoiceReceived(func(context.Context, c3types.VoicePayload) (string, error) {
-		return "[STT FAILED: empty — see /var/log/c3/broker.log]", nil
+		return "[STT FAILED: " + reason + " — see /var/log/c3/broker.log]", nil
 	})
 	att := c3types.Attachment{Kind: "voice", FileID: "quiet", MIME: "audio/ogg", Size: 10}
-	for _, test := range []struct {
-		channel string
-		want    string
-	}{{channel.BoardChannelName, c3types.VoiceNoSpeechNotice}, {"web", sttFailureNotice}} {
-		inbound := c3types.Inbound{Channel: test.channel, ChatID: 3, MessageID: 9, Attachments: []c3types.Attachment{att}}
-		result := scheduler.transcribe(context.Background(), voiceAttempt{
-			key:     voiceScheduleKey{route: MakeRouteKey(test.channel, 3, nil), messageID: 9, fileID: att.FileID},
+	transcribe := func(channelName string) voiceAttemptResult {
+		inbound := c3types.Inbound{Channel: channelName, ChatID: 3, MessageID: 9, Attachments: []c3types.Attachment{att}}
+		return scheduler.transcribe(context.Background(), voiceAttempt{
+			key:     voiceScheduleKey{route: MakeRouteKey(channelName, 3, nil), messageID: 9, fileID: att.FileID},
 			inbound: inbound, attachment: att,
 		})
-		if result.success || result.notice != test.want || !strings.Contains(result.segmentText, "empty") {
-			t.Errorf("%s: result=%+v, want notice %q and the agent's failure text", test.channel, result, test.want)
+	}
+	for _, channelName := range []string{"web", channel.BoardChannelName, "telegram"} {
+		reason = "empty"
+		if result := transcribe(channelName); result.success || result.notice != c3types.VoiceNoSpeechNotice || !strings.Contains(result.segmentText, "empty") {
+			t.Errorf("%s empty: result=%+v, want notice %q and the agent's failure text", channelName, result, c3types.VoiceNoSpeechNotice)
+		}
+		reason = "provider error"
+		if result := transcribe(channelName); result.success || result.notice != sttFailureNotice {
+			t.Errorf("%s failed: result=%+v, want notice %q", channelName, result, sttFailureNotice)
 		}
 	}
 }
 
-// voiceStatusChannel is a board: it shows C3's notices about a voice note on
-// the note itself.
+// voiceStatusChannel is a board or the web chat: it shows C3's notices about
+// a voice note on the note itself.
 type voiceStatusChannel struct {
 	*fakeChannel
+	name     string
 	statusMu sync.Mutex
 	statuses []c3types.VoiceStatusArgs
 }
 
-func (*voiceStatusChannel) Name() string { return channel.BoardChannelName }
+func (v *voiceStatusChannel) Name() string { return v.name }
 
 func (v *voiceStatusChannel) SendVoiceStatus(args c3types.VoiceStatusArgs) error {
 	v.statusMu.Lock()
@@ -651,19 +658,19 @@ func (v *voiceStatusChannel) statusSnapshot() []c3types.VoiceStatusArgs {
 	return append([]c3types.VoiceStatusArgs(nil), v.statuses...)
 }
 
-func registerVoiceStatusChannel(b *Broker) *voiceStatusChannel {
-	board := &voiceStatusChannel{fakeChannel: &fakeChannel{}}
+func registerVoiceStatusChannel(b *Broker, name string) *voiceStatusChannel {
+	shown := &voiceStatusChannel{fakeChannel: &fakeChannel{}, name: name}
 	b.chMu.Lock()
-	b.channels[board.Name()] = &channelRegistration{Channel: board}
+	b.channels[name] = &channelRegistration{Channel: shown}
 	b.chMu.Unlock()
-	return board
+	return shown
 }
 
 // On a channel that shows a voice note's status, C3's notices about the note
 // go on the note itself, never through SendReply, the session's own path.
 func TestBoardVoiceNoticesGoOnTheNoteNeverThroughReplies(t *testing.T) {
 	b, w, _, _ := shadowFixture(t)
-	board := registerVoiceStatusChannel(b)
+	board := registerVoiceStatusChannel(b, channel.BoardChannelName)
 	in := &c3types.Inbound{Channel: channel.BoardChannelName, ChatID: 3, MessageID: 9}
 	w.echoReadback(in, "", c3types.VoiceNoSpeechNotice)
 	w.echoReadback(in, "", sttFailureNotice)
@@ -677,29 +684,28 @@ func TestBoardVoiceNoticesGoOnTheNoteNeverThroughReplies(t *testing.T) {
 	}
 }
 
-// A board voice note still not transcribed two minutes on shows "slow" on the
-// note, once, as Telegram gets its reply; the web chat still gets none.
-func TestSlowNoticeReachesABoardVoiceNote(t *testing.T) {
+// A voice note still not transcribed two minutes on shows "slow" on the note,
+// once, on a board and in the web chat alike, as Telegram gets its reply.
+func TestSlowNoticeReachesBoardAndWebChatVoiceNotes(t *testing.T) {
 	b, scheduler, clock := schedulerHarness(t)
-	board := registerVoiceStatusChannel(b)
 	arrived := clock.Now()
-	entry := func(channelName string) *voiceEntry {
-		in := c3types.Inbound{Channel: channelName, ChatID: 3, MessageID: 9}
-		return &voiceEntry{key: voiceScheduleKey{route: MakeRouteKey(channelName, 3, nil), messageID: 9}, arrived: arrived,
-			targets: map[string]voiceResolveTarget{"record": {inbound: in}}}
-	}
 	later := arrived.Add(voiceSlowNoticeAfter)
-	if notice := scheduler.takeSlowNoticeLocked(entry("web"), later); notice != nil {
-		t.Fatalf("the web chat got a slow notice: %+v", notice)
-	}
-	onBoard := entry(channel.BoardChannelName)
-	notice := scheduler.takeSlowNoticeLocked(onBoard, later)
-	if notice == nil || scheduler.takeSlowNoticeLocked(onBoard, later) != nil {
-		t.Fatal("want exactly one slow notice for the board voice note")
-	}
-	scheduler.sendSlowNotice(*notice)
-	got := board.statusSnapshot()
-	if len(got) != 1 || got[0].MessageID != 9 || got[0].Status != c3types.VoiceStatusSlow || len(board.sendRepliesSnapshot()) != 0 {
-		t.Fatalf("statuses=%+v replies=%+v, want one slow status on message 9", got, board.sendRepliesSnapshot())
+	for _, channelName := range []string{channel.BoardChannelName, "web"} {
+		shown := registerVoiceStatusChannel(b, channelName)
+		in := c3types.Inbound{Channel: channelName, ChatID: 3, MessageID: 9}
+		entry := &voiceEntry{key: voiceScheduleKey{route: MakeRouteKey(channelName, 3, nil), messageID: 9}, arrived: arrived,
+			targets: map[string]voiceResolveTarget{"record": {inbound: in}}}
+		if scheduler.takeSlowNoticeLocked(entry, later.Add(-time.Second)) != nil {
+			t.Fatalf("%s: a slow notice before two minutes", channelName)
+		}
+		notice := scheduler.takeSlowNoticeLocked(entry, later)
+		if notice == nil || scheduler.takeSlowNoticeLocked(entry, later) != nil {
+			t.Fatalf("%s: want exactly one slow notice for the voice note", channelName)
+		}
+		scheduler.sendSlowNotice(*notice)
+		got := shown.statusSnapshot()
+		if len(got) != 1 || got[0].MessageID != 9 || got[0].Status != c3types.VoiceStatusSlow || len(shown.sendRepliesSnapshot()) != 0 {
+			t.Fatalf("%s: statuses=%+v replies=%+v, want one slow status on message 9", channelName, got, shown.sendRepliesSnapshot())
+		}
 	}
 }

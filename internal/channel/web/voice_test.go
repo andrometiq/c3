@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -245,44 +246,205 @@ func TestSendReadbackPersistsOwnVoiceEditForReplay(t *testing.T) {
 	<-done
 }
 
-func TestVoiceFailureReplyPersistsAsOwnRowEdit(t *testing.T) {
+// C3's notices about a voice note (no speech heard, couldn't transcribe, still
+// transcribing) land on the note's own row, in C3's wording, and survive a
+// restart; the transcript then takes the row back as heard.
+func TestVoiceStatusEditsTheNoteAndPersists(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	first, host, _ := newHandlerChannel()
 	if err := first.loadState(host); err != nil {
 		t.Fatal(err)
 	}
-	voice := true
 	sourceID := int64(17)
-	first.publish(streamEvent{kind: "own", payload: streamPayload{
-		MessageID: sourceID, Voice: &voice, Timestamp: streamTimestamp(first.now()),
-	}})
-	notice := c3types.VoiceTranscriptionFailureNoticePrefix + " — see logs / try again."
-	messageID, err := first.SendReply(c3types.ReplyArgs{
-		Channel: Name, ChatID: 42, ReplyTo: &sourceID, Text: notice,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if messageID != sourceID || len(first.replay) != 2 || first.replay[1].kind != "edit" || first.replay[1].payload.MessageID != sourceID || first.replay[1].payload.Text != notice || first.replay[1].payload.Voice == nil || !*first.replay[1].payload.Voice {
-		t.Fatalf("failure reply id/replay=%d/%+v", messageID, first.replay)
-	}
-	for _, event := range first.replay {
-		if event.kind == "message" {
-			t.Fatalf("failure reply created an agent row: %+v", first.replay)
+	for _, status := range []c3types.VoiceStatusArgs{
+		{ChatID: 42, MessageID: sourceID, Status: c3types.VoiceStatusSlow, Text: "anything"},
+		{ChatID: 42, MessageID: sourceID, Status: c3types.VoiceStatusNoSpeech, Text: "anything"},
+		{ChatID: 42, MessageID: sourceID, Status: c3types.VoiceStatusFailed, Text: c3types.VoiceTranscriptionFailureNoticePrefix + " — see logs / try again."},
+	} {
+		if err := first.SendVoiceStatus(status); err != nil {
+			t.Fatal(err)
 		}
 	}
-	if !isVoiceReadbackNotice(c3types.VoiceDownloadFailureNoticePrefix + ", so it wasn't transcribed") {
-		t.Fatal("download-failure prefix is not recognized as voice readback")
+	if _, err := first.SendReadback(c3types.ReadbackArgs{ChatID: 42, ReplyTo: &sourceID, Transcript: "heard at last"}); err != nil {
+		t.Fatal(err)
 	}
-
+	want := []struct{ status, text string }{
+		{c3types.VoiceStatusSlow, c3types.VoiceSlowNotice},
+		{c3types.VoiceStatusNoSpeech, c3types.VoiceNoSpeechNotice},
+		{c3types.VoiceStatusFailed, c3types.VoiceTranscriptionFailureNoticePrefix + " — see logs / try again."},
+		{c3types.VoiceStatusHeard, "heard at last"},
+	}
 	second := New()
 	second.host = host
 	second.operatorID = 42
 	if err := second.loadState(host); err != nil {
 		t.Fatal(err)
 	}
-	if len(second.replay) != 2 || second.replay[1].kind != "edit" || second.replay[1].payload.MessageID != sourceID || second.replay[1].payload.Text != notice {
-		t.Fatalf("persisted failure edit=%+v", second.replay)
+	for _, replay := range [][]streamEvent{first.replay, second.replay} {
+		if len(replay) != len(want) {
+			t.Fatalf("replay=%+v, want %d voice edits", replay, len(want))
+		}
+		for index, event := range replay {
+			payload := event.payload
+			if event.kind != "edit" || payload.MessageID != sourceID || payload.Voice == nil || !*payload.Voice ||
+				payload.VoiceStatus != want[index].status || payload.Text != want[index].text {
+				t.Fatalf("event %d=%s %+v, want an edit of %d with %+v", index, event.kind, payload, sourceID, want[index])
+			}
+		}
+	}
+	for _, refused := range []c3types.VoiceStatusArgs{
+		{ChatID: 42, MessageID: sourceID, Status: "bogus", Text: "x"},
+		{ChatID: 42, MessageID: 0, Status: c3types.VoiceStatusNoSpeech},
+		{ChatID: 7, MessageID: sourceID, Status: c3types.VoiceStatusNoSpeech},
+	} {
+		if err := first.SendVoiceStatus(refused); err == nil {
+			t.Fatalf("SendVoiceStatus(%+v) was taken", refused)
+		}
+	}
+}
+
+// A session's reply never edits a voice note, even one quoting it in C3's own
+// failure wording: only the broker's SendVoiceStatus does.
+func TestSessionReplyNeverEditsAVoiceNote(t *testing.T) {
+	c, _, _ := newHandlerChannel()
+	sourceID := int64(17)
+	for _, text := range []string{
+		c3types.VoiceTranscriptionFailureNoticePrefix + " — see logs / try again.",
+		c3types.VoiceDownloadFailureNoticePrefix + ", so it wasn't transcribed",
+		c3types.VoiceNoSpeechNotice,
+	} {
+		messageID, err := c.SendReply(c3types.ReplyArgs{Channel: Name, ChatID: 42, ReplyTo: &sourceID, Text: text})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if messageID == sourceID {
+			t.Fatalf("reply %q took the voice note's id", text)
+		}
+	}
+	for _, event := range c.replay {
+		if event.kind == "edit" || event.payload.Voice != nil {
+			t.Fatalf("a session reply edited a voice note: %+v", c.replay)
+		}
+	}
+}
+
+func voicePartRequest(c *Channel, cookie *http.Cookie, body []byte, clientID string, headers map[string]string) *httptest.ResponseRecorder {
+	request := httptest.NewRequest(http.MethodPost, "/voice-note", bytes.NewReader(body))
+	request.AddCookie(cookie)
+	request.Header.Set("Origin", "http://127.0.0.1:8371")
+	request.Header.Set("Content-Type", "audio/wav")
+	request.Header.Set("X-Client-Id", clientID)
+	for name, value := range headers {
+		request.Header.Set(name, value)
+	}
+	response := httptest.NewRecorder()
+	c.routes().ServeHTTP(response, request)
+	return response
+}
+
+// A part's place in a recording is checked as a board voice act's is: a
+// canonical number, more only with a number, and a not-sent part only with a
+// number, cancelled only as the last part, and with no audio.
+func TestVoicePartHeadersAreCheckedLikeABoardAct(t *testing.T) {
+	c, host, cookie, _ := voiceTestChannel(t)
+	for name, headers := range map[string]map[string]string{
+		"zero":               {"X-Voice-Segment": "0"},
+		"leading zero":       {"X-Voice-Segment": "01"},
+		"too many":           {"X-Voice-Segment": "1000"},
+		"more alone":         {"X-Voice-More": "1"},
+		"more not one":       {"X-Voice-Segment": "1", "X-Voice-More": "true"},
+		"unsent alone":       {"X-Voice-Unsent": "cancelled"},
+		"cancelled not last": {"X-Voice-Segment": "2", "X-Voice-More": "1", "X-Voice-Unsent": "cancelled"},
+		"unknown unsent":     {"X-Voice-Segment": "2", "X-Voice-Unsent": "lost"},
+	} {
+		if response := voicePartRequest(c, cookie, nil, "bad-"+name, headers); response.Code != http.StatusBadRequest {
+			t.Errorf("%s: status=%d body=%q, want 400", name, response.Code, response.Body.String())
+		}
+	}
+	withAudio := voicePartRequest(c, cookie, []byte("audio"), "unsent-with-audio", map[string]string{"X-Voice-Segment": "2", "X-Voice-Unsent": "refused"})
+	if withAudio.Code != http.StatusBadRequest {
+		t.Errorf("a not-sent part with audio: status=%d, want 400", withAudio.Code)
+	}
+	if emitted := host.emittedSnapshot(); len(emitted) != 0 {
+		t.Fatalf("a refused part reached the session: %+v", emitted)
+	}
+}
+
+// A recording longer than a part reaches the session as numbered parts, each
+// under its line, and ends with a last part or the line that it was not sent;
+// the page gets each part's place for its row. A whole note keeps no line.
+func TestLongWebChatRecordingReachesTheSessionAsNumberedParts(t *testing.T) {
+	if _, err := exec.LookPath("ffmpeg"); err != nil {
+		t.Skip("ffmpeg not available; real voice-note transcode test skipped")
+	}
+	c, host, cookie, _ := voiceTestChannel(t)
+	wav := sineWAV(t, time.Second)
+	requests := []struct {
+		clientID string
+		body     []byte
+		headers  map[string]string
+		line     string
+		hasAudio bool
+	}{
+		{"whole", wav, nil, "", true},
+		{"part-1", wav, map[string]string{"X-Voice-Segment": "1", "X-Voice-More": "1"}, "Voice note (part 1; more follows):", true},
+		{"part-2", wav, map[string]string{"X-Voice-Segment": "2", "X-Voice-More": "1"}, "Voice note (part 2; more follows):", true},
+		{"part-3", nil, map[string]string{"X-Voice-Segment": "3", "X-Voice-Unsent": "cancelled"},
+			"Voice note (part 3, the last): the recording was cancelled; this part was not sent.", false},
+		{"again-1", wav, map[string]string{"X-Voice-Segment": "1", "X-Voice-More": "1"}, "Voice note (part 1; more follows):", true},
+		{"again-2", nil, map[string]string{"X-Voice-Segment": "2", "X-Voice-More": "1", "X-Voice-Unsent": "refused"},
+			"Voice note (part 2; more follows): C3 couldn't take this part; it was not sent.", false},
+		{"again-3", wav, map[string]string{"X-Voice-Segment": "3"}, "Voice note (part 3, the last):", true},
+	}
+	for _, request := range requests {
+		if response := voicePartRequest(c, cookie, request.body, request.clientID, request.headers); response.Code != http.StatusAccepted {
+			t.Fatalf("%s: status=%d body=%q", request.clientID, response.Code, response.Body.String())
+		}
+	}
+	emitted := host.emittedSnapshot()
+	if len(emitted) != len(requests) || len(c.replay) != len(requests) {
+		t.Fatalf("emitted=%d replay=%d, want %d each", len(emitted), len(c.replay), len(requests))
+	}
+	for index, request := range requests {
+		inbound, own := emitted[index], c.replay[index].payload
+		hasAudio := len(inbound.Attachments) == 1 && inbound.Attachments[0].Kind == "voice"
+		if inbound.Text != request.line || hasAudio != request.hasAudio {
+			t.Errorf("%s: session read %q (audio %t), want %q (audio %t)", request.clientID, inbound.Text, hasAudio, request.line, request.hasAudio)
+		}
+		segment, _ := strconv.Atoi(request.headers["X-Voice-Segment"])
+		if c.replay[index].kind != "own" || own.Voice == nil || !*own.Voice || own.ClientID != request.clientID || own.Segment != segment ||
+			own.HasMore != (request.headers["X-Voice-More"] == "1") || own.Unsent != request.headers["X-Voice-Unsent"] || own.Text != "" {
+			t.Errorf("%s: own row=%+v", request.clientID, own)
+		}
+	}
+}
+
+// A retry of a part's client id must repeat its place in the recording, not
+// only its audio.
+func TestVoicePartRetryMustRepeatItsPlace(t *testing.T) {
+	if _, err := exec.LookPath("ffmpeg"); err != nil {
+		t.Skip("ffmpeg not available; real voice-note transcode test skipped")
+	}
+	c, host, cookie, _ := voiceTestChannel(t)
+	wav := sineWAV(t, time.Second)
+	first := map[string]string{"X-Voice-Segment": "1", "X-Voice-More": "1"}
+	if response := voicePartRequest(c, cookie, wav, "part", first); response.Code != http.StatusAccepted {
+		t.Fatalf("first: status=%d body=%q", response.Code, response.Body.String())
+	}
+	if response := voicePartRequest(c, cookie, wav, "part", first); response.Code != http.StatusAccepted {
+		t.Fatalf("same retry: status=%d body=%q", response.Code, response.Body.String())
+	}
+	for name, moved := range map[string]map[string]string{
+		"whole note": nil,
+		"other part": {"X-Voice-Segment": "2", "X-Voice-More": "1"},
+		"now last":   {"X-Voice-Segment": "1"},
+	} {
+		if response := voicePartRequest(c, cookie, wav, "part", moved); response.Code != http.StatusConflict {
+			t.Errorf("%s: status=%d, want 409", name, response.Code)
+		}
+	}
+	if emitted := host.emittedSnapshot(); len(emitted) != 1 {
+		t.Fatalf("emitted %d inbounds, want the first part once", len(emitted))
 	}
 }
 

@@ -164,7 +164,8 @@ rules for a request whose `Host` is the front's when it serves the chat (how the
   never written to disk: every browser through the front shares one
   spoken-replies setting, it resets to off when the broker restarts, and a send
   retried across a broker restart is delivered again (as on a board).
-- Logout in the page does nothing on the front; sign out at the front.
+- The page hides its Logout for a viewer the front signed in (every `prefs`
+  frame tells the page so); sign out at the front. C3's own login keeps Logout.
 
 ## Phone access over the tailnet (private CA)
 
@@ -360,12 +361,18 @@ Routes, trust, storage and the front are in [BOARD.md](BOARD.md).
 
 ## Drive view
 
+**Live and Hands-free are off for now.** Their voice-activity detection cut
+recordings off in the middle at noise and silences, so the page hides Drive's
+**Live** target and Chat's **Hands-free** button and its state pill; a later
+voice round replaces them with a streaming voice model. Their code stays, and
+the Live and Hands-free rows below describe it, not what the page offers.
+
 The signed-in page lands on **Drive**, a full-screen audio appliance layered over
 the same recorder, VAD, upload retry, playback queue, MediaSession, wake-lock,
 and earcon state used by Chat. **Chat** remains the complete conversation UI and
-keeps its composer, microphone, Voice, Hands-free, Stop, Replay, logout, rows,
-safe Markdown rendering, and persistence behavior. The Drive **Chat** corner
-target and the Chat-header **Drive** target switch panels. A horizontal view
+keeps its composer, microphone, Voice, Stop, Replay, logout (C3's own login
+only), rows, safe Markdown rendering, and persistence behavior. The Drive
+**Chat** corner target and the Chat-header **Drive** target switch panels. A horizontal view
 swipe is accepted only when it begins within 24 px of the left or right screen
 edge, travels at least 80 px, and drifts less than 30 px vertically. Left and
 right arrow keys also switch views when focus is not in an editor. The last view
@@ -500,8 +507,28 @@ rather than a transactional background recorder.
 ## Voice
 
 The microphone button is a push-to-talk toggle: tap once to record and again
-to stop. Recordings stop automatically after five minutes; clips shorter than
-400 ms are discarded, and uploads over 12 MiB are refused. Chrome and Android
+to stop. Clips shorter than 400 ms are discarded, and uploads over 12 MiB are
+refused. A recording has no length limit: every five minutes the page sends
+what it has as a numbered part and records on, starting the next part before
+the last one stops so no word falls between them, as a board does. The mic
+button keeps the whole recording's clock and names the part it is on
+(**● 7:12 · part 2**). Each part is its own row, labelled **part 1**, **part 2**,
+**part 3, the last**, drawn joined to the next, and the session reads each
+transcript under `Voice note (part 1; more follows):` or
+`Voice note (part 3, the last):`. Parts are transcribed separately and can reach
+the session out of order; each line carries its number and whether it is the
+last. A recording that has sent a part always ends with a last part: its audio,
+or a line saying it was not sent. Cancelling it (Drive's cancel gestures),
+Drive refusing the send while no session is attached, and a part C3 refuses
+each send that line (`… the recording was cancelled; this part was not sent.`
+or `… C3 couldn't take this part; it was not sent.`), and the row says
+**Cancelled, not sent.** or **Not sent: C3 refused it.** Once a part has gone
+out the rest can no longer become a draft: hiding the page, or a browser
+`pointercancel`, sends it as the last part. `/voice-note` reads a part's place
+from the headers a board voice act uses: `X-Voice-Segment` (1 to 999),
+`X-Voice-More: 1` on all but the last part, and `X-Voice-Unsent: cancelled`
+(last part only) or `refused` with an empty body for a part that was not sent;
+a retry of a part's client id must repeat its place. Chrome and Android
 normally produce WebM/Opus, while iOS commonly produces `audio/mp4` with AAC.
 The channel accepts browser `audio/*` input and transcodes it at the HTTP edge
 with ffmpeg to 48 kHz mono OGG/Opus before it enters the existing STT chain.
@@ -513,8 +540,13 @@ returns 415 rather than 409.
 Converted voice notes live under the web state directory in `voice/`, mode
 0600, with the newest 200 retained. Their channel-minted file ids continue to
 work with `retranscribe` while retained. The optimistic `🎤 Voice note` row is
-persisted like other operator rows; the transcript (or a couldn't-transcribe
-notice) returns as a persisted edit underneath that label. Microphone capture
+persisted like other operator rows and shows C3's live status under its label:
+**sending** while it uploads, **Transcribing…** once C3 has it, then the
+transcript fading in where that was. C3's notices land on the row the same way,
+as persisted edits only the broker sends (a session's reply never edits a voice
+note): **No speech heard** when STT heard nothing, **Couldn't transcribe** on a
+failure, and **taking longer** once a note has waited two minutes, which a
+transcript or final notice always replaces. Microphone capture
 requires a secure context, so use the private-CA HTTPS link or loopback
 `http://127.0.0.1`; the page hides the mic and explains the requirement on an
 insecure origin.
@@ -551,6 +583,9 @@ reports `aria-expanded`, and uses a short height transition that is removed by
 the reduced-motion preference.
 
 ## Hands-free
+
+Hands-free is off for now; its button is hidden (see [Drive view](#drive-view)).
+What follows describes the code the page keeps.
 
 The header's **🎙 Hands-free** button turns on Voice, unlocks playback in the
 same tap, asks for microphone permission once, and then holds that microphone
@@ -640,14 +675,17 @@ play each spoken reply.
 - Confirm the page says connected and replies arrive incrementally over SSE.
 - Send text and verify the attached CLI receives one `<channel>` turn; force one
   retry and verify it keeps one message id.
-- Grant microphone permission, record a voice note, and confirm its transcript
-  edits the same `🎤` row. On iOS, verify the `audio/mp4` recorder path.
+- Grant microphone permission, record a voice note, and confirm the `🎤` row
+  goes from **sending** to **Transcribing…** to its transcript. On iOS, verify
+  the `audio/mp4` recorder path. Record past five minutes and confirm part 1
+  arrives while the mic keeps recording.
 - Install from `/` after login on Android and iOS; open a fresh magic link
   inside the installed app and verify its separate cookie jar signs in.
 - Enable spoken replies with one tap, hear a reply, then exercise each bubble's
   play button, Stop, Replay, and lock-screen media controls. Drop SSE before an
   audio event, reconnect, and confirm only the newest unheard agent reply is
   requested through `/speak`.
+- While Hands-free is off, skip the next three Hands-free steps.
 - Enable Hands-free with one tap and complete a full
   listening→recording→sending→thinking→speaking turn with the phone foregrounded
   in a cradle. Verify the wake lock survives a visibility change and its own
@@ -666,5 +704,6 @@ play each spoken reply.
   distinct page treatments and that permission still waits at the laptop.
 - Reconnect with an old Last-Event-ID and verify **history may be incomplete**.
 - Logout and verify the stream closes and the next visit returns to login.
+  Through the authenticated front, confirm the page shows no Logout.
 - Finally, reattach the CLI to its Telegram topic and complete a normal Telegram
   round trip.

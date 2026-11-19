@@ -50,6 +50,11 @@ func (c *Channel) handleVoiceNote(w http.ResponseWriter, r *http.Request) {
 		writeSendError(w, http.StatusUnsupportedMediaType, "audio content type required")
 		return
 	}
+	part, isValid := readVoicePart(r.Header)
+	if !isValid {
+		writeSendError(w, http.StatusBadRequest, "invalid voice part")
+		return
+	}
 	r.Body = http.MaxBytesReader(w, r.Body, voiceBodyLimit)
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
@@ -61,8 +66,12 @@ func (c *Channel) handleVoiceNote(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+	if part.unsent != "" && len(body) != 0 {
+		writeSendError(w, http.StatusBadRequest, "invalid voice part")
+		return
+	}
 
-	messageID, status, err := c.acceptVoiceInbound(r.Context(), viewer, clientID, mediaType, body)
+	messageID, status, err := c.acceptVoiceInbound(r.Context(), viewer, clientID, mediaType, part, body)
 	switch {
 	case errors.Is(err, errClientIDConflict):
 		writeSendError(w, http.StatusConflict, err.Error())
@@ -95,15 +104,90 @@ func extendVoiceDeadline(w http.ResponseWriter) {
 	_ = controller.SetWriteDeadline(time.Now().Add(95 * time.Second))
 }
 
-func (c *Channel) acceptVoiceInbound(ctx context.Context, viewer boardViewer, clientID, mediaType string, body []byte) (int64, int, error) {
+// voicePart is a web chat voice note's place in a longer recording: its
+// number (1, 2, …; 0 for a note that is the whole recording), whether more
+// follows, and for a part whose audio never reached C3 why (unsent).
+type voicePart struct {
+	segment int
+	hasMore bool
+	unsent  string
+}
+
+// readVoicePart reads a voice note's place in a longer recording from the
+// headers a board voice act uses (voiceAct): X-Voice-Segment (1, 2, …) with
+// X-Voice-More: 1 on all but the last, and X-Voice-Unsent (cancelled: the
+// last part; refused: any) for a part whose audio never reached C3.
+func readVoicePart(header http.Header) (voicePart, bool) {
+	var part voicePart
+	if segment := header.Get("X-Voice-Segment"); segment != "" {
+		number, err := strconv.Atoi(segment)
+		if err != nil || number < 1 || number > boardVoiceMaxSegment || strconv.Itoa(number) != segment {
+			return voicePart{}, false
+		}
+		part.segment = number
+	}
+	switch more := header.Get("X-Voice-More"); {
+	case more == "1" && part.segment > 0:
+		part.hasMore = true
+	case more != "":
+		return voicePart{}, false
+	}
+	part.unsent = header.Get("X-Voice-Unsent")
+	isUnsentValid := part.unsent == "" || part.segment > 0 &&
+		(part.unsent == voiceUnsentRefused || part.unsent == voiceUnsentCancelled && !part.hasMore)
+	if !isUnsentValid {
+		return voicePart{}, false
+	}
+	return part, true
+}
+
+// line is what the session reads for a part before its transcript, as a
+// board says it: "Voice note (part 2; more follows):", or that the part was
+// not sent. A whole note has none.
+func (part voicePart) line() string {
+	if part.segment == 0 {
+		return ""
+	}
+	return voiceLine(boardAct{Segment: part.segment, HasMore: part.hasMore, Unsent: part.unsent})
+}
+
+// fields are the part's own fields, which a retry of its client id must repeat
+// with the audio; a whole note has none, as its persisted records hash only
+// the audio.
+func (part voicePart) fields() string {
+	if part.segment == 0 {
+		return ""
+	}
+	return fmt.Sprintf("voice segment=%d more=%t", part.segment, part.hasMore)
+}
+
+// acceptVoiceInbound takes a web chat voice note: its audio, transcribed by
+// the broker under the part's line, or for a part that never reached C3 the
+// line saying so, so the session sees every part of a recording.
+func (c *Channel) acceptVoiceInbound(ctx context.Context, viewer boardViewer, clientID, mediaType string, part voicePart, body []byte) (int64, int, error) {
 	key := clientMessageKey{sessionID: viewer.id, clientID: clientID}
-	return c.acceptVoice(ctx, c.webChatInbound(), key, viewer.sender, mediaType, "", body, func(inbound *c3types.Inbound, duration float64) {
-		voice := true
-		c.publish(streamEvent{kind: "own", payload: streamPayload{
-			MessageID: inbound.MessageID, ClientID: clientID, Timestamp: streamTimestamp(inbound.Timestamp),
-			Voice: &voice, DurationSeconds: duration, Text: c3types.WithTestInjectionMarker(inbound, ""),
-		}})
+	route := c.webChatInbound()
+	route.echo = func(inbound *c3types.Inbound, _ string) { c.echoOwnVoice(inbound, clientID, 0, part) }
+	if part.unsent != "" {
+		return c.acceptInbound(route, key, viewer.sender, part.line())
+	}
+	if line := part.line(); line != "" {
+		route.line = func(inbound *c3types.Inbound) { inbound.Text = line }
+	}
+	return c.acceptVoice(ctx, route, key, viewer.sender, mediaType, part.fields(), body, func(inbound *c3types.Inbound, duration float64) {
+		c.echoOwnVoice(inbound, clientID, duration, part)
 	})
+}
+
+// echoOwnVoice is the web chat's row for a voice note the operator sent, with
+// its place in a longer recording.
+func (c *Channel) echoOwnVoice(inbound *c3types.Inbound, clientID string, duration float64, part voicePart) {
+	voice := true
+	c.publish(streamEvent{kind: "own", payload: streamPayload{
+		MessageID: inbound.MessageID, ClientID: clientID, Timestamp: streamTimestamp(inbound.Timestamp),
+		Voice: &voice, DurationSeconds: duration, Text: c3types.WithTestInjectionMarker(inbound, ""),
+		Segment: part.segment, HasMore: part.hasMore, Unsent: part.unsent,
+	}})
 }
 
 // acceptVoice is acceptInbound for a voice note: it stores and transcodes the
@@ -439,6 +523,8 @@ func (c *Channel) pruneVoiceFiles() {
 	}
 }
 
+var _ channel.VoiceStatusSender = (*Channel)(nil)
+
 // SendReadback replaces the optimistic own voice row with its transcript.
 func (c *Channel) SendReadback(args c3types.ReadbackArgs) (int64, error) {
 	if err := c.checkDestination(Name, args.ChatID, args.TopicID); err != nil {
@@ -449,7 +535,26 @@ func (c *Channel) SendReadback(args c3types.ReadbackArgs) (int64, error) {
 	}
 	voice := true
 	c.publish(streamEvent{kind: "edit", payload: streamPayload{
-		MessageID: *args.ReplyTo, Text: args.Transcript, Voice: &voice,
+		MessageID: *args.ReplyTo, Text: args.Transcript, Voice: &voice, VoiceStatus: c3types.VoiceStatusHeard,
 	}})
 	return *args.ReplyTo, nil
+}
+
+// SendVoiceStatus shows C3's notice about a voice note (no speech heard,
+// couldn't transcribe, still transcribing) on the note's own row. Only the
+// broker calls it: a session's reply goes through SendReply, which never
+// edits a voice note.
+func (c *Channel) SendVoiceStatus(args c3types.VoiceStatusArgs) error {
+	if err := c.checkDestination(Name, args.ChatID, args.TopicID); err != nil {
+		return err
+	}
+	text := voiceStatusText(args.Status, args.Text)
+	if args.MessageID <= 0 || strings.TrimSpace(text) == "" {
+		return fmt.Errorf("web: no voice status %q for message %d", args.Status, args.MessageID)
+	}
+	voice := true
+	c.publish(streamEvent{kind: "edit", payload: streamPayload{
+		MessageID: args.MessageID, Text: text, Voice: &voice, VoiceStatus: args.Status,
+	}})
+	return nil
 }

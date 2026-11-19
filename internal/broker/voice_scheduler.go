@@ -793,12 +793,14 @@ func (s *VoiceScheduler) finishAttempt(key voiceScheduleKey, out voiceAttemptRes
 }
 
 // takeSlowNoticeLocked claims the entry's one "taking longer" notice (a
-// Telegram reply, a board's status on the note) once the note has waited
-// voiceSlowNoticeAfter since arrival. It returns the message it is about, or
-// nil. Transcript-only (manual, no chat message) targets never get one.
+// Telegram reply, the web chat's or a board's status on the note) once the
+// note has waited voiceSlowNoticeAfter since arrival. It returns the message
+// it is about, or nil. Transcript-only (manual, no chat message) targets never
+// get one.
 func (s *VoiceScheduler) takeSlowNoticeLocked(entry *voiceEntry, now time.Time) *c3types.Inbound {
 	route := entry.key.route
-	if entry.slowNoticed || route.Channel != "telegram" && !isBoardRoute(route) || now.Sub(entry.arrived) < voiceSlowNoticeAfter {
+	hasSlowNotice := route.Channel == "telegram" || route.Channel == "web" || isBoardRoute(route)
+	if entry.slowNoticed || !hasSlowNotice || now.Sub(entry.arrived) < voiceSlowNoticeAfter {
 		return nil
 	}
 	for _, target := range entry.targets {
@@ -1163,8 +1165,8 @@ func (s *VoiceScheduler) transcribe(ctx context.Context, attempt voiceAttempt) v
 		// recovery text may say the audio is saved.
 		retained := s.broker.voiceCachedPath(chanName, att.FileID)
 		notice := sttFailureNotice
-		if reason == "empty" && isBoardRoute(attempt.key.route) {
-			notice = c3types.VoiceNoSpeechNotice // a board shows "no speech heard", not a failure
+		if reason == "empty" {
+			notice = c3types.VoiceNoSpeechNotice // the sender reads "no speech heard", not a failure
 		}
 		return voiceAttemptResult{
 			segmentText: sttFailureText(att, reason, retained), notice: notice, detail: reason,

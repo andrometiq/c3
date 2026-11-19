@@ -121,6 +121,11 @@
     .body.literal { white-space: pre-wrap; }
     .voice-label { display: block; font-weight: 700; }
     .voice-transcript { margin-top: .45rem; padding-top: .45rem; border-top: 1px solid #416786; white-space: pre-wrap; }
+    .voice-state { color: #c5ced8; font-style: italic; }
+    .voice-fresh { animation: voice-fresh .6s ease-out; }
+    @keyframes voice-fresh { from { opacity: 0; } }
+    .message.voice-continues { margin-bottom: .3rem; border-bottom-right-radius: .3rem; }
+    .message.voice-continued { border-top-right-radius: .3rem; }
     .transcript-fold { display: block; width: 100%; min-height: 2rem; margin: .3rem 0; border: 1px dashed #70b7ff; border-radius: 999px; background: #102c47; color: #dcecff; font: 700 .9rem/1.2 system-ui, sans-serif; }
     .transcript-middle { max-height: 0; overflow: hidden; opacity: 0; transition: max-height 180ms ease, opacity 140ms linear; }
     .transcript-middle.expanded { opacity: 1; }
@@ -190,6 +195,7 @@
       #drive-circle.drive-pressed, #view-drive.lamp-recording #drive-circle.drive-pressed, #view-drive.lamp-listening #drive-circle.drive-pressed { transform: none; }
       #drive-cancel.holding { animation: none; }
       #drive-cancel-zone { transition: none; }
+      .voice-fresh { animation: none; }
     }
   </style>
 </head>
@@ -222,7 +228,7 @@
       <div id="drive-transcript" aria-live="polite"></div>
     </div>
     <div class="drive-bottom">
-      <button id="drive-live" class="drive-control" type="button" aria-label="Hold to switch live mode" aria-pressed="false"><span class="drive-icon">🎙</span>Live</button>
+      <button id="drive-live" class="drive-control" type="button" aria-label="Hold to switch live mode" aria-pressed="false" hidden><span class="drive-icon">🎙</span>Live</button>
       <button id="drive-replay" class="drive-control" type="button" aria-label="Replay last spoken reply"><span class="drive-icon">⟲</span>Replay</button>
     </div>
   </section>
@@ -232,12 +238,12 @@
         <button id="chat-drive" class="header-control" type="button" aria-label="Open Drive view">Drive</button>
         <h1>C3 on-the-go chat</h1>
         <a id="connection" href="" role="status" aria-live="polite">reconnecting…</a>
-        <span id="hands-free-state" class="state-idle" aria-live="polite">○ idle</span>
+        <span id="hands-free-state" class="state-idle" hidden aria-live="polite">○ idle</span>
         <button id="voice-toggle" class="header-control" type="button" aria-label="Spoken replies" aria-pressed="false">🔇</button>
-        <button id="hands-free-toggle" class="header-control" type="button" aria-label="Hands-free" aria-pressed="false">🎙</button>
+        <button id="hands-free-toggle" class="header-control" type="button" aria-label="Hands-free" aria-pressed="false" hidden>🎙</button>
         <button id="stop-audio" class="header-control" type="button" aria-label="Stop spoken reply" hidden>Stop</button>
         <button id="replay-audio" class="header-control" type="button" aria-label="Replay last spoken reply" disabled>Replay</button>
-        <button id="logout" type="button">logout</button>
+        <button id="logout" type="button" hidden>logout</button>
       </header>
       <section id="messages" aria-live="polite" aria-label="Conversation">
         <button id="load-earlier" type="button" hidden>Load earlier</button>
@@ -368,6 +374,8 @@
   const HANDS_FREE_UPLOAD_TIMEOUT_MS = 60000;
   // Periodic recorder data keeps most captured audio available before stop fires.
   const MEDIA_RECORDER_TIMESLICE_MS = 1000;
+  // A long recording goes out as a numbered part every five minutes and records on.
+  const VOICE_PART_MS = 5 * 60 * 1000;
   // Earcons ramp up over five milliseconds to avoid an audible click.
   const EARCON_ATTACK_MS = 5;
   // A view swipe must begin within 24 px of a physical screen edge.
@@ -499,6 +507,7 @@
   const counter = document.getElementById('counter');
   const voiceStatus = document.getElementById('voice-status');
   const micButton = document.getElementById('mic');
+  const logoutButton = document.getElementById('logout');
   const voiceButton = document.getElementById('voice-toggle');
   const handsFreeButton = document.getElementById('hands-free-toggle');
   const handsFreeState = document.getElementById('hands-free-state');
@@ -546,6 +555,8 @@
   const documentViewerFrame = document.getElementById('doc-viewer-frame');
   const rows = new Map();
   const pendingRows = new Map();
+  // Every voice upload not yet settled: the mic shows "uploading…" until the last one is.
+  const voiceUploads = new Set();
   let typingTimer;
   let voiceStatusTimer;
   let detached = false;
@@ -1017,7 +1028,8 @@
     const row = addMessage('mine', {
       voice: true,
       duration_seconds: draft.duration,
-      timestamp: new Date().toISOString()
+      timestamp: new Date().toISOString(),
+      isSending: true
     }, 'sending', {forceScroll: true});
     pendingRows.set(draft.clientID, row);
     const drive = draft.source === 'drive';
@@ -1392,20 +1404,74 @@
     return Math.floor(whole / 60) + ':' + String(whole % 60).padStart(2, '0');
   }
 
+  // A voice row's words for a part of a recording that never reached C3.
+  const VOICE_UNSENT_TEXT = {cancelled: 'Cancelled, not sent.', refused: 'Not sent: C3 refused it.'};
+
+  // voiceLabel names a voice note: its place in a longer recording, and its length.
+  function voiceLabel(data) {
+    const segment = Number(data.segment || 0);
+    const place = segment ? ' · part ' + segment + (data.has_more ? '' : ', the last') : '';
+    const duration = Number(data.duration_seconds || 0);
+    return '🎤 Voice note' + place + (duration > 0 ? ' · ' + formatDuration(duration) : '');
+  }
+
+  // voiceShown is what a voice row says under its label, as [state, text]: the
+  // transcript once heard, else C3's status for the note (transcribing, slow,
+  // no speech, failed) or why a part was not sent; nothing while it uploads.
+  function voiceShown(data) {
+    const status = String(data.voice_status || '');
+    if (data.unsent) return ['unsent', VOICE_UNSENT_TEXT[data.unsent] || 'Not sent.'];
+    if (data.text && status && status !== 'heard') return [status, String(data.text)];
+    if (data.text) return ['heard', String(data.text)];
+    if (data.isSending) return null;
+    return ['transcribing', 'Transcribing…'];
+  }
+
+  // mergeVoiceData folds a change into what a voice row knows. C3's slow
+  // status never replaces a final one, so a late notice can't hide a transcript.
+  function mergeVoiceData(known, change) {
+    if (change.voice_status === 'slow' && known.text && known.voice_status !== 'slow') return known;
+    return Object.assign({}, known, change, {voice: true});
+  }
+
+  // renderVoice draws a voice row: its label, then what voiceShown says, which
+  // fades in where the row's earlier state was (the transcript replacing
+  // "Transcribing…").
   function renderVoice(node, data) {
+    const shown = voiceShown(data);
+    const previous = node.dataset.voiceState;
     node.textContent = '';
     node.classList.add('literal');
     const label = document.createElement('span');
     label.className = 'voice-label';
-    const duration = Number(data.duration_seconds || 0);
-    label.textContent = '🎤 Voice note' + (duration > 0 ? ' · ' + formatDuration(duration) : '');
+    label.textContent = voiceLabel(data);
     node.append(label);
-    if (data.text) {
-      const transcript = document.createElement('div');
-      transcript.className = 'voice-transcript';
-      renderVoiceTranscript(transcript, String(data.text));
-      node.append(transcript);
-    }
+    node.dataset.voiceState = shown ? shown[0] : 'sending';
+    if (!shown) return;
+    const content = document.createElement('div');
+    content.className = shown[0] === 'heard' ? 'voice-transcript' : 'voice-transcript voice-state';
+    if (shown[0] === 'heard') renderVoiceTranscript(content, shown[1]);
+    else content.textContent = shown[1];
+    if (previous !== undefined && previous !== shown[0]) content.classList.add('voice-fresh');
+    node.append(content);
+  }
+
+  // updateVoiceRow applies a change to a voice row: its data, its drawing, and
+  // the joins that draw a recording's parts as one.
+  function updateVoiceRow(row, change) {
+    row.voiceData = mergeVoiceData(row.voiceData || {}, change);
+    renderVoice(row.bodyNode, row.voiceData);
+    const segment = Number(row.voiceData.segment || 0);
+    row.classList.toggle('voice-continues', Boolean(segment && row.voiceData.has_more));
+    row.classList.toggle('voice-continued', segment > 1);
+  }
+
+  // showVoiceInDrive puts the newest voice note's transcript, or its label, on the Drive transcript line.
+  function showVoiceInDrive(messageID, data) {
+    if (messageID && messageID < lastTranscriptMessageID) return;
+    lastTranscriptMessageID = Math.max(lastTranscriptMessageID, messageID);
+    const shown = voiceShown(data);
+    setDriveTranscript(shown && shown[0] !== 'transcribing' ? shown[1] : voiceLabel(data).replace('🎤 ', ''));
   }
 
   function normaliseDocumentAttachment(value) {
@@ -1595,8 +1661,7 @@
     const body = document.createElement('div');
     body.className = 'body';
     if (kind === 'agent') renderText(body, data.text || '');
-    else if (kind === 'mine' && data.voice) renderVoice(body, data);
-    else renderLiteral(body, data.text || '');
+    else if (kind !== 'mine' || !data.voice) renderLiteral(body, data.text || '');
     const documentAttachment = kind === 'agent' ? normaliseDocumentAttachment(data.attachment) : null;
     if (documentAttachment) body.append(createDocumentCard(documentAttachment));
     const meta = document.createElement('div');
@@ -1617,16 +1682,11 @@
     row.metaNode = meta;
     row.replyText = String(data.text || '');
     row.attachment = documentAttachment;
-    row.voiceDuration = Number(data.duration_seconds || 0);
+    if (kind === 'mine' && data.voice) updateVoiceRow(row, data);
     if (settings.before) messageList.insertBefore(row, settings.before);
     else messageList.append(row);
     if (kind === 'agent') updateDriveReply(data.text || '', id, documentAttachment);
-    if (kind === 'mine' && data.voice) {
-      if (!id || id >= lastTranscriptMessageID) {
-        lastTranscriptMessageID = id;
-        setDriveTranscript(data.text ? String(data.text) : 'Voice note' + (row.voiceDuration > 0 ? ' · ' + formatDuration(row.voiceDuration) : ''));
-      }
-    }
+    if (kind === 'mine' && data.voice) showVoiceInDrive(id, row.voiceData);
     if (id) {
       row.dataset.messageId = String(id);
       rows.set(key, row);
@@ -1659,9 +1719,8 @@
         replayHistoryEntries.push(entry);
         if (id) replayHistoryByKey.set(key, entry);
       } else {
-        entry.data = Object.assign({}, entry.data, data);
+        entry.data = mergeEntryData(kind, entry.data, data);
       }
-      if (kind === 'mine' && data.voice) entry.data.voice = true;
     });
   }
 
@@ -1688,7 +1747,7 @@
     updateDriveFromFreshHistory();
     replayHistoryVisibleStart = Math.max(0, replayHistoryEntries.length - HISTORY_PAGE_SIZE);
     replayHistoryEntries.slice(replayHistoryVisibleStart).forEach(entry => {
-      addMessage(entry.kind, entry.data, entry.kind === 'mine' ? 'sent' : '', {quiet: true, history: true});
+      addMessage(entry.kind, entry.data, ownDelivery(entry.kind, entry.data), {quiet: true, history: true});
     });
     loadEarlierButton.hidden = replayHistoryVisibleStart === 0;
     messages.scrollTop = messages.scrollHeight;
@@ -1707,7 +1766,7 @@
     const nextStart = Math.max(0, replayHistoryVisibleStart - HISTORY_PAGE_SIZE);
     const firstVisible = messageList.querySelector('[data-history-entry="true"]');
     replayHistoryEntries.slice(nextStart, replayHistoryVisibleStart).forEach(entry => {
-      addMessage(entry.kind, entry.data, entry.kind === 'mine' ? 'sent' : '', {
+      addMessage(entry.kind, entry.data, ownDelivery(entry.kind, entry.data), {
         quiet: true, history: true, before: firstVisible
       });
     });
@@ -1721,9 +1780,19 @@
     const id = Number(data.message_id || 0);
     const entry = replayHistoryByKey.get(rowKey(kind, id));
     if (!entry) return false;
-    entry.data = Object.assign({}, entry.data, data);
-    if (kind === 'mine' && data.voice) entry.data.voice = true;
+    entry.data = mergeEntryData(kind, entry.data, data);
     return true;
+  }
+
+  // ownDelivery is the delivery note under a row C3 took: "sent" for the
+  // operator's own, none for a part of a recording that was not sent.
+  function ownDelivery(kind, data) {
+    return kind === 'mine' && !data.unsent ? 'sent' : '';
+  }
+
+  // mergeEntryData folds an edit into a history entry, a voice note's as its row would.
+  function mergeEntryData(kind, known, change) {
+    return kind === 'mine' && change.voice ? mergeVoiceData(known, change) : Object.assign({}, known, change);
   }
 
   function setDelivery(row, text, state) {
@@ -1788,6 +1857,7 @@
   }
 
   function finishVoiceUpload() {
+    if (recording || recordingStarting || voiceUploads.size) return;
     micButton.disabled = handsFreeEnabled;
     micButton.setAttribute('aria-pressed', 'false');
     micButton.textContent = '🎤';
@@ -1797,6 +1867,7 @@
   function settleVoiceUpload(pending) {
     if (pending.settled) return false;
     pending.settled = true;
+    voiceUploads.delete(pending);
     window.clearTimeout(pending.handsFreeDeadline);
     pending.handsFreeDeadline = 0;
     return true;
@@ -1807,6 +1878,7 @@
     if (pending.fromDraft && (!driveDraft || driveDraft.clientID === pending.fromDraft.clientID)) keepDriveDraft(pending.fromDraft, false);
     pendingRows.delete(pending.clientID);
     setDelivery(pending.row, 'not sent — ' + reason, 'failed');
+    if (pending.place && pending.place.segment) sendUnsentPart(pending.place, 'refused', pending.row);
     finishVoiceUpload();
     if (pending.handsFree) handsFreeUploadFailed(pending.clientID);
     if (pending.drive) {
@@ -1826,18 +1898,21 @@
 
   async function deliverVoice(pending) {
     if (pending.settled) return;
+    voiceUploads.add(pending);
     startHandsFreeUploadDeadline(pending);
     setDelivery(pending.row, pending.attempt ? 'not delivered — retrying' : 'sending', pending.attempt ? 'retrying' : '');
-    micButton.disabled = true;
-    micButton.setAttribute('aria-pressed', 'false');
-    micButton.textContent = 'uploading…';
+    if (!recording && !recordingStarting) {
+      micButton.disabled = true;
+      micButton.setAttribute('aria-pressed', 'false');
+      micButton.textContent = 'uploading…';
+    }
     const controller = new AbortController();
     pending.controller = controller;
     const attemptTimeout = pending.handsFree ? 0 : window.setTimeout(() => controller.abort(), 60000);
     try {
       const response = await fetch('/voice-note', {
         method: 'POST',
-        headers: {'Content-Type': pending.mimeType, 'X-Client-Id': pending.clientID},
+        headers: Object.assign({'Content-Type': pending.mimeType, 'X-Client-Id': pending.clientID}, voicePartHeaders(pending.place)),
         body: pending.blob,
         signal: controller.signal
       });
@@ -1848,6 +1923,7 @@
         recordMessageID(pending.row, 'mine', messageID);
         pendingRows.delete(pending.clientID);
         setDelivery(pending.row, 'sent', '');
+        updateVoiceRow(pending.row, {isSending: false});
         finishVoiceUpload();
         if (pending.fromDraft && (!driveDraft || driveDraft.clientID === pending.fromDraft.clientID)) {
           deleteStoredDriveDraft().catch(error => console.error('web: drive draft delete after send failed', error));
@@ -1875,6 +1951,38 @@
       window.clearTimeout(attemptTimeout);
       if (pending.controller === controller) pending.controller = null;
     }
+  }
+
+  // voicePartHeaders are a part's place in a longer recording, as /voice-note reads them.
+  function voicePartHeaders(place) {
+    const headers = {};
+    if (place && place.segment) headers['X-Voice-Segment'] = String(place.segment);
+    if (place && place.has_more) headers['X-Voice-More'] = '1';
+    return headers;
+  }
+
+  // sendUnsentPart tells the session that part `place` of a recording never
+  // reached it (cancelled, or refused by C3), so every numbered part arrives. A
+  // lost connection or 503 is retried with the same client id. row, when
+  // given, is the refused part's own row, which then says so.
+  async function sendUnsentPart(place, reason, row) {
+    const id = clientID();
+    pendingRows.set(id, row);
+    const headers = Object.assign({'Content-Type': 'audio/webm', 'X-Client-Id': id, 'X-Voice-Unsent': reason}, voicePartHeaders(place));
+    for (let attempt = 0; ; attempt += 1) {
+      const response = await fetch('/voice-note', {method: 'POST', headers, body: ''}).catch(() => null);
+      if (response && response.status === 202) {
+        const result = await response.json().catch(() => ({}));
+        if (row) {
+          recordMessageID(row, 'mine', Number(result.message_id || 0));
+          updateVoiceRow(row, {unsent: reason, isSending: false});
+        }
+        break;
+      }
+      if (response && response.status !== 503) break;
+      await new Promise(resolve => window.setTimeout(resolve, Math.min(30000, 2000 * Math.pow(2, attempt))));
+    }
+    pendingRows.delete(id);
   }
 
   let recording;
@@ -1920,9 +2028,10 @@
     recording.discard = Boolean(discard);
     recording.refuse = Boolean(refuse);
     recording.cancelNotice = cancelNotice || '';
-    recording.saveAsDraft = Boolean(saveAsDraft);
+    // Once a part has gone out the recording can't become a draft: the rest goes out as its last part.
+    recording.saveAsDraft = Boolean(saveAsDraft) && recording.segment === 1;
     if (recording.source === 'drive') setDriveLocked(false);
-    window.clearTimeout(recording.autoStop);
+    window.clearInterval(recording.rotation);
     window.clearInterval(recording.clock);
     recording.recorder.stop();
     micButton.setAttribute('aria-pressed', 'false');
@@ -1946,89 +2055,18 @@
         noiseSuppression: true,
         autoGainControl: true
       }});
-      const mimeType = recorderMimeType();
-      const recorder = mimeType ? new MediaRecorder(stream, {mimeType}) : new MediaRecorder(stream);
-      const started = performance.now();
-      const capture = {recorder, stream, started, chunks: [], failed: false, source: recordingSource, discard: false, refuse: false, saveAsDraft: false};
+      const capture = {stream, mimeType: recorderMimeType(), started: performance.now(), segment: 1, failed: false, source: recordingSource, discard: false, refuse: false, saveAsDraft: false};
+      startRecordingPart(capture);
       recording = capture;
-      recorder.addEventListener('dataavailable', event => {
-        if (event.data && event.data.size) capture.chunks.push(event.data);
-      });
-      recorder.addEventListener('stop', () => {
-        if (recording === capture) recording = null;
-        capture.stream.getTracks().forEach(track => track.stop());
-        if (capture.failed) return;
-        const milliseconds = recordingMilliseconds(capture);
-        if (capture.saveAsDraft) {
-          finishVoiceUpload();
-          if (capture.source === 'drive') {
-            setState(handsFreeEnabled ? 'listening' : 'idle', true);
-            setDriveTranscript('saved as draft');
-          }
-          const actualType = capture.recorder.mimeType || (capture.chunks[0] && capture.chunks[0].type) || 'audio/webm';
-          const blob = new Blob(capture.chunks, {type: actualType});
-          if (blob.size) {
-            keepDriveDraft({
-              blob,
-              mimeType: actualType,
-              duration: milliseconds / 1000,
-              clientID: clientID(),
-              source: capture.source
-            }, capture.cancelNotice === 'draft-saved');
-          } else {
-            setVoiceStatus('could not save recording draft', 4000);
-            localNotice('error');
-          }
-          return;
-        }
-        if (capture.discard || capture.refuse) {
-          finishVoiceUpload();
-          if (capture.source === 'drive') {
-            setState(handsFreeEnabled ? 'listening' : 'idle', true);
-            setDriveTranscript(capture.discard ? 'cancelled' : 'send refused');
-            localNotice(capture.discard ? capture.cancelNotice || 'send-cancelled' : 'send-refused');
-          }
-          return;
-        }
-        if (milliseconds < 400) {
-          finishVoiceUpload();
-          setVoiceStatus('too short', 3000);
-          if (capture.source === 'drive') setState(handsFreeEnabled ? 'listening' : 'idle', true);
-          return;
-        }
-        const actualType = capture.recorder.mimeType || (capture.chunks[0] && capture.chunks[0].type) || 'audio/webm';
-        const blob = new Blob(capture.chunks, {type: actualType});
-        const duration = milliseconds / 1000;
-        const row = addMessage('mine', {
-          voice: true, duration_seconds: duration, timestamp: new Date().toISOString()
-        }, 'sending', {forceScroll: true});
-        const id = clientID();
-        pendingRows.set(id, row);
-        if (capture.source === 'drive') {
-          resetReplyTracking();
-          awaitingClientID = id;
-        }
-        deliverVoice({blob, mimeType: actualType, clientID: id, row, attempt: 0, drive: capture.source === 'drive'});
-      }, {once: true});
-      recorder.addEventListener('error', () => {
-        capture.failed = true;
-        capture.stream.getTracks().forEach(track => track.stop());
-        if (recording === capture) recording = null;
-        finishVoiceUpload();
-        setVoiceStatus('microphone recording failed', 4000);
-        if (capture.source === 'drive') setState(handsFreeEnabled ? 'listening' : 'idle', true);
-        if (capture.source === 'drive') setDriveLocked(false);
-      }, {once: true});
-      recorder.start(MEDIA_RECORDER_TIMESLICE_MS);
       recordingStarting = false;
       micButton.disabled = false;
       micButton.setAttribute('aria-pressed', 'true');
       micButton.textContent = '● 0:00';
       if (capture.source === 'drive') setState('recording');
-      recording.clock = window.setInterval(() => {
-        if (recording) micButton.textContent = '● ' + formatDuration((performance.now() - recording.started) / 1000);
+      capture.clock = window.setInterval(() => {
+        if (recording === capture) micButton.textContent = recordingClock(capture);
       }, 250);
-      recording.autoStop = window.setTimeout(() => stopRecording(false, capture.source === 'drive' && driveIsHeld()), 5 * 60 * 1000);
+      capture.rotation = window.setInterval(() => sendRecordingPart(capture), VOICE_PART_MS);
       if (preserveRecordingWhenStarted) {
         const notice = preserveRecordingWhenStarted === 'draft-saved' ? 'draft-saved' : '';
         preserveRecordingWhenStarted = '';
@@ -2049,6 +2087,144 @@
       if (recordingSource === 'drive') setState(handsFreeEnabled ? 'listening' : 'idle', true);
       if (recordingSource === 'drive') setDriveLocked(false);
     }
+  }
+
+  // recordingClock is the mic button while it records: the whole recording's
+  // time, and once it has gone out in parts, the part it is on.
+  function recordingClock(capture) {
+    const clock = '● ' + formatDuration((performance.now() - capture.started) / 1000);
+    return capture.segment > 1 ? clock + ' · part ' + capture.segment : clock;
+  }
+
+  // startRecordingPart records the capture's next part on its stream. When a
+  // part's recorder stops, its audio goes out as a numbered part if a later
+  // part has taken over (sendRecordingPart), or else it ends the recording.
+  function startRecordingPart(capture) {
+    const recorder = capture.mimeType ? new MediaRecorder(capture.stream, {mimeType: capture.mimeType}) : new MediaRecorder(capture.stream);
+    const part = {recorder, chunks: [], segment: capture.segment, started: performance.now(), isContinued: false};
+    recorder.addEventListener('dataavailable', event => {
+      if (event.data && event.data.size) part.chunks.push(event.data);
+    });
+    recorder.addEventListener('stop', () => {
+      if (part.isContinued) uploadRecordingPart(capture, part, true);
+      else finishRecording(capture, part);
+    }, {once: true});
+    recorder.addEventListener('error', () => failRecordingPart(capture, part), {once: true});
+    recorder.start(MEDIA_RECORDER_TIMESLICE_MS);
+    capture.recorder = recorder;
+    capture.part = part;
+  }
+
+  // sendRecordingPart sends the recording so far as part N, more to follow,
+  // and records on as part N+1: the next part starts before this one stops,
+  // so no word falls between them.
+  function sendRecordingPart(capture) {
+    const ended = capture.part;
+    if (recording !== capture || ended.recorder.state === 'inactive') return;
+    capture.segment += 1;
+    try {
+      startRecordingPart(capture);
+    } catch (_) {
+      capture.segment -= 1; // no recorder for another part: what was heard goes out as the last part
+      stopRecording(false, capture.source === 'drive' && driveIsHeld());
+      return;
+    }
+    ended.isContinued = true;
+    ended.recorder.stop();
+    micButton.textContent = recordingClock(capture);
+  }
+
+  // uploadRecordingPart sends one part of a recording: a numbered part once
+  // the recording is longer than one, else the whole note.
+  function uploadRecordingPart(capture, part, hasMore) {
+    const mimeType = part.recorder.mimeType || (part.chunks[0] && part.chunks[0].type) || 'audio/webm';
+    const blob = new Blob(part.chunks, {type: mimeType});
+    const place = hasMore || part.segment > 1 ? {segment: part.segment, has_more: hasMore} : null;
+    const row = addMessage('mine', Object.assign({
+      voice: true, duration_seconds: (performance.now() - part.started) / 1000, timestamp: new Date().toISOString(), isSending: true
+    }, place), 'sending', {forceScroll: true});
+    const id = clientID();
+    pendingRows.set(id, row);
+    const isDrive = capture.source === 'drive' && !hasMore;
+    if (isDrive) {
+      resetReplyTracking();
+      awaitingClientID = id;
+    }
+    deliverVoice({blob, mimeType, clientID: id, row, attempt: 0, drive: isDrive, place});
+  }
+
+  // finishRecording ends a recording once its current part's recorder stops:
+  // as a draft, cancelled, too short, or sent as its last part (the whole note
+  // when it never went out in parts). A recording that has sent a part always
+  // ends with a last part the session sees: its audio, or a line that it was
+  // not sent.
+  function finishRecording(capture, part) {
+    if (capture.isFinished) return;
+    capture.isFinished = true;
+    if (recording === capture) recording = null;
+    window.clearInterval(capture.rotation);
+    window.clearInterval(capture.clock);
+    capture.stream.getTracks().forEach(track => track.stop());
+    if (capture.failed) {
+      finishVoiceUpload();
+      setVoiceStatus('microphone recording failed', 4000);
+      if (capture.source === 'drive') setState(handsFreeEnabled ? 'listening' : 'idle', true);
+      if (capture.source === 'drive') setDriveLocked(false);
+      return;
+    }
+    const milliseconds = recordingMilliseconds(capture);
+    if (capture.saveAsDraft) {
+      finishVoiceUpload();
+      if (capture.source === 'drive') {
+        setState(handsFreeEnabled ? 'listening' : 'idle', true);
+        setDriveTranscript('saved as draft');
+      }
+      const actualType = part.recorder.mimeType || (part.chunks[0] && part.chunks[0].type) || 'audio/webm';
+      const blob = new Blob(part.chunks, {type: actualType});
+      if (blob.size) {
+        keepDriveDraft({
+          blob,
+          mimeType: actualType,
+          duration: milliseconds / 1000,
+          clientID: clientID(),
+          source: capture.source
+        }, capture.cancelNotice === 'draft-saved');
+      } else {
+        setVoiceStatus('could not save recording draft', 4000);
+        localNotice('error');
+      }
+      return;
+    }
+    if (capture.discard || capture.refuse) {
+      if (capture.segment > 1) {
+        sendUnsentPart({segment: capture.segment, has_more: false}, 'cancelled', null);
+        setVoiceStatus('Recording cancelled after part ' + (capture.segment - 1) + '.', 4000);
+      }
+      finishVoiceUpload();
+      if (capture.source === 'drive') {
+        setState(handsFreeEnabled ? 'listening' : 'idle', true);
+        setDriveTranscript(capture.discard ? 'cancelled' : 'send refused');
+        localNotice(capture.discard ? capture.cancelNotice || 'send-cancelled' : 'send-refused');
+      }
+      return;
+    }
+    if (capture.segment === 1 && milliseconds < 400) {
+      finishVoiceUpload();
+      setVoiceStatus('too short', 3000);
+      if (capture.source === 'drive') setState(handsFreeEnabled ? 'listening' : 'idle', true);
+      return;
+    }
+    uploadRecordingPart(capture, part, false);
+  }
+
+  // failRecordingPart: the recorder failed. A recording that never went out in
+  // parts is lost, as before; one that has ends with what it heard as its last
+  // part. A failure of a part already handed on leaves that part's upload be.
+  function failRecordingPart(capture, part) {
+    if (part !== capture.part) return;
+    if (capture.segment === 1) capture.failed = true;
+    if (part.recorder.state !== 'inactive') part.recorder.stop();
+    else finishRecording(capture, part);
   }
 
   micButton.addEventListener('click', () => {
@@ -2098,17 +2274,15 @@
       recordMessageID(pending, 'mine', Number(data.message_id || 0));
       pendingRows.delete(data.client_id);
       if (data.voice) {
-        pending.voiceDuration = Number(data.duration_seconds || pending.voiceDuration || 0);
-        renderVoice(pending.bodyNode, {
-          voice: true, duration_seconds: pending.voiceDuration, text: data.text || ''
-        });
-        lastTranscriptMessageID = Math.max(lastTranscriptMessageID, Number(data.message_id || 0));
-        setDriveTranscript(data.text ? String(data.text) : 'Voice note' + (pending.voiceDuration > 0 ? ' · ' + formatDuration(pending.voiceDuration) : ''));
+        const change = Object.assign({}, data, {isSending: false});
+        if (!Number(data.duration_seconds || 0)) delete change.duration_seconds;
+        updateVoiceRow(pending, change);
+        showVoiceInDrive(Number(data.message_id || 0), pending.voiceData);
       }
-      setDelivery(pending, 'sent', '');
+      if (!data.unsent) setDelivery(pending, 'sent', '');
       return pending;
     }
-    return addMessage('mine', data, 'sent');
+    return addMessage('mine', data, ownDelivery('mine', data));
   }
 
   const player = document.createElement('audio');
@@ -2569,7 +2743,8 @@
     const row = addMessage('mine', {
       voice: true,
       duration_seconds: duration,
-      timestamp: new Date().toISOString()
+      timestamp: new Date().toISOString(),
+      isSending: true
     }, 'sending', {forceScroll: true});
     const id = clientID();
     pendingRows.set(id, row);
@@ -3227,20 +3402,12 @@
       if (freshHistoryPending) finishFreshHistory();
       if (data.voice) {
         const messageID = Number(data.message_id || 0);
+        const change = {text: String(data.text || ''), voice_status: String(data.voice_status || ''), isSending: false};
         const row = rows.get(rowKey('mine', messageID));
+        if (row) updateVoiceRow(row, change);
+        else if (!updateHiddenReplayEntry('mine', data)) addMessage('mine', data, 'sent');
         const hidden = replayHistoryByKey.get(rowKey('mine', messageID));
-        const duration = Number(row ? row.voiceDuration : hidden && hidden.data.duration_seconds || 0);
-        if (row) {
-          renderVoice(row.bodyNode, {
-            voice: true, duration_seconds: row.voiceDuration, text: data.text || ''
-          });
-        } else if (!updateHiddenReplayEntry('mine', data)) {
-          addMessage('mine', data, 'sent');
-        }
-        if (messageID >= lastTranscriptMessageID) {
-          lastTranscriptMessageID = messageID;
-          setDriveTranscript(data.text ? String(data.text) : 'Voice note' + (duration > 0 ? ' · ' + formatDuration(duration) : ''));
-        }
+        showVoiceInDrive(messageID, row ? row.voiceData : hidden ? hidden.data : data);
       } else {
         const messageID = Number(data.message_id || 0);
         const row = rows.get(rowKey('agent', messageID));
@@ -3255,6 +3422,7 @@
     });
     events.addEventListener('prefs', event => {
       const data = JSON.parse(event.data);
+      logoutButton.hidden = Boolean(data.front_viewer); // the front signs its viewer in and out
       voiceEnabled = Boolean(data.voice);
       updateVoiceButton();
       if (!voiceEnabled) {
@@ -3307,7 +3475,7 @@
     const notice = noticeKind || 'recording-cancelled';
     setDriveLocked(false);
     if (recording && recording.source === 'drive') {
-      if (draftDecision(recordingMilliseconds(recording)) === 'draft') {
+      if (recording.segment === 1 && draftDecision(recordingMilliseconds(recording)) === 'draft') {
         stopRecording(false, false, 'draft-saved', true);
       } else {
         stopRecording(true, false, notice);
@@ -3653,7 +3821,7 @@
   document.addEventListener('pointerup', finishEdgeSwipe, true);
   document.addEventListener('pointercancel', () => { edgeSwipe = null; }, true);
 
-  document.getElementById('logout').addEventListener('click', async () => {
+  logoutButton.addEventListener('click', async () => {
     if (hasUnsentWork() && !window.confirm('You have an unsent voice note. Leave and lose it?')) return;
     const response = await fetch('/logout', {method: 'POST'});
     if (response.ok || response.status === 401) location.assign('/login');

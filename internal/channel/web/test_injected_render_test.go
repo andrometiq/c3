@@ -49,7 +49,7 @@ func TestInjectedMarkerWebVoiceAndReadbackRendering(t *testing.T) {
 			messageID: 1, kind: "voice", textHash: sha256.Sum256(nil), created: c.now(),
 			voiceFileID: "00000000000000000000000000000001", voiceSize: 1, voiceDuration: 1,
 		}
-		id, status, err := c.acceptVoiceInbound(context.Background(), boardViewer{id: "matrix", sender: c3types.Sender{UserID: 42}}, "voice", "audio/ogg", nil)
+		id, status, err := c.acceptVoiceInbound(context.Background(), boardViewer{id: "matrix", sender: c3types.Sender{UserID: 42}}, "voice", "audio/ogg", voicePart{}, nil)
 		if err != nil || status != http.StatusAccepted {
 			t.Fatalf("status=%d err=%v", status, err)
 		}
