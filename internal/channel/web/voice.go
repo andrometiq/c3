@@ -414,7 +414,10 @@ func randomHexID() (string, error) {
 	return hex.EncodeToString(value[:]), nil
 }
 
-func (c *Channel) voiceDirectoryPath() (string, error) {
+func (c *Channel) voiceDirectoryPath() (string, error) { return c.stateSubdirectory("voice") }
+
+// stateSubdirectory is name under the web state directory.
+func (c *Channel) stateSubdirectory(name string) (string, error) {
 	directory := c.stateDirectory
 	if directory == "" {
 		var err error
@@ -423,11 +426,14 @@ func (c *Channel) voiceDirectoryPath() (string, error) {
 			return "", err
 		}
 	}
-	return filepath.Join(directory, "voice"), nil
+	return filepath.Join(directory, name), nil
 }
 
-func (c *Channel) ensureVoiceDirectory() (string, error) {
-	directory, err := c.voiceDirectoryPath()
+func (c *Channel) ensureVoiceDirectory() (string, error) { return c.ensurePrivateDirectory("voice") }
+
+// ensurePrivateDirectory makes name in the web state directory: 0700, no link.
+func (c *Channel) ensurePrivateDirectory(name string) (string, error) {
+	directory, err := c.stateSubdirectory(name)
 	if err != nil {
 		return "", err
 	}
@@ -439,7 +445,7 @@ func (c *Channel) ensureVoiceDirectory() (string, error) {
 	}
 	info, err := os.Lstat(directory)
 	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
-		return "", errors.New("web: voice directory is not a private directory")
+		return "", fmt.Errorf("web: %s directory is not a private directory", name)
 	}
 	return directory, nil
 }
@@ -450,28 +456,34 @@ func (c *Channel) LocalAudioPath(fileID string) (string, error) {
 }
 
 func (c *Channel) localAudioPath(fileID string, requireFile bool) (string, error) {
+	return c.mintedFilePath("voice", fileID, ".oga", requireFile)
+}
+
+// mintedFilePath resolves a file C3 named by a 32-hex id (and its own
+// extension) in a state directory; with requireFile, a regular file there.
+func (c *Channel) mintedFilePath(directoryName, fileID, extension string, requireFile bool) (string, error) {
 	decoded, err := hex.DecodeString(fileID)
 	if err != nil || len(decoded) != 16 || hex.EncodeToString(decoded) != fileID {
-		return "", errors.New("web: invalid local audio id")
+		return "", fmt.Errorf("web: invalid %s file id", directoryName)
 	}
-	directory, err := c.voiceDirectoryPath()
+	directory, err := c.stateSubdirectory(directoryName)
 	if err != nil {
 		return "", err
 	}
-	path := filepath.Join(directory, fileID+".oga")
+	path := filepath.Join(directory, fileID+extension)
 	if filepath.Dir(path) != filepath.Clean(directory) {
-		return "", errors.New("web: local audio path escaped voice directory")
+		return "", fmt.Errorf("web: %s path escaped its directory", directoryName)
 	}
 	if !requireFile {
 		return path, nil
 	}
 	directoryInfo, err := os.Lstat(directory)
 	if err != nil || !directoryInfo.IsDir() || directoryInfo.Mode()&os.ModeSymlink != 0 {
-		return "", errors.New("web: local audio directory unavailable")
+		return "", fmt.Errorf("web: %s directory unavailable", directoryName)
 	}
 	info, err := os.Lstat(path)
 	if err != nil || !info.Mode().IsRegular() {
-		return "", errors.New("web: local audio unavailable")
+		return "", fmt.Errorf("web: %s file unavailable", directoryName)
 	}
 	return path, nil
 }

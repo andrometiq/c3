@@ -411,8 +411,9 @@ func (b *boardChannel) LocalAudioPath(fileID string) (string, error) {
 	return b.web.LocalAudioPath(fileID)
 }
 
-func (b *boardChannel) DownloadAttachment(string) (string, error) {
-	return "", fmt.Errorf("%w: attachments", errUnsupported)
+// DownloadAttachment is an owner's file act's stored file, by C3's id for it.
+func (b *boardChannel) DownloadAttachment(fileID string) (string, error) {
+	return b.web.mintedFilePath(boardFilesDirectory, fileID, "", true)
 }
 
 func (b *boardChannel) StopPoll(int64, int64) (*c3types.PollResult, error) {

@@ -93,7 +93,7 @@ func TestShellAndSDKUseTheContractLimits(t *testing.T) {
 	shell := readPage(t, "board.js")
 	want := map[string]int{
 		"textRunes": channel.BoardTextMaxRunes, "quoteRunes": channel.BoardQuoteMaxRunes, "valueBytes": channel.BoardTapValueMaxBytes,
-		"keepBytes": channel.BoardKeepMaxBytes, "logEntries": channel.BoardLogHistoryEntries,
+		"keepBytes": channel.BoardKeepMaxBytes, "logEntries": channel.BoardLogHistoryEntries, "fileBytes": boardFileLimit,
 	}
 	for name, limit := range want {
 		match := regexp.MustCompile(name + `: (\d+)(?: << (\d+))?`).FindStringSubmatch(shell)

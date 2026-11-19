@@ -220,7 +220,7 @@ func TestActTrustBoundary(t *testing.T) {
 			`{"op":"comment","part":"1","text":"hi"}`,
 			`{"client_id":"x","op":"comment","part":"1 5","text":"hi"}`,
 			`{"client_id":"x","op":"comment","part":"1","text":"  "}`,
-			`{"client_id":"x","op":"comment","part":"1","text":"hi","ref":` + itoa(answer) + `}`,
+			`{"client_id":"x","op":"comment","part":"1","text":"hi","ref":999}`,
 			`{"client_id":"x","op":"approve","ref":999}`,
 			`{"client_id":"x","op":"approve","ref":` + itoa(ownComment) + `}`,
 			`{"client_id":"x","op":"react","ref":` + itoa(answer) + `,"emoji":"👍 extra"}`,
@@ -505,7 +505,7 @@ func TestEventsReplayFromLastEventID(t *testing.T) {
 }
 
 // harnessHost plays the agent at Emit, the boundary the broker proves: each
-// comment, tap, react and voice note gets a reply_to answer (a voice note its
+// comment, file, tap, react and voice note gets a reply_to answer (a voice note its
 // transcript first, as the broker's STT readback; a line asking it to
 // "propose" a proposal ending in its [apply: …] line), each approve a page
 // whose approved part changed. An ended board holds its inbounds until it
@@ -519,7 +519,7 @@ type harnessHost struct {
 	isDown map[int64]bool
 }
 
-var harnessLine = regexp.MustCompile(`^\[board ([a-z0-9-]+)(?: · ([A-Za-z0-9._:-]+))? · msg (\d+)\] ?(Approved)?`)
+var harnessLine = regexp.MustCompile(`^\[board ([a-z0-9-]+)(?: · ([A-Za-z0-9._:-]+))? · msg (\d+)(?: · reply to msg \d+ "(?:[^"\\]|\\.)*")?\] ?(Approved)?`)
 
 func (host *harnessHost) Emit(inbound *c3types.Inbound, _ ...*intake.Source) bool {
 	copy := *inbound

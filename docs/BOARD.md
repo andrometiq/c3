@@ -67,6 +67,18 @@ as a line saying it was not sent. When parts stop coming, C3 ends the recording 
 A quote comes first as `> ` lines; a ref also arrives as the reply context. Owner text with a line
 starting `[board ` is refused, invisible characters ignored.
 
+A comment, voice note or file the owner sends as a reply names the message it answers (any on the
+board, the owner's own included) after C3's id, with that message's first 80 characters as it now
+reads. A file comes as an attachment (`photo` for an image, else `document`, with its MIME type, size
+and name) under a line naming it, its caption below; `download_attachment` with its `file_id` gives
+the stored file's path. The c3 plugin pre-approves only Telegram's downloads, so reading it may ask.
+
+```text
+[board plan · 1.5 · msg 432 · reply to msg 418 "Shorter, and the risk moved to the top."] why the top?
+[board plan · 1.5 · msg 433] File "login-error.png":
+this is what I see
+```
+
 The session sends text (shown in the part its `reply_to` answers), edits of its own messages,
 reactions, and pages: one regular `.html`/`.htm` file of at most 5 MiB per reply, stored as the
 next revision. Buttons, polls and other media are not taken. C3 lints a page for storage,
@@ -88,6 +100,7 @@ not the approved message's (418).
 | `GET /board/<name>/page?cap=…` | the page with the SDK inlined; `&rev=N&raw=1` gives a stored revision as `text/plain` |
 | `GET /board/<name>/events` | SSE `message`, `edit`, `reaction`, `action`, `page`, `status`, `notice`; `id:` is the log seq, `Last-Event-ID` replays after it |
 | `POST /board/<name>/act` | `{client_id, op, …}`, op `comment`, `approve`, `tap` or `react`; or a voice act (below); 202 `{id}` |
+| `POST /board/<name>/file` | the owner's file from C3's chat as the body (at most 20 MB), with headers `X-Client-Id`, `X-Board-Part`, `X-File-Name` and optionally `X-Caption` (both percent-encoded UTF-8) and `X-Reply-To`; an act's checks and `client_id` retry; 202 `{id}` |
 | `POST /board/<name>/close` | empty body; 204, or 500 `close_failed` (repeat to retry) |
 | `POST /board/<name>/speak` | `{id}`: the session's message `id` on this board, read aloud; 200 `{token}` (cached audio first), else 404, 429 `rate`, 503 `unavailable` |
 | `GET /board/<name>/audio/<token>` | that audio as MP3, under this board only; `…/audio/unlock` is C3's silent clip |
@@ -111,10 +124,19 @@ few seconds under the circle, then fades; it never reaches the frame.
 C3 draws each part's chat itself, as its web chat does: a sheet rising from the bottom (a panel at the
 bottom right on a wide screen) with the part's title, a line from the page (its question, or what is
 decided) and up to three quick answers, then the thread: the owner's lines and the agent's answers with
-their times, edits and reactions, voice notes with their live status, a play button on each answer,
+their times, edits and reactions, voice notes with their live status, files (📎 name · size, the
+caption under it), a play button on each answer,
 the page's own acts labelled "Sent by the page", and a button for a proposal (an answer whose last line is `[apply: <label>]`, while it is the agent's
-latest word there) that approves it. Under it is the composer, as in Telegram: an empty box has the mic,
-typing turns it into Send; Enter sends on a keyboard and breaks the line on a touch screen. The page
+latest word there) that approves it. Under it is the composer, as in Telegram: a paperclip, then a box
+that has the mic while empty and turns it into Send as the owner types; Enter sends on a keyboard and
+breaks the line on a touch screen. The paperclip opens the browser's own file picker: one file of any
+type, at most 20 MB (what a Telegram bot can fetch, so the agent meets one ceiling on both routes; the
+shell says so before sending a bigger one), with the box's text as its caption. Its row shows the
+upload's progress, then its time; the shell never serves a file back. Any message in the thread can be
+answered: a swipe right or a long press on touch, its Reply button on hover with a mouse. A bar over
+the composer shows its first line with ×, and the next comment, voice note or file answers it. A row
+that answers another opens with that message's first line, and a tap there scrolls to it and flashes
+it; the agent's answer to the line right before it needs none. The page
 asks with `c3.chat(part, {title, ask, choices, quote})` and shuts it with `c3.chat(null)`; `c3.threads()`
 opens it on a tap on a part, titled by the part's first heading. The page hears `c3.on("chat")`:
 `{part}` while open, `{part: null}` once shut. An owner's tap in the page that asks for no chat shuts
@@ -155,7 +177,8 @@ session is told the board closed.
 Each recording is a voice act: `POST /board/<name>/act` with the `audio/*` body (at most 12 MiB) and
 headers `X-Client-Id`, `X-Board-Part`, and for a part of a longer recording `X-Voice-Segment` (1, 2,
 …) with `X-Voice-More: 1` on all but the last, and optionally `X-Voice-Recording` (one id on every
-part of a recording: printable ASCII, at most 128 bytes). It gets an act's checks, rate and `client_id` retry
+part of a recording: printable ASCII, at most 128 bytes) and `X-Reply-To` (the message every part
+answers). It gets an act's checks, rate and `client_id` retry
 (a retry repeats the audio and these headers, else 409), then the web chat's ffmpeg transcode (422
 `unreadable` when that fails), a second open-board check (409 `closed` if the board was made
 read-only meanwhile) and the broker's STT. A part whose audio never reached C3 is the same request
@@ -182,8 +205,8 @@ it. The wait lives in memory: after a broker restart an unfinished recording isn
 the shell's next part or the owner's next message moves it on.
 
 **Spoken replies.** The shell reads the session's messages aloud; the frame can't, having no network.
-Each answer in C3's chat has a play button: ▶, then … while C3 makes the audio, ⏸ while it plays
-(a tap stops it). A page asks with `c3.speak(id)` (`c3.speak(null)` stops) and follows
+Each answer in C3's chat has a play button, a filled disc as Telegram draws a voice note's: a play
+triangle, a spinner while C3 makes the audio, two bars while it plays (a tap stops it). A page asks with `c3.speak(id)` (`c3.speak(null)` stops) and follows
 `c3.on("speech", e => …)`: `{id, state, error}`, state `loading`, `playing`, `ended` or `failed`.
 **Read replies aloud** in the circle's panel (off until turned on; the browser remembers it in the
 shell's own storage) reads each new message as it arrives, in order; after a reconnect, only the newest
@@ -239,8 +262,13 @@ can still be heard.
   script can ask for any of the session's messages without a tap, within the board's 12 a minute.
 - **Acts.** Each re-checks sign-in, same origin and board; the body is decoded strictly per op and
   can't name a sender. Part `^[A-Za-z0-9._:-]{1,64}$`, text and note 16,000 runes, quote 2,000,
-  tap value 64 bytes, 30 new acts a minute per board; a `ref` must name a session message; a
-  `client_id` retry is delivered once (not across a broker restart).
+  tap value 64 bytes, 30 new acts a minute per board; an approve's, tap's or reaction's `ref` must
+  name a session message, a reply's any message on the board; a `client_id` retry is delivered once
+  (not across a broker restart).
+- **Files.** Only the shell sends one: the owner's pick in the browser's own picker, opened by a real
+  tap on its paperclip. The page has no file call, `/act` takes no file op, and the frame has no
+  network. The name is shown as text only, clipped to 120 characters with controls and path separators
+  replaced; C3 stores the bytes by an id from their contents, never by the name.
 - **Permissions.** A prompt's preview never reaches a board; a boards-only session gets
   "⏸ Permission prompt waiting at the laptop." as a notice. Board input can't settle a prompt.
 - **A board yes.** The page's script can send any act, Approve included, without a tap, but C3 marks it
@@ -254,8 +282,10 @@ can still be heard.
 `boards/` under the web state directory (`$XDG_STATE_HOME/c3/web`, else `~/.local/state/c3/web`),
 directories 0700, files 0600: `capability.key` (the cap key) and per board `board.json` (number,
 owner, title, rev, closed), `pages/<rev>.html` (the last 5; `rev` picks the served one) and
-`log.jsonl` (append-only: seq, at, dir, id, op, part, text, ref, reply_to, from, and for voice
-segment, has_more, recording, status). Held actions sit in the broker's queue. Voice recordings are the web
+`log.jsonl` (append-only: seq, at, dir, id, op, part, text, ref, reply_to, from, for voice
+segment, has_more, recording, status, and for a file name, mime, size). Held actions sit in the broker's queue.
+Files the owner sends are `board-files/<id>` under the web state directory, kept for good (boards are
+never deleted); the log never holds their id. Voice recordings are the web
 chat's: `voice/` under the web state directory, the newest 200 kept for both. Spoken replies' audio
 is kept in memory only; **Read replies aloud** and the read marks are the browser's, in the shell origin's storage. An unreadable `board.json` stops the board channel from starting.
 

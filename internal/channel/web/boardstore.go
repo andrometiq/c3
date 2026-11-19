@@ -65,6 +65,10 @@ type boardLogEntry struct {
 	Status string `json:"status,omitempty"`
 	// FromPage: the page's script sent this act, not the owner's own typing.
 	FromPage bool `json:"from_page,omitempty"`
+	// A file act's name (made safe), MIME type and size; never its stored id.
+	Name string `json:"name,omitempty"`
+	MIME string `json:"mime,omitempty"`
+	Size int64  `json:"size,omitempty"`
 }
 
 // loadBoards reads every board. A board whose record is unreadable, or two
@@ -220,6 +224,15 @@ func dropExpiredBoardRevision(directory string, rev int64) {
 	if expired := rev - channel.BoardRevisionsKept; expired > 0 {
 		_ = os.Remove(boardRevisionPath(directory, expired))
 	}
+}
+
+// storeBoardFile keeps a file act's bytes in board-files/<id>, for good.
+func (c *Channel) storeBoardFile(fileID string, body []byte) error {
+	directory, err := c.ensurePrivateDirectory(boardFilesDirectory)
+	if err != nil {
+		return err
+	}
+	return writeAtomic(filepath.Join(directory, fileID), body)
 }
 
 // readBoardPage loads the one HTML file an agent sends as a board's page.

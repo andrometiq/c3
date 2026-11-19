@@ -4,9 +4,9 @@
 (() => {
   "use strict";
 
-  const LIMITS = { textRunes: 16000, quoteRunes: 2000, valueBytes: 64, keepBytes: 64 << 10, logEntries: 500 };
+  const LIMITS = { textRunes: 16000, quoteRunes: 2000, valueBytes: 64, keepBytes: 64 << 10, logEntries: 500, fileBytes: 20 << 20 };
   const PART = /^[A-Za-z0-9._:-]{1,64}$/;
-  const ACT_FIELDS = { comment: ["part", "text", "quote"], approve: ["ref", "part", "note"], tap: ["part", "value", "ref"], react: ["ref", "emoji"] };
+  const ACT_FIELDS = { comment: ["part", "text", "quote", "ref"], approve: ["ref", "part", "note"], tap: ["part", "value", "ref"], react: ["ref", "emoji"] };
   const RULES = { 409: "closed", 413: "too_big", 429: "rate", 503: "offline" };
   const STREAM_KINDS = ["message", "edit", "reaction", "action", "page", "status", "notice"];
   const REFUSALS = { 401: "Signed out. Reload to sign in.", 403: "This board can't be opened.", 404: "This board can't be opened." };
@@ -50,7 +50,11 @@
     offline: "C3 can't be reached, try again", invalid: "C3 refused it" };
   const GENERAL = "general"; // the board-level chat: the circle's "Talk to the agent"
   const GENERAL_TITLE = "General";
-  const THREAD_OPS = new Set(["comment", "tap", "approve", "voice", "voice_ended", "message", "page"]);
+  const THREAD_OPS = new Set(["comment", "tap", "approve", "voice", "voice_ended", "message", "page", "file"]);
+  // Replies: on touch a message is picked by a swipe right of swipePx or a press held holdMs (a move past slopPx is no
+  // press); the owner's acts that may answer one.
+  const REPLY = { swipePx: 48, holdMs: 500, slopPx: 10 };
+  const REPLY_OPS = new Set(["comment", "voice", "file"]);
   // An agent message whose last line is "[apply: <label>]" is a proposal: that line is drawn as its Approve button.
   const PROPOSAL = /(?:^|\n)\[apply: ([^\]\n]{1,24})\]$/u;
 
@@ -61,7 +65,8 @@
   const controls = Object.fromEntries(["status", "badge", "panel", "title", "session", "typing", "unread", "talk", "notice", "close", "waiting",
     "toast", "shield", "mic", "recorder", "clock", "dock-wave", "cancel", "aloud", "player", "chat", "chat-title", "chat-close", "chat-scroll",
     "chat-ask", "chat-choices", "chat-lines", "chat-new", "chat-typing", "chat-error", "chat-quote-row", "chat-quote", "chat-drop-quote",
-    "chat-text", "chat-recorder", "chat-cancel", "chat-clock", "chat-wave", "chat-send", "chat-mic"]
+    "chat-text", "chat-recorder", "chat-cancel", "chat-clock", "chat-wave", "chat-send", "chat-mic", "chat-attach", "chat-file", "chat-reply-row",
+    "chat-reply-text", "chat-drop-reply"]
     .map((id) => [id.replace(/-(\w)/g, (_, letter) => letter.toUpperCase()), document.getElementById(id)]));
   const early = [];
   let state = null; // /state, kept current from the stream: the one copy this shell holds
@@ -101,7 +106,9 @@
   let chat = null; // {part, title, ask, choices} while the sheet is open
   const drafts = new Map(); // part -> the owner's unsent text
   const quotes = new Map(); // part -> the page's words the owner quoted
-  const pendingActs = new Map(); // part -> {op, text, at, id} from the owner's Send or quick answer until its line is in the log
+  const replies = new Map(); // part -> the id of the message the owner picked to answer
+  const rowIds = new WeakMap(); // a drawn message row -> its message id
+  const pendingActs = new Map(); // part -> {text, ref, file, progress, at, id} from the owner's Send, quick answer or file until its line is in the log
   const approving = new Set(); // proposals whose approve is on its way, until its line is in the log
   const voiceShown = new Map(); // a voice row's key -> the status last drawn, so only a change fades in
   const pageTitles = new Map(); // part -> the title the page's markup gives it
@@ -343,6 +350,7 @@
     const started = performance.now();
     const type = VOICE_TYPES.find((candidate) => MediaRecorder.isTypeSupported?.(candidate)) ?? "";
     const stopListening = listen(stream);
+    const ref = replies.get(part); // every part answers the message picked when it started
     let segment = 1;
     let finished = null; // finish()'s promise: settled once C3 has answered the recording's last act
     let current = startSegment();
@@ -362,7 +370,7 @@
       const uploaded = new Promise((resolve) => {
         recorder.addEventListener("stop", () => {
           if (ending === null) finish(false); // the microphone went away: what it heard goes out as the last part
-          resolve(ending && upload({ part, blob: new Blob(chunks, { type: recorder.mimeType || type || "audio/webm" }), ...ending }));
+          resolve(ending && upload({ part, ref, blob: new Blob(chunks, { type: recorder.mimeType || type || "audio/webm" }), ...ending }));
         }, { once: true });
       });
       recorder.addEventListener("dataavailable", (event) => { if (event.data.size) chunks.push(event.data); });
@@ -378,7 +386,8 @@
       stopListening();
       const isTooShort = segment === 1 && performance.now() - started < VOICE.minMs;
       const isDropped = isCancelled || isTooShort;
-      const last = segment > 1 ? { part, segment } : { part };
+      const last = { part, ref, ...(segment > 1 && { segment }) };
+      if (!isDropped && replies.get(part) === ref) replies.delete(part); // sent as that reply
       finished = beforeClosing(current.end(isDropped ? false : { segment: last.segment })
         .then(() => isDropped && last.segment && sendUnsent(last, "cancelled")));
       stream.getTracks().forEach((track) => track.stop());
@@ -468,8 +477,8 @@
     return promise;
   }
 
-  const voiceHeaders = ({ part, segment, hasMore }) => ({ "X-Board-Part": part,
-    ...(segment && { "X-Voice-Segment": String(segment) }), ...(hasMore && { "X-Voice-More": "1" }) });
+  const voiceHeaders = ({ part, segment, hasMore, ref }) => ({ "X-Board-Part": part, ...(segment && { "X-Voice-Segment": String(segment) }),
+    ...(hasMore && { "X-Voice-More": "1" }), ...(ref && { "X-Reply-To": String(ref) }) });
 
   /** Posts one voice act; a lost connection, 429 or 503 is retried with the same client_id, so C3 takes it once. */
   async function postVoice(headers, body, onAttempt = () => {}) {
@@ -487,13 +496,13 @@
   const sendUnsent = (fields, reason) => postVoice({ "Content-Type": "audio/webm", ...voiceHeaders(fields), "X-Voice-Unsent": reason }, "");
 
   /** Sends one recording. A part C3 refuses still reaches the session, as a line saying it was not sent. */
-  async function upload({ part, blob, segment, hasMore }) {
+  async function upload({ part, blob, segment, hasMore, ref }) {
     const voice = { key: `voice-${++voiceKeys}`, part, segment, has_more: Boolean(hasMore) };
-    const sent = await postVoice({ "Content-Type": blob.type, ...voiceHeaders({ part, segment, hasMore }) }, blob,
+    const sent = await postVoice({ "Content-Type": blob.type, ...voiceHeaders({ part, segment, hasMore, ref }) }, blob,
       (attempt) => tellVoice({ ...voice, status: "sending", attempt }));
     if (!sent.error) return tellVoice({ ...voice, status: "sent", id: sent.id });
     tellVoice({ ...voice, status: "not_sent", error: sent.error });
-    const unsent = segment ? await sendUnsent({ part, segment, hasMore }, "refused") : {};
+    const unsent = segment ? await sendUnsent({ part, segment, hasMore, ref }, "refused") : {};
     // The refused part's line in the log takes its row's place.
     if (unsent.id) tellVoice({ ...voice, status: "not_sent", error: sent.error, id: unsent.id }, false);
     return undefined;
@@ -726,8 +735,8 @@
     controls.chatNew.hidden = true;
   }
 
-  /** As in Telegram: an empty box has the mic, text turns it into Send; while recording, the box gives way to Cancel,
-   *  the time and the wave, and the mic (pressed) sends. */
+  /** As in Telegram: the paperclip picks a file, an empty box has the mic, text turns it into Send, and the reply bar shows the
+   *  message the owner answers; while recording, the box gives way to Cancel, the time and the wave, and the mic sends. */
   function drawComposer() {
     const hasText = controls.chatText.value.trim() !== "";
     const isRecording = Boolean(recording);
@@ -739,7 +748,10 @@
     if (wasMicHidden && !controls.chatMic.hidden) settleMic();
     controls.chatMic.disabled = recording ? recording.isOpening : isClosing;
     controls.chatMic.ariaPressed = String(isRecording);
-    controls.chatSend.disabled = pendingActs.has(chat.part);
+    controls.chatSend.disabled = controls.chatAttach.disabled = pendingActs.has(chat.part);
+    controls.chatAttach.hidden = isRecording || state.closed;
+    controls.chatReplyText.textContent = replies.has(chat.part) ? firstLineOf(replies.get(chat.part)) : "";
+    controls.chatReplyRow.hidden = !controls.chatReplyText.textContent || state.closed;
     controls.chatText.disabled = state.closed;
     controls.chatText.placeholder = state.closed ? "This board is read-only." : chat.part === GENERAL ? "Message the agent" : "Message";
     controls.chatClose.disabled = isRecording;
@@ -758,14 +770,19 @@
     }
     const lines = state.log.filter((entry) => entry.part === part && THREAD_OPS.has(entry.op));
     const latestReply = lines.findLast(isReply)?.id;
-    const rows = lines.flatMap((entry) => (entry.id === chat.unreadFrom ? [element("li", "unread-line", "Unread"), rowOf(entry, folded, latestReply)]
-      : [rowOf(entry, folded, latestReply)]));
+    const rows = lines.flatMap((entry, index) => {
+      const row = rowOf(entry, folded, latestReply);
+      if (row.classList.contains("msg")) answerable(row, entry, lines[index - 1]);
+      return entry.id === chat.unreadFrom ? [element("li", "unread-line", "Unread"), row] : [row];
+    });
     for (const voice of uploads.values()) {
       if (voice.part === part && !(voice.id && folded.logged.has(voice.id))) rows.push(voiceRow({ ...voice, upload: voice }, folded));
     }
     const pending = pendingActs.get(part);
     if (pending && !(pending.id && folded.logged.has(pending.id))) {
-      rows.push(element("li", "msg mine", element("div", "body", pending.text), element("div", "meta", "sending…")));
+      const sent = pending.progress === undefined ? "" : ` ${Math.round(pending.progress * 100)}%`;
+      rows.push(element("li", "msg mine", pending.ref && quoteHeader(pending.ref), pending.file && fileLabel(pending.file),
+        pending.text && element("div", "body", pending.text), element("div", "meta", `sending…${sent}`)));
     }
     return rows;
   }
@@ -781,6 +798,7 @@
     }
     if (entry.op === "page") return element("li", "note", "The agent updated the page.");
     if (entry.op === "voice_ended") return element("li", "note", entry.text);
+    if (entry.op === "file") return element("li", "msg mine", fileLabel(entry), entry.text && element("div", "body", entry.text), meta(entry));
     if (entry.from_page) return element("li", "msg page", element("span", "label", "Sent by the page"), element("div", "body", entry.text), meta(entry));
     return element("li", "msg mine", element("div", "body", entry.text), meta(entry)); // the owner's comment or quick answer
   }
@@ -815,20 +833,85 @@
     return element("li", "msg mine", element("span", "label", entry.segment ? `🎤 Part ${entry.segment}` : "🎤 Voice note"), body, meta(entry));
   }
 
+  /** A file's line in its row, as text: 📎, its name and its size. */
+  const fileLabel = ({ name: fileName, size }) => element("span", "label",
+    `📎 ${fileName} · ${size < 1 << 20 ? `${Math.ceil(size / 1024)} KB` : `${(size / (1 << 20)).toFixed(1)} MB`}`);
+
+  /** A message's row takes the owner's reply (its Reply button on a mouse; a swipe or a long press on touch, onRowPress) and,
+   *  when it answers another message, opens with that message's first line: an owner's reply always, the agent's answer only
+   *  when it answers something other than the line right before it. */
+  function answerable(row, entry, previous) {
+    rowIds.set(row, entry.id);
+    const answered = entry.dir === "in" ? REPLY_OPS.has(entry.op) && entry.ref : entry.reply_to !== previous?.id && entry.reply_to;
+    const header = answered && quoteHeader(answered);
+    if (header) row.prepend(header);
+    const reply = element("button", "reply", "Reply");
+    reply.addEventListener("click", () => replyTo(entry.id));
+    row.append(reply);
+  }
+
+  /** The one-line quote of message id over a row that answers it; a tap scrolls the thread to that message and flashes it. */
+  function quoteHeader(id) {
+    const text = firstLineOf(id);
+    if (!text) return null;
+    const header = element("button", "quoted", text);
+    header.addEventListener("click", () => {
+      const row = [...controls.chatLines.children].find((item) => rowIds.get(item) === id);
+      row?.scrollIntoView({ block: "center" });
+      row?.classList.remove("flash");
+      requestAnimationFrame(() => row?.classList.add("flash"));
+    });
+    return header;
+  }
+
+  /** Message id's first line as its row reads, or "" once the log no longer holds it. */
+  function firstLineOf(id) {
+    const entry = state.log.find((line) => line.id === id && line.op !== "edit");
+    if (!entry) return "";
+    if (entry.op === "message") return snippetOf(entry);
+    if (entry.op === "file") return `📎 ${entry.name}`;
+    const heard = state.log.findLast((line) => line.id === id && line.status === "heard")?.text;
+    return (entry.op === "voice" ? heard ?? "🎤 Voice note" : entry.text).trim().split("\n")[0];
+  }
+
+  /** The owner picked message id to answer: the reply bar shows it until a comment, voice note or file goes with it. */
+  function replyTo(id) {
+    if (!chat || state.closed) return;
+    replies.set(chat.part, id);
+    drawComposer();
+    if (!isTouch()) controls.chatText.focus();
+  }
+
+  /** A finger on a message: moved REPLY.swipePx to the right, or held REPLY.holdMs, it picks that message to answer. */
+  function onRowPress(event) {
+    const id = rowIds.get(event.target.closest(".msg"));
+    if (!id || !event.isTrusted || event.pointerType === "mouse") return;
+    const start = { x: event.clientX, y: event.clientY }, done = new AbortController();
+    const pick = () => { done.abort(); replyTo(id); };
+    const timer = setTimeout(pick, REPLY.holdMs);
+    done.signal.addEventListener("abort", () => clearTimeout(timer));
+    addEventListener("pointermove", (moved) => {
+      const [dx, dy] = [moved.clientX - start.x, moved.clientY - start.y];
+      if (dx >= REPLY.swipePx && Math.abs(dy) < dx) pick();
+      else if (Math.hypot(dx, dy) > REPLY.slopPx) clearTimeout(timer); // it moves: no long press
+    }, { signal: done.signal });
+    for (const end of ["pointerup", "pointercancel"]) addEventListener(end, () => done.abort(), { signal: done.signal });
+  }
+
   /** A row's foot: what the caller adds, then the time. */
   function meta(entry, ...extras) {
     const at = new Date(entry.at ?? Date.now());
     return element("div", "meta", ...extras, element("span", "", at.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })));
   }
 
-  /** A reply's play button, as the web chat's: ▶ reads it aloud, … while C3 makes the audio, ⏸ while it plays (a tap stops). */
+  /** A reply's play button, drawn by CSS as Telegram draws a voice note's: a filled disc whose triangle reads it aloud, a
+   *  spinner while C3 makes the audio, a pause sign while it plays (a tap stops it). */
   function playButton(id) {
-    const phase = speechState?.id === id && ["loading", "playing"].includes(speechState.state) ? speechState.state : "";
-    const [glyph, label] = { loading: ["…", "Preparing spoken reply"], playing: ["⏸", "Stop spoken reply"] }[phase] ?? ["▶", "Play spoken reply"];
-    const button = element("button", "round play", glyph);
-    button.ariaLabel = label;
+    const phase = speechState?.id === id && ["loading", "playing"].includes(speechState.state) ? speechState.state : "idle";
+    const button = element("button", `round play ${phase}`);
+    button.ariaLabel = { loading: "Preparing spoken reply", playing: "Stop spoken reply" }[phase] ?? "Play spoken reply";
     button.ariaBusy = String(phase === "loading");
-    button.addEventListener("click", () => speakForPage(phase ? null : id));
+    button.addEventListener("click", () => speakForPage(phase === "idle" ? id : null));
     return button;
   }
 
@@ -838,15 +921,14 @@
     return match && match[1].trim() ? { body: text.trimEnd().slice(0, match.index).trimEnd(), label: match[1].trim() } : null;
   }
 
-  /** Posts the owner's comment or quick answer on part, shown as sending until its line is in the log; returns C3's rule refusing
-   *  it, or "". */
-  async function deliver(part, body, shown) {
-    pendingActs.set(part, { op: body.op, text: shown, at: new Date().toISOString() });
+  /** The owner's comment, quick answer or file on part, shown as sending (pending: its text, the message it answers, a file's
+   *  name and size) until its line is in the log; post() sends it. Returns C3's rule refusing it, or "". */
+  async function deliver(part, pending, post) {
+    pendingActs.set(part, { ...pending, at: new Date().toISOString() });
     showChatError("");
     drawChat();
     if (chat?.part === part) scrollChat();
-    const problem = checkAct(body);
-    const { value, error } = problem ? { error: problem } : await postAct(body);
+    const { value, error } = await post();
     if (error || state.log.some((entry) => entry.id === value.id)) pendingActs.delete(part); // its line may already be in
     else pendingActs.set(part, { ...pendingActs.get(part), id: value.id });
     drawChat();
@@ -856,22 +938,41 @@
   async function sendText() {
     const part = chat.part, text = controls.chatText.value.trim();
     if (!text || state.closed || pendingActs.has(part)) return;
-    const quote = quotes.get(part);
+    const quote = quotes.get(part), ref = replies.get(part);
     drafts.delete(part);
     quotes.delete(part);
+    replies.delete(part);
     controls.chatText.value = "";
-    const error = await deliver(part, { op: "comment", part, text, ...(quote && { quote }) }, text);
-    if (!error) return;
+    const error = await deliver(part, { text, ref }, () => postChecked({ op: "comment", part, text, ...(quote && { quote }), ...(ref && { ref }) }));
+    if (error) giveBack(part, { text, quote, ref }, error);
+  }
+
+  /** The file the owner picked goes with the box's text as its caption and the reply bar's message; one over the limit never
+   *  leaves the browser. */
+  async function sendFile(file) {
+    const part = chat.part, text = controls.chatText.value.trim(), ref = replies.get(part);
+    if (state.closed || pendingActs.has(part)) return;
+    if (file.size > LIMITS.fileBytes) return showChatError(`Not sent: ${file.name} is over 20 MB.`);
+    drafts.delete(part);
+    replies.delete(part);
+    controls.chatText.value = "";
+    const error = await deliver(part, { text, ref, file: { name: file.name, size: file.size } }, () => postFile(part, file, text, ref));
+    if (error) giveBack(part, { text, ref }, error);
+  }
+
+  /** An act C3 refused: its text, quote and reply go back where they were, and the sheet says why. */
+  function giveBack(part, { text, quote, ref }, error) {
     if (quote && !quotes.has(part)) quotes.set(part, quote);
+    if (ref && !replies.has(part)) replies.set(part, ref);
     if (chat?.part === part && !controls.chatText.value) controls.chatText.value = text;
-    else if (!drafts.has(part)) drafts.set(part, text);
-    showChatError(`Not sent: ${CHAT_REASONS[error] ?? error}. Your text is back in the box.`);
+    else if (text && !drafts.has(part)) drafts.set(part, text);
+    showChatError(`Not sent: ${CHAT_REASONS[error] ?? error}.${text ? " Your text is back in the box." : ""}`);
     drawChat();
   }
 
   async function choose(part, choice) {
     if (state.closed || pendingActs.has(part)) return;
-    const error = await deliver(part, { op: "tap", part, value: choice }, choice);
+    const error = await deliver(part, { text: choice }, () => postChecked({ op: "tap", part, value: choice }));
     if (error) showChatError(`Not sent: ${CHAT_REASONS[error] ?? error}.`);
   }
 
@@ -879,9 +980,7 @@
     const part = chat.part;
     approving.add(id);
     drawChat();
-    const body = { op: "approve", ref: id, part };
-    const problem = checkAct(body);
-    const { error } = problem ? { error: problem } : await postAct(body);
+    const { error } = await postChecked({ op: "approve", ref: id, part });
     if (error || state.log.some((entry) => entry.op === "approve" && entry.ref === id)) approving.delete(id);
     showChatError(error ? `Not approved: ${CHAT_REASONS[error] ?? error}.` : "");
     drawChat();
@@ -977,6 +1076,45 @@
     if (runes(body.text) > LIMITS.textRunes || runes(body.note) > LIMITS.textRunes || runes(body.quote) > LIMITS.quoteRunes) return "too_big";
     if (new TextEncoder().encode(body.value ?? "").length > LIMITS.valueBytes) return "too_big";
     return "";
+  }
+
+  /** The shell's own act, checked as the page's are, then posted: {value} or {error}. */
+  async function postChecked(body) {
+    const problem = checkAct(body);
+    return problem ? { error: problem } : postAct(body);
+  }
+
+  /** Uploads a file act (its fields as headers), its row showing how much has gone; a 503 or a lost connection is retried with
+   *  the same client id, so C3 takes it once. */
+  async function postFile(part, file, caption, ref) {
+    const headers = { "X-Client-Id": randomID(), "X-Board-Part": part, "X-File-Name": encodeURIComponent(file.name),
+      ...(caption && { "X-Caption": encodeURIComponent(caption) }), ...(ref && { "X-Reply-To": String(ref) }) };
+    for (let attempt = 0; ; attempt++) {
+      const reply = await sendBody(`${base}/file`, headers, file, (progress) => {
+        if (pendingActs.has(part)) pendingActs.set(part, { ...pendingActs.get(part), progress });
+        drawChat();
+      });
+      if (reply.status === 202) return { value: { id: reply.id } };
+      if (reply.status && reply.status !== 503 || attempt === RETRIES) return { error: reply.error || (reply.status ? RULES[reply.status] ?? "unavailable" : "offline") };
+      await sleep(Math.min(reply.retryAfter || 2, 10) * 1000);
+    }
+  }
+
+  /** One POST through XMLHttpRequest, which (unlike fetch) tells how much of the body has gone: C3's JSON with the status (0
+   *  when the connection failed) and Retry-After. */
+  function sendBody(url, headers, body, onProgress) {
+    return new Promise((resolve) => {
+      const request = new XMLHttpRequest();
+      request.open("POST", url);
+      for (const [header, value] of Object.entries(headers)) request.setRequestHeader(header, value);
+      request.upload.addEventListener("progress", (event) => onProgress(event.loaded / (event.total || 1)));
+      request.addEventListener("loadend", () => {
+        let reply = {};
+        try { reply = JSON.parse(request.responseText); } catch { /* not C3's answer */ }
+        resolve({ ...reply, status: request.status, retryAfter: Number(request.getResponseHeader("Retry-After")) });
+      });
+      request.send(body);
+    });
   }
 
   /** Posts one act; a 503 or a lost connection is retried with the same client_id, so C3 takes it once. */
@@ -1099,6 +1237,18 @@
   controls.chatDropQuote.addEventListener("click", () => {
     quotes.delete(chat.part);
     drawChat();
+  });
+  controls.chatDropReply.addEventListener("click", () => {
+    replies.delete(chat.part);
+    drawComposer();
+  });
+  controls.chatLines.addEventListener("pointerdown", onRowPress);
+  // Only the owner's tap on the paperclip opens the browser's own file picker, and only its pick is sent.
+  controls.chatAttach.addEventListener("click", (event) => { if (event.isTrusted) controls.chatFile.click(); });
+  controls.chatFile.addEventListener("change", () => {
+    const [file] = controls.chatFile.files;
+    controls.chatFile.value = ""; // the same file can be picked again
+    if (file && chat) sendFile(file);
   });
   controls.chatText.addEventListener("input", () => {
     drafts.set(chat.part, controls.chatText.value);
