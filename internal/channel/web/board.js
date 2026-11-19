@@ -1,6 +1,6 @@
-// C3's board shell: the status circle and its panel, the mic, and the bridge between this board's sandboxed frame
-// (the agent's page, which fills the window) and C3. Only messages from the frame's own window are taken; agent
-// strings reach this document only as text.
+// C3's board shell: the status circle and its panel, the chat sheet, the mic, and the bridge between this board's
+// sandboxed frame (the agent's page, which fills the window) and C3. Only messages from the frame's own window are
+// taken; agent and page strings reach this document only as text.
 (() => {
   "use strict";
 
@@ -17,23 +17,46 @@
   // Voice, as the web chat records it; a long recording goes out as numbered parts while it goes on.
   const VOICE = { minMs: 400, segmentMs: 5 * 60 * 1000, timesliceMs: 1000, retryMs: 2000 };
   const NOTICE_MS = 5000; // a notice shows this long under the circle, then fades
-  // The mic is a circle this wide, kept this far inside the frame's visible box and from the status circle; the
-  // recording bar sits gapPx beside it. A page that names no spot gets it at the frame's bottom-right corner.
+  // The docked mic (a page that draws its own chat) is a circle this wide, kept this far inside the frame's visible box
+  // and from the status circle; the recording bar sits gapPx beside it. A page that names no spot gets the corner.
   const MIC = { minPx: 44, maxPx: 56, marginPx: 4, gapPx: 6, defaultPx: 48, cornerPx: 16 };
+  // A mic that just appeared or moved takes no tap for this long, so a page can't slide it under a finger that meant
+  // to tap the page.
+  const MIC_SETTLE_MS = 500;
   const VOICE_TYPES = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4"];
   const VOICE_REASONS = { closed: "the board is read-only", rate: "too many this minute", too_big: "too long",
     unreadable: "C3 couldn't read the recording", unauthorized: "signed out, reload to sign in", not_found: "this board can't be opened" };
+  // A voice note's line in the chat: the upload's status, then C3's (heard: the transcript). A part of a long recording
+  // that never reached C3 is a voice act with its own status, cancelled or refused.
+  const VOICE_STATES = { sending: "Sending…", sent: "Transcribing…", transcribing: "Transcribing…",
+    slow: "Transcribing… taking longer, C3 keeps trying.", no_speech: "No speech heard.", failed: "Couldn't transcribe it.",
+    cancelled: "Cancelled, not sent.", refused: "Not sent: C3 refused it." };
+  const WAVE = { stepMs: 70, barPx: 3, gapPx: 2, levels: 200 }; // the recording wave: one bar per step, newest on the right
   // Spoken replies: why one wasn't read, and the setting's key in this shell's own storage (the frame has none).
   const SPEECH_REASONS = { not_found: "it is no longer on the board", rate: "too many this minute", unavailable: "speech is unavailable",
     offline: "C3 can't be reached", unauthorized: "signed out, reload to sign in", unplayable: "the audio didn't play" };
   const SPEECH_BLOCKED = "Tap the circle at the top right to hear replies.";
   const READ_ALOUD_KEY = "c3.board.readAloud";
+  // The chat sheet. The page names a part and may give a title, one line for the top (its question, or what is decided)
+  // and quick answers; C3 clips the strings to these and shows them as text.
+  const CHAT = { titleRunes: 120, askRunes: 600, choices: 3, followPx: 80 };
+  const CHAT_REASONS = { closed: "the board is read-only", rate: "too many this minute, wait a moment", too_big: "too long",
+    offline: "C3 can't be reached, try again", invalid: "C3 refused it" };
+  const GENERAL = "general"; // the board-level chat: the circle's "Talk to the agent"
+  const GENERAL_TITLE = "General";
+  const THREAD_OPS = new Set(["comment", "tap", "approve", "voice", "voice_ended", "message", "page"]);
+  // An agent message whose last line is "[apply: <label>]" is a proposal: that line is drawn as its Approve button.
+  const PROPOSAL = /(?:^|\n)\[apply: ([^\]\n]{1,24})\]$/u;
 
   const name = location.pathname.split("/")[2] ?? "";
   const base = `/board/${name}`;
+  const READ_KEY = `c3.board.read.${name}`; // the owner's read marks for this board, in this browser
   const frame = document.getElementById("page");
-  const controls = Object.fromEntries(["status", "badge", "panel", "title", "session", "waiting", "typing", "notice", "close", "toast",
-    "mic", "recorder", "clock", "about", "cancel", "aloud", "player"].map((id) => [id, document.getElementById(id)]));
+  const controls = Object.fromEntries(["status", "badge", "panel", "title", "session", "typing", "unread", "talk", "notice", "close", "waiting",
+    "toast", "mic", "recorder", "clock", "dock-wave", "cancel", "aloud", "player", "chat", "chat-title", "chat-close", "chat-scroll",
+    "chat-ask", "chat-choices", "chat-lines", "chat-new", "chat-typing", "chat-error", "chat-quote-row", "chat-quote", "chat-drop-quote",
+    "chat-text", "chat-recorder", "chat-cancel", "chat-clock", "chat-wave", "chat-send", "chat-mic"]
+    .map((id) => [id.replace(/-(\w)/g, (_, letter) => letter.toUpperCase()), document.getElementById(id)]));
   const early = [];
   let state = null; // /state, kept current from the stream: the one copy this shell holds
   let lastSeq = 0;
@@ -45,17 +68,19 @@
   let syncs = 0;
   let retryMs = RETRY_MS;
   let typingTimer = 0;
-  let isPanelOpen = false;
-  let isNoticeUnseen = false; // a kept notice came while the panel was shut: the circle shows its badge
   let toastFade = null;
-  // Only this shell opens the microphone, after a real tap on its own button. The page only names the part the
-  // owner is on, where its Send sits and whether its composer has text (c3.focus); a recording keeps its part.
+  let isPanelOpen = false;
+  // Only this shell opens the microphone, after a real tap on its own button. The page only names the part (c3.chat,
+  // or c3.focus for a page that draws its own chat, with where its Send sits); a recording keeps its part.
   const canRecord = Boolean(window.isSecureContext && navigator.mediaDevices?.getUserMedia && window.MediaRecorder);
-  let composer = { part: null, dock: null, hasText: false }; // dock: the page's Send in frame CSS pixels, or null
+  let composer = { part: null, dock: null, hasText: false }; // c3.focus: dock is the page's Send in frame CSS pixels, or null
   let recording = null; // {part, started, isOpening, stop(isCancelled)} while the mic is on
   let voiceKeys = 0;
   let isClosing = false; // Make read-only is waiting for the voice acts on their way
-  const uploads = new Map(); // key -> the frame's view of a recording on its way to C3
+  let micSettlesAt = 0; // a mic tap before this performance.now() is ignored
+  let placedMic = ""; // where the docked mic was last put, to see it move
+  let audioContext = null; // the wave's, made in the first tap on a mic: a phone runs one only after a tap
+  const uploads = new Map(); // key -> the latest status of a recording on its way to C3
   const sending = new Set(); // every voice act's promise until C3 answers it
   // Spoken replies play here, through one reusable player: the frame has no network. A phone lets a page play sound
   // only after a tap; Chromium counts a tap in the frame for this shell too, and a tap on the shell's circle always counts.
@@ -65,6 +90,17 @@
   let isReadingAloud = readSetting(); // "Read replies aloud": each new agent message is read as it arrives
   let isAudioBlocked = false; // the browser refused to play until a tap: the reply waits at the queue's head
   let isAudioUnlocked = false; // the shell's silent clip played from a tap on it
+  // The chat sheet's state lives here; the page only asks for a part's chat.
+  let chat = null; // {part, title, ask, choices} while the sheet is open
+  const drafts = new Map(); // part -> the owner's unsent text
+  const quotes = new Map(); // part -> the page's words the owner quoted
+  const pendingActs = new Map(); // part -> {op, text, at, id} from the owner's Send or quick answer until its line is in the log
+  const approving = new Set(); // proposals whose approve is on its way
+  const voiceShown = new Map(); // a voice row's key -> the status last drawn, so only a change fades in
+  const pageTitles = new Map(); // part -> the title the page's markup gives it
+  const chatTitles = new Map(); // part -> the title the page last opened its chat with
+  let shownRows = 0; // rows the open chat had when last drawn: only new ones follow the bottom
+  let marks = { from: 0, parts: new Map() }; // read marks: the agent's replies on a part after its mark are unread
 
   const sleep = (ms) => new Promise((resolve) => { setTimeout(resolve, ms); });
   const toFrame = (message) => frame.contentWindow.postMessage(message, "*");
@@ -75,6 +111,17 @@
   const messages = (count) => `${count} message${count === 1 ? "" : "s"}`;
   const randomID = () => [...crypto.getRandomValues(new Uint8Array(16))].map((byte) => byte.toString(16).padStart(2, "0")).join("");
   const clock = (ms) => `${Math.floor(ms / 60000)}:${String(Math.floor(ms / 1000) % 60).padStart(2, "0")}`;
+  const clip = (text, runes) => ([...text].length > runes ? `${[...text].slice(0, runes - 1).join("")}…` : text);
+  const isReply = (entry) => entry.dir === "out" && entry.op === "message" && Boolean(entry.part);
+  const isTouch = () => matchMedia("(pointer: coarse)").matches;
+
+  /** A new element with its classes, holding text (as text nodes) and elements; empty ones are left out. */
+  function element(tag, className, ...children) {
+    const node = document.createElement(tag);
+    if (className) node.classList.add(...className.split(" "));
+    node.append(...children.filter(Boolean));
+    return node;
+  }
 
   function drawStatus() {
     const { live, waiting, closed, typing, holder } = state;
@@ -85,26 +132,91 @@
     const folder = holder?.cwd?.split(/[\\/]/).filter(Boolean).pop() ?? holder?.cwd;
     controls.session.textContent = closed ? "Read-only." : !live ? `Session ended.${waiting ? ` ${messages(waiting)} ${waiting === 1 ? "waits" : "wait"} for it.` : ""}`
       : holder ? `${holder.cli} · ${folder}` : "Live";
-    controls.waiting.textContent = live && !closed && waiting ? `${messages(waiting)} waiting` : "";
+    // Waiting is a line at the panel's foot, never a badge: only unread replies ask for the owner's eye.
+    controls.waiting.textContent = live && !closed && waiting ? `${messages(waiting)} waiting for the session` : "";
     controls.typing.hidden = !(live && typing);
     controls.close.hidden = closed;
     drawBadge();
     drawVoice();
+    drawChat();
   }
 
-  /** The circle's badge: something waits for the session, or a kept notice the panel hasn't shown yet. */
+  /** The circle's badge counts the agent's replies the owner hasn't seen, and the panel lists them; nothing else badges it. */
   function drawBadge() {
-    controls.badge.hidden = !(isNoticeUnseen || state && !state.closed && state.waiting > 0);
+    const items = unreadParts();
+    const count = items.reduce((sum, item) => sum + item.count, 0);
+    controls.badge.hidden = count === 0;
+    controls.badge.textContent = count > 9 ? "9+" : String(count);
+    controls.unread.hidden = items.length === 0;
+    controls.unread.replaceChildren(...items.map(({ part, count: replies, newest }) => {
+      const button = element("button", "", element("strong", "", element("span", "", titleOf(part)), replies > 1 && element("span", "", String(replies))),
+        element("span", "snippet", snippetOf(newest)));
+      button.addEventListener("click", () => openFromPanel(part));
+      return element("li", "", button);
+    }));
   }
 
-  /** A notice under the circle for a few seconds, then it fades. A kept one (the default) stays in the panel and badges
-   *  the circle until the panel opens; notify("") clears it. Text only, and never the frame. */
-  function notify(text, isKept = true) {
-    if (isKept) {
-      controls.notice.textContent = text;
-      isNoticeUnseen = Boolean(text) && !isPanelOpen;
-      drawBadge();
+  /** The parts holding replies after their read mark, newest first: {part, count, newest}. */
+  function unreadParts() {
+    const byPart = new Map();
+    for (const entry of state?.log ?? []) {
+      if (!isReply(entry) || entry.id <= Math.max(marks.from, marks.parts.get(entry.part) ?? 0)) continue;
+      byPart.set(entry.part, { part: entry.part, count: (byPart.get(entry.part)?.count ?? 0) + 1, newest: entry });
     }
+    return [...byPart.values()].sort((a, b) => b.newest.id - a.newest.id);
+  }
+
+  /** A reply's first line as it now reads (its latest edit, without a proposal's marker line). */
+  function snippetOf(reply) {
+    const text = state.log.findLast((entry) => entry.op === "edit" && entry.dir === "out" && entry.id === reply.id)?.text ?? reply.text;
+    return (proposalOf(text)?.body ?? text).trim().split("\n")[0];
+  }
+
+  /** The owner's read mark on part moves to its newest reply; only while the page shows, since a hidden tab reads nothing. */
+  function markRead(part) {
+    if (document.hidden || !state) return;
+    const newest = state.log.findLast((entry) => isReply(entry) && entry.part === part)?.id ?? 0;
+    if (newest <= (marks.parts.get(part) ?? 0)) return;
+    marks.parts.set(part, newest);
+    try { localStorage.setItem(READ_KEY, JSON.stringify({ from: marks.from, parts: Object.fromEntries(marks.parts) })); } catch { /* this tab keeps them */ }
+    drawBadge();
+  }
+
+  /** The read marks this browser keeps for the board. On a first visit what is on the board already counts as read. */
+  function loadMarks(log) {
+    try {
+      const stored = JSON.parse(localStorage.getItem(READ_KEY));
+      if (Number.isSafeInteger(stored?.from) && stored.parts && typeof stored.parts === "object") {
+        return { from: stored.from, parts: new Map(Object.entries(stored.parts).filter(([, id]) => Number.isSafeInteger(id))) };
+      }
+    } catch { /* unreadable: start over */ }
+    const fresh = { from: log.findLast(isReply)?.id ?? 0, parts: new Map() };
+    try { localStorage.setItem(READ_KEY, JSON.stringify({ from: fresh.from, parts: {} })); } catch { /* this tab keeps them */ }
+    return fresh;
+  }
+
+  /** A part's name for the sheet and the panel: the title the page opened its chat with, else its markup's, else its address. */
+  const titleOf = (part) => (part === GENERAL ? GENERAL_TITLE : chatTitles.get(part) || pageTitles.get(part) || part);
+
+  /** Each part's title from the stored page: a JSON part's "title", else the part's first heading. Returns the parsed page. */
+  function readTitles(text) {
+    if (text === null) return null;
+    pageTitles.clear();
+    const parsed = new DOMParser().parseFromString(text, "text/html");
+    for (const part of parsed.querySelectorAll("[data-c3-part]")) {
+      let title = part.querySelector("h1, h2, h3, h4, h5, h6")?.textContent;
+      if (part.matches('script[type="application/json"]')) {
+        try { title = JSON.parse(part.textContent)?.title; } catch { title = null; }
+      }
+      if (typeof title === "string" && title.trim()) pageTitles.set(part.getAttribute("data-c3-part"), clip(title.trim(), CHAT.titleRunes));
+    }
+    return parsed;
+  }
+
+  /** A notice under the circle for a few seconds, then it fades. A kept one (the default) stays in the panel;
+   *  notify("") clears it. Text only, and never the frame. */
+  function notify(text, isKept = true) {
+    if (isKept) controls.notice.textContent = text;
     toastFade?.cancel();
     controls.toast.textContent = text;
     controls.toast.hidden = !text;
@@ -113,23 +225,33 @@
     toastFade.finished.then(() => { controls.toast.hidden = true; }, () => {});
   }
 
-  /** The mic shows where the page's Send sits while its composer is empty (not while that spot has no size: the page
-   *  hides it), and through a whole recording. */
+  /** A mic that just appeared or moved waits MIC_SETTLE_MS before it takes a tap. */
+  function settleMic() {
+    micSettlesAt = performance.now() + MIC_SETTLE_MS;
+  }
+
+  /** The docked mic shows where the page's Send sits while its composer is empty (not while that spot has no size: the
+   *  page hides it), and through a whole recording; never while C3's own chat sheet is open, which has its mic. */
   function drawVoice() {
+    if (chat) drawComposer();
     const hasSpot = composer.dock === null || composer.dock.width > 0 && composer.dock.height > 0;
-    const isShown = Boolean(recording) || composer.part !== null && !composer.hasText && hasSpot && Boolean(state) && !state.closed;
+    const isShown = !chat && (Boolean(recording) || composer.part !== null && !composer.hasText && hasSpot && Boolean(state) && !state.closed);
     controls.mic.hidden = !isShown;
-    controls.recorder.hidden = !recording;
-    if (!isShown) return;
+    controls.recorder.hidden = !(isShown && recording);
+    controls.clock.textContent = controls.chatClock.textContent = recording && !recording.isOpening ? clock(performance.now() - recording.started) : "";
+    if (!isShown) {
+      placedMic = "";
+      return;
+    }
     const frameBox = frame.getBoundingClientRect();
     const mic = micBox(frameBox);
     place(controls.mic, mic);
+    const spot = [mic.left, mic.top, mic.width].map(Math.round).join();
+    if (spot !== placedMic) settleMic(); // it appeared or the page moved it
+    placedMic = spot;
     controls.mic.disabled = recording ? recording.isOpening : isClosing;
     controls.mic.ariaPressed = String(Boolean(recording));
-    if (!recording) return;
-    place(controls.recorder, recorderBox(frameBox, mic));
-    controls.clock.textContent = recording.isOpening ? "" : clock(performance.now() - recording.started);
-    controls.about.textContent = recording.isOpening ? "Opening the mic…" : `About ${recording.part}`;
+    if (recording) place(controls.recorder, recorderBox(frameBox, mic));
   }
 
   const clamp = (value, low, high) => Math.min(Math.max(value, low), high);
@@ -137,7 +259,7 @@
   const visibleBox = (frameBox) => ({ left: Math.max(frameBox.left, 0) + MIC.marginPx, top: Math.max(frameBox.top, 0) + MIC.marginPx,
     right: Math.min(frameBox.right, innerWidth) - MIC.marginPx, bottom: Math.min(frameBox.bottom, innerHeight) - MIC.marginPx });
 
-  /** Where the mic goes: centred on the page's Send spot, mapped through the frame's box, as a circle MIC.minPx to
+  /** Where the docked mic goes: centred on the page's Send spot, mapped through the frame's box, as a circle MIC.minPx to
    *  MIC.maxPx wide, inside the frame's visible box, its row below the status circle. So no page can put it out of
    *  sight, cover the circle with it or with the recording bar beside it, or shrink or blow up the shell's control. */
   function micBox(frameBox) {
@@ -167,9 +289,11 @@
   }
 
   async function startRecording() {
-    const part = composer.part;
+    const part = chat?.part ?? composer.part;
     if (recording || !part || state.closed || isClosing) return;
     stopSpeech(); // recording and speaking never overlap
+    if (!audioContext && window.AudioContext) audioContext = new AudioContext(); // in the tap, so a phone lets it run
+    audioContext?.resume().catch(() => {});
     let isCancelled = false;
     recording = { part, started: performance.now(), isOpening: true, stop: () => { isCancelled = true; } };
     drawVoice();
@@ -192,6 +316,7 @@
   function record(part, stream) {
     const started = performance.now();
     const type = VOICE_TYPES.find((candidate) => MediaRecorder.isTypeSupported?.(candidate)) ?? "";
+    const stopListening = listen(stream);
     let segment = 1;
     let finished = null; // finish()'s promise: settled once C3 has answered the recording's last act
     let current = startSegment();
@@ -224,6 +349,7 @@
       if (finished) return finished;
       clearInterval(ticker);
       clearInterval(rotation);
+      stopListening();
       const isTooShort = segment === 1 && performance.now() - started < VOICE.minMs;
       const isDropped = isCancelled || isTooShort;
       const last = segment > 1 ? { part, segment } : { part };
@@ -238,6 +364,50 @@
       return finished;
     }
     return { part, started, isOpening: false, stop: finish };
+  }
+
+  /** The wave: the mic's loudness every WAVE.stepMs, drawn as bars moving left, so the owner sees at a glance that the
+   *  mic hears them. Returns what stops it. */
+  function listen(stream) {
+    if (!audioContext) return () => {};
+    const analyser = audioContext.createAnalyser();
+    const source = audioContext.createMediaStreamSource(stream);
+    source.connect(analyser);
+    const samples = new Float32Array(analyser.fftSize);
+    const levels = [];
+    let lastStep = 0;
+    let request = requestAnimationFrame(function step(now) {
+      request = requestAnimationFrame(step);
+      if (now - lastStep < WAVE.stepMs) return;
+      lastStep = now;
+      analyser.getFloatTimeDomainData(samples);
+      const loudness = Math.sqrt(samples.reduce((sum, sample) => sum + sample * sample, 0) / samples.length);
+      levels.push(Math.min(1, Math.sqrt(loudness) * 1.6)); // a square root, so quiet speech still shows
+      levels.splice(0, levels.length - WAVE.levels);
+      drawWave(levels);
+    });
+    return () => {
+      cancelAnimationFrame(request);
+      source.disconnect();
+    };
+  }
+
+  /** Draws levels (0 to 1) as centred bars, the newest at the right, on whichever wave canvas shows. */
+  function drawWave(levels) {
+    for (const canvas of [controls.chatWave, controls.dockWave]) {
+      if (!canvas.clientWidth) continue;
+      const scale = devicePixelRatio || 1;
+      canvas.width = Math.round(canvas.clientWidth * scale);
+      canvas.height = Math.round(canvas.clientHeight * scale);
+      const context = canvas.getContext("2d");
+      context.fillStyle = getComputedStyle(canvas).color;
+      const step = (WAVE.barPx + WAVE.gapPx) * scale;
+      const shown = levels.slice(-Math.floor(canvas.width / step));
+      shown.forEach((level, index) => {
+        const height = Math.max(2 * scale, level * canvas.height);
+        context.fillRect(canvas.width - (shown.length - index) * step, (canvas.height - height) / 2, WAVE.barPx * scale, height);
+      });
+    }
   }
 
   /** Make read-only waits for promise: a voice act on its way to C3. */
@@ -274,17 +444,18 @@
     if (!sent.error) return tellVoice({ ...voice, status: "sent", id: sent.id });
     tellVoice({ ...voice, status: "not_sent", error: sent.error });
     const unsent = segment ? await sendUnsent({ part, segment, hasMore }, "refused") : {};
-    // The refused part's line in the log takes its row's place in the frame.
-    if (unsent.id && isFrameReady) toFrame({ c3: "voice", voice: { ...voice, status: "not_sent", error: sent.error, id: unsent.id } });
+    // The refused part's line in the log takes its row's place.
+    if (unsent.id) tellVoice({ ...voice, status: "not_sent", error: sent.error, id: unsent.id }, false);
     return undefined;
   }
 
-  /** An upload's status for the page (c3.on("voice"), which shows it in its chat); one C3 refused is also a notice. */
-  function tellVoice(voice) {
-    if (voice.status === "sending") uploads.set(voice.key, voice);
-    else uploads.delete(voice.key);
-    if (voice.status === "not_sent") notify(`${voice.segment ? `Part ${voice.segment}` : "Voice note"} not sent: ${VOICE_REASONS[voice.error] ?? "C3 refused it"}.`);
+  /** An upload's status: a row in C3's chat until its voice act is in the log, and an event for the page (c3.on("voice"));
+   *  one C3 refused is also a notice. */
+  function tellVoice(voice, isNew = true) {
+    uploads.set(voice.key, { ...voice, at: uploads.get(voice.key)?.at ?? new Date().toISOString() });
+    if (isNew && voice.status === "not_sent") notify(`${voice.segment ? `Part ${voice.segment}` : "Voice note"} not sent: ${VOICE_REASONS[voice.error] ?? "C3 refused it"}.`);
     if (isFrameReady) toFrame({ c3: "voice", voice });
+    drawChat();
   }
 
   /** Reply id's audio from C3: {token}, or {error} with C3's rule. */
@@ -354,15 +525,16 @@
     tellSpeech(id, "ended");
   }
 
-  /** A reply's place in the player, for the page (c3.on("speech")): loading, playing, ended, or failed with C3's rule
-   *  (blocked: the browser waits for a tap). */
+  /** A reply's place in the player, for the chat's play buttons and the page (c3.on("speech")): loading, playing, ended,
+   *  or failed with C3's rule (blocked: the browser waits for a tap). */
   function tellSpeech(id, phase, error) {
     speechState = { id, state: phase, ...(error && { error }) };
     if (isFrameReady) toFrame({ c3: "speech", speech: speechState });
+    drawChat();
   }
 
-  /** c3.speak(id) from the page: id plays now, in place of whatever played or waited; null stops. Not while the mic is
-   *  on. Returns the rule refusing it, or "". */
+  /** c3.speak(id) from the page, or a play button in the chat: id plays now, in place of whatever played or waited; null
+   *  stops. Not while the mic is on. Returns the rule refusing it, or "". */
   function speakForPage(id) {
     if (id !== null && !(Number.isSafeInteger(id) && id > 0)) return "invalid";
     if (id !== null && recording) {
@@ -402,6 +574,261 @@
     try { localStorage.setItem(READ_ALOUD_KEY, isOn ? "on" : "off"); } catch { /* this tab keeps it */ }
   }
 
+  // ---------- the chat sheet ----------
+
+  /** Opens (or refreshes) the sheet on part. options are the page's, checked by readChat; null when the shell opens it
+   *  (the panel), which keeps what the page gave last. A recording keeps its own part on screen. Returns the rule
+   *  refusing it, or "". */
+  function openChat(part, options) {
+    if (!state) return "offline";
+    if (recording && part !== recording.part) return "recording";
+    const isNew = chat?.part !== part;
+    const fields = options ?? (isNew ? { title: "", ask: "", choices: [] } : chat);
+    chat = { part, title: fields.title, ask: fields.ask, choices: fields.choices };
+    if (fields.title) chatTitles.set(part, fields.title);
+    if (options?.quote) quotes.set(part, options.quote);
+    if (isNew) {
+      shownRows = 0;
+      controls.chatText.value = drafts.get(part) ?? "";
+      showChatError("");
+      controls.chat.hidden = false;
+      settleMic(); // the sheet's mic just appeared, at a spot the page chose the moment of
+      if (isFrameReady) toFrame({ c3: "chat", chat: { part } });
+    }
+    markRead(part);
+    drawVoice();
+    drawChat();
+    if (isNew && !isTouch() && !state.closed) controls.chatText.focus(); // on a keyboard, straight to typing
+    else if (isNew) controls.chatTitle.focus(); // on touch no keyboard pops up; the shell holds the focus
+    return "";
+  }
+
+  /** Shuts the sheet, except while it records (the recording's part stays on screen). Returns the rule refusing it, or "". */
+  function closeChat() {
+    if (!chat) return "";
+    if (recording) return "recording";
+    chat = null;
+    controls.chat.hidden = true;
+    if (isFrameReady) toFrame({ c3: "chat", chat: { part: null } });
+    drawVoice();
+    return "";
+  }
+
+  /** An unread reply in the panel: the page brings its part into view (c3.on("reveal")) and its chat opens. */
+  function openFromPanel(part) {
+    controls.panel.hidePopover?.();
+    if (isFrameReady) toFrame({ c3: "reveal", reveal: { part } });
+    if (openChat(part, null)) notify("Stop recording first.", false);
+  }
+
+  /** A chat request from the page: the part (null closes) and its strings, each a string or absent, clipped to fit; up to
+   *  CHAT.choices quick answers, each one C3 takes as a tap. Null if any field is malformed. */
+  function readChat({ value, title, ask, choices = [], quote }) {
+    const isText = (text) => text === undefined || text === null || typeof text === "string";
+    const isChoice = (choice) => typeof choice === "string" && choice.trim() !== "" && new TextEncoder().encode(choice).length <= LIMITS.valueBytes;
+    if (!(value === null || typeof value === "string" && PART.test(value)) || ![title, ask, quote].every(isText)) return null;
+    if (!Array.isArray(choices) || choices.length > CHAT.choices || !choices.every(isChoice)) return null;
+    return { part: value, title: clip(title ?? "", CHAT.titleRunes), ask: clip(ask ?? "", CHAT.askRunes), choices: [...choices],
+      quote: clip(quote ?? "", LIMITS.quoteRunes) };
+  }
+
+  function showChatError(text) {
+    controls.chatError.textContent = text;
+    controls.chatError.hidden = !text;
+  }
+
+  /** Draws the open sheet from the log: the page's title, line and quick answers, the thread, the composer. */
+  function drawChat() {
+    if (!chat || !state) return;
+    const { part } = chat;
+    const pending = pendingActs.get(part);
+    controls.chatTitle.textContent = titleOf(part);
+    controls.chatAsk.textContent = chat.ask;
+    controls.chatAsk.hidden = !chat.ask;
+    controls.chatChoices.replaceChildren(...chat.choices.map((choice) => {
+      const button = element("button", "", choice);
+      button.disabled = state.closed || Boolean(pending);
+      button.addEventListener("click", () => choose(part, choice));
+      return button;
+    }));
+    controls.chatChoices.hidden = chat.choices.length === 0;
+    const scroller = controls.chatScroll;
+    const isNearBottom = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight <= CHAT.followPx;
+    const rows = threadRows(part);
+    controls.chatLines.replaceChildren(...(rows.length ? rows : [element("li", "empty", part === GENERAL ? "Talk to the agent about anything here."
+      : "Type, or tap the mic to talk.")]));
+    if (rows.length > shownRows && (isNearBottom || shownRows === 0)) scrollChat();
+    else if (rows.length > shownRows) controls.chatNew.hidden = false;
+    shownRows = rows.length;
+    const lastLine = state.log.findLast((entry) => entry.part === part && THREAD_OPS.has(entry.op));
+    controls.chatTyping.hidden = !(state.typing && (pending || lastLine?.dir === "in"));
+    controls.chatQuote.textContent = quotes.get(part) ?? "";
+    controls.chatQuoteRow.hidden = !quotes.has(part);
+    drawComposer();
+  }
+
+  function scrollChat() {
+    controls.chatScroll.scrollTop = controls.chatScroll.scrollHeight;
+    controls.chatNew.hidden = true;
+  }
+
+  /** As in Telegram: an empty box has the mic, text turns it into Send; while recording, the box gives way to Cancel,
+   *  the time and the wave, and the mic (pressed) sends. */
+  function drawComposer() {
+    const hasText = controls.chatText.value.trim() !== "";
+    const isRecording = Boolean(recording);
+    const wasMicHidden = controls.chatMic.hidden;
+    controls.chatText.hidden = isRecording;
+    controls.chatRecorder.hidden = !isRecording;
+    controls.chatSend.hidden = isRecording || !hasText || state.closed;
+    controls.chatMic.hidden = !isRecording && (hasText || state.closed);
+    if (wasMicHidden && !controls.chatMic.hidden) settleMic();
+    controls.chatMic.disabled = recording ? recording.isOpening : isClosing;
+    controls.chatMic.ariaPressed = String(isRecording);
+    controls.chatSend.disabled = pendingActs.has(chat.part);
+    controls.chatText.disabled = state.closed;
+    controls.chatText.placeholder = state.closed ? "This board is read-only." : chat.part === GENERAL ? "Message the agent" : "Message";
+    controls.chatClose.disabled = isRecording;
+  }
+
+  /** The open part's rows: its lines from the log (edits, statuses and reactions folded in), the owner's recordings C3 hasn't
+   *  logged yet, and the owner's comment or quick answer on its way. */
+  function threadRows(part) {
+    const folded = { edits: new Map(), statuses: new Map(), reactions: new Map(), approved: new Set(), logged: new Set() };
+    for (const entry of state.log) {
+      folded.logged.add(entry.id);
+      if (entry.op === "edit" && entry.dir === "out") folded.edits.set(entry.id, entry.text);
+      if (entry.op === "edit" && entry.dir === "in" && entry.status) folded.statuses.set(entry.id, entry);
+      if (entry.op === "reaction" || entry.op === "react") folded.reactions.set(entry.ref, `${folded.reactions.get(entry.ref) ?? ""}${entry.text}`);
+      if (entry.op === "approve") folded.approved.add(entry.ref);
+    }
+    const lines = state.log.filter((entry) => entry.part === part && THREAD_OPS.has(entry.op));
+    const latestReply = lines.findLast(isReply)?.id;
+    const rows = lines.map((entry) => rowOf(entry, folded, latestReply));
+    for (const voice of uploads.values()) {
+      if (voice.part === part && !(voice.id && folded.logged.has(voice.id))) rows.push(voiceRow({ ...voice, upload: voice }, folded));
+    }
+    const pending = pendingActs.get(part);
+    if (pending && !(pending.id && folded.logged.has(pending.id))) {
+      rows.push(element("li", "msg mine", element("div", "body", pending.text), element("div", "meta", "sending…")));
+    }
+    return rows;
+  }
+
+  function rowOf(entry, folded, latestReply) {
+    if (entry.op === "message") return replyRow(entry, folded, entry.id === latestReply);
+    if (entry.op === "voice") return voiceRow(entry, folded);
+    if (entry.op === "approve") {
+      const proposal = proposalOf(folded.edits.get(entry.ref) ?? state.log.find((line) => line.id === entry.ref && line.op === "message")?.text ?? "");
+      return element("li", "note", proposal ? `You approved “${proposal.label}”.` : "You approved the agent's answer.");
+    }
+    if (entry.op === "page") return element("li", "note", "The agent updated the page.");
+    if (entry.op === "voice_ended") return element("li", "note", entry.text);
+    return element("li", "msg mine", element("div", "body", entry.text), meta(entry)); // the owner's comment or quick answer
+  }
+
+  /** The agent's reply: its text as it now reads, its reactions, its time and a play button; a proposal, while it is the
+   *  agent's latest word here and not yet approved, carries its Approve button. */
+  function replyRow(entry, folded, isLatest) {
+    const text = folded.edits.get(entry.id) ?? entry.text;
+    const proposal = proposalOf(text);
+    const row = element("li", "msg", element("div", "body", proposal ? proposal.body : text),
+      folded.reactions.has(entry.id) && element("div", "", folded.reactions.get(entry.id)));
+    if (proposal && isLatest && !folded.approved.has(entry.id) && !state.closed) {
+      const apply = element("button", "apply", approving.has(entry.id) ? "Approving…" : proposal.label);
+      apply.disabled = approving.has(entry.id);
+      apply.addEventListener("click", () => approveReply(entry.id));
+      row.append(apply);
+    }
+    row.append(meta(entry, playButton(entry.id), folded.edits.has(entry.id) && "edited"));
+    return row;
+  }
+
+  /** The owner's voice note: where the upload is, then C3's status, then the transcript fading in where the status was. */
+  function voiceRow(entry, folded) {
+    const settled = entry.upload ? null : folded.statuses.get(entry.id);
+    const status = entry.upload?.status ?? settled?.status ?? entry.status ?? "transcribing";
+    const text = status === "heard" ? settled.text : status === "not_sent"
+      ? `Not sent: ${VOICE_REASONS[entry.upload.error] ?? "C3 refused it"}.` : VOICE_STATES[status] ?? VOICE_STATES.transcribing;
+    const body = element("div", status === "heard" ? "body" : "body state", text);
+    const key = entry.upload?.key ?? entry.id;
+    if (voiceShown.has(key) && voiceShown.get(key) !== status) body.classList.add("fresh");
+    voiceShown.set(key, status);
+    return element("li", "msg mine", element("span", "label", entry.segment ? `🎤 Part ${entry.segment}` : "🎤 Voice note"), body, meta(entry));
+  }
+
+  /** A row's foot: what the caller adds, then the time. */
+  function meta(entry, ...extras) {
+    const at = new Date(entry.at ?? Date.now());
+    return element("div", "meta", ...extras, element("span", "", at.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })));
+  }
+
+  /** A reply's play button, as the web chat's: ▶ reads it aloud, … while C3 makes the audio, ⏸ while it plays (a tap stops). */
+  function playButton(id) {
+    const phase = speechState?.id === id && ["loading", "playing"].includes(speechState.state) ? speechState.state : "";
+    const [glyph, label] = { loading: ["…", "Preparing spoken reply"], playing: ["⏸", "Stop spoken reply"] }[phase] ?? ["▶", "Play spoken reply"];
+    const button = element("button", "round play", glyph);
+    button.ariaLabel = label;
+    button.ariaBusy = String(phase === "loading");
+    button.addEventListener("click", () => speakForPage(phase ? null : id));
+    return button;
+  }
+
+  /** An agent message's proposal: its text without the marker line, and its button's label; else null. */
+  function proposalOf(text) {
+    const match = PROPOSAL.exec(text.trimEnd());
+    return match && match[1].trim() ? { body: text.trimEnd().slice(0, match.index).trimEnd(), label: match[1].trim() } : null;
+  }
+
+  /** Posts the owner's comment or quick answer on part, shown as sending until its line is in the log; returns C3's rule refusing
+   *  it, or "". */
+  async function deliver(part, body, shown) {
+    pendingActs.set(part, { op: body.op, text: shown, at: new Date().toISOString() });
+    showChatError("");
+    drawChat();
+    if (chat?.part === part) scrollChat();
+    const problem = checkAct(body);
+    const { value, error } = problem ? { error: problem } : await postAct(body);
+    if (error || state.log.some((entry) => entry.id === value.id)) pendingActs.delete(part); // its line may already be in
+    else pendingActs.set(part, { ...pendingActs.get(part), id: value.id });
+    drawChat();
+    return error ?? "";
+  }
+
+  async function sendText() {
+    const part = chat.part, text = controls.chatText.value.trim();
+    if (!text || state.closed || pendingActs.has(part)) return;
+    const quote = quotes.get(part);
+    drafts.delete(part);
+    quotes.delete(part);
+    controls.chatText.value = "";
+    const error = await deliver(part, { op: "comment", part, text, ...(quote && { quote }) }, text);
+    if (!error) return;
+    if (quote && !quotes.has(part)) quotes.set(part, quote);
+    if (chat?.part === part && !controls.chatText.value) controls.chatText.value = text;
+    else if (!drafts.has(part)) drafts.set(part, text);
+    showChatError(`Not sent: ${CHAT_REASONS[error] ?? error}. Your text is back in the box.`);
+    drawChat();
+  }
+
+  async function choose(part, choice) {
+    if (state.closed || pendingActs.has(part)) return;
+    const error = await deliver(part, { op: "tap", part, value: choice }, choice);
+    if (error) showChatError(`Not sent: ${CHAT_REASONS[error] ?? error}.`);
+  }
+
+  async function approveReply(id) {
+    const part = chat.part;
+    approving.add(id);
+    drawChat();
+    const body = { op: "approve", ref: id, part };
+    const problem = checkAct(body);
+    const { error } = problem ? { error: problem } : await postAct(body);
+    approving.delete(id);
+    showChatError(error ? `Not approved: ${CHAT_REASONS[error] ?? error}.` : "");
+    drawChat();
+  }
+
   function setTyping(isTyping, isStatusNew = false) {
     clearTimeout(typingTimer);
     if (isTyping) typingTimer = setTimeout(() => setTyping(false), TYPING_MS);
@@ -431,19 +858,26 @@
       state.log.splice(0, state.log.length - LIMITS.logEntries);
       if (data.dir === "out" && (kind === "message" || kind === "page")) setTyping(false);
       if (isLive && data.dir === "out" && kind === "message") readAloud(data.id);
+      if (pendingActs.get(data.part)?.id === data.id) pendingActs.delete(data.part); // the owner's line is in: its row is the log's now
+      if (chat && isReply(data) && data.part === chat.part) markRead(chat.part); // the owner is looking at it
+      if (kind === "page" && chat && isApproveOn(data.reply_to, chat.part) && !drafts.get(chat.part)) closeChat(); // show the change
       if (kind === "page") {
         state.rev = data.rev;
         pages = pages.then(() => showPage(data));
       } else if (isFrameReady) {
         toFrame({ c3: "entry", kind, entry: data });
       }
+      drawBadge();
+      drawChat();
     }
   }
+
+  const isApproveOn = (id, part) => state.log.some((entry) => entry.id === id && entry.dir === "in" && entry.op === "approve" && entry.part === part);
 
   /** Hands the frame the previous and the new stored text; when that can't be done, reloads the frame. */
   async function showPage(entry) {
     const next = await readPage(entry.rev);
-    const title = next === null ? "" : new DOMParser().parseFromString(next, "text/html").title.trim();
+    const title = readTitles(next)?.title.trim();
     if (title) state.title = title;
     drawStatus();
     if (next === null || !isFrameReady) {
@@ -466,11 +900,12 @@
     const { board, title, rev, viewer, live, waiting, closed, log } = state;
     toFrame({ c3: "ready", ready: { board, title, rev, viewer, live, waiting, closed, log, kept } });
     toFrame({ c3: "status", status: frameStatus() });
-    for (const voice of uploads.values()) toFrame({ c3: "voice", voice });
+    for (const voice of uploads.values()) if (voice.status === "sending") toFrame({ c3: "voice", voice });
     if (speaking && speechState) toFrame({ c3: "speech", speech: speechState });
+    if (chat) toFrame({ c3: "chat", chat: { part: chat.part } }); // the sheet stayed open across the reload
   }
 
-  /** An act body from the frame: the op's own fields only, each of its type and within its limit. */
+  /** An act body: the op's own fields only, each of its type and within its limit. */
   function checkAct(body) {
     const fields = body && Object.hasOwn(ACT_FIELDS, body.op) ? ACT_FIELDS[body.op] : null;
     if (!fields || Object.keys(body).some((key) => key !== "op" && !fields.includes(key))) return "invalid";
@@ -510,9 +945,15 @@
     return { part: value, dock: dock && { x: dock.x, y: dock.y, width: dock.width, height: dock.height }, hasText };
   }
 
-  async function onFrameMessage({ op, call, body, value, dock, hasText }) {
+  async function onFrameMessage(message) {
+    const { op, call, body, value, dock, hasText } = message;
     if (op === "hello") return sendReady();
     if (op === "reload") return reloadFrame();
+    if (op === "chat") {
+      const request = readChat(message);
+      const problem = !request ? "invalid" : request.part === null ? closeChat() : openChat(request.part, request);
+      return toFrame({ c3: "result", call, ...(problem ? { error: problem } : {}) });
+    }
     if (op === "focus") {
       const next = readComposer({ value, dock, hasText });
       if (next) composer = next;
@@ -556,21 +997,52 @@
   });
   controls.panel.addEventListener("toggle", (event) => {
     isPanelOpen = event.newState === "open";
-    if (isPanelOpen) { // the panel shows the notice itself
-      isNoticeUnseen = false;
-      toastFade?.cancel();
-      controls.toast.hidden = true;
-    }
-    drawBadge();
+    if (!isPanelOpen) return;
+    toastFade?.cancel(); // the panel shows the notice itself
+    controls.toast.hidden = true;
+  });
+  // The panel shuts on a tap anywhere else. A tap in the page moves the focus into the frame, which the shell sees only
+  // as its own window losing focus.
+  addEventListener("blur", () => { if (isPanelOpen && document.activeElement === frame) controls.panel.hidePopover(); });
+  controls.talk.addEventListener("click", () => {
+    controls.panel.hidePopover?.();
+    if (openChat(GENERAL, null)) notify("Stop recording first.", false);
   });
 
-  controls.mic.addEventListener("click", (event) => { // a real tap only: the shell's own control, never the page
-    if (!event.isTrusted) return;
+  /** A real tap on one of the shell's own mics, once it has sat still for MIC_SETTLE_MS. */
+  function onMicTap(event) {
+    if (!event.isTrusted || performance.now() < micSettlesAt) return;
     if (!canRecord) return notify("Voice needs the HTTPS link.", false);
     if (recording) recording.stop(false);
     else startRecording();
-  });
+  }
+  controls.mic.addEventListener("click", onMicTap);
+  controls.chatMic.addEventListener("click", onMicTap);
   controls.cancel.addEventListener("click", () => recording?.stop(true));
+  controls.chatCancel.addEventListener("click", () => recording?.stop(true));
+  controls.chatClose.addEventListener("click", closeChat);
+  controls.chatSend.addEventListener("click", sendText);
+  controls.chatNew.addEventListener("click", scrollChat);
+  controls.chatScroll.addEventListener("scroll", () => {
+    const scroller = controls.chatScroll;
+    if (scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight <= CHAT.followPx) controls.chatNew.hidden = true;
+  });
+  controls.chatDropQuote.addEventListener("click", () => {
+    quotes.delete(chat.part);
+    drawChat();
+  });
+  controls.chatText.addEventListener("input", () => {
+    drafts.set(chat.part, controls.chatText.value);
+    drawComposer();
+  });
+  controls.chatText.addEventListener("keydown", (event) => {
+    // As the web chat: Enter sends and Shift+Enter breaks the line on a keyboard; on touch Enter is a newline.
+    if (event.key !== "Enter" || event.shiftKey || event.isComposing || isTouch()) return;
+    event.preventDefault();
+    sendText();
+  });
+  addEventListener("keydown", (event) => { if (event.key === "Escape" && chat && !isPanelOpen) closeChat(); });
+  document.addEventListener("visibilitychange", () => { if (chat) markRead(chat.part); });
   controls.status.addEventListener("click", unlockAudio);
   controls.aloud.checked = isReadingAloud;
   controls.aloud.addEventListener("change", (event) => {
@@ -635,9 +1107,14 @@
   function begin(fresh) {
     state = { ...fresh, typing: false };
     lastSeq = state.log.at(-1)?.seq ?? 0;
+    marks = loadMarks(state.log);
     drawStatus();
     const { rev } = state;
-    pages = pages.then(async () => { pageText = rev > 0 ? await readPage(rev) : null; });
+    pages = pages.then(async () => {
+      pageText = rev > 0 ? await readPage(rev) : null;
+      readTitles(pageText);
+      drawBadge();
+    });
     reloadFrame();
   }
 
@@ -654,6 +1131,7 @@
     state.rev = rev;
     pages = pages.then(async () => {
       pageText = await readPage(rev);
+      readTitles(pageText);
       reloadFrame();
     });
   }

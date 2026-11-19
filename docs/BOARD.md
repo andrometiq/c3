@@ -25,7 +25,7 @@ the layer under any form: per-part threads, voice notes, approvals, and redrawin
 - The session names the board as `channel="board:<name>"` on `reply`, `edit_message` and `react`,
   and lets go of it with `detach target=board:<name>`. `web` always means the web chat; a bare
   `board` with two boards held fails closed.
-- While the session is gone, the owner's actions queue and the status circle says how many wait. Resume
+- While the session is gone, the owner's actions queue and the status circle's panel says how many wait. Resume
   and broker restart restore the board from the session's record (30 days, with
   `auto_attach_on_resume` on, the default); else its session re-holds it with `attach`. An
   in-place conversation switch leaves it waiting for its own conversation.
@@ -78,7 +78,7 @@ not the approved message's (418).
 | Route | What it is |
 |---|---|
 | `GET /board` | this broker's boards |
-| `GET /board/<name>` | the shell: the page's frame filling the window, C3's status circle over its top-right corner, and C3's mic in the page's chat box |
+| `GET /board/<name>` | the shell: the page's frame filling the window, C3's status circle over its top-right corner, and C3's chat sheet when a part's chat is open |
 | `GET /board/<name>/state` | title, rev, frame capability, viewer, live, holder, waiting, closed, last 500 log entries |
 | `GET /board/<name>/page?cap=…` | the page with the SDK inlined; `&rev=N&raw=1` gives a stored revision as `text/plain` |
 | `GET /board/<name>/events` | SSE `message`, `edit`, `reaction`, `action`, `page`, `status`, `notice`; `id:` is the log seq, `Last-Event-ID` replays after it |
@@ -92,22 +92,50 @@ Shell assets are under `/board/assets/`. Errors are `{"error": <rule>}`: `invali
 `unreadable` 422, `rate` 429, `offline` 503 with `Retry-After`, `unavailable` 503 (no speech: none set
 up, the provider failed or its queue is full).
 
-## Voice
+## The chat and the circle
 
 The page fills the window. C3's own state is a small circle over its top-right corner: its dot is the
 session (green live, amber away or reconnecting, grey read-only, pulsing while the session types), and
-a badge shows while actions wait or a notice came that the owner hasn't seen. A tap opens its panel:
-the board's title, the live session (`cli · folder`), waiting and typing, the last notice, and
-**Make read-only**. A notice (a reply of that kind, a voice problem) shows a few seconds under the
-circle, then fades; it never reaches the frame.
+its badge counts the agent's replies the owner hasn't seen; nothing else badges it. A tap opens its
+panel: the board's title, the live session (`cli · folder`), typing, the parts with unread replies
+(title and first line, newest first), **Talk to the agent**, the last notice, **Read replies aloud**,
+**Make read-only**, and at its foot how many of the owner's actions wait for the session. A tap
+anywhere else, the page included, shuts it. A notice (a reply of that kind, a voice problem) shows a
+few seconds under the circle, then fades; it never reaches the frame.
 
-Voice sits in the page's chat, as in Telegram: while a thread's box is empty it has no Send, and C3
-draws its mic in that spot; typing brings Send back. The page tells C3 with `c3.focus(part, {dock,
-hasText})`: the part the owner is on, where its Send sits (an element the SDK follows through layout,
-scroll and keyboard, or a box in frame pixels) and whether the box has text (`c3.threads()` does all of
-it). `c3.focus(part)` alone puts the mic at the frame's bottom-right corner. A tap records; the mic
-turns into a send button and C3 draws a bar beside it with the time, the part and **Cancel**; under
-400 ms nothing is sent. A recording keeps the part it started for, and the bar names it. Recording never stops on its own:
+C3 draws each part's chat itself, as its web chat does: a sheet rising from the bottom (a panel at the
+bottom right on a wide screen) with the part's title, a line from the page (its question, or what is
+decided) and up to three quick answers, then the thread: the owner's lines and the agent's answers with
+their times, edits and reactions, voice notes with their live status, a play button on each answer,
+and a button for a proposal (an answer whose last line is `[apply: <label>]`, while it is the agent's
+latest word there) that approves it. Under it is the composer, as in Telegram: an empty box has the mic,
+typing turns it into Send; Enter sends on a keyboard and breaks the line on a touch screen. The page
+asks with `c3.chat(part, {title, ask, choices, quote})` and shuts it with `c3.chat(null)`; `c3.threads()`
+opens it on a tap on a part, titled by the part's first heading. The page hears `c3.on("chat")`
+(`{part}`, null once shut), and an owner's tap in the page that asks for no chat shuts it, as Escape
+does. The sheet stays open across a frame reload, and a page that answers an approve on the open part
+shuts it, so the owner sees the change, unless the owner has a draft there. **Talk to the agent** opens the
+board-level chat, the part `general`, which pages leave alone.
+
+A reply is unread until the owner opens its part's chat: each browser keeps a read mark per part in the
+shell origin's storage (on its first visit, what is already on the board counts as read). A tap on an
+unread part in the panel opens its chat and tells the page `c3.on("reveal", ({part}) => …)`; a handler
+that returns `true` shows the part itself, else C3's SDK scrolls the part's element to the top and
+flashes it. The panel names a part by the title the page last gave its chat, else its markup's (a JSON
+part's `title`, else its first heading), else its address.
+
+A page that draws its own chat still can: it tells C3 with `c3.focus(part, {dock, hasText})` the part
+the owner is on, where its Send sits (an element the SDK follows through layout, scroll and keyboard,
+or a box in frame pixels) and whether the box has text, and while the box is empty C3 draws its mic in
+that spot (`c3.focus(part)` alone puts it at the frame's bottom-right corner; never while C3's sheet is
+open).
+
+## Voice
+
+A tap on the mic records. While it records, the box gives way to **Cancel**, the time and a wave that
+moves with the owner's voice (the docked mic draws the same in a bar beside it), and the mic turns into
+a send button; under 400 ms nothing is sent. A recording keeps the part it started for: its chat can't
+be shut or switched until it ends. Recording never stops on its own:
 every five minutes the shell sends what it has as a numbered part and records on. Once a part has
 gone out, the recording always ends with a last part the session sees: Cancel sends a `cancelled`
 line in place of the last part's audio, and a part C3 refuses (413, 422, …) goes out again as a
@@ -145,7 +173,7 @@ it. The wait lives in memory: after a broker restart an unfinished recording isn
 the shell's next part or the owner's next message moves it on.
 
 **Spoken replies.** The shell reads the session's messages aloud; the frame can't, having no network.
-Each answer in `c3.threads()` has a play button: ▶, then … while C3 makes the audio, ⏸ while it plays
+Each answer in C3's chat has a play button: ▶, then … while C3 makes the audio, ⏸ while it plays
 (a tap stops it). A page asks with `c3.speak(id)` (`c3.speak(null)` stops) and follows
 `c3.on("speech", e => …)`: `{id, state, error}`, state `loading`, `playing`, `ended` or `failed`.
 **Read replies aloud** in the circle's panel (off until turned on; the browser remembers it in the
@@ -175,10 +203,17 @@ can still be heard.
 - **Shell.** It runs only its own script file, pins `frame-src` to `<origin>/board/<name>/page`,
   sends `Cross-Origin-Opener-Policy: same-origin` (no `top.opener` for the page), refuses framing,
   takes messages only from its frame, writes agent strings only as text and keeps `notice` out of
-  the frame. Its circle, panel, mic and recording bar sit over the frame, where the page can't draw.
+  the frame. Its circle, panel, chat sheet, mic and recording bar sit over the frame, where the page
+  can't draw or script them.
+- **Chat.** The page gives the sheet only a part, a title (120 characters), one line (600) and up to
+  three quick answers, each one C3 would take as a tap; longer text is cut, anything else is refused,
+  and all of it is shown as text in the sheet's header, never as C3's own words. Sends, quick answers
+  and approves from the sheet are the shell's acts, checked as the page's are.
 - **Microphone.** Only the shell records: one `getUserMedia` call, reached only from a trusted tap
   on its own mic button; the shell draws the recording state and its part itself. The frame has no
-  microphone (sandboxed, opaque origin, no `allow`). The page can only name a part, its Send's spot and
+  microphone (sandboxed, opaque origin, no `allow`). A mic that just appeared or moved takes no tap for
+  500 ms, since the page chooses when the sheet opens and where a docked mic sits: it can't slide the mic
+  under a finger that meant to tap the page. The page can only name a part, its Send's spot and
   whether its box has text, so its script can never hear the owner or send a voice act. A spot that
   isn't four finite numbers is refused; the mic is a 44–56 px circle centred on the spot, kept inside
   the frame's visible box with its row below the status circle, and the recording bar takes the
@@ -209,7 +244,7 @@ owner, title, rev, closed), `pages/<rev>.html` (the last 5; `rev` picks the serv
 `log.jsonl` (append-only: seq, at, dir, id, op, part, text, ref, reply_to, from, and for voice
 segment, has_more, recording, status). Held actions sit in the broker's queue. Voice recordings are the web
 chat's: `voice/` under the web state directory, the newest 200 kept for both. Spoken replies' audio
-is kept in memory only; **Read replies aloud** is the browser's, in the shell origin's storage. An unreadable `board.json` stops the board channel from starting.
+is kept in memory only; **Read replies aloud** and the read marks are the browser's, in the shell origin's storage. An unreadable `board.json` stops the board channel from starting.
 
 ## The authenticated HTTPS front
 

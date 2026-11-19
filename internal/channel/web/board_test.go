@@ -638,6 +638,42 @@ func TestBoardTextIsPlain(t *testing.T) {
 	}
 }
 
+// The waiting count follows the queue down: once the session takes what
+// waited, the board's viewers hear 0 with no new request from them.
+func TestWaitingCountReturnsToZeroOnceTheSessionTakesTheActions(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	host, clock := newFakeBoardHost(), &fakeTimers{}
+	c := startBoardChannel(t, host, func(c *Channel) { c.board.after = clock.after })
+	cookie := loginCookie(t, c)
+	board := createBoard(t, c, "plan")
+	c.board.SetRouteHolder(board.Number, nil, &channel.RouteHolder{CLI: "claude", CWD: "/work/plan", SessionID: "session-1"})
+	stream := &boardStream{events: make(chan boardEvent, 16), done: make(chan struct{})}
+	_ = c.board.withBoard(board.Number, func(state *boardState) error { state.streams[stream] = struct{}{}; return nil })
+
+	host.setHeld(board.Number, 1) // the comment waits in the queue until the session takes it
+	if response := postAct(c, cookie, "plan", `{"client_id":"w1","op":"comment","part":"1","text":"hello"}`); response.Code != http.StatusAccepted {
+		t.Fatalf("act: %d %s", response.Code, response.Body)
+	}
+	host.setHeld(board.Number, 0) // the session took it
+	clock.advance(boardWaitingRecheck)
+
+	var told []int
+	for len(stream.events) > 0 {
+		event := <-stream.events
+		var status struct{ Waiting *int }
+		if event.kind == "status" && json.Unmarshal(event.data, &status) == nil && status.Waiting != nil {
+			told = append(told, *status.Waiting)
+		}
+	}
+	if len(told) < 2 || told[len(told)-2] != 1 || told[len(told)-1] != 0 {
+		t.Fatalf("waiting counts the viewers heard = %v, want 1 then 0", told)
+	}
+	clock.advance(time.Minute)
+	if len(stream.events) != 0 {
+		t.Fatalf("%d more events after the count reached 0, want the rechecks to stop", len(stream.events))
+	}
+}
+
 func TestMissingHeldCountIsLoggedOnceAndKeepsTheLastCount(t *testing.T) {
 	c, host, cookie := newBoardTest(t)
 	createBoard(t, c, "plan")

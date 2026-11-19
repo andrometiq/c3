@@ -18,14 +18,15 @@ func readPage(t *testing.T, name string) string {
 	return string(contents)
 }
 
-// The shell writes agent strings (title, holder, notices) only as text: the
-// only DOM properties it assigns are on this list, its URL sinks are the
-// frame's own page URL and its player's board audio, and it calls no HTML or
-// code sink.
+// The shell writes agent and page strings (title, holder, notices, the chat's
+// title, line, quick answers and thread) only as text: the only DOM properties
+// it assigns are on this list, its URL sinks are the frame's own page URL and
+// its player's board audio, and it calls no HTML or code sink.
 func TestShellWritesAgentStringsOnlyToAllowedSinks(t *testing.T) {
 	shell := readPage(t, "board.js")
 	allowed := map[string]bool{"textContent": true, "title": true, "hidden": true, "mode": true, "src": true, "typing": true, "holder": true, "rev": true,
-		"disabled": true, "ariaPressed": true, "checked": true}
+		"disabled": true, "ariaPressed": true, "checked": true, "value": true, "placeholder": true, "scrollTop": true, "ariaLabel": true,
+		"ariaBusy": true, "width": true, "height": true, "fillStyle": true}
 	for _, match := range regexp.MustCompile(`\.([A-Za-z_$][\w$]*)\s*=[^=]`).FindAllStringSubmatch(shell, -1) {
 		if !allowed[match[1]] {
 			t.Errorf("board.js assigns .%s, which is not an allowed sink", match[1])
@@ -150,19 +151,22 @@ func TestStarterIsPartsAndOneThreadsCall(t *testing.T) {
 	}
 }
 
-// Only the shell opens the microphone, and only from a real tap on its own
-// button: the frame gets no microphone, and no frame message reaches the
-// recorder (the page can only name the part it is on).
+// Only the shell opens the microphone, and only from a real tap on one of its
+// own mic buttons: the frame gets no microphone, and no frame message reaches
+// the recorder (the page can only name the part it is on).
 func TestOnlyTheShellsOwnButtonOpensTheMicrophone(t *testing.T) {
 	shell := readPage(t, "board.js")
 	if strings.Count(shell, "getUserMedia(") != 1 || !strings.Contains(functionBody(t, shell, "async function startRecording("), "getUserMedia(") {
 		t.Fatal("board.js opens the microphone outside startRecording")
 	}
-	starts := regexp.MustCompile(`startRecording\(\)`).FindAllStringIndex(shell, -1)
-	click := strings.Index(shell, `controls.mic.addEventListener("click", (event) => {`)
-	trusted := strings.Index(shell, "if (!event.isTrusted) return;")
-	if len(starts) != 2 || click < 0 || trusted < click || starts[1][0] < trusted || starts[1][0]-click > 300 {
-		t.Fatalf("startRecording is called %d times; want once, from the mic's click listener after its isTrusted check", len(starts)-1)
+	tap := functionBody(t, shell, "function onMicTap(")
+	if starts := regexp.MustCompile(`startRecording\(\)`).FindAllStringIndex(shell, -1); len(starts) != 2 || !strings.Contains(tap, "startRecording()") ||
+		!strings.HasPrefix(strings.SplitN(tap, "\n", 2)[1], "    if (!event.isTrusted || ") {
+		t.Fatalf("startRecording is called %d times; want once, from onMicTap after its isTrusted check", len(starts)-1)
+	}
+	if strings.Count(shell, "onMicTap") != 3 || !strings.Contains(shell, `controls.mic.addEventListener("click", onMicTap);`) ||
+		!strings.Contains(shell, `controls.chatMic.addEventListener("click", onMicTap);`) {
+		t.Error("onMicTap is reached from something other than the shell's two mic buttons' clicks")
 	}
 	handler := functionBody(t, shell, "async function onFrameMessage(")
 	for _, recorder := range []string{"startRecording", "recording", "getUserMedia", "MediaRecorder", "upload("} {
@@ -266,6 +270,77 @@ func TestPageCannotPlaceTheMicOverTheShellsOwnControls(t *testing.T) {
 	}
 	if !strings.Contains(functionBody(t, shell, "async function onFrameMessage("), "const next = readComposer({ value, dock, hasText });") {
 		t.Error("a focus message reaches the composer without readComposer")
+	}
+}
+
+// A page chooses when the chat sheet opens and, for a page that draws its own
+// chat, where the docked mic sits. So a mic that just appeared or moved takes
+// no tap for 500 ms: a page can't slide it under a finger that meant to tap
+// the page and start a recording.
+func TestAMicThatJustAppearedOrMovedTakesNoTap(t *testing.T) {
+	shell := readPage(t, "board.js")
+	if !strings.Contains(shell, "const MIC_SETTLE_MS = 500;") || !strings.Contains(functionBody(t, shell, "function settleMic("), "micSettlesAt = performance.now() + MIC_SETTLE_MS;") {
+		t.Fatal("board.js has no 500 ms settle time for its mic")
+	}
+	if !strings.Contains(functionBody(t, shell, "function onMicTap("), "if (!event.isTrusted || performance.now() < micSettlesAt) return;") {
+		t.Error("a tap on the mic is taken before it settles")
+	}
+	if !strings.Contains(functionBody(t, shell, "function drawVoice("), "if (spot !== placedMic) settleMic(); // it appeared or the page moved it") {
+		t.Error("the docked mic takes a tap right after it appears or moves")
+	}
+	if !strings.Contains(functionBody(t, shell, "function openChat("), "settleMic();") ||
+		!strings.Contains(functionBody(t, shell, "function drawComposer("), "if (wasMicHidden && !controls.chatMic.hidden) settleMic();") {
+		t.Error("the chat sheet's mic takes a tap right after the sheet opens or the mic comes back")
+	}
+}
+
+// The page names the chat's part and may give a title, one line and quick
+// answers, nothing more: each string is checked and clipped, each quick answer
+// is a tap C3 would take, and they reach the sheet only as text.
+func TestThePageGivesTheChatOnlyCheckedText(t *testing.T) {
+	shell := readPage(t, "board.js")
+	read := functionBody(t, shell, "function readChat(")
+	for _, rule := range []string{
+		`if (!(value === null || typeof value === "string" && PART.test(value)) || ![title, ask, quote].every(isText)) return null;`,
+		"new TextEncoder().encode(choice).length <= LIMITS.valueBytes",
+		"choices.length > CHAT.choices",
+		"title: clip(title ?? \"\", CHAT.titleRunes), ask: clip(ask ?? \"\", CHAT.askRunes)",
+	} {
+		if !strings.Contains(read, rule) {
+			t.Errorf("readChat lacks %q", rule)
+		}
+	}
+	if !strings.Contains(functionBody(t, shell, "async function onFrameMessage("), "const request = readChat(message);") {
+		t.Error("a chat message reaches the sheet without readChat")
+	}
+	draw := functionBody(t, shell, "function drawChat(")
+	if !strings.Contains(draw, "controls.chatAsk.textContent = chat.ask;") || !strings.Contains(draw, "element(\"button\", \"\", choice)") {
+		t.Error("drawChat shows the page's line or quick answers other than as text")
+	}
+	if !strings.Contains(functionBody(t, shell, "function element("), "node.append(...children.filter(Boolean));") {
+		t.Error("the chat's rows are not built from text nodes")
+	}
+}
+
+// Only the agent's replies the owner hasn't seen badge the circle: a read mark
+// per part, kept in this browser, and nothing else (waiting actions, notices)
+// shows a dot. The panel lists the unread parts and shuts on a tap in the page.
+func TestOnlyUnreadRepliesBadgeTheCircle(t *testing.T) {
+	shell := readPage(t, "board.js")
+	if strings.Count(shell, "controls.badge.hidden") != 1 || !strings.Contains(functionBody(t, shell, "function drawBadge("), "controls.badge.hidden = count === 0;") ||
+		!strings.Contains(functionBody(t, shell, "function drawBadge("), "const items = unreadParts();") {
+		t.Error("something other than the unread replies sets the circle's badge")
+	}
+	if !strings.Contains(functionBody(t, shell, "function unreadParts("), "entry.id <= Math.max(marks.from, marks.parts.get(entry.part) ?? 0)") ||
+		!strings.Contains(shell, "const READ_KEY = `c3.board.read.${name}`;") {
+		t.Error("unread is not counted from the read marks this browser keeps")
+	}
+	if !strings.Contains(shell, `addEventListener("blur", () => { if (isPanelOpen && document.activeElement === frame) controls.panel.hidePopover(); });`) {
+		t.Error("the panel stays open after a tap in the page")
+	}
+	html := readPage(t, "board.html")
+	if !strings.Contains(html, `<ul id="unread"`) || !strings.Contains(html, `<button id="talk" type="button">`) {
+		t.Error("the panel has no unread list or no Talk to the agent")
 	}
 }
 

@@ -4,22 +4,15 @@
 (() => {
   "use strict";
 
-  const KINDS = ["message", "edit", "reaction", "action", "update", "status", "voice", "speech"];
+  const KINDS = ["message", "edit", "reaction", "action", "update", "status", "voice", "speech", "chat", "reveal"];
   const CONTROLS = "a[href], button, input, select, textarea, label, summary, [contenteditable]";
   const QUOTE_RUNES = 2000;
-  const REASONS = { closed: "the board is read-only", rate: "too many this minute, wait a moment", too_big: "too long",
-    offline: "C3 can't be reached, try again", invalid: "C3 refused it" };
   const VIEWS = {
     message: ({ id, reply_to, part, text, at }) => ({ id, reply_to, part, text, ts: at }),
     edit: ({ id, text, status }) => ({ id, text, status }),
     reaction: ({ ref, text, from }) => ({ ref, emoji: text, from }),
     action: ({ id, op, part, text, ref, from, segment, has_more, status }) => ({ id, op, part, text, ref, from, segment, has_more, status }),
   };
-  // A voice note's line: the shell's upload status, then C3's (an edit of the voice act: heard is its transcript). A
-  // part of a long recording that never reached C3 is a voice act with its own status, cancelled or refused.
-  const VOICE_STATES = { sending: "Sending…", sent: "Transcribing…", transcribing: "Transcribing…",
-    slow: "Transcribing… taking longer, C3 keeps trying.", no_speech: "No speech heard.", failed: "Couldn't transcribe it.",
-    cancelled: "Cancelled, not sent.", refused: "Not sent: C3 refused it." };
   const listeners = Object.fromEntries(KINDS.map((kind) => [kind, new Set()]));
   const calls = new Map();
   let nextCall = 1;
@@ -43,6 +36,23 @@
   // c3.speak(id): C3's shell reads your message id aloud (the frame has no network), in place of whatever it was reading;
   // c3.speak(null) stops. c3.on("speech") follows it: {id, state: "loading" | "playing" | "ended" | "failed", error}.
   const speak = (id) => request("speak", { value: id ?? null });
+
+  // c3.chat(part, {title, ask, choices, quote}): C3's shell opens its chat sheet on part (or refreshes it, when that
+  // part's chat is open): the thread, the composer and C3's mic are C3's. title names the part; ask is one line for the
+  // top (your question, or what is decided); choices are up to 3 quick answers the owner taps (each a tap act); quote is
+  // page text the owner picked. All are shown as text. c3.chat(null) shuts it. c3.on("chat") follows it: {part}, null once shut.
+  // The owner's tap anywhere in the page that doesn't itself ask for a chat shuts it, as Escape does (a click the page
+  // makes itself never does).
+  let chatPart = null; // the part the sheet shows, from the shell's "chat" events
+  let isChatAsked = false; // c3.chat was called while the current click was dispatched
+  const chat = (part, { title, ask, choices, quote } = {}) => {
+    isChatAsked = true;
+    return request("chat", { value: part ?? null, title, ask, choices, quote });
+  };
+  const shutChat = () => { if (chatPart !== null) chat(null).catch(() => {}); }; // refused while the mic records: it stays
+  addEventListener("click", () => { isChatAsked = false; }, true);
+  addEventListener("click", (event) => { if (event.isTrusted && !isChatAsked) shutChat(); });
+  addEventListener("keydown", (event) => { if (event.key === "Escape") shutChat(); });
 
   // c3.focus(part, {dock, hasText}): the part the owner is on, where the page's Send sits (an element C3 follows, or
   // {x, y, width, height} in frame CSS pixels) and whether its composer has text. While it is empty, C3 draws its mic
@@ -113,15 +123,14 @@
     } else if (message.c3 === "page") {
       applyPage(message);
     } else if (message.c3 === "voice") {
-      voices.set(message.voice.key, message.voice);
-      draw();
       emit("voice", { ...message.voice });
     } else if (message.c3 === "speech") {
-      const { id, state } = message.speech;
-      if (state === "loading" || state === "playing") speeches.set(id, state);
-      else speeches.delete(id);
-      draw();
       emit("speech", { ...message.speech });
+    } else if (message.c3 === "chat") {
+      chatPart = message.chat.part;
+      emit("chat", { part: chatPart });
+    } else if (message.c3 === "reveal") {
+      reveal(message.reveal.part);
     }
   });
 
@@ -144,8 +153,6 @@
   function applyPage({ entry, previous, next }) {
     board.log.push(entry);
     board.rev = entry.rev;
-    const answered = board.log.find((line) => line.dir === "in" && line.op === "approve" && line.id === entry.reply_to);
-    if (answered && answered.part === openPart) closeSheet();
     draw();
     if (!updateParts(entry.rev, previous, next)) toShell({ op: "reload" });
   }
@@ -201,30 +208,31 @@
     const live = document.querySelector(`${CSS.escape(tag)}[data-c3-part="${CSS.escape(part)}"]`);
     if (!live) return false;
     live.innerHTML = html;
-    live.animate([{ outline: "3px solid #d4a72c", outlineOffset: "2px" }, { outline: "3px solid transparent", outlineOffset: "2px" }],
-      { duration: 1200, easing: "ease-out" });
+    flash(live);
     return true;
   }
 
-  // c3.threads(): a tap on a part opens its breakout, a sheet drawn outside every part, so no swap touches it.
-  const drafts = new Map();
-  const quotes = new Map();
-  const voices = new Map(); // the shell's uploads by key, shown until their voice act is in the log
-  const speeches = new Map(); // message id -> "loading" or "playing" while the shell reads it aloud
-  const approving = new Set();
-  let isThreaded = false;
-  let sheet = null;
-  let foldStyle = null;
-  let openPart = null;
-  let isSending = false; // Ctrl/Cmd+Enter can press send again while one is in flight
-  let pressedQuote = "";
+  /** A short outline on a part C3 just changed or brought into view. */
+  const flash = (element) => element.animate([{ outline: "3px solid #d4a72c", outlineOffset: "2px" }, { outline: "3px solid transparent", outlineOffset: "2px" }],
+    { duration: 1200, easing: "ease-out" });
 
-  function el(tag, attributes = {}, ...children) {
-    const node = document.createElement(tag);
-    for (const [key, value] of Object.entries(attributes)) node.setAttribute(key, value);
-    node.append(...children.filter((child) => child !== null && child !== false && child !== undefined));
-    return node;
+  /** The shell asks for part to be shown (the owner picked its unread reply in the panel; its chat opens there). A
+   *  c3.on("reveal") handler that returns true has shown it; else the part's element scrolls to the top and flashes. */
+  function reveal(part) {
+    let isHandled = false;
+    for (const handler of listeners.reveal) {
+      try { isHandled = handler({ part }) === true || isHandled; } catch (error) { reportError(error); }
+    }
+    const element = isHandled ? null : livePart(part);
+    element?.scrollIntoView({ block: "start", behavior: "smooth" });
+    if (element) flash(element);
   }
+
+  // c3.threads(): a tap on a part opens its chat in C3's sheet, titled by the part's first heading; words the owner
+  // selected in the part come along as a quote. Parts whose last approve a new page answered get a "settled" line.
+  let isThreaded = false;
+  let foldStyle = null;
+  let pressedQuote = "";
 
   const partOf = (node) => (node instanceof Element ? node.closest("[data-c3-part]") : null);
   const livePart = (part) => document.querySelector(`[data-c3-part="${CSS.escape(part)}"]`);
@@ -245,118 +253,10 @@
     document.addEventListener("click", (event) => {
       const element = partOf(event.target);
       if (!element || event.defaultPrevented || event.target.closest(CONTROLS)) return;
-      openSheet(element.getAttribute("data-c3-part"), selectionIn(element) || pressedQuote);
+      const title = element.querySelector("h1, h2, h3, h4, h5, h6")?.textContent.trim();
+      chat(element.getAttribute("data-c3-part"), { title, quote: selectionIn(element) || pressedQuote }).catch(reportError);
     });
-    document.addEventListener("selectionchange", () => {
-      const quote = openPart === null ? "" : selectionIn(livePart(openPart));
-      if (quote) {
-        quotes.set(openPart, quote);
-        draw();
-      }
-    });
-    document.addEventListener("keydown", (event) => { if (event.key === "Escape" && openPart !== null) closeSheet(); });
     draw();
-  }
-
-  function makeSheet() {
-    const host = el("c3-thread");
-    const root = host.attachShadow({ mode: "open" });
-    const parts = {
-      address: el("strong"), state: el("span", { class: "state" }),
-      close: el("button", { type: "button", class: "close", "aria-label": "Close the thread" }, "×"),
-      lines: el("ol", { class: "lines" }),
-      typing: el("p", { class: "typing" }, el("span", { class: "spinner", "aria-hidden": "true" }), "Typing…"),
-      error: el("p", { class: "error", role: "alert" }),
-      quote: el("blockquote", { class: "quote" }),
-      dropQuote: el("button", { type: "button", "aria-label": "Drop the quote" }, "×"),
-      text: el("textarea", { rows: "2", "aria-label": "Your message" }),
-      send: el("button", { type: "button", class: "send", "aria-label": "Send" }),
-    };
-    parts.send.innerHTML = SEND_ICON;
-    const style = el("style");
-    style.textContent = SHEET_CSS;
-    parts.quoteRow = el("div", { class: "quote-row" }, parts.quote, parts.dropQuote);
-    root.append(style, el("section", { class: "sheet", role: "dialog", "aria-label": "Thread" },
-      el("header", {}, parts.address, parts.state, parts.close), parts.lines, parts.typing, parts.error, parts.quoteRow,
-      el("div", { class: "compose" }, parts.text, parts.send)));
-    parts.close.addEventListener("click", closeSheet);
-    parts.dropQuote.addEventListener("click", () => { quotes.delete(openPart); draw(); });
-    parts.text.addEventListener("input", () => {
-      drafts.set(openPart, parts.text.value);
-      drawComposer();
-    });
-    parts.text.addEventListener("keydown", (event) => { if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) send(); });
-    parts.send.addEventListener("click", send);
-    parts.lines.addEventListener("click", (event) => {
-      const button = event.target.closest("[data-approve]");
-      if (button) approveAnswer(Number(button.getAttribute("data-approve")));
-      const play = event.target.closest("[data-speak]");
-      const id = play && Number(play.getAttribute("data-speak"));
-      // A refusal (the mic is on) is the shell's to say, under its circle.
-      if (play) speak(speeches.has(id) ? null : id).catch(() => {});
-    });
-    (document.body ?? document.documentElement).append(host);
-    return { host, ...parts };
-  }
-
-  function openSheet(part, quote) {
-    sheet ??= makeSheet();
-    openPart = part;
-    if (quote) quotes.set(part, quote);
-    sheet.text.value = drafts.get(part) ?? "";
-    sheet.error.textContent = "";
-    sheet.host.hidden = false;
-    draw();
-    drawComposer();
-    if (!matchMedia("(pointer: coarse)").matches) sheet.text.focus();
-  }
-
-  function closeSheet() {
-    if (openPart !== null) focus(null).catch(reportError);
-    openPart = null;
-    if (sheet) sheet.host.hidden = true;
-  }
-
-  /** Send shows only while there is text; while the box is empty, C3's mic sits in its place. */
-  function drawComposer() {
-    const hasText = sheet.text.value.trim() !== "";
-    sheet.send.classList.toggle("blank", !hasText);
-    focus(openPart, { dock: sheet.send, hasText }).catch(reportError);
-  }
-
-  async function send() {
-    const part = openPart, text = sheet.text.value.trim();
-    if (!text || board.closed || isSending) return;
-    isSending = sheet.send.disabled = true;
-    try {
-      await comment(part, text, { quote: quotes.get(part) });
-      drafts.delete(part);
-      quotes.delete(part);
-      if (openPart === part) {
-        sheet.text.value = "";
-        drawComposer();
-      }
-      sheet.error.textContent = "";
-    } catch (error) {
-      sheet.error.textContent = `Not sent: ${REASONS[error.message] ?? error.message}.`;
-    } finally {
-      isSending = false;
-      draw();
-    }
-  }
-
-  async function approveAnswer(id) {
-    approving.add(id);
-    draw();
-    try {
-      await approve(id, { part: openPart });
-      sheet.error.textContent = "";
-    } catch (error) {
-      sheet.error.textContent = `Not approved: ${REASONS[error.message] ?? error.message}.`;
-    } finally {
-      approving.delete(id);
-      draw();
-    }
   }
 
   /** Parts whose last approve was answered by a new page, and not talked about since. From the log alone. */
@@ -372,124 +272,17 @@
 
   function draw() {
     if (!board || !isThreaded) return;
-    const settled = settledParts();
-    foldStyle ??= (document.head ?? document.documentElement).appendChild(el("style"));
-    const selectors = settled.map((part) => `[data-c3-part="${CSS.escape(part)}"]::before`).join(",");
+    const selectors = settledParts().map((part) => `[data-c3-part="${CSS.escape(part)}"]::before`).join(",");
+    foldStyle ??= (document.head ?? document.documentElement).appendChild(document.createElement("style"));
     foldStyle.textContent = `[data-c3-part]{cursor:pointer}` + (selectors && `${selectors}{${FOLD_CSS}}` +
       `@media (prefers-color-scheme:dark){${selectors}{color:#3fb950;background:#3fb95026}}`);
-    if (sheet && openPart !== null) drawSheet(openPart, settled.includes(openPart));
-  }
-
-  function drawSheet(part, isSettled) {
-    const logged = board.log.filter((entry) => entry.part === part && !["edit", "reaction", "react"].includes(entry.op));
-    const ids = new Set(logged.map((entry) => entry.id));
-    const uploading = [...voices.values()].filter((voice) => voice.part === part && !ids.has(voice.id))
-      .map((voice) => ({ dir: "in", op: "voice", part, from: board.viewer?.name, segment: voice.segment, upload: voice }));
-    const thread = [...logged, ...uploading];
-    const edits = new Map(), statuses = new Map(), reactions = new Map(), approved = new Set();
-    for (const entry of board.log) {
-      if (entry.op === "edit") edits.set(entry.id, entry.text);
-      if (entry.op === "edit" && entry.status) statuses.set(entry.id, entry.status);
-      if ((entry.op === "reaction" || entry.op === "react") && ids.has(entry.ref)) reactions.set(entry.ref, `${reactions.get(entry.ref) ?? ""}${entry.text}`);
-      if (entry.op === "approve") approved.add(entry.ref);
-    }
-    const isAtBottom = sheet.lines.scrollHeight - sheet.lines.scrollTop - sheet.lines.clientHeight < 8;
-    sheet.address.textContent = `On ${part}`;
-    sheet.state.textContent = isSettled ? "Settled" : "";
-    sheet.lines.replaceChildren(...thread.map((entry) => line(entry, edits, reactions, approved, statuses)));
-    if (isAtBottom) sheet.lines.scrollTop = sheet.lines.scrollHeight;
-    sheet.typing.hidden = !(board.typing && thread.at(-1)?.dir === "in");
-    sheet.quote.textContent = quotes.get(part) ?? "";
-    sheet.quoteRow.hidden = !quotes.has(part);
-    sheet.text.disabled = board.closed;
-    sheet.send.disabled = board.closed || isSending;
-    sheet.text.placeholder = board.closed ? "This board is read-only." : `About ${part}…`;
-  }
-
-  /** A voice note's text: its transcript once heard, else where it is on its way. */
-  function voiceText(entry, edits, statuses) {
-    const label = `🎤 ${entry.segment ? `Part ${entry.segment}: ` : ""}`;
-    if (entry.upload) {
-      const reason = entry.upload.status === "not_sent" && `Not sent: ${REASONS[entry.upload.error] ?? entry.upload.error}.`;
-      return label + (reason || VOICE_STATES[entry.upload.status]);
-    }
-    const status = statuses.get(entry.id) ?? entry.status ?? "transcribing";
-    return label + (status === "heard" ? edits.get(entry.id) : VOICE_STATES[status]);
-  }
-
-  function line(entry, edits, reactions, approved, statuses) {
-    const who = entry.dir === "out" ? "Agent" : entry.from === board.viewer?.name ? "You" : entry.from;
-    const text = entry.op === "voice" ? voiceText(entry, edits, statuses) : {
-      approve: `Approved message ${entry.ref}.`, tap: `Tapped “${entry.text}”.`,
-      page: entry.text || "Updated the page.", message: edits.get(entry.id) ?? entry.text,
-    }[entry.op] ?? entry.text;
-    const isAnswer = entry.dir === "out" && entry.op === "message";
-    const mark = isAnswer && (approved.has(entry.id) ? el("span", { class: "approved" }, "Approved ✓")
-      : !board.closed && el("button", { type: "button", "data-approve": String(entry.id), ...(approving.has(entry.id) && { disabled: "" }) },
-        approving.has(entry.id) ? "Approving…" : "Approve"));
-    const head = isAnswer ? el("span", { class: "head" }, el("span", { class: "who" }, who), playButton(entry.id)) : el("span", { class: "who" }, who);
-    return el("li", { class: entry.dir }, head, el("span", { class: "text" }, text),
-      reactions.has(entry.id) && el("span", { class: "reactions" }, reactions.get(entry.id)), mark);
-  }
-
-  /** An answer's play button, as the web chat's: ▶ reads it aloud, … while C3 makes the audio, ⏸ while it plays (a tap stops). */
-  function playButton(id) {
-    const state = speeches.get(id);
-    const [glyph, label] = { loading: ["…", "Preparing spoken reply"], playing: ["⏸", "Stop spoken reply"] }[state] ?? ["▶", "Play spoken reply"];
-    return el("button", { type: "button", class: "play", "data-speak": String(id), "aria-label": label, "aria-busy": String(state === "loading") }, glyph);
   }
 
   const FOLD_CSS = "content:'✓ Settled · tap for its thread';display:block;width:fit-content;margin:0 0 .5em;padding:.2em .6em;" +
     "border-radius:6px;font:600 13px/1.4 system-ui,-apple-system,sans-serif;color:#1a7f37;background:#1a7f3718";
-  const SHEET_CSS = `
-:host { all: initial; --ink: #1f2328; --muted: #59636e; --paper: #fff; --soft: #f0f2f4; --mine: #ddf4ff; --line: #d1d9e0;
-  --accent: #0969da; --good: #1a7f37; --bad: #cf222e; }
-@media (prefers-color-scheme: dark) { :host { --ink: #e6edf3; --muted: #9198a1; --paper: #151b23; --soft: #212830;
-  --mine: #0c2d6b; --line: #3d444d; --accent: #4493f8; --good: #3fb950; --bad: #f85149; } }
-:host([hidden]), [hidden] { display: none !important; }
-.sheet { position: fixed; left: 0; right: 0; bottom: 0; z-index: 2147483647; box-sizing: border-box; max-width: 640px;
-  max-height: 70vh; margin: 0 auto; display: flex; flex-direction: column; gap: 8px;
-  padding: 12px 16px calc(12px + env(safe-area-inset-bottom)); border: 1px solid var(--line); border-bottom: 0;
-  border-radius: 14px 14px 0 0; background: var(--paper); color: var(--ink);
-  font: 15px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; box-shadow: 0 -6px 24px rgb(0 0 0 / 20%); }
-header { display: flex; align-items: center; gap: 10px; }
-.state { color: var(--good); font-weight: 600; }
-.close { margin-left: auto; }
-.lines { flex: 1 1 auto; min-height: 0; overflow-y: auto; margin: 0; padding: 0; list-style: none; display: flex;
-  flex-direction: column; gap: 6px; }
-li { max-width: 85%; padding: 6px 10px; border-radius: 10px; background: var(--soft); white-space: pre-wrap; overflow-wrap: anywhere; }
-li.in { align-self: flex-end; background: var(--mine); }
-.who { display: block; font-size: 12px; color: var(--muted); }
-.head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-li .play { flex: none; width: 32px; min-height: 32px; height: 32px; margin: -4px -6px 0 0; padding: 0; border-radius: 50%; font-size: 13px; line-height: 1; }
-.reactions { margin-left: 6px; }
-.approved { display: block; margin-top: 4px; color: var(--good); font-weight: 600; font-size: 13px; }
-li button { display: block; margin-top: 6px; }
-button { font: inherit; min-height: 36px; padding: 4px 12px; border: 1px solid var(--line); border-radius: 8px;
-  background: var(--paper); color: var(--ink); cursor: pointer; }
-.send { flex: none; display: grid; place-items: center; width: 44px; height: 44px; padding: 0; border-radius: 50%;
-  background: var(--accent); border-color: var(--accent); color: #fff; }
-.send svg { width: 22px; height: 22px; fill: currentColor; }
-.send.blank { visibility: hidden; }
-button:disabled { opacity: .55; cursor: default; }
-.typing { margin: 0; display: flex; align-items: center; gap: 8px; color: var(--muted); }
-.spinner { width: 14px; height: 14px; box-sizing: border-box; border: 2px solid var(--line); border-top-color: var(--accent);
-  border-radius: 50%; animation: spin .8s linear infinite; }
-@keyframes spin { to { transform: rotate(360deg); } }
-.error { margin: 0; color: var(--bad); }
-.error:empty { display: none; }
-.quote-row { display: flex; align-items: flex-start; gap: 8px; }
-.quote { flex: 1; min-width: 0; max-height: 4.5em; overflow: auto; margin: 0; padding: 2px 10px; border-left: 3px solid var(--accent);
-  color: var(--muted); white-space: pre-wrap; }
-.compose { display: flex; align-items: flex-end; gap: 8px; }
-textarea { flex: 1; min-width: 0; box-sizing: border-box; resize: vertical; padding: 8px 10px; border: 1px solid var(--line);
-  border-radius: 8px; background: var(--paper); color: var(--ink); font: inherit; font-size: 16px; }
-`;
-
-  const SEND_ICON = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M11 20V7.83l-5.6 5.6L4 12l8-8 8 8-1.4 1.43-5.6-5.6V20h-2Z"/></svg>';
 
   window.c3 = Object.freeze({
-    ready, comment, approve, on, threads, focus, speak,
+    ready, comment, approve, on, threads, chat, focus, speak,
     tap: (part, value, { ref } = {}) => act({ op: "tap", part, value, ref }),
     react: (ref, emoji) => act({ op: "react", ref, emoji }),
     keep: (value) => request("keep", { value: JSON.stringify(value) }),

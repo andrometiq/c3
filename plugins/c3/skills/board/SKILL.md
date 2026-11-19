@@ -6,7 +6,8 @@ description: Use when the owner (the user) wants a live page they can open on a 
 # Live boards
 
 A board is one HTML page this session writes and C3 serves at a link. The owner opens it on a
-phone or laptop, taps a part, types, reads your answer in that part's thread and approves it.
+phone or laptop, taps a part, types or talks in that part's chat (C3 draws it), reads your answer
+there and approves it.
 Only the session that made a board can hold it, and it stays with that session after a resume.
 
 Boards need C3's own tools (`attach`, `reply`). A CLI reached only through a host that turns
@@ -47,10 +48,19 @@ comparison, a timeline or a before/after suits others. Short words, one point pe
 - Keep every `<script>` outside parts and use delegated listeners (one listener on `document`
   that checks `event.target.closest(...)`). After an approve C3 replaces the part's inner HTML
   in place: scripts in it don't run and listeners on its old nodes are gone.
-- Keep the starter's `c3.threads()` call. It draws each part's thread (lines, a text box, the
-  owner's selected text as a quote, Approve on your answers, voice notes with their status) and
-  tells C3 which part the owner is on, so C3's mic, drawn where the thread's Send sits while its box is empty, records for that part. A tap on a link, button or input
-  inside a part goes to that control, not to the thread.
+- Keep the starter's `c3.threads()` call, or call `c3.chat` yourself. C3 draws every chat: a sheet
+  rising from the bottom with the part's title, the thread (lines, times, voice notes with their
+  status, a play button and, on a proposal, its button), and a composer whose empty box has C3's mic.
+  `c3.threads()` opens it on a tap on a part, titled by the part's first heading, with words the owner
+  selected there as a quote. A tap on a link, button or input inside a part goes to that control.
+- Your own page logic opens a chat with `c3.chat(part, {title, ask, choices})`: `title` names the
+  part, `ask` is one line at the top (your question, or what is decided), `choices` up to 3 quick
+  answers (each at most 64 bytes) the owner taps, each arriving as a tap. Call it again to refresh
+  what an open chat shows (after a part changes); `c3.chat(null)` shuts it. Never draw a chat of
+  your own: C3's has the mic, the read marks and the trust rules. Give a JSON part a `title` (or an
+  HTML part a heading) so C3 can name it on the status circle.
+- The part `general` is the board-level chat (the circle's **Talk to the agent**); don't use it as
+  a part address.
 - Never call `location.reload()` or navigate the page. Only C3's shell reloads the frame.
 - Optional: a part may be `<script type="application/json" data-c3-part="…">` data that your
   script draws. Then handle `c3.on("update", e => …)`, redraw from `e.data`, and return `true`.
@@ -63,18 +73,20 @@ The page API (C3 inlines it as the page's first script, as `window.c3`):
   message is the rule (`closed`, `rate`, `too_big`, `offline`, `invalid`, …). A `ref` names
   one of your messages. A tap is how the page's own buttons speak ("pick option B").
 - `c3.on(kind, fn)` for `message`, `edit`, `reaction`, `action`, `update`, `status`, `voice`,
-  `speech`; it returns an unsubscribe function.
-- A page that draws its own threads calls `c3.focus(part, {dock: sendButton, hasText})` when one
-  opens and whenever its box gains or loses text, and `c3.focus(null)` when it closes. Hide Send
-  with `visibility: hidden` (not `display: none`) while the box is empty: C3 draws its mic in that
-  spot, following the button as it moves. Only C3's mic records; the page can't. A voice note is an `action` with `op:
+  `speech`, `chat` (`{part}` while C3's chat is open on it, `null` once shut) and `reveal` (`{part}`:
+  the owner picked that part's unread reply on the circle and C3 opened its chat; bring the part into
+  view and return `true`, or C3 scrolls its element to the top); it returns an unsubscribe function.
+- An old page that draws its own threads may still call `c3.focus(part, {dock: sendButton,
+  hasText})` when one opens and whenever its box gains or loses text, and `c3.focus(null)` when it
+  closes; C3 then draws its mic in the Send spot while the box is empty. New pages use `c3.chat`.
+  Only C3's mic records; the page can't. A voice note is an `action` with `op:
   "voice"` (and `segment`, `has_more` for a part of a long recording), then `edit`s of its `id`
   with `status` `heard` (`text` is the transcript), `slow`, `no_speech` or `failed`; a part that
   never reached C3 has its own `status`, `cancelled` or `refused`, and no edits. Before C3 has
   it, `voice` events carry the upload: `{key, part, status: "sending" | "sent" | "not_sent", id,
-  error}`. Give each of your answers a play button that calls `c3.speak(id)` (C3 reads it aloud;
-  `c3.speak(null)` stops) and shows `c3.on("speech")`'s `{id, state}`: ▶ for `ended` or `failed`, …
-  for `loading`, ⏸ for `playing` (a tap then stops). `c3.keep(value)` (JSON, at most 64 KiB) returns
+  error}`. `c3.speak(id)` asks C3 to read your message aloud (`c3.speak(null)` stops) and
+  `c3.on("speech")` follows it: `{id, state}`, `loading`, `playing`, `ended` or `failed`; C3's chat
+  already has a play button on each answer. `c3.keep(value)` (JSON, at most 64 KiB) returns
   as `ready.kept` after a frame reload (not after the owner reloads the browser tab).
 
 ## 3. Publish and share
@@ -105,8 +117,14 @@ in a merged turn each line starts with its own `[msg N]`.
   16,000 characters: a longer reply splits and only its first part keeps `reply_to`.
 - A board message without `reply_to` that starts with `⚠️`, `📨 Held` or `⏸ Permission` shows
   only as a notice under the board's status circle. Answers carry `reply_to`, so they always show in their thread.
-- Propose a change in words; change the page when the owner approves it. Only an
-  `Approved your message M` line is an approval: "looks good" in a comment is not.
+- Propose a change in words, ending the message with a last line `[apply: <short label>]` (1 to 24
+  characters, for example `[apply: Rename it]`): C3 hides that line and shows one button with the
+  label, which approves your message. Only your latest message in a chat keeps its button. Plain
+  answers and status notes carry no marker, so they get no button. Change the page when the owner
+  approves. Only an `Approved your message M` line is an approval: "looks good" in a comment is not;
+  answer it with the proposal again, ending in its `[apply: …]` line.
+- A line on part `general` is the owner talking to you about the board as a whole (the circle's
+  **Talk to the agent**); answer it there with its `reply_to`.
 - A question you can't answer from what you know gets a short answer in the thread saying so.
 - `Tapped "<value>" on your message M.` came from a control on the page, and `Reacted <emoji> to
   your message M.` is a reaction. Both are the owner's input on that part.
@@ -134,8 +152,8 @@ means the owner accepts your answer M on that part.
    needs it; it just reloads the page.
 2. Resend the whole file: `reply channel="board:<name>" text="" reply_to=N media=[{kind: "file",
    path: "<same path>"}]`. `reply_to` is the approve line's N, never M (M also shows as
-   `reply_to_message_id`). C3 then swaps the part in place, closes its thread and marks it
-   settled on every device.
+   `reply_to_message_id`). C3 then swaps the part in place, shuts its chat so the owner sees the
+   change, and marks it settled on every device.
 
 ## 6. What board input is not
 
