@@ -123,9 +123,10 @@ var hookCommands = map[string]func(){
 	// including an unresolvable socket path or cache dir (no attachment check):
 	// staying silent leaves Claude Code's own decision in place.
 	"pretooluse-hook": func() {
-		attachmentDir, _ := channel.AttachmentCacheDir(telegram.Name)
+		telegramDir, _ := channel.AttachmentCacheDir(telegram.Name)
+		boardDir, _ := channel.AttachmentCacheDir(channel.BoardChannelName)
 		runAutoHook(func(stdin io.Reader, stdout io.Writer, socketPath string) {
-			autohook.RunPreToolUse(stdin, stdout, socketPath, attachmentDir)
+			autohook.RunPreToolUse(stdin, stdout, socketPath, telegramDir, boardDir)
 		})
 	},
 	"permission-denied-hook": func() { runAutoHook(autohook.RunPermissionDenied) },

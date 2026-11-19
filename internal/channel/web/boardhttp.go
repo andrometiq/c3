@@ -2,6 +2,7 @@ package web
 
 import (
 	"bytes"
+	"cmp"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"io/fs"
 	"mime"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -40,6 +42,16 @@ const (
 	// refused the part's upload.
 	voiceUnsentCancelled = "cancelled"
 	voiceUnsentRefused   = "refused"
+	// A file from C3's chat: at most what a Telegram bot can fetch, so the agent
+	// meets one ceiling on both routes. Its bytes live in boardFilesDirectory.
+	boardFileLimit      = 20 << 20
+	boardFileNameRunes  = 120
+	boardFilesDirectory = "board-files"
+	boardFileMIMEBytes  = 127 // a media type's longest name (RFC 6838)
+	// A caption travels as a header, which a fronting proxy refuses when large.
+	boardFileCaptionBytes = 6 << 10
+	// The session's line for a reply quotes this much of the message it answers.
+	boardReplySnippetRunes = 80
 )
 
 // boardAct is the body of POST /board/<name>/act, decoded strictly: a viewer
@@ -63,15 +75,32 @@ type boardAct struct {
 	HasMore   bool   `json:"-"`
 	Recording string `json:"-"`
 	Unsent    string `json:"-"`
+	// A file act's fields from its headers and its stored bytes' id; not from JSON.
+	Name   string `json:"-"`
+	MIME   string `json:"-"`
+	Size   int64  `json:"-"`
+	FileID string `json:"-"`
+	// RefText is the start of the message a reply answers, as admit read it,
+	// and IsRefFromPage tells that message came from the page's script.
+	RefText       string `json:"-"`
+	IsRefFromPage bool   `json:"-"`
 }
 
-// boardOpFields lists, per op, the fields it needs and the ones it may add.
-var boardOpFields = map[string]struct{ required, optional []string }{
-	"comment": {required: []string{"part", "text"}, optional: []string{"quote"}},
+// boardFields are the fields an op needs and the ones it may add.
+type boardFields struct{ required, optional []string }
+
+// boardOpFields are the JSON ops'; a file comes only as its own request.
+var boardOpFields = map[string]boardFields{
+	"comment": {required: []string{"part", "text"}, optional: []string{"quote", "ref"}},
 	"approve": {required: []string{"ref"}, optional: []string{"part", "note"}},
 	"tap":     {required: []string{"part", "value"}, optional: []string{"ref"}},
 	"react":   {required: []string{"ref", "emoji"}},
 }
+
+var boardFileFields = boardFields{required: []string{"part"}, optional: []string{"text", "ref"}}
+
+// boardReplyOps' ref is the message they answer: any on the board.
+var boardReplyOps = map[string]bool{"comment": true, "voice": true, "file": true}
 
 var boardLintRules = []struct {
 	pattern *regexp.Regexp
@@ -318,12 +347,7 @@ func (c *Channel) handleBoardAct(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
 	var act boardAct
 	if err := decodeJSONLimit(w, r, &act, boardActBodyLimit); err != nil {
-		var tooLarge *http.MaxBytesError
-		if errors.As(err, &tooLarge) {
-			writeBoardError(w, http.StatusRequestEntityTooLarge, "too_big")
-		} else {
-			writeBoardError(w, http.StatusBadRequest, "invalid")
-		}
+		writeBodyError(w, err)
 		return
 	}
 	if status, rule := act.check(); status != 0 {
@@ -331,6 +355,17 @@ func (c *Channel) handleBoardAct(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	content, _ := json.Marshal(act)
+	route, key, number, ok := c.admitAct(w, name, viewer, act)
+	if !ok {
+		return
+	}
+	messageID, status, err := c.acceptInbound(route, key, viewer.sender, string(content))
+	c.board.refreshWaiting(number)
+	c.writeActOutcome(w, name, messageID, status, err)
+}
+
+// admitAct runs admit on a checked act: its route, or the refusal written.
+func (c *Channel) admitAct(w http.ResponseWriter, name string, viewer boardViewer, act boardAct) (inboundRoute, clientMessageKey, int64, bool) {
 	key := clientMessageKey{scope: name, sessionID: viewer.id, clientID: act.ClientID}
 	host, _ := c.board.boardHost()
 	admitted, number, retryAfter, err := c.board.admit(name, act, !c.hasClientMessage(c.boardClientMessages, key))
@@ -342,13 +377,23 @@ func (c *Channel) handleBoardAct(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
 		}
 		writeBoardStoreError(w, err)
-		return
+		return inboundRoute{}, key, number, false
 	}
-	messageID, status, err := c.acceptInbound(c.boardInbound(host, name, number, admitted), key, viewer.sender, string(content))
-	c.board.refreshWaiting(number)
+	return c.boardInbound(host, name, number, admitted), key, number, true
+}
+
+// writeActOutcome answers an admitted act: 202 {id}, or why C3 didn't take it.
+func (c *Channel) writeActOutcome(w http.ResponseWriter, name string, messageID int64, status int, err error) {
 	switch {
 	case errors.Is(err, errClientIDConflict):
 		writeBoardError(w, status, "conflict")
+	case errors.Is(err, errBoardClosed), errors.Is(err, errNoBoard), errors.Is(err, errBoardsStopped):
+		writeBoardStoreError(w, err) // made read-only (or gone) since it was admitted
+	case errors.Is(err, errVoiceDecode):
+		writeBoardError(w, http.StatusUnprocessableEntity, "unreadable")
+	case err != nil:
+		c.board.logf("board: store %q act: %v", name, err)
+		writeBoardError(w, http.StatusInternalServerError, "unavailable")
 	case status == http.StatusForbidden:
 		writeBoardError(w, status, "forbidden")
 	case status == http.StatusServiceUnavailable:
@@ -358,6 +403,16 @@ func (c *Channel) handleBoardAct(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(status)
 		_ = json.NewEncoder(w).Encode(map[string]int64{"id": messageID})
+	}
+}
+
+// writeBodyError refuses a body cut short: too_big past its limit, else invalid.
+func writeBodyError(w http.ResponseWriter, err error) {
+	var tooLarge *http.MaxBytesError
+	if errors.As(err, &tooLarge) {
+		writeBoardError(w, http.StatusRequestEntityTooLarge, "too_big")
+	} else {
+		writeBoardError(w, http.StatusBadRequest, "invalid")
 	}
 }
 
@@ -390,12 +445,7 @@ func (c *Channel) handleBoardVoice(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, voiceBodyLimit)
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
-		var tooLarge *http.MaxBytesError
-		if errors.As(err, &tooLarge) {
-			writeBoardError(w, http.StatusRequestEntityTooLarge, "too_big")
-		} else {
-			writeBoardError(w, http.StatusBadRequest, "invalid")
-		}
+		writeBodyError(w, err)
 		return
 	}
 	if act.Unsent != "" && len(body) != 0 {
@@ -403,20 +453,10 @@ func (c *Channel) handleBoardVoice(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	name := r.PathValue("name")
-	key := clientMessageKey{scope: name, sessionID: viewer.id, clientID: act.ClientID}
-	host, _ := c.board.boardHost()
-	admitted, number, retryAfter, err := c.board.admit(name, act, !c.hasClientMessage(c.boardClientMessages, key))
-	if err == nil && host == nil {
-		err = errBoardsStopped
-	}
-	if err != nil {
-		if retryAfter > 0 {
-			w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
-		}
-		writeBoardStoreError(w, err)
+	route, key, number, ok := c.admitAct(w, name, viewer, act)
+	if !ok {
 		return
 	}
-	route := c.boardInbound(host, name, number, admitted)
 	var messageID int64
 	var status int
 	if act.Unsent != "" {
@@ -426,38 +466,133 @@ func (c *Channel) handleBoardVoice(w http.ResponseWriter, r *http.Request) {
 			func(inbound *c3types.Inbound, _ float64) { route.echo(inbound, act.ClientID) })
 	}
 	c.board.refreshWaiting(number)
-	switch {
-	case errors.Is(err, errClientIDConflict):
-		writeBoardError(w, status, "conflict")
-	case errors.Is(err, errBoardClosed), errors.Is(err, errNoBoard), errors.Is(err, errBoardsStopped):
-		writeBoardStoreError(w, err) // made read-only (or gone) while the audio was transcoded
-	case errors.Is(err, errVoiceDecode):
-		writeBoardError(w, http.StatusUnprocessableEntity, "unreadable")
-	case err != nil:
-		c.board.logf("board: store %q voice act: %v", name, err)
-		writeBoardError(w, http.StatusInternalServerError, "unavailable")
-	case status == http.StatusForbidden:
-		writeBoardError(w, status, "forbidden")
-	case status == http.StatusServiceUnavailable:
-		w.Header().Set("Retry-After", boardRetryAfterBusy)
-		writeBoardError(w, status, "offline")
-	default:
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(status)
-		_ = json.NewEncoder(w).Encode(map[string]int64{"id": messageID})
+	c.writeActOutcome(w, name, messageID, status, err)
+}
+
+// handleBoardFile takes a file the owner picked in C3's chat under a voice act's
+// checks. It is stored by an id from its contents (a retry stores it again in
+// place) and reaches the session as an attachment of the act's line.
+func (c *Channel) handleBoardFile(w http.ResponseWriter, r *http.Request) {
+	extendVoiceDeadline(w)
+	if !c.sameOrigin(r) {
+		writeBoardError(w, http.StatusForbidden, "forbidden")
+		return
 	}
+	viewer, ok := c.boardRequest(w, r, true)
+	if !ok {
+		return
+	}
+	act, status, rule := fileAct(r.Header)
+	if status != 0 {
+		writeBoardError(w, status, rule)
+		return
+	}
+	name := r.PathValue("name")
+	temporary, fileID, size, err := c.receiveBoardFile(http.MaxBytesReader(w, r.Body, boardFileLimit))
+	if err != nil {
+		if errors.As(err, new(*http.MaxBytesError)) {
+			writeBodyError(w, err)
+		} else {
+			c.writeActOutcome(w, name, 0, 0, err)
+		}
+		return
+	}
+	defer os.Remove(temporary) // already gone once kept
+	act.FileID, act.Size = fileID, size
+	if c.isClientIDReused(clientMessageKey{scope: name, sessionID: viewer.id, clientID: act.ClientID}, act.fileFields()) {
+		writeBoardError(w, http.StatusConflict, "conflict")
+		return
+	}
+	route, key, number, ok := c.admitAct(w, name, viewer, act)
+	if !ok {
+		return
+	}
+	var messageID int64
+	if err = c.keepBoardFile(temporary, fileID); err == nil {
+		err = route.checkOpen()
+	}
+	if err == nil {
+		messageID, status, err = c.acceptInbound(route, key, viewer.sender, act.fileFields())
+	}
+	c.board.refreshWaiting(number)
+	c.writeActOutcome(w, name, messageID, status, err)
+}
+
+// fileAct reads a file act's headers: X-Client-Id, X-Board-Part, X-File-Name,
+// X-Caption (both percent-encoded UTF-8; the caption checked as a comment's
+// text), X-Reply-To and the browser's Content-Type, kept only when valid.
+func fileAct(header http.Header) (boardAct, int, string) {
+	name, nameErr := url.PathUnescape(header.Get("X-File-Name"))
+	caption, captionErr := url.PathUnescape(header.Get("X-Caption"))
+	ref, isRefValid := replyRef(header)
+	mediaType, _, err := mime.ParseMediaType(header.Get("Content-Type"))
+	if err != nil || len(mediaType) > boardFileMIMEBytes {
+		mediaType = "application/octet-stream"
+	}
+	act := boardAct{Op: "file", ClientID: strings.TrimSpace(header.Get("X-Client-Id")), Part: header.Get("X-Board-Part"),
+		Text: caption, Ref: ref, Name: safeFileName(name), MIME: mediaType}
+	if len(header.Get("X-Caption")) > boardFileCaptionBytes {
+		return boardAct{}, http.StatusRequestEntityTooLarge, "too_big"
+	}
+	if nameErr != nil || captionErr != nil || !isRefValid || act.Name == "" {
+		return boardAct{}, http.StatusBadRequest, "invalid"
+	}
+	status, rule := act.checkFields(boardFileFields)
+	return act, status, rule
+}
+
+// safeFileName is the browser's name for a file, shown as text: non-graphic
+// runes and path separators replaced, clipped to boardFileNameRunes.
+func safeFileName(name string) string {
+	safe := []rune(strings.Map(func(r rune) rune {
+		if !unicode.IsGraphic(r) || r == '/' || r == '\\' {
+			return '_'
+		}
+		return r
+	}, strings.ToValidUTF8(name, "\uFFFD")))
+	return strings.TrimSpace(string(safe[:min(len(safe), boardFileNameRunes)]))
+}
+
+// fileFields are what a file act's client id retry must repeat.
+func (act boardAct) fileFields() string {
+	return fmt.Sprintf("file part=%s ref=%d name=%q mime=%q caption=%q id=%s", act.Part, act.Ref, act.Name, act.MIME, act.Text, act.FileID)
+}
+
+// isClientIDReused reports a client id the dedup window holds for other
+// content, which acceptInbound would refuse, so nothing of it is kept.
+func (c *Channel) isClientIDReused(key clientMessageKey, content string) bool {
+	c.clientMu.Lock()
+	record := c.boardClientMessages[key]
+	c.clientMu.Unlock()
+	if record == nil || c.now().Sub(record.created) >= clientMessageTTL {
+		return false
+	}
+	record.mu.Lock()
+	defer record.mu.Unlock()
+	return record.kind != "" || record.textHash != textHash(content)
+}
+
+// replyRef reads X-Reply-To, the message an upload answers: none or an id.
+func replyRef(header http.Header) (int64, bool) {
+	value := header.Get("X-Reply-To")
+	if value == "" {
+		return 0, true
+	}
+	ref, err := strconv.ParseInt(value, 10, 64)
+	return ref, err == nil && ref > 0 && strconv.FormatInt(ref, 10) == value
 }
 
 // voiceAct reads a voice act's fields from its headers: X-Client-Id,
 // X-Board-Part (the part the shell recorded for) and, for a part of a longer
 // recording, X-Voice-Segment (1, 2, …) with X-Voice-More: 1 on all but the
 // last, the optional X-Voice-Recording (one id on all of a recording's
-// parts), and X-Voice-Unsent (cancelled: the last part; refused: any) for a
-// part whose audio never reached C3.
+// parts), X-Voice-Unsent (cancelled: the last part; refused: any) for a
+// part whose audio never reached C3, and the optional X-Reply-To.
 func voiceAct(header http.Header) (boardAct, bool) {
+	ref, isRefValid := replyRef(header)
 	act := boardAct{Op: "voice", ClientID: strings.TrimSpace(header.Get("X-Client-Id")), Part: header.Get("X-Board-Part"),
-		Recording: strings.TrimSpace(header.Get("X-Voice-Recording"))}
-	if act.ClientID == "" || len(act.ClientID) > boardClientIDBytes || !channel.IsValidBoardPart(act.Part) ||
+		Recording: strings.TrimSpace(header.Get("X-Voice-Recording")), Ref: ref}
+	if !isRefValid || act.ClientID == "" || len(act.ClientID) > boardClientIDBytes || !channel.IsValidBoardPart(act.Part) ||
 		len(act.Recording) > boardClientIDBytes || strings.ContainsFunc(act.Recording, func(r rune) bool { return r < '!' || r > '~' }) {
 		return boardAct{}, false
 	}
@@ -487,14 +622,22 @@ func voiceAct(header http.Header) (boardAct, bool) {
 // voiceFields are a voice act's own fields, which a retry of its client id
 // must repeat along with the audio.
 func (act boardAct) voiceFields() string {
-	return fmt.Sprintf("voice part=%s segment=%d more=%t unsent=%s recording=%s", act.Part, act.Segment, act.HasMore, act.Unsent, act.Recording)
+	return fmt.Sprintf("voice part=%s segment=%d more=%t unsent=%s recording=%s ref=%d", act.Part, act.Segment, act.HasMore, act.Unsent, act.Recording, act.Ref)
 }
 
-// check validates a decoded act: the op's fields and only those, each in its
-// rule and size, and no line the session would read as C3's own.
+// check validates a decoded JSON act by its op's fields.
 func (act boardAct) check() (int, string) {
 	fields, known := boardOpFields[act.Op]
-	if !known || act.ClientID == "" || len(act.ClientID) > boardClientIDBytes {
+	if !known || act.FromPage && boardReplyOps[act.Op] && act.Ref != 0 { // the page never answers a message
+		return http.StatusBadRequest, "invalid"
+	}
+	return act.checkFields(fields)
+}
+
+// checkFields validates an act: its op's fields and only those, each in its
+// rule and size, and no line the session would read as C3's own.
+func (act boardAct) checkFields(fields boardFields) (int, string) {
+	if act.ClientID == "" || len(act.ClientID) > boardClientIDBytes {
 		return http.StatusBadRequest, "invalid"
 	}
 	present := map[string]bool{
@@ -530,8 +673,9 @@ func (act boardAct) check() (int, string) {
 }
 
 // admit applies the board's own rules to an act: open, a ref naming one of
-// the session's messages (whose part a missing part takes), and the rate,
-// which charges a client_id once: its retries and replays are free.
+// the session's messages (whose part a missing part takes; a reply may answer
+// any message on the board, and the session's line quotes its start), and the
+// rate, which charges a client_id once: its retries and replays are free.
 func (b *boardChannel) admit(name string, act boardAct, isNewClientID bool) (boardAct, int64, int, error) {
 	var number int64
 	retryAfter := 0
@@ -542,11 +686,14 @@ func (b *boardChannel) admit(name string, act boardAct, isNewClientID bool) (boa
 		}
 		if act.Ref > 0 {
 			answered, ok := board.entry(act.Ref)
-			if !ok || answered.Dir != "out" {
+			if !ok || answered.Dir != "out" && !boardReplyOps[act.Op] {
 				return errBoardRef
 			}
 			if act.Part == "" {
 				act.Part = answered.Part
+			}
+			if boardReplyOps[act.Op] {
+				act.RefText, act.IsRefFromPage = board.replySnippet(answered), answered.FromPage
 			}
 		}
 		if !isNewClientID {
@@ -559,6 +706,25 @@ func (b *boardChannel) admit(name string, act boardAct, isNewClientID bool) (boa
 	})
 	return act, number, retryAfter, err
 }
+
+// replySnippet is the start of message answered as it now reads (its latest
+// edit or transcript; a file's name when it has no caption), on one line.
+func (board *boardState) replySnippet(answered boardLogEntry) string {
+	text := cmp.Or(answered.Text, answered.Name)
+	for _, entry := range board.log {
+		if entry.ID == answered.ID && entry.Op == "edit" && (entry.Status == "" || entry.Status == c3types.VoiceStatusHeard) {
+			text = entry.Text
+		}
+	}
+	snippet := []rune(boardSnippetBrackets.Replace(strings.Join(strings.Fields(text), " ")))
+	if len(snippet) > boardReplySnippetRunes {
+		return string(snippet[:boardReplySnippetRunes]) + "…"
+	}
+	return string(snippet)
+}
+
+// boardSnippetBrackets keep a quoted message from reading as a C3 header.
+var boardSnippetBrackets = strings.NewReplacer("[", "(", "]", ")")
 
 // chargeMinute counts one use at now in uses, which keeps the last minute's,
 // unless limit are there already: then it counts nothing and returns the
@@ -599,11 +765,19 @@ func (c *Channel) boardInbound(host channel.Host, name string, number int64, act
 			if act.Ref > 0 {
 				inbound.ReplyTo = &c3types.ReplyContext{MessageID: act.Ref}
 			}
+			if act.FileID != "" {
+				kind := "document"
+				if strings.HasPrefix(act.MIME, "image/") {
+					kind = "photo"
+				}
+				inbound.Attachments = []c3types.Attachment{{Kind: kind, FileID: act.FileID, MIME: act.MIME, Size: act.Size, Name: act.Name}}
+			}
 		},
 		checkOpen: func() error { return c.board.withOpenBoard(number, func(*boardState) error { return nil }) },
 		echo: func(inbound *c3types.Inbound, _ string) {
 			entry := boardLogEntry{Dir: "in", ID: inbound.MessageID, Op: act.Op, Part: act.Part, Text: act.logText(), Ref: act.Ref, From: inbound.Sender.Username,
-				Segment: act.Segment, HasMore: act.HasMore, Recording: act.Recording, Status: act.Unsent, FromPage: act.FromPage}
+				Segment: act.Segment, HasMore: act.HasMore, Recording: act.Recording, Status: act.Unsent, FromPage: act.FromPage,
+				Name: act.Name, MIME: act.MIME, Size: act.Size}
 			if err := c.board.withBoard(number, func(board *boardState) error { return c.board.appendLocked(board, entry) }); err != nil {
 				c.board.logf("board: log %q action %d: %v", name, inbound.MessageID, err)
 			}
@@ -621,13 +795,23 @@ func boardLine(name string, act boardAct, messageID int64) string {
 	if act.Part != "" {
 		header += " · " + act.Part
 	}
-	header += fmt.Sprintf(" · msg %d]", messageID)
+	header += fmt.Sprintf(" · msg %d", messageID)
+	if boardReplyOps[act.Op] && act.Ref > 0 {
+		whose := "msg"
+		if act.IsRefFromPage {
+			whose = "the page's msg"
+		}
+		header += fmt.Sprintf(" · reply to %s %d %q", whose, act.Ref, act.RefText)
+	}
+	header += "]"
 	if act.FromPage {
 		header += " " + boardPageActNote
 	}
 	switch act.Op {
 	case "voice":
 		return header + " " + voiceLine(act)
+	case "file": // named first, as a voice note's line is: the stored path has no name
+		return strings.TrimSuffix(fmt.Sprintf("%s File %q:\n%s", header, act.Name, act.Text), "\n")
 	case "comment":
 		if act.Quote == "" {
 			return header + " " + act.Text
@@ -682,8 +866,10 @@ func (act boardAct) logText() string {
 		return act.Note
 	case "tap":
 		return act.Value
-	default:
+	case "react":
 		return act.Emoji
+	default:
+		return act.Text // a file's caption; a voice act has none
 	}
 }
 

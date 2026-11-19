@@ -639,31 +639,12 @@ func (b *Broker) handleToolCall(conn *ipc.Conn, stub *Stub, raw []byte) {
 		return
 	}
 
-	resultCh := make(chan OutboundResult, 1)
-	job := Job{Kind: JobOutbound, Outbound: &OutboundJob{
-		Tool:     req.Name,
-		Args:     forwardedArgs,
-		ResultCh: resultCh,
-	}}
-	if !b.Workers.Submit(route, job) {
-		_ = conn.WriteJSON(ipc.ToolResultMsg{
-			Op: ipc.OpToolResult, ID: req.ID,
-			Error: &ipc.ErrorPayload{Code: -32000, Message: "worker queue full or stopped"},
-		})
-		return
+	if _, isSelected := req.Args["channel"]; req.Name == "download_attachment" && !isSelected {
+		route = b.attachmentRoute(stub, route, argString(forwardedArgs, "file_id", ""))
 	}
-
-	var res OutboundResult
-	select {
-	case res = <-resultCh:
-	case <-time.After(workerJobTimeout):
-		// A3: an EXITED worker already replied errWorkerStopped fast; this fires only
-		// for a worker that genuinely STALLED. Return THIS tool call's clean error so
-		// the read loop is not wedged on the never-written resultCh.
-		_ = conn.WriteJSON(ipc.ToolResultMsg{
-			Op: ipc.OpToolResult, ID: req.ID,
-			Error: &ipc.ErrorPayload{Code: -32000, Message: fmt.Sprintf("worker did not respond within %s", workerJobTimeout)},
-		})
+	res, failure := b.runToolOn(route, req.Name, forwardedArgs)
+	if failure != "" {
+		_ = conn.WriteJSON(ipc.ToolResultMsg{Op: ipc.OpToolResult, ID: req.ID, Error: &ipc.ErrorPayload{Code: -32000, Message: failure}})
 		return
 	}
 	resp := ipc.ToolResultMsg{Op: ipc.OpToolResult, ID: req.ID}
@@ -676,6 +657,44 @@ func (b *Broker) handleToolCall(conn *ipc.Conn, stub *Stub, raw []byte) {
 		}
 	}
 	_ = conn.WriteJSON(resp)
+}
+
+// runToolOn submits one outbound tool job to route's worker and waits for it.
+// failure is the tool call's error when the worker never answered; otherwise the
+// result carries the channel's own outcome.
+func (b *Broker) runToolOn(route RouteKey, name string, args map[string]any) (OutboundResult, string) {
+	resultCh := make(chan OutboundResult, 1)
+	job := Job{Kind: JobOutbound, Outbound: &OutboundJob{Tool: name, Args: args, ResultCh: resultCh}}
+	if !b.Workers.Submit(route, job) {
+		return OutboundResult{}, "worker queue full or stopped"
+	}
+	select {
+	case res := <-resultCh:
+		return res, ""
+	case <-time.After(workerJobTimeout):
+		// A3: an EXITED worker already replied errWorkerStopped fast; this fires only
+		// for a worker that genuinely STALLED, so the read loop is not wedged.
+		return OutboundResult{}, fmt.Sprintf("worker did not respond within %s", workerJobTimeout)
+	}
+}
+
+// attachmentRoute is the route a download_attachment without a channel selector
+// goes to: a route the stub holds on another channel that mints fileID itself
+// (a board's file lives with its board), else output. The id never reaches a
+// channel that didn't mint it.
+func (b *Broker) attachmentRoute(stub *Stub, output RouteKey, fileID string) RouteKey {
+	routes, _ := stub.RouteSnapshot()
+	for _, route := range routes {
+		if route.Channel == output.Channel {
+			continue
+		}
+		ch, err := b.Channel(route.Channel)
+		owner, isOwner := ch.(channel.AttachmentOwner)
+		if holder, isHeld := b.Routes.Holder(route); err == nil && isOwner && isHeld && holder == stub && owner.OwnsAttachment(fileID) {
+			return route
+		}
+	}
+	return output
 }
 
 // handleAskRegister registers a blocking, correlated `ask`, sends the question to

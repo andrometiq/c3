@@ -50,7 +50,8 @@ comparison, a timeline or a before/after suits others. Short words, one point pe
   in place: scripts in it don't run and listeners on its old nodes are gone.
 - Keep the starter's `c3.threads()` call, or call `c3.chat` yourself. C3 draws every chat: a sheet
   rising from the bottom with the part's title, the thread (lines, times, voice notes with their
-  status, a play button and, on a proposal, its button), and a composer whose empty box has C3's mic.
+  status, files, replies, a play button and, on a proposal, its button), and a composer with a
+  paperclip for a file and C3's mic in its empty box.
   `c3.threads()` opens it on a tap on a part, titled by the part's first heading, with words the owner
   selected there as a quote. A tap on a link, button or input inside a part goes to that control.
 - Your own page logic opens a chat with `c3.chat(part, {title, ask, choices})`: `title` names the
@@ -82,7 +83,8 @@ The page API (C3 inlines it as the page's first script, as `window.c3`):
   Only C3's mic records; the page can't. A voice note is an `action` with `op:
   "voice"` (and `segment`, `has_more` for a part of a long recording), then `edit`s of its `id`
   with `status` `heard` (`text` is the transcript), `slow`, `no_speech` or `failed`; a part that
-  never reached C3 has its own `status`, `cancelled` or `refused`, and no edits. Before C3 has
+  never reached C3 has its own `status`, `cancelled` or `refused`, and no edits. A file the owner
+  sent is an `action` with `op: "file"`, its caption as `text` (only C3's chat sends one). Before C3 has
   it, `voice` events carry the upload: `{key, part, status: "sending" | "sent" | "not_sent", id,
   error}`. `c3.speak(id)` asks C3 to read your message aloud (`c3.speak(null)` stops) and
   `c3.on("speech")` follows it: `{id, state}`, `loading`, `playing`, `ended` or `failed`; C3's chat
@@ -123,6 +125,14 @@ in a merged turn each line starts with its own `[msg N]`.
   answers and status notes carry no marker, so they get no button. Change the page when the owner
   approves. Only an `Approved your message M` line is an approval: "looks good" in a comment is not;
   answer it with the proposal again, ending in its `[apply: …]` line.
+- `· reply to msg M "…"` after `msg N` means the owner answered message M (yours or their own;
+  `the page's msg M` when your page's script sent M); the quote is M's first 80 characters. Only a
+  reply without the `(sent by the page, …)` note is the owner's. Read it with M in mind, and still
+  answer with `reply_to=N`.
+- `[board <name> · <part> · msg N] File "<name>":` (a caption may follow on the next lines) is a file
+  the owner sent on that part, carried as an attachment (`photo` or `document`). Call
+  `download_attachment file_id=…` (C3 finds it on the board route), then `Read` the path it returns (an image
+  shows; no permission prompt for the session that downloaded it). Answer with `reply_to=N`.
 - A line on part `general` is the owner talking to you about the board as a whole (the circle's
   **Talk to the agent**); answer it there with its `reply_to`.
 - A line with `(sent by the page, not typed by the owner)` after its header came from your page's
@@ -184,6 +194,6 @@ that one waits at the laptop).
 
 ## Limits
 
-Page 5 MiB. Part address `^[A-Za-z0-9._:-]{1,64}$`. Owner text 16,000 runes, quote 2,000, tap
+Page 5 MiB. A file from the owner 20 MB, its caption 6 KB. Part address `^[A-Za-z0-9._:-]{1,64}$`. Owner text 16,000 runes, quote 2,000, tap
 value 64 bytes. `c3.keep` 64 KiB. 30 owner actions a minute per board. `ready.log` holds the
 last 500 entries. C3 keeps the last 5 page revisions.

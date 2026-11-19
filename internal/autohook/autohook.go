@@ -45,7 +45,7 @@ const (
 	allowOutput = `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow",` +
 		`"permissionDecisionReason":"C3: approved once on Telegram"}}` + "\n"
 	attachmentReadOutput = `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow",` +
-		`"permissionDecisionReason":"C3: Telegram attachment this session downloaded"}}` + "\n"
+		`"permissionDecisionReason":"C3: attachment this session downloaded"}}` + "\n"
 	retryOutput = `{"hookSpecificOutput":{"hookEventName":"PermissionDenied","retry":true}}` + "\n"
 )
 
@@ -67,10 +67,10 @@ func (in hookInput) callContext() ipc.AutoCallContext {
 
 // hookEnv is what a hook run depends on besides its streams; tests replace it.
 type hookEnv struct {
-	budget        time.Duration
-	now           func() time.Time
-	verifyPeer    func(net.Conn) error
-	attachmentDir string // the attachment cache a Read's file is checked against; "" for none
+	budget         time.Duration
+	now            func() time.Time
+	verifyPeer     func(net.Conn) error
+	attachmentDirs []string // the attachment caches a Read's file is checked against
 }
 
 func defaultEnv(budget time.Duration) hookEnv {
@@ -79,12 +79,12 @@ func defaultEnv(budget time.Duration) hookEnv {
 
 // RunPreToolUse prints the allow decision only when, within PreToolUseBudget,
 // the broker consumed an armed grant for this exact call or allowed a Read of
-// a file in attachmentDir that this session downloaded. Any other outcome, a
-// panic included, prints nothing.
-func RunPreToolUse(stdin io.Reader, stdout io.Writer, socketPath, attachmentDir string) {
+// a file in one of attachmentDirs that this session downloaded. Any other
+// outcome, a panic included, prints nothing.
+func RunPreToolUse(stdin io.Reader, stdout io.Writer, socketPath string, attachmentDirs ...string) {
 	defer func() { _ = recover() }()
 	env := defaultEnv(PreToolUseBudget)
-	env.attachmentDir = attachmentDir
+	env.attachmentDirs = attachmentDirs
 	runPreToolUse(stdin, stdout, socketPath, env)
 }
 
@@ -104,7 +104,7 @@ func runPreToolUse(stdin io.Reader, stdout io.Writer, socketPath string, env hoo
 		return
 	}
 	defer conn.close()
-	attachmentPath := attachmentReadPath(in, env.attachmentDir)
+	attachmentPath := attachmentReadPath(in, env.attachmentDirs)
 	request := ipc.GrantCheckReq{Op: ipc.OpGrantCheck, AutoCallContext: in.callContext(), ToolUseID: in.ToolUseID,
 		InputHash: inputHash, AttachmentPath: attachmentPath}
 	if conn.WriteJSONContext(conn.ctx, request) != nil {
@@ -136,22 +136,28 @@ func runPreToolUse(stdin io.Reader, stdout io.Writer, socketPath string, env hoo
 }
 
 // attachmentReadPath is the resolved file of a Read whose file_path is itself
-// a regular file (not a link) directly inside attachmentDir as configured, the
-// form download_attachment returns; else "". file_path is read by its exact
-// key, as the host reads it. This only decides what to ask: the broker checks
-// the path again and allows it only for the session that downloaded it.
-func attachmentReadPath(in hookInput, attachmentDir string) string {
+// a regular file (not a link) directly inside one of attachmentDirs as
+// configured, the form download_attachment returns; else "". file_path is
+// read by its exact key, as the host reads it. This only decides what to ask:
+// the broker checks the path again and allows it only for the session that
+// downloaded it.
+func attachmentReadPath(in hookInput, attachmentDirs []string) string {
 	var input map[string]json.RawMessage
 	var filePath string
-	if in.ToolName != "Read" || json.Unmarshal(in.ToolInput, &input) != nil ||
-		json.Unmarshal(input["file_path"], &filePath) != nil || filepath.Dir(filepath.Clean(filePath)) != filepath.Clean(attachmentDir) {
+	if in.ToolName != "Read" || json.Unmarshal(in.ToolInput, &input) != nil || json.Unmarshal(input["file_path"], &filePath) != nil {
 		return ""
 	}
-	if info, err := os.Lstat(filePath); err != nil || !info.Mode().IsRegular() {
-		return ""
+	for _, attachmentDir := range attachmentDirs {
+		if filepath.Dir(filepath.Clean(filePath)) != filepath.Clean(attachmentDir) {
+			continue
+		}
+		if info, err := os.Lstat(filePath); err != nil || !info.Mode().IsRegular() {
+			return ""
+		}
+		path, _ := channel.ResolveAttachment(attachmentDir, filePath)
+		return path
 	}
-	path, _ := channel.ResolveAttachment(attachmentDir, filePath)
-	return path
+	return ""
 }
 
 // RunPermissionDenied reports the denial and holds the connection through the
