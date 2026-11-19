@@ -72,8 +72,8 @@ board, the owner's own included; `the page's msg M` when the page's script sent 
 with that message's first 80 characters as it now reads, its brackets turned into parentheses. The
 page's own comment never answers a message. A file comes as an attachment (`photo` for an image, else
 `document`, with its MIME type, size and name) under a line naming it, its caption below.
-`download_attachment` with its `file_id` (and `channel="board:<name>"` unless the board is the
-session's output route) copies it to `$XDG_CACHE_HOME/c3/board/attachments/<id>.<ext>`, the extension
+`download_attachment` with its `file_id` (C3 asks the session's other held routes when its output
+route doesn't know the id) copies it to `$XDG_CACHE_HOME/c3/board/attachments/<id>.<ext>`, the extension
 from the type its bytes show, and the c3 plugin lets that session `Read` the copy without a prompt.
 
 ```text

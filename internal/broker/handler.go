@@ -639,32 +639,20 @@ func (b *Broker) handleToolCall(conn *ipc.Conn, stub *Stub, raw []byte) {
 		return
 	}
 
-	resultCh := make(chan OutboundResult, 1)
-	job := Job{Kind: JobOutbound, Outbound: &OutboundJob{
-		Tool:     req.Name,
-		Args:     forwardedArgs,
-		ResultCh: resultCh,
-	}}
-	if !b.Workers.Submit(route, job) {
-		_ = conn.WriteJSON(ipc.ToolResultMsg{
-			Op: ipc.OpToolResult, ID: req.ID,
-			Error: &ipc.ErrorPayload{Code: -32000, Message: "worker queue full or stopped"},
-		})
+	res, failure := b.runToolOn(route, req.Name, forwardedArgs)
+	if failure != "" {
+		_ = conn.WriteJSON(ipc.ToolResultMsg{Op: ipc.OpToolResult, ID: req.ID, Error: &ipc.ErrorPayload{Code: -32000, Message: failure}})
 		return
 	}
-
-	var res OutboundResult
-	select {
-	case res = <-resultCh:
-	case <-time.After(workerJobTimeout):
-		// A3: an EXITED worker already replied errWorkerStopped fast; this fires only
-		// for a worker that genuinely STALLED. Return THIS tool call's clean error so
-		// the read loop is not wedged on the never-written resultCh.
-		_ = conn.WriteJSON(ipc.ToolResultMsg{
-			Op: ipc.OpToolResult, ID: req.ID,
-			Error: &ipc.ErrorPayload{Code: -32000, Message: fmt.Sprintf("worker did not respond within %s", workerJobTimeout)},
-		})
-		return
+	if _, isSelected := req.Args["channel"]; req.Name == "download_attachment" && res.Err != nil && !isSelected {
+		// The file may have come on another held route (a board's file lives with its
+		// board): ask each other channel this session holds, in turn.
+		for _, other := range b.otherHeldChannels(stub, route) {
+			if retry, failure := b.runToolOn(other, req.Name, forwardedArgs); failure == "" && retry.Err == nil {
+				res, route = retry, other
+				break
+			}
+		}
 	}
 	resp := ipc.ToolResultMsg{Op: ipc.OpToolResult, ID: req.ID}
 	if res.Err != nil {
@@ -676,6 +664,40 @@ func (b *Broker) handleToolCall(conn *ipc.Conn, stub *Stub, raw []byte) {
 		}
 	}
 	_ = conn.WriteJSON(resp)
+}
+
+// runToolOn submits one outbound tool job to route's worker and waits for it.
+// failure is the tool call's error when the worker never answered; otherwise the
+// result carries the channel's own outcome.
+func (b *Broker) runToolOn(route RouteKey, name string, args map[string]any) (OutboundResult, string) {
+	resultCh := make(chan OutboundResult, 1)
+	job := Job{Kind: JobOutbound, Outbound: &OutboundJob{Tool: name, Args: args, ResultCh: resultCh}}
+	if !b.Workers.Submit(route, job) {
+		return OutboundResult{}, "worker queue full or stopped"
+	}
+	select {
+	case res := <-resultCh:
+		return res, ""
+	case <-time.After(workerJobTimeout):
+		// A3: an EXITED worker already replied errWorkerStopped fast; this fires only
+		// for a worker that genuinely STALLED, so the read loop is not wedged.
+		return OutboundResult{}, fmt.Sprintf("worker did not respond within %s", workerJobTimeout)
+	}
+}
+
+// otherHeldChannels is one route per channel the stub still holds, other than
+// route's own channel.
+func (b *Broker) otherHeldChannels(stub *Stub, route RouteKey) []RouteKey {
+	routes, _ := stub.RouteSnapshot()
+	seen := map[string]bool{route.Channel: true}
+	var others []RouteKey
+	for _, other := range routes {
+		if holder, isHeld := b.Routes.Holder(other); !seen[other.Channel] && isHeld && holder == stub {
+			seen[other.Channel] = true
+			others = append(others, other)
+		}
+	}
+	return others
 }
 
 // handleAskRegister registers a blocking, correlated `ask`, sends the question to

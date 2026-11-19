@@ -3,6 +3,7 @@ package broker
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -383,5 +384,54 @@ func TestBoardAttachmentReadAllowedOnlyForTheSessionThatDownloadedIt(t *testing.
 	}
 	if output := read("session-other-board", mine); output != "" {
 		t.Fatalf("another session's read of this session's board file printed %q", output)
+	}
+}
+
+// refusingDownloads is a channel that knows no attachment id.
+type refusingDownloads struct{ *autoTestChannel }
+
+func (refusingDownloads) DownloadAttachment(string) (string, error) {
+	return "", errors.New("unknown attachment id")
+}
+
+// A file sent on a board downloads without naming the board: when the output
+// route's channel doesn't know the id, C3 asks the session's other held
+// channels, and remembers the download on the route that had it.
+func TestDownloadAttachmentFindsTheFileOnAnotherHeldRoute(t *testing.T) {
+	f, _, _ := newAttachmentFixture(t)
+	boardDir, err := channel.AttachmentCacheDir(channel.BoardChannelName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(boardDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	boardFiles := &downloadChannel{autoTestChannel: f.ch}
+	f.b.chMu.Lock()
+	f.b.channels["telegram"] = &channelRegistration{Channel: refusingDownloads{f.ch}}
+	f.b.channels[channel.BoardChannelName] = &channelRegistration{Channel: boardFiles}
+	f.b.chMu.Unlock()
+	stub := f.b.Stubs.Register("claude", 4848, "/both", struct{}{})
+	stub.SetStableSessionID("session-both")
+	board := RouteKey{Channel: channel.BoardChannelName, ChatID: 3}
+	claimConfirmed(t, f.b, stub, board)
+	output := RouteKey{Channel: "telegram", ChatID: -100, TopicID: 4242, HasTopic: true}
+	claimConfirmed(t, f.b, stub, output)
+	if !stub.SetOutputRoute(output) {
+		t.Fatal("telegram output not set")
+	}
+	path, resolved := writeAttachment(t, boardDir, "0123456789abcdef0123456789abcdef.png")
+	boardFiles.path = path
+
+	resp := toolCallForTest(t, f.b, stub, "download", "download_attachment", map[string]any{"file_id": "0123456789abcdef0123456789abcdef"})
+	if resp.Error != nil || !strings.Contains(fmt.Sprint(resp.Result), path) {
+		t.Fatalf("download from the board with telegram as output: error %v, result %v; want %s", resp.Error, resp.Result, path)
+	}
+	if !isAttachmentAllow(attachmentCheck(t, f, "session-both", "Read", resolved)) {
+		t.Fatal("the board file found on the other route was not remembered for this session")
+	}
+	selected := toolCallForTest(t, f.b, stub, "download", "download_attachment", map[string]any{"file_id": "x", "channel": "telegram"})
+	if selected.Error == nil {
+		t.Fatal("a download naming its channel was retried on another route")
 	}
 }

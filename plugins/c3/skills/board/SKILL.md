@@ -131,7 +131,7 @@ in a merged turn each line starts with its own `[msg N]`.
   answer with `reply_to=N`.
 - `[board <name> · <part> · msg N] File "<name>":` (a caption may follow on the next lines) is a file
   the owner sent on that part, carried as an attachment (`photo` or `document`). Call
-  `download_attachment channel="board:<name>" file_id=…`, then `Read` the path it returns (an image
+  `download_attachment file_id=…` (C3 finds it on the board route), then `Read` the path it returns (an image
   shows; no permission prompt for the session that downloaded it). Answer with `reply_to=N`.
 - A line on part `general` is the owner talking to you about the board as a whole (the circle's
   **Talk to the agent**); answer it there with its `reply_to`.
