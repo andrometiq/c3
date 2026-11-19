@@ -42,6 +42,10 @@ type boardChannel struct {
 // C3 ends one with no further part after a part length and grace.
 const boardVoiceWait = 5*time.Minute + 2*time.Minute
 
+// The queue tells no one when the session takes a waiting action, so while some
+// wait for a live session the count is read again this often.
+const boardWaitingRecheck = 2 * time.Second
+
 // boardRecording is a recording waiting for its next part.
 type boardRecording struct {
 	part, from string
@@ -63,6 +67,8 @@ type boardState struct {
 	streams map[*boardStream]struct{}
 
 	recordings map[string]*boardRecording // waiting for a next part, by board part and the shell's recording id
+
+	isWaitingRechecked bool // a later read of the waiting count is scheduled
 }
 
 type boardStream struct {
@@ -443,7 +449,8 @@ func (b *boardChannel) SetRouteHolder(chatID int64, topicID *int64, holder *chan
 }
 
 // refreshWaiting reads the held count without the store lock (a BoardHost
-// call) and tells the board's viewers when it changed. Without a count (the
+// call) and tells the board's viewers when it changed; while some wait for a
+// live session it reads it again after boardWaitingRecheck. Without a count (the
 // durable queue is off for this run) the waiting count keeps its last value.
 func (b *boardChannel) refreshWaiting(number int64) {
 	_, extension := b.boardHost()
@@ -460,8 +467,21 @@ func (b *boardChannel) refreshWaiting(number int64) {
 			board.waiting = count
 			board.broadcast(board.statusEvent(false))
 		}
+		if count > 0 && board.holder != nil && !board.record.Closed && !board.isWaitingRechecked {
+			board.isWaitingRechecked = true
+			b.after(boardWaitingRecheck, func() { b.recheckWaiting(number) })
+		}
 		return nil
 	})
+}
+
+// recheckWaiting reads the count again: the session may have taken what waited.
+func (b *boardChannel) recheckWaiting(number int64) {
+	_ = b.withBoard(number, func(board *boardState) error {
+		board.isWaitingRechecked = false
+		return nil
+	})
+	b.refreshWaiting(number)
 }
 
 // CreateBoard implements channel.BoardKeeper. A taken name returns the stored

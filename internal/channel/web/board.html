@@ -6,18 +6,20 @@
 <meta name="color-scheme" content="light dark">
 <title>Board</title>
 <style>
-:root { --ink: #1f2328; --muted: #59636e; --paper: #fff; --line: #d1d9e0; --accent: #0969da; --live: #1a7f37; --ended: #9a6700;
-  --closed: #818b98; --shadow: 0 1px 6px rgb(0 0 0 / 18%); }
-@media (prefers-color-scheme: dark) { :root { --ink: #e6edf3; --muted: #9198a1; --paper: #151b23; --line: #3d444d; --accent: #4493f8;
-  --live: #3fb950; --ended: #d29922; --closed: #656c76; --shadow: 0 1px 8px rgb(0 0 0 / 60%); } }
+:root { --ink: #1f2328; --muted: #59636e; --paper: #fff; --soft: #f0f2f4; --mine: #ddf4ff; --line: #d1d9e0; --accent: #0969da;
+  --live: #1a7f37; --ended: #9a6700; --closed: #818b98; --shadow: 0 1px 6px rgb(0 0 0 / 18%); }
+@media (prefers-color-scheme: dark) { :root { --ink: #e6edf3; --muted: #9198a1; --paper: #151b23; --soft: #212830; --mine: #0c2d6b;
+  --line: #3d444d; --accent: #4493f8; --live: #3fb950; --ended: #d29922; --closed: #656c76; --shadow: 0 1px 8px rgb(0 0 0 / 60%); } }
 html, body { margin: 0; height: 100%; background: var(--paper); color: var(--ink); font: 15px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; }
 body { height: 100dvh; overflow: hidden; }
 [hidden] { display: none !important; }
 button { font: inherit; color: inherit; cursor: pointer; -webkit-tap-highlight-color: transparent; }
+button:disabled { opacity: 0.55; cursor: default; }
+svg { fill: currentColor; }
 #page { display: block; width: 100%; height: 100%; border: 0; }
 /* The status circle, over the page's top-right corner: its dot is the session (green live, amber away, grey
-   read-only), a badge when something waits or a notice came, and a tap opens the panel. */
-#status { position: fixed; z-index: 2; top: calc(8px + env(safe-area-inset-top)); right: calc(8px + env(safe-area-inset-right));
+   read-only), its badge the agent's replies not yet seen, and a tap opens the panel. */
+#status { position: fixed; z-index: 3; top: calc(8px + env(safe-area-inset-top)); right: calc(8px + env(safe-area-inset-right));
   width: 34px; height: 34px; padding: 0; display: grid; place-items: center; border: 1px solid var(--line); border-radius: 50%;
   background: var(--paper); box-shadow: var(--shadow); }
 #dot { width: 12px; height: 12px; border-radius: 50%; background: var(--ended); }
@@ -25,44 +27,123 @@ button { font: inherit; color: inherit; cursor: pointer; -webkit-tap-highlight-c
 [data-mode="closed"] :is(#dot, #session-dot) { background: var(--closed); }
 @media (prefers-reduced-motion: no-preference) { [data-mode="typing"] #dot { animation: pulse 1.2s ease-in-out infinite; } }
 @keyframes pulse { 50% { opacity: 0.3; } }
-#badge { position: absolute; top: -3px; right: -3px; width: 10px; height: 10px; border: 2px solid var(--paper); border-radius: 50%; background: var(--accent); }
-#toast, #panel { position: fixed; z-index: 3; top: calc(50px + env(safe-area-inset-top)); right: calc(8px + env(safe-area-inset-right));
+#badge { position: absolute; top: -6px; right: -6px; min-width: 18px; height: 18px; box-sizing: border-box; padding: 0 5px;
+  border: 2px solid var(--paper); border-radius: 999px; background: var(--accent); color: #fff; font: 700 11px/14px system-ui, sans-serif; }
+/* While the panel is open, a clear layer over the frame and the sheet takes the tap that shuts it. */
+#shield { position: fixed; z-index: 3; inset: 0; }
+#toast, #panel { position: fixed; z-index: 4; top: calc(50px + env(safe-area-inset-top)); right: calc(8px + env(safe-area-inset-right));
   box-sizing: border-box; max-width: min(320px, calc(100vw - 16px)); margin: 0; border: 1px solid var(--line); border-radius: 12px;
   background: var(--paper); color: var(--ink); box-shadow: var(--shadow); overflow-wrap: anywhere; }
 #toast { padding: 8px 12px; }
-#panel { left: auto; bottom: auto; width: 300px; padding: 12px 14px; display: none; gap: 4px; }
+#panel { left: auto; bottom: auto; width: 300px; max-height: calc(100dvh - 66px); overflow-y: auto; padding: 12px 14px; display: none; gap: 4px; }
 #panel:popover-open { display: grid; }
 #panel p { margin: 0; color: var(--muted); }
 #panel .session { display: flex; align-items: center; gap: 8px; color: var(--ink); }
 #session-dot { flex: none; width: 8px; height: 8px; border-radius: 50%; background: var(--ended); }
-#waiting:empty, #notice:empty { display: none; }
-#aloud-row { display: flex; align-items: center; gap: 8px; min-height: 40px; margin-top: 2px; }
+#notice:empty { display: none; }
+#unread { display: grid; gap: 6px; margin: 6px 0 2px; padding: 0; list-style: none; }
+#unread button { display: grid; width: 100%; gap: 1px; padding: 7px 10px; border: 1px solid var(--line); border-radius: 10px; background: var(--soft);
+  text-align: left; }
+#unread strong { display: flex; gap: 6px; min-width: 0; font-size: 14px; }
+#unread strong span:first-child, #unread .snippet { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+#unread strong span + span { flex: none; color: var(--accent); }
+#unread .snippet { color: var(--muted); font-size: 13px; }
+#talk { display: flex; align-items: center; gap: 8px; min-height: 40px; margin-top: 4px; padding: 0 12px; border: 1px solid var(--line);
+  border-radius: 999px; background: none; font-weight: 600; justify-self: start; }
+#talk svg { width: 18px; height: 18px; }
+#aloud-row { display: flex; align-items: center; gap: 8px; min-height: 40px; }
 #aloud { flex: none; width: 18px; height: 18px; margin: 0; accent-color: var(--accent); }
-#close { justify-self: start; min-height: 40px; margin-top: 6px; padding: 2px 14px; border: 1px solid var(--line); border-radius: 8px; background: none; }
-/* The mic: drawn by C3 where the page's Send sits while its composer is empty; while recording, the bar beside it
-   shows the time, the part and Cancel. */
+#close { justify-self: start; min-height: 40px; margin-top: 2px; padding: 2px 14px; border: 1px solid var(--line); border-radius: 8px; background: none; }
+#panel #waiting { margin-top: 4px; font-size: 13px; }
+#panel #waiting:empty { display: none; }
+/* The chat sheet: C3 draws a part's conversation itself, like its web chat, rising from the bottom over the page (a
+   panel at the bottom right on a wide screen). The page names the part, a title and a line; everything else is C3's. */
+#chat { position: fixed; z-index: 2; left: 0; right: 0; bottom: 0; box-sizing: border-box; display: flex; flex-direction: column;
+  max-height: min(78dvh, 680px); padding-bottom: env(safe-area-inset-bottom); border-top: 1px solid var(--line);
+  border-radius: 16px 16px 0 0; background: var(--paper); box-shadow: 0 -6px 24px rgb(0 0 0 / 18%); }
+@media (min-width: 720px) { #chat { left: auto; right: 16px; bottom: 16px; width: 420px; max-height: min(72dvh, 680px);
+  border: 1px solid var(--line); border-radius: 16px; } }
+@media (prefers-reduced-motion: no-preference) { #chat { animation: rise 0.18s ease-out; } }
+@keyframes rise { from { transform: translateY(24px); opacity: 0; } }
+#chat-head { display: flex; align-items: center; gap: 8px; padding: 8px 6px 6px 16px; }
+#chat-title { flex: 1; min-width: 0; margin: 0; overflow: hidden; font-size: 16px; font-weight: 650; white-space: nowrap; text-overflow: ellipsis;
+  outline: none; }
+.round { flex: none; display: grid; place-items: center; width: 44px; height: 44px; padding: 0; border: 0; border-radius: 50%; background: none; }
+.round svg { width: 24px; height: 24px; }
+#chat-close svg { width: 20px; height: 20px; }
+#chat-scroll { position: relative; flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 0 12px 8px; }
+#chat-ask { margin: 0 4px 10px; padding: 8px 12px; border-radius: 10px; background: var(--soft); white-space: pre-wrap; overflow-wrap: anywhere; }
+#chat-choices { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 4px 12px; }
+#chat-choices button { min-height: 40px; padding: 0 14px; border: 1px solid var(--accent); border-radius: 999px; background: none;
+  color: var(--accent); font-weight: 600; }
+#chat-lines { display: flex; flex-direction: column; gap: 6px; margin: 0; padding: 0; list-style: none; }
+#chat-lines .empty { align-self: center; padding: 8px 0; color: var(--muted); font-size: 14px; }
+.msg { max-width: 85%; box-sizing: border-box; padding: 7px 10px 4px; border-radius: 14px 14px 14px 4px; background: var(--soft);
+  overflow-wrap: anywhere; }
+.msg.mine { align-self: flex-end; border-radius: 14px 14px 4px 14px; background: var(--mine); }
+.msg.page { align-self: flex-end; border: 1px dashed var(--line); background: none; color: var(--muted); }
+.msg .body { white-space: pre-wrap; }
+.msg .label { display: block; color: var(--muted); font-size: 12px; font-weight: 650; }
+.msg .state { color: var(--muted); font-style: italic; }
+@media (prefers-reduced-motion: no-preference) { .msg .fresh { animation: fade 0.6s ease-out; } }
+@keyframes fade { from { opacity: 0; } }
+.meta { display: flex; align-items: center; justify-content: flex-end; gap: 6px; min-height: 18px; color: var(--muted); font-size: 12px; }
+.meta .play { margin: -6px auto -6px -8px; width: 32px; height: 32px; font-size: 13px; }
+.msg .apply { display: block; width: 100%; min-height: 40px; margin: 6px 0 4px; border: 0; border-radius: 10px; background: var(--accent);
+  color: #fff; font-weight: 650; }
+.note { align-self: center; max-width: 90%; padding: 2px 10px; color: var(--muted); font-size: 13px; text-align: center; }
+#chat-new { position: sticky; bottom: 4px; display: block; margin: -36px auto 0; min-height: 32px; padding: 0 14px; border: 1px solid var(--accent);
+  border-radius: 999px; background: var(--paper); color: var(--accent); font-weight: 650; box-shadow: var(--shadow); }
+#chat-typing, #chat-error { margin: 0; padding: 0 16px 4px; font-size: 13px; }
+#chat-typing { color: var(--muted); }
+#chat-error { color: var(--ended); }
+#chat-quote-row { display: flex; align-items: center; gap: 4px; margin: 0 8px 0 16px; }
+#chat-quote { flex: 1; min-width: 0; max-height: 3em; overflow: auto; margin: 0; padding: 2px 10px; border-left: 3px solid var(--accent);
+  color: var(--muted); white-space: pre-wrap; }
+#chat-drop-quote svg { width: 18px; height: 18px; }
+/* The composer, as in Telegram: while the box is empty its button is the mic, and typing turns it into Send. While the
+   mic records, the box gives way to Cancel, the time and a wave that moves with the owner's voice. */
+#chat-compose { display: flex; align-items: flex-end; gap: 4px; padding: 6px 6px 6px 12px; border-top: 1px solid var(--line); }
+#chat-text { flex: 1; min-width: 0; box-sizing: border-box; min-height: 44px; max-height: 8.5em; field-sizing: content; resize: none; margin: 0;
+  padding: 10px 14px; border: 1px solid var(--line); border-radius: 22px; background: var(--soft); color: var(--ink); font: inherit;
+  font-size: 16px; line-height: 1.4; }
+#chat-text:focus { outline: none; border-color: var(--accent); }
+#chat-recorder { flex: 1; min-width: 0; display: flex; align-items: center; gap: 8px; height: 44px; }
+#chat-cancel { flex: none; min-height: 40px; padding: 0 10px; border: 0; border-radius: 999px; background: none; color: var(--accent); font-weight: 650; }
+.clock { flex: none; display: flex; align-items: center; gap: 6px; font-variant-numeric: tabular-nums; font-weight: 600; }
+.clock::before { content: ""; width: 9px; height: 9px; border-radius: 50%; background: var(--accent); }
+@media (prefers-reduced-motion: no-preference) { .clock::before { animation: pulse 1.2s ease-in-out infinite; } }
+.wave { flex: 1; min-width: 0; height: 28px; color: var(--accent); }
+#chat-send { background: var(--accent); color: #fff; }
+.mic[aria-pressed="true"] { background: var(--accent); color: #fff; }
+@media (prefers-reduced-motion: no-preference) { .mic[aria-pressed="true"] { animation: ring 1.6s ease-out infinite; } }
+@keyframes ring { from { box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 45%, transparent); } to { box-shadow: 0 0 0 12px transparent; } }
+.mic[aria-pressed="true"] .idle, .mic[aria-pressed="false"] .busy { display: none; }
+/* The docked mic, for a page that draws its own chat: drawn where the page's Send sits while its composer is empty;
+   while recording, the bar beside it shows the time, the wave and Cancel. */
 #mic { position: fixed; z-index: 1; padding: 0; display: grid; place-items: center; border: 1px solid var(--line); border-radius: 50%;
   background: var(--paper); color: var(--ink); }
-#mic[aria-pressed="true"] { border-color: var(--accent); background: var(--accent); color: #fff; }
-#mic:disabled { opacity: 0.55; cursor: default; }
-#mic svg { width: 24px; height: 24px; fill: currentColor; }
-#mic[aria-pressed="true"] .idle, #mic[aria-pressed="false"] .busy { display: none; }
-@media (prefers-reduced-motion: no-preference) { #mic[aria-pressed="true"] { animation: ring 1.6s ease-out infinite; } }
-@keyframes ring { from { box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 45%, transparent); } to { box-shadow: 0 0 0 12px transparent; } }
+#mic svg { width: 24px; height: 24px; }
 #recorder { position: fixed; z-index: 1; box-sizing: border-box; display: flex; align-items: center; gap: 8px; padding: 0 4px 0 14px;
   border: 1px solid var(--line); border-radius: 999px; background: var(--paper); box-shadow: var(--shadow); }
-#recorder::before { content: ""; flex: none; width: 10px; height: 10px; border-radius: 50%; background: var(--accent); }
-#clock { flex: none; font-variant-numeric: tabular-nums; font-weight: 600; }
-#about { flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; color: var(--muted); }
 #cancel { flex: none; min-height: 36px; padding: 0 12px; border: 0; border-radius: 999px; background: none; color: var(--accent); font-weight: 600; }
 </style>
 </head>
 <body>
 <iframe id="page" sandbox="allow-scripts" title="The board's page"></iframe>
-<div id="recorder" hidden><span id="clock"></span><span id="about"></span><button id="cancel" type="button">Cancel</button></div>
-<button id="mic" type="button" aria-pressed="false" aria-label="Record a voice note" hidden><svg class="idle" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 14a3 3 0 0 0 3-3V5a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3Zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.93V21h2v-3.07A7 7 0 0 0 19 11h-2Z"/></svg><svg class="busy" viewBox="0 0 24 24" aria-hidden="true"><path d="M11 20V7.83l-5.6 5.6L4 12l8-8 8 8-1.4 1.43-5.6-5.6V20h-2Z"/></svg></button>
+<div id="recorder" hidden><span id="clock" class="clock"></span><canvas id="dock-wave" class="wave" aria-hidden="true"></canvas><button id="cancel" type="button">Cancel</button></div>
+<button id="mic" class="mic" type="button" aria-pressed="false" aria-label="Record a voice note" hidden><svg class="idle" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 14a3 3 0 0 0 3-3V5a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3Zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.93V21h2v-3.07A7 7 0 0 0 19 11h-2Z"/></svg><svg class="busy" viewBox="0 0 24 24" aria-hidden="true"><path d="M11 20V7.83l-5.6 5.6L4 12l8-8 8 8-1.4 1.43-5.6-5.6V20h-2Z"/></svg></button>
+<section id="chat" role="dialog" aria-labelledby="chat-title" hidden>
+<div id="chat-head"><h2 id="chat-title" tabindex="-1"></h2><button id="chat-close" class="round" type="button" aria-label="Close the chat"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6.4 19 5 17.6l5.6-5.6L5 6.4 6.4 5l5.6 5.6L17.6 5 19 6.4 13.4 12l5.6 5.6-1.4 1.4-5.6-5.6L6.4 19Z"/></svg></button></div>
+<div id="chat-scroll"><p id="chat-ask" hidden></p><div id="chat-choices" role="group" aria-label="Quick answers" hidden></div><ol id="chat-lines" aria-live="polite"></ol><button id="chat-new" type="button" aria-label="Scroll to new messages" hidden>↓ new</button></div>
+<p id="chat-typing" hidden>The agent is typing…</p>
+<p id="chat-error" role="alert" hidden></p>
+<div id="chat-quote-row" hidden><blockquote id="chat-quote"></blockquote><button id="chat-drop-quote" class="round" type="button" aria-label="Drop the quote"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6.4 19 5 17.6l5.6-5.6L5 6.4 6.4 5l5.6 5.6L17.6 5 19 6.4 13.4 12l5.6 5.6-1.4 1.4-5.6-5.6L6.4 19Z"/></svg></button></div>
+<div id="chat-compose"><textarea id="chat-text" rows="1" aria-label="Your message"></textarea><div id="chat-recorder" hidden><button id="chat-cancel" type="button">Cancel</button><span id="chat-clock" class="clock"></span><canvas id="chat-wave" class="wave" aria-hidden="true"></canvas></div><button id="chat-send" class="round" type="button" aria-label="Send" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M11 20V7.83l-5.6 5.6L4 12l8-8 8 8-1.4 1.43-5.6-5.6V20h-2Z"/></svg></button><button id="chat-mic" class="round mic" type="button" aria-pressed="false" aria-label="Record a voice note"><svg class="idle" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 14a3 3 0 0 0 3-3V5a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3Zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.93V21h2v-3.07A7 7 0 0 0 19 11h-2Z"/></svg><svg class="busy" viewBox="0 0 24 24" aria-hidden="true"><path d="M11 20V7.83l-5.6 5.6L4 12l8-8 8 8-1.4 1.43-5.6-5.6V20h-2Z"/></svg></button></div>
+</section>
+<div id="shield" hidden></div>
 <button id="status" type="button" popovertarget="panel" aria-label="Board status"><span id="dot"></span><span id="badge" hidden></span></button>
-<div id="panel" popover><strong id="title">Board</strong><p class="session"><span id="session-dot"></span><span id="session">Connecting…</span></p><p id="waiting"></p><p id="typing" hidden>Typing…</p><p id="notice"></p><label id="aloud-row"><input id="aloud" type="checkbox"> Read replies aloud</label><button id="close" type="button" hidden>Make read-only</button></div>
+<div id="panel" popover><strong id="title">Board</strong><p class="session"><span id="session-dot"></span><span id="session">Connecting…</span></p><p id="typing" hidden>Typing…</p><ul id="unread" aria-label="Replies you haven't read" hidden></ul><button id="talk" type="button"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4h16a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H8l-4 4V6a2 2 0 0 1 2-2Z"/></svg>Talk to the agent</button><p id="notice"></p><label id="aloud-row"><input id="aloud" type="checkbox"> Read replies aloud</label><button id="close" type="button" hidden>Make read-only</button><p id="waiting"></p></div>
 <p id="toast" role="status" hidden></p>
 <audio id="player" preload="auto" hidden></audio>
 <script src="/board/assets/board.js"></script>
