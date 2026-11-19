@@ -83,6 +83,10 @@ The first is cleaner; the second is far easier to reason about when it misbehave
   - **Sample representations** the board skill can point to: a scroll-through list of points
     (each with its illustration and its own discussion), playable screens and flows for
     non-technical readers, and the narrated diagram for architecture and workflows.
+- **Release gate for boards and the web chat: sign-in for any C3 user.** Not every user has an authenticated
+  HTTPS front. Use theirs when configured; otherwise fall back to C3's own one-time, quickly expiring login link
+  served over a quick tunnel (for example a TryCloudflare URL). C3 refuses to serve boards or the web chat on an
+  unauthenticated public link.
 - Board page history as diffs: keep every revision of a board's page as a diff chain (git-style),
   so any earlier version can be shown or compared, instead of keeping only the last five.
 - Reply options beyond buttons: polls (multi-select, open answers) and rich text are available on
