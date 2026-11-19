@@ -41,3 +41,9 @@ func ResolveAttachment(dir, path string) (string, bool) {
 	}
 	return resolved, true
 }
+
+// AttachmentOwner is a channel that can tell its own attachment ids by shape, so
+// a download that names no channel reaches it instead of the output route's.
+type AttachmentOwner interface {
+	OwnsAttachment(fileID string) bool
+}

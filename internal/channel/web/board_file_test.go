@@ -419,3 +419,20 @@ func TestAReplyToThePagesMessageSaysSo(t *testing.T) {
 		t.Fatalf("line %q\nwant %q", line, want)
 	}
 }
+
+// A download that names no channel reaches the board only for an id the board
+// mints, so another channel's id is never taken for a board file.
+func TestTheBoardOwnsOnlyIdsItMints(t *testing.T) {
+	board := &boardChannel{}
+	for id, want := range map[string]bool{
+		"0123456789abcdef0123456789abcdef":   true,
+		"0123456789ABCDEF0123456789ABCDEF":   false,
+		"0123456789abcdef0123456789abcde":    false,
+		"AgACAgUAAyEFAATt3T-EAAJH8Wr-zntnZF": false,
+		"":                                   false,
+	} {
+		if got := board.OwnsAttachment(id); got != want {
+			t.Errorf("OwnsAttachment(%q) = %v, want %v", id, got, want)
+		}
+	}
+}

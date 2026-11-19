@@ -639,20 +639,13 @@ func (b *Broker) handleToolCall(conn *ipc.Conn, stub *Stub, raw []byte) {
 		return
 	}
 
+	if _, isSelected := req.Args["channel"]; req.Name == "download_attachment" && !isSelected {
+		route = b.attachmentRoute(stub, route, argString(forwardedArgs, "file_id", ""))
+	}
 	res, failure := b.runToolOn(route, req.Name, forwardedArgs)
 	if failure != "" {
 		_ = conn.WriteJSON(ipc.ToolResultMsg{Op: ipc.OpToolResult, ID: req.ID, Error: &ipc.ErrorPayload{Code: -32000, Message: failure}})
 		return
-	}
-	if _, isSelected := req.Args["channel"]; req.Name == "download_attachment" && res.Err != nil && !isSelected {
-		// The file may have come on another held route (a board's file lives with its
-		// board): ask each other channel this session holds, in turn.
-		for _, other := range b.otherHeldChannels(stub, route) {
-			if retry, failure := b.runToolOn(other, req.Name, forwardedArgs); failure == "" && retry.Err == nil {
-				res, route = retry, other
-				break
-			}
-		}
 	}
 	resp := ipc.ToolResultMsg{Op: ipc.OpToolResult, ID: req.ID}
 	if res.Err != nil {
@@ -685,19 +678,23 @@ func (b *Broker) runToolOn(route RouteKey, name string, args map[string]any) (Ou
 	}
 }
 
-// otherHeldChannels is one route per channel the stub still holds, other than
-// route's own channel.
-func (b *Broker) otherHeldChannels(stub *Stub, route RouteKey) []RouteKey {
+// attachmentRoute is the route a download_attachment without a channel selector
+// goes to: a route the stub holds on another channel that mints fileID itself
+// (a board's file lives with its board), else output. The id never reaches a
+// channel that didn't mint it.
+func (b *Broker) attachmentRoute(stub *Stub, output RouteKey, fileID string) RouteKey {
 	routes, _ := stub.RouteSnapshot()
-	seen := map[string]bool{route.Channel: true}
-	var others []RouteKey
-	for _, other := range routes {
-		if holder, isHeld := b.Routes.Holder(other); !seen[other.Channel] && isHeld && holder == stub {
-			seen[other.Channel] = true
-			others = append(others, other)
+	for _, route := range routes {
+		if route.Channel == output.Channel {
+			continue
+		}
+		ch, err := b.Channel(route.Channel)
+		owner, isOwner := ch.(channel.AttachmentOwner)
+		if holder, isHeld := b.Routes.Holder(route); err == nil && isOwner && isHeld && holder == stub && owner.OwnsAttachment(fileID) {
+			return route
 		}
 	}
-	return others
+	return output
 }
 
 // handleAskRegister registers a blocking, correlated `ask`, sends the question to

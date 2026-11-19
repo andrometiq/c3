@@ -5,6 +5,7 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -414,6 +415,13 @@ func (b *boardChannel) LocalAudioPath(fileID string) (string, error) {
 // DownloadAttachment copies an owner's file act's stored file, by C3's id for
 // it, into the board's attachment cache, where the c3 plugin lets the session
 // it was returned to read it without a prompt.
+// OwnsAttachment implements channel.AttachmentOwner: the board mints its file
+// ids as 32 lowercase hex characters, a shape no Telegram file id has.
+func (b *boardChannel) OwnsAttachment(fileID string) bool {
+	decoded, err := hex.DecodeString(fileID)
+	return err == nil && len(decoded) == 16 && hex.EncodeToString(decoded) == fileID
+}
+
 func (b *boardChannel) DownloadAttachment(fileID string) (string, error) {
 	stored, err := b.web.mintedFilePath(boardFilesDirectory, fileID, "", true)
 	if err != nil {

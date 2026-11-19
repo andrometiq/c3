@@ -387,16 +387,26 @@ func TestBoardAttachmentReadAllowedOnlyForTheSessionThatDownloadedIt(t *testing.
 	}
 }
 
-// refusingDownloads is a channel that knows no attachment id.
-type refusingDownloads struct{ *autoTestChannel }
+// refusingDownloads is a channel that knows no attachment id and counts the ids
+// it was asked for.
+type refusingDownloads struct {
+	*autoTestChannel
+	asked *int
+}
 
-func (refusingDownloads) DownloadAttachment(string) (string, error) {
+func (c refusingDownloads) DownloadAttachment(string) (string, error) {
+	*c.asked++
 	return "", errors.New("unknown attachment id")
 }
 
-// A file sent on a board downloads without naming the board: when the output
-// route's channel doesn't know the id, C3 asks the session's other held
-// channels, and remembers the download on the route that had it.
+// owningDownloads is a channel that mints 32-character ids, as a board does.
+type owningDownloads struct{ *downloadChannel }
+
+func (owningDownloads) OwnsAttachment(fileID string) bool { return len(fileID) == 32 }
+
+// A file sent on a board downloads without naming the board: a held channel
+// that mints the id gets the download, the output route's channel never sees
+// the id, and the download is remembered on the route that had it.
 func TestDownloadAttachmentFindsTheFileOnAnotherHeldRoute(t *testing.T) {
 	f, _, _ := newAttachmentFixture(t)
 	boardDir, err := channel.AttachmentCacheDir(channel.BoardChannelName)
@@ -408,8 +418,9 @@ func TestDownloadAttachmentFindsTheFileOnAnotherHeldRoute(t *testing.T) {
 	}
 	boardFiles := &downloadChannel{autoTestChannel: f.ch}
 	f.b.chMu.Lock()
-	f.b.channels["telegram"] = &channelRegistration{Channel: refusingDownloads{f.ch}}
-	f.b.channels[channel.BoardChannelName] = &channelRegistration{Channel: boardFiles}
+	telegramAsked := 0
+	f.b.channels["telegram"] = &channelRegistration{Channel: refusingDownloads{f.ch, &telegramAsked}}
+	f.b.channels[channel.BoardChannelName] = &channelRegistration{Channel: owningDownloads{boardFiles}}
 	f.b.chMu.Unlock()
 	stub := f.b.Stubs.Register("claude", 4848, "/both", struct{}{})
 	stub.SetStableSessionID("session-both")
@@ -427,11 +438,18 @@ func TestDownloadAttachmentFindsTheFileOnAnotherHeldRoute(t *testing.T) {
 	if resp.Error != nil || !strings.Contains(fmt.Sprint(resp.Result), path) {
 		t.Fatalf("download from the board with telegram as output: error %v, result %v; want %s", resp.Error, resp.Result, path)
 	}
+	if telegramAsked != 0 {
+		t.Fatalf("the output route's channel was asked for the board's id %d time(s)", telegramAsked)
+	}
 	if !isAttachmentAllow(attachmentCheck(t, f, "session-both", "Read", resolved)) {
 		t.Fatal("the board file found on the other route was not remembered for this session")
 	}
 	selected := toolCallForTest(t, f.b, stub, "download", "download_attachment", map[string]any{"file_id": "x", "channel": "telegram"})
-	if selected.Error == nil {
-		t.Fatal("a download naming its channel was retried on another route")
+	if selected.Error == nil || telegramAsked != 1 {
+		t.Fatalf("a download naming its channel: error %v, telegram asked %d time(s); want its own channel's error", selected.Error, telegramAsked)
+	}
+	unowned := toolCallForTest(t, f.b, stub, "download", "download_attachment", map[string]any{"file_id": "AgACAgUAAx"})
+	if unowned.Error == nil || telegramAsked != 2 {
+		t.Fatalf("an id no other channel mints: error %v, telegram asked %d time(s); want the output route", unowned.Error, telegramAsked)
 	}
 }
