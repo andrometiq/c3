@@ -34,8 +34,9 @@
     cancelled: "Cancelled, not sent.", refused: "Not sent: C3 refused it." };
   // The recording wave, as Telegram draws a voice note: one bar per stepMs (its loudest moment), newest on the right; a
   // bar is a dot in silence and grows with the voice. Loudness is RMS in dB, from gateDb above a noise floor that
-  // follows the quiet level (down at once, up slowly, never above floorMaxDb) to ceilingDb at full height.
-  const WAVE = { stepMs: 100, barPx: 3, gapPx: 2, levels: 200, ceilingDb: -10, gateDb: 6, floorStartDb: -60, floorMinDb: -90,
+  // follows the quiet level (down at once, up slowly, never above floorMaxDb) to ceilingDb at full height. It starts at
+  // floorMaxDb, so the first pause sets it: a phone's gain lifts room noise well above -60 dB.
+  const WAVE = { stepMs: 100, barPx: 3, gapPx: 2, levels: 200, ceilingDb: -10, gateDb: 6, floorStartDb: -30, floorMinDb: -90,
     floorMaxDb: -30, floorRise: 0.01, ringEase: 0.35 };
   // Spoken replies: why one wasn't read, and the setting's key in this shell's own storage (the frame has none).
   const SPEECH_REASONS = { not_found: "it is no longer on the board", rate: "too many this minute", unavailable: "speech is unavailable",
