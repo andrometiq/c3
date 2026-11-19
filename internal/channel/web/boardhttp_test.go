@@ -110,6 +110,47 @@ func TestBoardActionReachesOnlyItsOwnRoute(t *testing.T) {
 	}
 }
 
+// An act the page's script sent (the shell marks it) reaches the session saying
+// so and is logged as the page's, so neither the agent nor C3's chat takes it
+// for the owner's own words.
+func TestPageActsReachTheSessionAsThePages(t *testing.T) {
+	c, host, cookie := newBoardTest(t)
+	board := createBoard(t, c, "plan")
+	answer, _ := c.board.SendReply(c3types.ReplyArgs{Channel: channel.BoardChannelName, ChatID: board.Number, Text: "draft"})
+	for _, body := range []string{
+		`{"client_id":"p1","op":"comment","part":"1","text":"looks good","from_page":true}`,
+		`{"client_id":"p2","op":"approve","ref":` + itoa(answer) + `,"from_page":true}`,
+	} {
+		if response := postAct(c, cookie, "plan", body); response.Code != http.StatusAccepted {
+			t.Fatalf("act %s=%d %s", body, response.Code, response.Body)
+		}
+	}
+	emitted, log := host.emittedSnapshot(), boardLog(t, c, "plan")
+	want := []string{"[board plan · 1 · msg 2] (sent by the page, not typed by the owner) looks good",
+		"[board plan · msg 3] (sent by the page, not typed by the owner) Approved your message 1."}
+	for index, line := range want {
+		if emitted[index].Text != line || !log[index+1].FromPage {
+			t.Fatalf("page act %d: line %q, logged from_page %v; want %q, true", index, emitted[index].Text, log[index+1].FromPage, line)
+		}
+	}
+	if response := postAct(c, cookie, "plan", `{"client_id":"p3","op":"tap","part":"1","value":"x","from_page":"yes"}`); response.Code != http.StatusBadRequest {
+		t.Fatalf("a from_page that isn't a boolean: %d, want 400", response.Code)
+	}
+}
+
+// An act from C3's own chat (the owner's typing, quick answer or approve
+// button) carries no mark: it is the owner's word.
+func TestOwnersActsCarryNoPageMark(t *testing.T) {
+	c, host, cookie := newBoardTest(t)
+	createBoard(t, c, "plan")
+	if response := postAct(c, cookie, "plan", `{"client_id":"o1","op":"comment","part":"1","text":"shorter please"}`); response.Code != http.StatusAccepted {
+		t.Fatalf("act: %d %s", response.Code, response.Body)
+	}
+	if line, log := host.emittedSnapshot()[0].Text, boardLog(t, c, "plan"); line != "[board plan · 1 · msg 1] shorter please" || log[0].FromPage {
+		t.Fatalf("owner's act: line %q, logged from_page %v", line, log[0].FromPage)
+	}
+}
+
 func TestBoardActNeverTouchesTheWebChat(t *testing.T) {
 	c, _, cookie := newBoardTest(t)
 	createBoard(t, c, "plan")

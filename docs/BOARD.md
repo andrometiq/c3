@@ -42,7 +42,12 @@ The session gets one line per action, drawn by C3 from checked fields, each with
 [board plan · 1.5 · msg 413] Approved your message 418.
 [board plan · 1.5 · msg 414] Tapped "pick-b" on your message 418.
 [board plan · 1.5 · msg 415] Reacted 👍 to your message 418.
+[board plan · 1.5 · msg 416] (sent by the page, not typed by the owner) Tapped "pick-b".
 ```
+
+An act the page's script sent (`c3.comment`, `c3.tap`, `c3.approve`, `c3.react`) carries that mark after C3's
+header and `from_page` in the log; acts from C3's own chat (the owner's typing, quick answers, a proposal's
+button) carry none.
 
 A voice note arrives once the broker has transcribed it, its transcript (or why there is none)
 under C3's line. A long recording arrives as numbered parts, each when its own transcript is done,
@@ -99,26 +104,28 @@ session (green live, amber away or reconnecting, grey read-only, pulsing while t
 its badge counts the agent's replies the owner hasn't seen; nothing else badges it. A tap opens its
 panel: the board's title, the live session (`cli · folder`), typing, the parts with unread replies
 (title and first line, newest first), **Talk to the agent**, the last notice, **Read replies aloud**,
-**Make read-only**, and at its foot how many of the owner's actions wait for the session. A tap
-anywhere else, the page included, shuts it. A notice (a reply of that kind, a voice problem) shows a
+**Make read-only**, and at its foot how many of the owner's actions wait for the session. While it is
+open, a clear shell layer covers the page: a tap anywhere else shuts it and doesn't reach the page. A notice (a reply of that kind, a voice problem) shows a
 few seconds under the circle, then fades; it never reaches the frame.
 
 C3 draws each part's chat itself, as its web chat does: a sheet rising from the bottom (a panel at the
 bottom right on a wide screen) with the part's title, a line from the page (its question, or what is
 decided) and up to three quick answers, then the thread: the owner's lines and the agent's answers with
 their times, edits and reactions, voice notes with their live status, a play button on each answer,
-and a button for a proposal (an answer whose last line is `[apply: <label>]`, while it is the agent's
+the page's own acts labelled "Sent by the page", and a button for a proposal (an answer whose last line is `[apply: <label>]`, while it is the agent's
 latest word there) that approves it. Under it is the composer, as in Telegram: an empty box has the mic,
 typing turns it into Send; Enter sends on a keyboard and breaks the line on a touch screen. The page
 asks with `c3.chat(part, {title, ask, choices, quote})` and shuts it with `c3.chat(null)`; `c3.threads()`
-opens it on a tap on a part, titled by the part's first heading. The page hears `c3.on("chat")`
-(`{part}`, null once shut), and an owner's tap in the page that asks for no chat shuts it, as Escape
-does. The sheet stays open across a frame reload, and a page that answers an approve on the open part
-shuts it, so the owner sees the change, unless the owner has a draft there. **Talk to the agent** opens the
-board-level chat, the part `general`, which pages leave alone.
+opens it on a tap on a part, titled by the part's first heading. The page hears `c3.on("chat")`:
+`{part}` while open, `{part: null}` once shut. An owner's tap in the page that asks for no chat shuts
+it, as Escape does. The sheet stays open across a frame reload, and a page that answers an approve on
+the open part shuts it, so the owner sees the change, unless the owner has a draft there. **Talk to the
+agent** opens the board-level chat, the part `general`, which the page can't open (`invalid`). The page
+can shut any chat, but can't switch away from one the owner opened from the panel (`owner`).
 
-A reply is unread until the owner opens its part's chat: each browser keeps a read mark per part in the
-shell origin's storage (on its first visit, what is already on the board counts as read). A tap on an
+A reply is unread until its part's chat has shown for a second in a visible tab: each browser keeps a
+read mark per part in the shell origin's storage (on its first visit, what is already on the board
+counts as read), and a chat shut, switched or hidden sooner marks nothing. A tap on an
 unread part in the panel opens its chat and tells the page `c3.on("reveal", ({part}) => …)`; a handler
 that returns `true` shows the part itself, else C3's SDK scrolls the part's element to the top and
 flashes it. The panel names a part by the title the page last gave its chat, else its markup's (a JSON
@@ -211,9 +218,12 @@ can still be heard.
   and approves from the sheet are the shell's acts, checked as the page's are.
 - **Microphone.** Only the shell records: one `getUserMedia` call, reached only from a trusted tap
   on its own mic button; the shell draws the recording state and its part itself. The frame has no
-  microphone (sandboxed, opaque origin, no `allow`). A mic that just appeared or moved takes no tap for
-  500 ms, since the page chooses when the sheet opens and where a docked mic sits: it can't slide the mic
-  under a finger that meant to tap the page. The page can only name a part, its Send's spot and
+  microphone (sandboxed, opaque origin, no `allow`). The page chooses when the sheet opens and where a
+  docked mic sits, so a press counts only if it went down on that mic at least 500 ms after the mic
+  appeared or last moved: a press that began earlier, or anywhere else, never starts or stops a
+  recording. (A keyboard or assistive click needs the shell's focus on the mic, which the page can't
+  give.) This doesn't stop a page that predicts where the owner will tap after a pause; the recording
+  state and its Cancel then show at once. The page can only name a part, its Send's spot and
   whether its box has text, so its script can never hear the owner or send a voice act. A spot that
   isn't four finite numbers is refused; the mic is a 44–56 px circle centred on the spot, kept inside
   the frame's visible box with its row below the status circle, and the recording bar takes the
@@ -231,9 +241,10 @@ can still be heard.
   `client_id` retry is delivered once (not across a broker restart).
 - **Permissions.** A prompt's preview never reaches a board; a boards-only session gets
   "⏸ Permission prompt waiting at the laptop." as a notice. Board input can't settle a prompt.
-- **A board yes.** The page's script can send any act, Approve included, without a tap. It reaches
-  only the session that wrote the script, whose rule is that board input is the owner's word for
-  that work, never for a push, deploy, release, message to someone else or permission answer.
+- **A board yes.** The page's script can send any act, Approve included, without a tap, but C3 marks it
+  as the page's to the session and in C3's chat. It reaches only the session that wrote the script,
+  whose rule is that board input is the owner's word for that work, never for a push, deploy, release,
+  message to someone else or permission answer.
   The script can draw misleading UI in its frame; the status circle's panel names the live session.
 
 ## Storage

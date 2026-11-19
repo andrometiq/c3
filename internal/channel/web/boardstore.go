@@ -63,6 +63,8 @@ type boardLogEntry struct {
 	// C3's notice). On the act of a part that never reached C3: cancelled or
 	// refused.
 	Status string `json:"status,omitempty"`
+	// FromPage: the page's script sent this act, not the owner's own typing.
+	FromPage bool `json:"from_page,omitempty"`
 }
 
 // loadBoards reads every board. A board whose record is unreadable, or two

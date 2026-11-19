@@ -29,6 +29,8 @@ svg { fill: currentColor; }
 @keyframes pulse { 50% { opacity: 0.3; } }
 #badge { position: absolute; top: -6px; right: -6px; min-width: 18px; height: 18px; box-sizing: border-box; padding: 0 5px;
   border: 2px solid var(--paper); border-radius: 999px; background: var(--accent); color: #fff; font: 700 11px/14px system-ui, sans-serif; }
+/* While the panel is open, a clear layer over the frame and the sheet takes the tap that shuts it. */
+#shield { position: fixed; z-index: 3; inset: 0; }
 #toast, #panel { position: fixed; z-index: 4; top: calc(50px + env(safe-area-inset-top)); right: calc(8px + env(safe-area-inset-right));
   box-sizing: border-box; max-width: min(320px, calc(100vw - 16px)); margin: 0; border: 1px solid var(--line); border-radius: 12px;
   background: var(--paper); color: var(--ink); box-shadow: var(--shadow); overflow-wrap: anywhere; }
@@ -79,6 +81,7 @@ svg { fill: currentColor; }
 .msg { max-width: 85%; box-sizing: border-box; padding: 7px 10px 4px; border-radius: 14px 14px 14px 4px; background: var(--soft);
   overflow-wrap: anywhere; }
 .msg.mine { align-self: flex-end; border-radius: 14px 14px 4px 14px; background: var(--mine); }
+.msg.page { align-self: flex-end; border: 1px dashed var(--line); background: none; color: var(--muted); }
 .msg .body { white-space: pre-wrap; }
 .msg .label { display: block; color: var(--muted); font-size: 12px; font-weight: 650; }
 .msg .state { color: var(--muted); font-style: italic; }
@@ -138,6 +141,7 @@ svg { fill: currentColor; }
 <div id="chat-quote-row" hidden><blockquote id="chat-quote"></blockquote><button id="chat-drop-quote" class="round" type="button" aria-label="Drop the quote"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6.4 19 5 17.6l5.6-5.6L5 6.4 6.4 5l5.6 5.6L17.6 5 19 6.4 13.4 12l5.6 5.6-1.4 1.4-5.6-5.6L6.4 19Z"/></svg></button></div>
 <div id="chat-compose"><textarea id="chat-text" rows="1" aria-label="Your message"></textarea><div id="chat-recorder" hidden><button id="chat-cancel" type="button">Cancel</button><span id="chat-clock" class="clock"></span><canvas id="chat-wave" class="wave" aria-hidden="true"></canvas></div><button id="chat-send" class="round" type="button" aria-label="Send" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M11 20V7.83l-5.6 5.6L4 12l8-8 8 8-1.4 1.43-5.6-5.6V20h-2Z"/></svg></button><button id="chat-mic" class="round mic" type="button" aria-pressed="false" aria-label="Record a voice note"><svg class="idle" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 14a3 3 0 0 0 3-3V5a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3Zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.93V21h2v-3.07A7 7 0 0 0 19 11h-2Z"/></svg><svg class="busy" viewBox="0 0 24 24" aria-hidden="true"><path d="M11 20V7.83l-5.6 5.6L4 12l8-8 8 8-1.4 1.43-5.6-5.6V20h-2Z"/></svg></button></div>
 </section>
+<div id="shield" hidden></div>
 <button id="status" type="button" popovertarget="panel" aria-label="Board status"><span id="dot"></span><span id="badge" hidden></span></button>
 <div id="panel" popover><strong id="title">Board</strong><p class="session"><span id="session-dot"></span><span id="session">Connecting…</span></p><p id="typing" hidden>Typing…</p><ul id="unread" aria-label="Replies you haven't read" hidden></ul><button id="talk" type="button"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4h16a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H8l-4 4V6a2 2 0 0 1 2-2Z"/></svg>Talk to the agent</button><p id="notice"></p><label id="aloud-row"><input id="aloud" type="checkbox"> Read replies aloud</label><button id="close" type="button" hidden>Make read-only</button><p id="waiting"></p></div>
 <p id="toast" role="status" hidden></p>

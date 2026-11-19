@@ -20,9 +20,10 @@
   // The docked mic (a page that draws its own chat) is a circle this wide, kept this far inside the frame's visible box
   // and from the status circle; the recording bar sits gapPx beside it. A page that names no spot gets the corner.
   const MIC = { minPx: 44, maxPx: 56, marginPx: 4, gapPx: 6, defaultPx: 48, cornerPx: 16 };
-  // A mic that just appeared or moved takes no tap for this long, so a page can't slide it under a finger that meant
-  // to tap the page.
+  // A press on a mic counts only if it began on that mic at least this long after the mic appeared or last moved: a
+  // page that opens the sheet or moves a docked mic as a finger lands never starts a recording.
   const MIC_SETTLE_MS = 500;
+  const READ_AFTER_MS = 1000; // a part's replies count as read once its chat has shown this long in a visible tab
   const VOICE_TYPES = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4"];
   const VOICE_REASONS = { closed: "the board is read-only", rate: "too many this minute", too_big: "too long",
     unreadable: "C3 couldn't read the recording", unauthorized: "signed out, reload to sign in", not_found: "this board can't be opened" };
@@ -53,7 +54,7 @@
   const READ_KEY = `c3.board.read.${name}`; // the owner's read marks for this board, in this browser
   const frame = document.getElementById("page");
   const controls = Object.fromEntries(["status", "badge", "panel", "title", "session", "typing", "unread", "talk", "notice", "close", "waiting",
-    "toast", "mic", "recorder", "clock", "dock-wave", "cancel", "aloud", "player", "chat", "chat-title", "chat-close", "chat-scroll",
+    "toast", "shield", "mic", "recorder", "clock", "dock-wave", "cancel", "aloud", "player", "chat", "chat-title", "chat-close", "chat-scroll",
     "chat-ask", "chat-choices", "chat-lines", "chat-new", "chat-typing", "chat-error", "chat-quote-row", "chat-quote", "chat-drop-quote",
     "chat-text", "chat-recorder", "chat-cancel", "chat-clock", "chat-wave", "chat-send", "chat-mic"]
     .map((id) => [id.replace(/-(\w)/g, (_, letter) => letter.toUpperCase()), document.getElementById(id)]));
@@ -77,7 +78,8 @@
   let recording = null; // {part, started, isOpening, stop(isCancelled)} while the mic is on
   let voiceKeys = 0;
   let isClosing = false; // Make read-only is waiting for the voice acts on their way
-  let micSettlesAt = 0; // a mic tap before this performance.now() is ignored
+  let micSettlesAt = 0; // a press on a mic that began before this performance.now() is ignored
+  let micPress = null; // {mic, at}: the last trusted pointerdown on a mic, which its click must follow
   let placedMic = ""; // where the docked mic was last put, to see it move
   let audioContext = null; // the wave's, made in the first tap on a mic: a phone runs one only after a tap
   const uploads = new Map(); // key -> the latest status of a recording on its way to C3
@@ -95,11 +97,13 @@
   const drafts = new Map(); // part -> the owner's unsent text
   const quotes = new Map(); // part -> the page's words the owner quoted
   const pendingActs = new Map(); // part -> {op, text, at, id} from the owner's Send or quick answer until its line is in the log
-  const approving = new Set(); // proposals whose approve is on its way
+  const approving = new Set(); // proposals whose approve is on its way, until its line is in the log
   const voiceShown = new Map(); // a voice row's key -> the status last drawn, so only a change fades in
   const pageTitles = new Map(); // part -> the title the page's markup gives it
   const chatTitles = new Map(); // part -> the title the page last opened its chat with
   let shownRows = 0; // rows the open chat had when last drawn: only new ones follow the bottom
+  let readingPart = null; // the part the sheet has shown for READ_AFTER_MS in a visible tab: its replies are read
+  let readTimer = 0;
   let marks = { from: 0, parts: new Map() }; // read marks: the agent's replies on a part after its mark are unread
 
   const sleep = (ms) => new Promise((resolve) => { setTimeout(resolve, ms); });
@@ -172,9 +176,22 @@
     return (proposalOf(text)?.body ?? text).trim().split("\n")[0];
   }
 
-  /** The owner's read mark on part moves to its newest reply; only while the page shows, since a hidden tab reads nothing. */
+  /** Starts the clock on the open part: after READ_AFTER_MS on screen in a visible tab its replies count as read. A chat
+   *  shut, switched or hidden before then marks nothing, so a page flashing chats open can't clear the badge. */
+  function watchReading() {
+    clearTimeout(readTimer);
+    readingPart = null;
+    if (!chat || document.hidden) return;
+    const { part } = chat;
+    readTimer = setTimeout(() => {
+      readingPart = part;
+      markRead(part);
+    }, READ_AFTER_MS);
+  }
+
+  /** The owner's read mark on part moves to its newest reply, once the sheet has shown part long enough (watchReading). */
   function markRead(part) {
-    if (document.hidden || !state) return;
+    if (document.hidden || !state || part !== readingPart) return;
     const newest = state.log.findLast((entry) => isReply(entry) && entry.part === part)?.id ?? 0;
     if (newest <= (marks.parts.get(part) ?? 0)) return;
     marks.parts.set(part, newest);
@@ -452,7 +469,8 @@
   /** An upload's status: a row in C3's chat until its voice act is in the log, and an event for the page (c3.on("voice"));
    *  one C3 refused is also a notice. */
   function tellVoice(voice, isNew = true) {
-    uploads.set(voice.key, { ...voice, at: uploads.get(voice.key)?.at ?? new Date().toISOString() });
+    if (voice.id && state.log.some((entry) => entry.id === voice.id)) uploads.delete(voice.key); // its line is in already
+    else uploads.set(voice.key, { ...voice, at: uploads.get(voice.key)?.at ?? new Date().toISOString() });
     if (isNew && voice.status === "not_sent") notify(`${voice.segment ? `Part ${voice.segment}` : "Voice note"} not sent: ${VOICE_REASONS[voice.error] ?? "C3 refused it"}.`);
     if (isFrameReady) toFrame({ c3: "voice", voice });
     drawChat();
@@ -577,14 +595,15 @@
   // ---------- the chat sheet ----------
 
   /** Opens (or refreshes) the sheet on part. options are the page's, checked by readChat; null when the shell opens it
-   *  (the panel), which keeps what the page gave last. A recording keeps its own part on screen. Returns the rule
-   *  refusing it, or "". */
+   *  (the panel), which keeps what the page gave last and makes the chat the owner's: the page can't switch it away. A
+   *  recording keeps its own part on screen. Returns the rule refusing it, or "". */
   function openChat(part, options) {
     if (!state) return "offline";
     if (recording && part !== recording.part) return "recording";
     const isNew = chat?.part !== part;
     const fields = options ?? (isNew ? { title: "", ask: "", choices: [] } : chat);
-    chat = { part, title: fields.title, ask: fields.ask, choices: fields.choices };
+    const isOwners = options === null || !isNew && chat.isOwners;
+    chat = { part, title: fields.title, ask: fields.ask, choices: fields.choices, isOwners };
     if (fields.title) chatTitles.set(part, fields.title);
     if (options?.quote) quotes.set(part, options.quote);
     if (isNew) {
@@ -595,7 +614,7 @@
       settleMic(); // the sheet's mic just appeared, at a spot the page chose the moment of
       if (isFrameReady) toFrame({ c3: "chat", chat: { part } });
     }
-    markRead(part);
+    if (isNew) watchReading();
     drawVoice();
     drawChat();
     if (isNew && !isTouch() && !state.closed) controls.chatText.focus(); // on a keyboard, straight to typing
@@ -609,6 +628,7 @@
     if (recording) return "recording";
     chat = null;
     controls.chat.hidden = true;
+    watchReading();
     if (isFrameReady) toFrame({ c3: "chat", chat: { part: null } });
     drawVoice();
     return "";
@@ -621,12 +641,12 @@
     if (openChat(part, null)) notify("Stop recording first.", false);
   }
 
-  /** A chat request from the page: the part (null closes) and its strings, each a string or absent, clipped to fit; up to
+  /** A chat request from the page: the part (null closes; never the board-level chat) and its strings, each a string or absent, clipped to fit; up to
    *  CHAT.choices quick answers, each one C3 takes as a tap. Null if any field is malformed. */
   function readChat({ value, title, ask, choices = [], quote }) {
     const isText = (text) => text === undefined || text === null || typeof text === "string";
     const isChoice = (choice) => typeof choice === "string" && choice.trim() !== "" && new TextEncoder().encode(choice).length <= LIMITS.valueBytes;
-    if (!(value === null || typeof value === "string" && PART.test(value)) || ![title, ask, quote].every(isText)) return null;
+    if (!(value === null || typeof value === "string" && PART.test(value) && value !== GENERAL) || ![title, ask, quote].every(isText)) return null;
     if (!Array.isArray(choices) || choices.length > CHAT.choices || !choices.every(isChoice)) return null;
     return { part: value, title: clip(title ?? "", CHAT.titleRunes), ask: clip(ask ?? "", CHAT.askRunes), choices: [...choices],
       quote: clip(quote ?? "", LIMITS.quoteRunes) };
@@ -718,12 +738,15 @@
   function rowOf(entry, folded, latestReply) {
     if (entry.op === "message") return replyRow(entry, folded, entry.id === latestReply);
     if (entry.op === "voice") return voiceRow(entry, folded);
-    if (entry.op === "approve") {
-      const proposal = proposalOf(folded.edits.get(entry.ref) ?? state.log.find((line) => line.id === entry.ref && line.op === "message")?.text ?? "");
-      return element("li", "note", proposal ? `You approved “${proposal.label}”.` : "You approved the agent's answer.");
+    if (entry.op === "approve") { // the message as it read when approved, never a later edit
+      const approved = state.log.findLast((line) => line.seq < entry.seq && line.dir === "out" && line.id === entry.ref && (line.op === "message" || line.op === "edit"));
+      const proposal = proposalOf(approved?.text ?? "");
+      const what = proposal ? `“${proposal.label}”` : "the agent's answer";
+      return element("li", "note", entry.from_page ? `Sent by the page: approved ${what}.` : `You approved ${what}.`);
     }
     if (entry.op === "page") return element("li", "note", "The agent updated the page.");
     if (entry.op === "voice_ended") return element("li", "note", entry.text);
+    if (entry.from_page) return element("li", "msg page", element("span", "label", "Sent by the page"), element("div", "body", entry.text), meta(entry));
     return element("li", "msg mine", element("div", "body", entry.text), meta(entry)); // the owner's comment or quick answer
   }
 
@@ -824,7 +847,7 @@
     const body = { op: "approve", ref: id, part };
     const problem = checkAct(body);
     const { error } = problem ? { error: problem } : await postAct(body);
-    approving.delete(id);
+    if (error || state.log.some((entry) => entry.op === "approve" && entry.ref === id)) approving.delete(id);
     showChatError(error ? `Not approved: ${CHAT_REASONS[error] ?? error}.` : "");
     drawChat();
   }
@@ -859,6 +882,8 @@
       if (data.dir === "out" && (kind === "message" || kind === "page")) setTyping(false);
       if (isLive && data.dir === "out" && kind === "message") readAloud(data.id);
       if (pendingActs.get(data.part)?.id === data.id) pendingActs.delete(data.part); // the owner's line is in: its row is the log's now
+      for (const [key, voice] of uploads) if (voice.id === data.id) uploads.delete(key); // so is a recording's
+      if (data.op === "approve") approving.delete(data.ref); // and an approve's: its button is gone for good
       if (chat && isReply(data) && data.part === chat.part) markRead(chat.part); // the owner is looking at it
       if (kind === "page" && chat && isApproveOn(data.reply_to, chat.part) && !drafts.get(chat.part)) closeChat(); // show the change
       if (kind === "page") {
@@ -951,7 +976,8 @@
     if (op === "reload") return reloadFrame();
     if (op === "chat") {
       const request = readChat(message);
-      const problem = !request ? "invalid" : request.part === null ? closeChat() : openChat(request.part, request);
+      const problem = !request ? "invalid" : request.part === null ? closeChat()
+        : chat?.isOwners && request.part !== chat.part ? "owner" : openChat(request.part, request);
       return toFrame({ c3: "result", call, ...(problem ? { error: problem } : {}) });
     }
     if (op === "focus") {
@@ -970,8 +996,8 @@
       return toFrame({ c3: "result", call, ...(isKept ? {} : { error: "too_big" }) });
     }
     if (op !== "act") return undefined;
-    const problem = checkAct(body);
-    return toFrame({ c3: "result", call, ...(problem ? { error: problem } : await postAct(body)) });
+    const problem = checkAct(body); // refuses a from_page of the page's own
+    return toFrame({ c3: "result", call, ...(problem ? { error: problem } : await postAct({ ...body, from_page: true })) });
   }
 
   addEventListener("message", (event) => { // only the sandboxed frame: its window, its opaque origin
@@ -995,27 +1021,36 @@
     notify(!response?.ok ? "Making it read-only failed. Try again." : wasRecording ? "The board is read-only now: the recording stopped." : "");
     drawVoice();
   });
+  // While the panel is open a clear shell layer covers the frame: a tap anywhere else shuts the panel (the popover's own
+  // light dismiss) and never reaches the page, and the page can't shut it.
   controls.panel.addEventListener("toggle", (event) => {
     isPanelOpen = event.newState === "open";
+    controls.shield.hidden = !isPanelOpen;
     if (!isPanelOpen) return;
     toastFade?.cancel(); // the panel shows the notice itself
     controls.toast.hidden = true;
   });
-  // The panel shuts on a tap anywhere else. A tap in the page moves the focus into the frame, which the shell sees only
-  // as its own window losing focus.
-  addEventListener("blur", () => { if (isPanelOpen && document.activeElement === frame) controls.panel.hidePopover(); });
   controls.talk.addEventListener("click", () => {
     controls.panel.hidePopover?.();
     if (openChat(GENERAL, null)) notify("Stop recording first.", false);
   });
 
-  /** A real tap on one of the shell's own mics, once it has sat still for MIC_SETTLE_MS. */
+  /** A real press on one of the shell's own mics, judged when it went down: it must have begun on this mic once the mic
+   *  had sat still for MIC_SETTLE_MS. A keyboard or assistive click (no press, detail 0) needs the shell's focus on the mic,
+   *  which the page can't give it. */
   function onMicTap(event) {
-    if (!event.isTrusted || performance.now() < micSettlesAt) return;
+    const press = micPress;
+    micPress = null;
+    if (!event.isTrusted) return;
+    if (press ? press.mic !== event.currentTarget || press.at < micSettlesAt : event.detail !== 0) return;
     if (!canRecord) return notify("Voice needs the HTTPS link.", false);
     if (recording) recording.stop(false);
     else startRecording();
   }
+  function onMicPress(event) {
+    micPress = event.isTrusted ? { mic: event.currentTarget, at: performance.now() } : null;
+  }
+  for (const mic of [controls.mic, controls.chatMic]) mic.addEventListener("pointerdown", onMicPress);
   controls.mic.addEventListener("click", onMicTap);
   controls.chatMic.addEventListener("click", onMicTap);
   controls.cancel.addEventListener("click", () => recording?.stop(true));
@@ -1042,7 +1077,7 @@
     sendText();
   });
   addEventListener("keydown", (event) => { if (event.key === "Escape" && chat && !isPanelOpen) closeChat(); });
-  document.addEventListener("visibilitychange", () => { if (chat) markRead(chat.part); });
+  document.addEventListener("visibilitychange", watchReading);
   controls.status.addEventListener("click", unlockAudio);
   controls.aloud.checked = isReadingAloud;
   controls.aloud.addEventListener("change", (event) => {

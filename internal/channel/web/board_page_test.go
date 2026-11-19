@@ -160,8 +160,8 @@ func TestOnlyTheShellsOwnButtonOpensTheMicrophone(t *testing.T) {
 		t.Fatal("board.js opens the microphone outside startRecording")
 	}
 	tap := functionBody(t, shell, "function onMicTap(")
-	if starts := regexp.MustCompile(`startRecording\(\)`).FindAllStringIndex(shell, -1); len(starts) != 2 || !strings.Contains(tap, "startRecording()") ||
-		!strings.HasPrefix(strings.SplitN(tap, "\n", 2)[1], "    if (!event.isTrusted || ") {
+	trusted := strings.Index(tap, "if (!event.isTrusted) return;")
+	if starts := regexp.MustCompile(`startRecording\(\)`).FindAllStringIndex(shell, -1); len(starts) != 2 || trusted < 0 || strings.Index(tap, "startRecording()") < trusted {
 		t.Fatalf("startRecording is called %d times; want once, from onMicTap after its isTrusted check", len(starts)-1)
 	}
 	if strings.Count(shell, "onMicTap") != 3 || !strings.Contains(shell, `controls.mic.addEventListener("click", onMicTap);`) ||
@@ -274,16 +274,20 @@ func TestPageCannotPlaceTheMicOverTheShellsOwnControls(t *testing.T) {
 }
 
 // A page chooses when the chat sheet opens and, for a page that draws its own
-// chat, where the docked mic sits. So a mic that just appeared or moved takes
-// no tap for 500 ms: a page can't slide it under a finger that meant to tap
-// the page and start a recording.
-func TestAMicThatJustAppearedOrMovedTakesNoTap(t *testing.T) {
+// chat, where the docked mic sits. So a press on a mic counts only if it went
+// down on that mic at least 500 ms after the mic appeared or last moved: a
+// press that began earlier, or elsewhere, never starts a recording.
+func TestAMicPressCountsOnlyIfItBeganOnTheSettledMic(t *testing.T) {
 	shell := readPage(t, "board.js")
 	if !strings.Contains(shell, "const MIC_SETTLE_MS = 500;") || !strings.Contains(functionBody(t, shell, "function settleMic("), "micSettlesAt = performance.now() + MIC_SETTLE_MS;") {
 		t.Fatal("board.js has no 500 ms settle time for its mic")
 	}
-	if !strings.Contains(functionBody(t, shell, "function onMicTap("), "if (!event.isTrusted || performance.now() < micSettlesAt) return;") {
-		t.Error("a tap on the mic is taken before it settles")
+	if !strings.Contains(functionBody(t, shell, "function onMicPress("), "micPress = event.isTrusted ? { mic: event.currentTarget, at: performance.now() } : null;") ||
+		!strings.Contains(shell, `for (const mic of [controls.mic, controls.chatMic]) mic.addEventListener("pointerdown", onMicPress);`) {
+		t.Error("a mic press isn't timed when it goes down")
+	}
+	if !strings.Contains(functionBody(t, shell, "function onMicTap("), "if (press ? press.mic !== event.currentTarget || press.at < micSettlesAt : event.detail !== 0) return;") {
+		t.Error("a tap on the mic is judged by something other than where and when its press began")
 	}
 	if !strings.Contains(functionBody(t, shell, "function drawVoice("), "if (spot !== placedMic) settleMic(); // it appeared or the page moved it") {
 		t.Error("the docked mic takes a tap right after it appears or moves")
@@ -301,7 +305,7 @@ func TestThePageGivesTheChatOnlyCheckedText(t *testing.T) {
 	shell := readPage(t, "board.js")
 	read := functionBody(t, shell, "function readChat(")
 	for _, rule := range []string{
-		`if (!(value === null || typeof value === "string" && PART.test(value)) || ![title, ask, quote].every(isText)) return null;`,
+		`if (!(value === null || typeof value === "string" && PART.test(value) && value !== GENERAL) || ![title, ask, quote].every(isText)) return null;`,
 		"new TextEncoder().encode(choice).length <= LIMITS.valueBytes",
 		"choices.length > CHAT.choices",
 		"title: clip(title ?? \"\", CHAT.titleRunes), ask: clip(ask ?? \"\", CHAT.askRunes)",
@@ -335,12 +339,42 @@ func TestOnlyUnreadRepliesBadgeTheCircle(t *testing.T) {
 		!strings.Contains(shell, "const READ_KEY = `c3.board.read.${name}`;") {
 		t.Error("unread is not counted from the read marks this browser keeps")
 	}
-	if !strings.Contains(shell, `addEventListener("blur", () => { if (isPanelOpen && document.activeElement === frame) controls.panel.hidePopover(); });`) {
-		t.Error("the panel stays open after a tap in the page")
+	if !strings.Contains(functionBody(t, shell, "function markRead("), "if (document.hidden || !state || part !== readingPart) return;") ||
+		!strings.Contains(shell, "const READ_AFTER_MS = 1000;") {
+		t.Error("a reply counts as read before its chat has shown for a second in a visible tab")
 	}
 	html := readPage(t, "board.html")
 	if !strings.Contains(html, `<ul id="unread"`) || !strings.Contains(html, `<button id="talk" type="button">`) {
 		t.Error("the panel has no unread list or no Talk to the agent")
+	}
+}
+
+// The panel shuts on a tap anywhere else through a clear shell layer over the
+// frame, so the tap never reaches the page and the page can't shut the panel.
+func TestThePanelShutsThroughTheShellsOwnLayer(t *testing.T) {
+	shell, html := readPage(t, "board.js"), readPage(t, "board.html")
+	if !strings.Contains(html, `<div id="shield" hidden></div>`) || !regexp.MustCompile(`#shield \{ position: fixed; z-index: 3; inset: 0; \}`).MatchString(html) ||
+		!strings.Contains(shell, "controls.shield.hidden = !isPanelOpen;") {
+		t.Error("no shell layer covers the frame while the panel is open")
+	}
+	if strings.Contains(shell, `addEventListener("blur"`) {
+		t.Error("the panel still shuts when the shell loses focus, which the page can cause")
+	}
+}
+
+// The page can shut any chat but can't switch away from one the owner opened
+// from the panel, can't use the board-level chat, and its acts are marked.
+func TestThePageCantTakeOverTheOwnersChats(t *testing.T) {
+	shell := readPage(t, "board.js")
+	if !strings.Contains(functionBody(t, shell, "async function onFrameMessage("), `: chat?.isOwners && request.part !== chat.part ? "owner" : openChat(request.part, request);`) ||
+		!strings.Contains(functionBody(t, shell, "function openChat("), "const isOwners = options === null || !isNew && chat.isOwners;") {
+		t.Error("the page can switch away from a chat the owner opened")
+	}
+	if !strings.Contains(functionBody(t, shell, "function readChat("), "PART.test(value) && value !== GENERAL") {
+		t.Error("the page can open the board-level chat")
+	}
+	if !strings.Contains(functionBody(t, shell, "async function onFrameMessage("), "await postAct({ ...body, from_page: true })") {
+		t.Error("the page's acts reach C3 unmarked")
 	}
 }
 

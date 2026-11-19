@@ -54,6 +54,9 @@ type boardAct struct {
 	Note     string `json:"note"`
 	Value    string `json:"value"`
 	Emoji    string `json:"emoji"`
+	// FromPage marks an act the page's script sent (c3.comment, c3.tap, …):
+	// the shell sets it, so the session never reads it as typed by the owner.
+	FromPage bool `json:"from_page"`
 	// A voice act's place in a longer recording, the shell's id for that
 	// recording, and for a part that never reached C3 why; not from JSON.
 	Segment   int    `json:"-"`
@@ -600,13 +603,16 @@ func (c *Channel) boardInbound(host channel.Host, name string, number int64, act
 		checkOpen: func() error { return c.board.withOpenBoard(number, func(*boardState) error { return nil }) },
 		echo: func(inbound *c3types.Inbound, _ string) {
 			entry := boardLogEntry{Dir: "in", ID: inbound.MessageID, Op: act.Op, Part: act.Part, Text: act.logText(), Ref: act.Ref, From: inbound.Sender.Username,
-				Segment: act.Segment, HasMore: act.HasMore, Recording: act.Recording, Status: act.Unsent}
+				Segment: act.Segment, HasMore: act.HasMore, Recording: act.Recording, Status: act.Unsent, FromPage: act.FromPage}
 			if err := c.board.withBoard(number, func(board *boardState) error { return c.board.appendLocked(board, entry) }); err != nil {
 				c.board.logf("board: log %q action %d: %v", name, inbound.MessageID, err)
 			}
 		},
 	}
 }
+
+// boardPageActNote follows C3's header on an act the page's script sent.
+const boardPageActNote = "(sent by the page, not typed by the owner)"
 
 // boardLine is what the session reads for one act: C3's header, then the
 // viewer's checked fields.
@@ -616,6 +622,9 @@ func boardLine(name string, act boardAct, messageID int64) string {
 		header += " · " + act.Part
 	}
 	header += fmt.Sprintf(" · msg %d]", messageID)
+	if act.FromPage {
+		header += " " + boardPageActNote
+	}
 	switch act.Op {
 	case "voice":
 		return header + " " + voiceLine(act)

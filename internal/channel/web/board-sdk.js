@@ -40,7 +40,8 @@
   // c3.chat(part, {title, ask, choices, quote}): C3's shell opens its chat sheet on part (or refreshes it, when that
   // part's chat is open): the thread, the composer and C3's mic are C3's. title names the part; ask is one line for the
   // top (your question, or what is decided); choices are up to 3 quick answers the owner taps (each a tap act); quote is
-  // page text the owner picked. All are shown as text. c3.chat(null) shuts it. c3.on("chat") follows it: {part}, null once shut.
+  // page text the owner picked. All are shown as text. c3.chat(null) shuts it. c3.on("chat") follows it: {part}, or
+  // {part: null} once shut. C3 refuses "general" (invalid) and switching away from a chat the owner opened (owner).
   // The owner's tap anywhere in the page that doesn't itself ask for a chat shuts it, as Escape does (a click the page
   // makes itself never does).
   let chatPart = null; // the part the sheet shows, from the shell's "chat" events
