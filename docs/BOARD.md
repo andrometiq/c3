@@ -47,7 +47,8 @@ The session gets one line per action, drawn by C3 from checked fields, each with
 A voice note arrives once the broker has transcribed it, its transcript (or why there is none)
 under C3's line. A long recording arrives as numbered parts, each when its own transcript is done,
 so possibly out of order; the last says so, and a part whose audio never reached C3 still arrives,
-as a line saying it was not sent:
+as a line saying it was not sent. When parts stop coming, C3 ends the recording itself
+([Voice](#voice)):
 
 ```text
 [board plan · 1.5 · msg 416] Voice note:
@@ -55,6 +56,7 @@ as a line saying it was not sent:
 [board plan · 1.5 · msg 417] Voice note (part 1; more follows):
 [Transcribed voice]: first, the intro
 [board plan · 1.5 · msg 419] Voice note (part 2, the last): the recording was cancelled; this part was not sent.
+[board plan · 2 · msg 431] Voice note ended after part 3: no further part arrived.
 ```
 
 A quote comes first as `> ` lines; a ref also arrives as the reply context. Owner text with a line
@@ -112,7 +114,8 @@ session is told the board closed.
 
 Each recording is a voice act: `POST /board/<name>/act` with the `audio/*` body (at most 12 MiB) and
 headers `X-Client-Id`, `X-Board-Part`, and for a part of a longer recording `X-Voice-Segment` (1, 2,
-…) with `X-Voice-More: 1` on all but the last. It gets an act's checks, rate and `client_id` retry
+…) with `X-Voice-More: 1` on all but the last, and optionally `X-Voice-Recording` (one id on every
+part of a recording: printable ASCII, at most 128 bytes). It gets an act's checks, rate and `client_id` retry
 (a retry repeats the audio and these headers, else 409), then the web chat's ffmpeg transcode (422
 `unreadable` when that fails), a second open-board check (409 `closed` if the board was made
 read-only meanwhile) and the broker's STT. A part whose audio never reached C3 is the same request
@@ -125,6 +128,18 @@ voice-status method, never through a reply, and each act takes one final status 
 it): whatever the session's reply says, it is the session's message. The shell tells the frame each
 upload's own status (`sending`, `sent` with the entry's `id`, `not_sent` with the rule), and the SDK
 passes all of it as events.
+
+**When parts stop coming.** A tab can die mid-recording, or a part and its `refused` line can both
+be refused, and the session would wait for good. So after a part that says more follows, C3 waits
+one part length (five minutes) plus two minutes; each later part of the recording starts the wait
+again, and its last part (or a `cancelled` or `refused` line saying it is the last) ends it. If no
+part comes, the session reads `Voice note ended after part 3: no further part arrived.` under C3's
+header, with its own `msg` id, and the log gets `{op: "voice_ended", part, segment: 3, from: "C3",
+text}`, which the page shows. A part that still comes after that is delivered as usual. On a board
+made read-only the line is only logged: its route is gone and the session was told the board
+closed. Parts belong to a recording by board part, or by `X-Voice-Recording` when the shell sends
+it. The wait lives in memory: after a broker restart an unfinished recording isn't closed by C3;
+the shell's next part or the owner's next message moves it on.
 
 ## Trust
 
@@ -164,7 +179,7 @@ passes all of it as events.
 directories 0700, files 0600: `capability.key` (the cap key) and per board `board.json` (number,
 owner, title, rev, closed), `pages/<rev>.html` (the last 5; `rev` picks the served one) and
 `log.jsonl` (append-only: seq, at, dir, id, op, part, text, ref, reply_to, from, and for voice
-segment, has_more, status). Held actions sit in the broker's queue. Voice recordings are the web
+segment, has_more, recording, status). Held actions sit in the broker's queue. Voice recordings are the web
 chat's: `voice/` under the web state directory, the newest 200 kept for both. An unreadable `board.json` stops the board channel from starting.
 
 ## The authenticated HTTPS front

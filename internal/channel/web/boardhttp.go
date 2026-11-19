@@ -54,11 +54,12 @@ type boardAct struct {
 	Note     string `json:"note"`
 	Value    string `json:"value"`
 	Emoji    string `json:"emoji"`
-	// A voice act's place in a longer recording, and for a part that never
-	// reached C3 why; never decoded from JSON.
-	Segment int    `json:"-"`
-	HasMore bool   `json:"-"`
-	Unsent  string `json:"-"`
+	// A voice act's place in a longer recording, the shell's id for that
+	// recording, and for a part that never reached C3 why; not from JSON.
+	Segment   int    `json:"-"`
+	HasMore   bool   `json:"-"`
+	Recording string `json:"-"`
+	Unsent    string `json:"-"`
 }
 
 // boardOpFields lists, per op, the fields it needs and the ones it may add.
@@ -447,11 +448,14 @@ func (c *Channel) handleBoardVoice(w http.ResponseWriter, r *http.Request) {
 // voiceAct reads a voice act's fields from its headers: X-Client-Id,
 // X-Board-Part (the part the shell recorded for) and, for a part of a longer
 // recording, X-Voice-Segment (1, 2, …) with X-Voice-More: 1 on all but the
-// last, and X-Voice-Unsent (cancelled: the last part; refused: any) for a
+// last, the optional X-Voice-Recording (one id on all of a recording's
+// parts), and X-Voice-Unsent (cancelled: the last part; refused: any) for a
 // part whose audio never reached C3.
 func voiceAct(header http.Header) (boardAct, bool) {
-	act := boardAct{Op: "voice", ClientID: strings.TrimSpace(header.Get("X-Client-Id")), Part: header.Get("X-Board-Part")}
-	if act.ClientID == "" || len(act.ClientID) > boardClientIDBytes || !channel.IsValidBoardPart(act.Part) {
+	act := boardAct{Op: "voice", ClientID: strings.TrimSpace(header.Get("X-Client-Id")), Part: header.Get("X-Board-Part"),
+		Recording: strings.TrimSpace(header.Get("X-Voice-Recording"))}
+	if act.ClientID == "" || len(act.ClientID) > boardClientIDBytes || !channel.IsValidBoardPart(act.Part) ||
+		len(act.Recording) > boardClientIDBytes || strings.ContainsFunc(act.Recording, func(r rune) bool { return r < '!' || r > '~' }) {
 		return boardAct{}, false
 	}
 	segment, more := header.Get("X-Voice-Segment"), header.Get("X-Voice-More")
@@ -480,7 +484,7 @@ func voiceAct(header http.Header) (boardAct, bool) {
 // voiceFields are a voice act's own fields, which a retry of its client id
 // must repeat along with the audio.
 func (act boardAct) voiceFields() string {
-	return fmt.Sprintf("voice part=%s segment=%d more=%t unsent=%s", act.Part, act.Segment, act.HasMore, act.Unsent)
+	return fmt.Sprintf("voice part=%s segment=%d more=%t unsent=%s recording=%s", act.Part, act.Segment, act.HasMore, act.Unsent, act.Recording)
 }
 
 // check validates a decoded act: the op's fields and only those, each in its
@@ -588,7 +592,7 @@ func (c *Channel) boardInbound(host channel.Host, name string, number int64, act
 		checkOpen: func() error { return c.board.withOpenBoard(number, func(*boardState) error { return nil }) },
 		echo: func(inbound *c3types.Inbound, _ string) {
 			entry := boardLogEntry{Dir: "in", ID: inbound.MessageID, Op: act.Op, Part: act.Part, Text: act.logText(), Ref: act.Ref, From: inbound.Sender.Username,
-				Segment: act.Segment, HasMore: act.HasMore, Status: act.Unsent}
+				Segment: act.Segment, HasMore: act.HasMore, Recording: act.Recording, Status: act.Unsent}
 			if err := c.board.withBoard(number, func(board *boardState) error { return c.board.appendLocked(board, entry) }); err != nil {
 				c.board.logf("board: log %q action %d: %v", name, inbound.MessageID, err)
 			}

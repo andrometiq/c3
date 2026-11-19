@@ -52,10 +52,12 @@ type boardLogEntry struct {
 	ReplyTo int64     `json:"reply_to"`
 	From    string    `json:"from"`
 	Rev     int64     `json:"rev,omitempty"`
-	// A voice act's part of a longer recording (0 for a whole one), and
-	// whether more parts follow it.
-	Segment int  `json:"segment,omitempty"`
-	HasMore bool `json:"has_more,omitempty"`
+	// A voice act's part of a longer recording (0 for a whole one), whether
+	// more parts follow it, and the shell's id for the recording, if any.
+	// C3's voice_ended line carries the part it ended after as Segment.
+	Segment   int    `json:"segment,omitempty"`
+	HasMore   bool   `json:"has_more,omitempty"`
+	Recording string `json:"recording,omitempty"`
 	// Status is a voice act's status. On its edit: heard (Text is the
 	// transcript), no_speech, slow (still transcribing) or failed (Text is
 	// C3's notice). On the act of a part that never reached C3: cancelled or

@@ -110,7 +110,11 @@ in a merged turn each line starts with its own `[msg N]`.
   the owner talking about that part; answer it like a typed line, with `reply_to=N`. `Voice note
   (part 2; more follows):` is a long recording sent in parts. Parts can arrive out of order: act
   only once parts 1 to N are all in, where N is the part marked `the last`, and reply to that
-  part. A part that says it was not sent (cancelled, or C3 couldn't take it) still counts as in. If
+  part. A part that says it was not sent (cancelled, or C3 couldn't take it) still counts as in.
+  When parts stop coming, C3 ends the recording itself with its own line:
+  `Voice note ended after part N: no further part arrived.` Stop waiting then: act on the parts
+  you have and reply to that line. A part that still comes after it is more of the same note:
+  answer it too. A board made read-only takes no more parts: stop waiting for them. If
   the next line says transcription failed, retranscribe once as it says; the owner's page already
   shows that it failed or heard no speech. Your replies never change what the page shows for a
   voice note: only C3 does.

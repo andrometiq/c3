@@ -10,7 +10,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -124,6 +126,7 @@ func TestBoardVoiceActTrustBoundary(t *testing.T) {
 		{"segment padded", "plan", cookie, valid(map[string]string{"X-Voice-Segment": "01"}), []byte("x"), http.StatusBadRequest},
 		{"more without segment", "plan", cookie, valid(map[string]string{"X-Voice-More": "1"}), []byte("x"), http.StatusBadRequest},
 		{"more not one", "plan", cookie, valid(map[string]string{"X-Voice-Segment": "2", "X-Voice-More": "yes"}), []byte("x"), http.StatusBadRequest},
+		{"recording id with a space", "plan", cookie, valid(map[string]string{"X-Voice-Recording": "a b"}), []byte("x"), http.StatusBadRequest},
 		{"read-only board", "shut", cookie, valid(nil), []byte("x"), http.StatusConflict},
 		{"too big", "plan", cookie, valid(nil), make([]byte, voiceBodyLimit+1), http.StatusRequestEntityTooLarge},
 	}
@@ -377,7 +380,7 @@ func TestVoiceRetryMustRepeatThePartFields(t *testing.T) {
 	if first.Code != http.StatusAccepted {
 		t.Fatalf("first=%d %s", first.Code, first.Body)
 	}
-	for _, changes := range []map[string]string{{"X-Board-Part": "2"}, {"X-Voice-Segment": "2"}, {"X-Voice-More": ""}} {
+	for _, changes := range []map[string]string{{"X-Board-Part": "2"}, {"X-Voice-Segment": "2"}, {"X-Voice-More": ""}, {"X-Voice-Recording": "other"}} {
 		if response := postVoice(c, cookie, "plan", audio, headers(changes)); response.Code != http.StatusConflict {
 			t.Fatalf("retry with %v: status=%d %s, want 409", changes, response.Code, response.Body)
 		}
@@ -420,5 +423,171 @@ func TestVoiceActOnABoardMadeReadOnlyDuringTranscodeIsRefused(t *testing.T) {
 	}
 	if files, _ := filepath.Glob(filepath.Join(directory, "*")); len(files) != 0 {
 		t.Fatalf("the refused recording was kept: %v", files)
+	}
+}
+
+// fakeTimers is the board channel's clock in a test: a timer fires only when
+// the test moves time past it.
+type fakeTimers struct {
+	mu      sync.Mutex
+	elapsed time.Duration
+	timers  []*fakeTimer
+}
+
+type fakeTimer struct {
+	at        time.Duration
+	fire      func()
+	isStopped bool
+}
+
+func (clock *fakeTimers) after(wait time.Duration, fire func()) func() bool {
+	clock.mu.Lock()
+	defer clock.mu.Unlock()
+	timer := &fakeTimer{at: clock.elapsed + wait, fire: fire}
+	clock.timers = append(clock.timers, timer)
+	return func() bool {
+		clock.mu.Lock()
+		defer clock.mu.Unlock()
+		wasArmed := !timer.isStopped
+		timer.isStopped = true
+		return wasArmed
+	}
+}
+
+// advance moves time on by wait and fires each timer that comes due.
+func (clock *fakeTimers) advance(wait time.Duration) {
+	clock.mu.Lock()
+	clock.elapsed += wait
+	var due []*fakeTimer
+	for _, timer := range clock.timers {
+		if !timer.isStopped && timer.at <= clock.elapsed {
+			timer.isStopped = true
+			due = append(due, timer)
+		}
+	}
+	clock.mu.Unlock()
+	for _, timer := range due {
+		timer.fire()
+	}
+}
+
+func (clock *fakeTimers) armed() int {
+	clock.mu.Lock()
+	defer clock.mu.Unlock()
+	count := 0
+	for _, timer := range clock.timers {
+		if !timer.isStopped {
+			count++
+		}
+	}
+	return count
+}
+
+// recordingTest is a started board channel on a fake clock with board plan,
+// posting parts of recordings about its part 1.5.
+type recordingTest struct {
+	t      *testing.T
+	c      *Channel
+	host   *fakeBoardHost
+	clock  *fakeTimers
+	cookie *http.Cookie
+	sent   int
+}
+
+func newRecordingTest(t *testing.T) *recordingTest {
+	t.Helper()
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	test := &recordingTest{t: t, host: newFakeBoardHost(), clock: &fakeTimers{}}
+	test.c = startBoardChannel(t, test.host, func(c *Channel) { c.board.after = test.clock.after })
+	createBoard(t, test.c, "plan")
+	test.cookie = loginCookie(t, test.c)
+	return test
+}
+
+// send posts part segment of recording ("" sends no recording id) as the line
+// saying its audio was refused, which needs no transcode and counts as a part.
+func (test *recordingTest) send(recording string, segment int, hasMore bool, unsent string) {
+	test.t.Helper()
+	test.sent++
+	headers := map[string]string{"X-Client-Id": fmt.Sprintf("voice-%d", test.sent), "X-Board-Part": "1.5",
+		"X-Voice-Segment": strconv.Itoa(segment), "X-Voice-Recording": recording, "X-Voice-Unsent": unsent}
+	if hasMore {
+		headers["X-Voice-More"] = "1"
+	}
+	if response := postVoice(test.c, test.cookie, "plan", nil, headers); response.Code != http.StatusAccepted {
+		test.t.Fatalf("part %d of %q: status=%d %s", segment, recording, response.Code, response.Body)
+	}
+}
+
+// A recording whose parts stop coming (its tab died, or C3 refused a part and
+// the line saying so) is ended by C3 once, with its own line on the
+// recording's part, logged for the page.
+func TestARecordingWhosePartsStopIsEndedOnce(t *testing.T) {
+	test := newRecordingTest(t)
+	test.send("a", 1, true, "refused")
+	test.clock.advance(boardVoiceWait)
+	emitted := test.host.emittedSnapshot()
+	if len(emitted) != 2 {
+		t.Fatalf("emitted %d lines, want the part and C3's end", len(emitted))
+	}
+	ended := emitted[1]
+	if want := "[board plan · 1.5 · msg " + itoa(ended.MessageID) + "] Voice note ended after part 1: no further part arrived."; ended.Text != want ||
+		ended.Channel != channel.BoardChannelName || ended.ChatID != 1 || ended.Sender.UserID != 42 {
+		t.Fatalf("ended line=%+v, want %q from the operator on the board's route", ended, want)
+	}
+	log := boardLog(t, test.c, "plan")
+	if entry := log[len(log)-1]; entry.Op != "voice_ended" || entry.ID != ended.MessageID || entry.Part != "1.5" || entry.Segment != 1 || entry.From != "C3" {
+		t.Fatalf("logged %+v, want C3's voice_ended line", entry)
+	}
+	test.clock.advance(3 * boardVoiceWait)
+	if len(test.host.emittedSnapshot()) != 2 || test.clock.armed() != 0 {
+		t.Fatalf("emitted %d lines with %d timers armed, want it ended once", len(test.host.emittedSnapshot()), test.clock.armed())
+	}
+}
+
+// Each new part of a recording restarts C3's wait for the next one.
+func TestANewPartRestartsTheWait(t *testing.T) {
+	test := newRecordingTest(t)
+	test.send("", 1, true, "refused")
+	test.clock.advance(boardVoiceWait - time.Second)
+	test.send("", 2, true, "refused")
+	test.clock.advance(boardVoiceWait - time.Second)
+	if emitted := test.host.emittedSnapshot(); len(emitted) != 2 {
+		t.Fatalf("emitted %d lines, want no end before a whole wait after part 2", len(emitted))
+	}
+	test.clock.advance(time.Second)
+	if emitted := test.host.emittedSnapshot(); len(emitted) != 3 || !strings.HasSuffix(emitted[2].Text, "] Voice note ended after part 2: no further part arrived.") {
+		t.Fatalf("emitted %d lines, want the end a whole wait after part 2", len(emitted))
+	}
+}
+
+// A recording that reaches its last part, or a line saying it was cancelled,
+// is never ended by C3.
+func TestACompleteRecordingIsNeverEnded(t *testing.T) {
+	test := newRecordingTest(t)
+	test.send("a", 1, true, "refused")
+	test.send("a", 2, false, "refused")
+	test.send("", 1, true, "refused")
+	test.send("", 2, false, "cancelled")
+	test.clock.advance(3 * boardVoiceWait)
+	if emitted := test.host.emittedSnapshot(); len(emitted) != 4 || test.clock.armed() != 0 {
+		t.Fatalf("emitted %d lines with %d timers armed, want the four parts only", len(emitted), test.clock.armed())
+	}
+}
+
+// On a board made read-only the end goes to the log only: the board's route
+// is gone, and the session was told the board closed.
+func TestARecordingOnABoardMadeReadOnlyEndsInTheLogOnly(t *testing.T) {
+	test := newRecordingTest(t)
+	test.send("", 1, true, "refused")
+	w := httptest.NewRecorder()
+	test.c.routes().ServeHTTP(w, request(http.MethodPost, "/board/plan/close", "", test.cookie, true))
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("close=%d %s", w.Code, w.Body)
+	}
+	test.clock.advance(boardVoiceWait)
+	log := boardLog(t, test.c, "plan")
+	if len(test.host.emittedSnapshot()) != 1 || log[len(log)-1].Op != "voice_ended" {
+		t.Fatalf("emitted %d lines, log %+v; want the end logged and not sent", len(test.host.emittedSnapshot()), log)
 	}
 }
