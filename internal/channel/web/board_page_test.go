@@ -19,19 +19,20 @@ func readPage(t *testing.T, name string) string {
 }
 
 // The shell writes agent strings (title, holder, notices) only as text: the
-// only DOM properties it assigns are on this list, its one URL sink is the
-// frame's own page URL, and it calls no HTML or code sink.
+// only DOM properties it assigns are on this list, its URL sinks are the
+// frame's own page URL and its player's board audio, and it calls no HTML or
+// code sink.
 func TestShellWritesAgentStringsOnlyToAllowedSinks(t *testing.T) {
 	shell := readPage(t, "board.js")
 	allowed := map[string]bool{"textContent": true, "title": true, "hidden": true, "mode": true, "src": true, "typing": true, "holder": true, "rev": true,
-		"disabled": true, "ariaPressed": true}
+		"disabled": true, "ariaPressed": true, "checked": true}
 	for _, match := range regexp.MustCompile(`\.([A-Za-z_$][\w$]*)\s*=[^=]`).FindAllStringSubmatch(shell, -1) {
 		if !allowed[match[1]] {
 			t.Errorf("board.js assigns .%s, which is not an allowed sink", match[1])
 		}
 	}
-	if sources := regexp.MustCompile(`\.src\s*=[^=][^\n]*`).FindAllString(shell, -1); len(sources) != 1 || sources[0] != ".src = pageURL();" {
-		t.Errorf("board.js .src assignments = %q, want only the frame's own page URL", sources)
+	if sources := regexp.MustCompile(`\.src\s*=[^=][^\n]*`).FindAllString(shell, -1); strings.Join(sources, " ") != ".src = `${base}/audio/${name}`; .src = pageURL();" {
+		t.Errorf("board.js .src assignments = %q, want only the player's board audio and the frame's own page URL", sources)
 	}
 	for _, sink := range []string{"inner" + "HTML", "outer" + "HTML", "insertAdjacent", "document.write", "eval(", "Function(", "srcdoc", "href", "setAttribute", "location.assign", "location.replace", "location.reload", "location.href", "window.open", "createContextualFragment", "setTimeout(\"", "setTimeout('", "setTimeout(`"} {
 		if strings.Contains(shell, sink) {
@@ -172,6 +173,32 @@ func TestOnlyTheShellsOwnButtonOpensTheMicrophone(t *testing.T) {
 	frame := regexp.MustCompile(`<iframe[^>]*>`).FindString(readPage(t, "board.html"))
 	if strings.Contains(frame, "allow=") || strings.Contains(frame, "allow-same-origin") {
 		t.Errorf("board.html frame %q delegates a permission or its origin", frame)
+	}
+}
+
+// Spoken replies play in the shell, never the frame: the page names only a
+// reply's id (a positive integer), the player takes only this board's audio
+// (a token C3 gave, checked, or the silent unlock clip), and starting the mic
+// stops it first.
+func TestOnlyTheShellPlaysRepliesAndThePageNamesOnlyAnID(t *testing.T) {
+	shell := readPage(t, "board.js")
+	if !strings.Contains(functionBody(t, shell, "async function onFrameMessage("), "const problem = speakForPage(value);") ||
+		!strings.Contains(functionBody(t, shell, "function speakForPage("), "if (id !== null && !(Number.isSafeInteger(id) && id > 0)) return \"invalid\";") {
+		t.Error("a speak message reaches the player without its id checked")
+	}
+	if calls := regexp.MustCompile(`playAudio\([^)]*\)`).FindAllString(shell, -1); strings.Join(calls, " ") != `playAudio(token) playAudio(name) playAudio("unlock")` ||
+		!strings.Contains(functionBody(t, shell, "async function fetchSpeech("), "/^[0-9a-f]{32}$/.test(body.token)") {
+		t.Errorf("playAudio calls = %q, want only a checked token from C3 and the unlock clip", calls)
+	}
+	if !strings.Contains(functionBody(t, shell, "async function startRecording("), "stopSpeech(); // recording and speaking never overlap") ||
+		!strings.Contains(functionBody(t, shell, "async function playNext("), "if (speaking || recording || isAudioBlocked") {
+		t.Error("the mic and the player can overlap")
+	}
+	if !strings.Contains(readPage(t, "board.html"), `<audio id="player" preload="auto" hidden></audio>`) {
+		t.Error("board.html has no player of the shell's own")
+	}
+	if sdk := readPage(t, "board-sdk.js"); !strings.Contains(sdk, `const speak = (id) => request("speak", { value: id ?? null });`) || strings.Contains(sdk, "fetch(") {
+		t.Error("board-sdk.js does not ask the shell to speak, or reaches for the network itself")
 	}
 }
 

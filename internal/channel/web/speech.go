@@ -33,6 +33,7 @@ type synthesizerHost interface {
 }
 
 type speechJob struct {
+	board          int64 // the board's number, or 0 for the web chat
 	messageID      int64
 	text           string
 	explicit       bool
@@ -47,6 +48,7 @@ type speechResult struct {
 
 type cachedAudio struct {
 	audio     []byte
+	board     int64 // the board's number, or 0 for the web chat
 	messageID int64
 	created   time.Time
 }
@@ -248,7 +250,7 @@ func (c *Channel) runSpeech(job speechJob) {
 		}
 		return
 	}
-	token, err := c.cacheSpeech(job.messageID, result.Audio)
+	token, err := c.cacheSpeech(job.board, job.messageID, result.Audio)
 	if err != nil {
 		outcome.err = err
 		if !job.explicit {
@@ -290,31 +292,46 @@ func (c *Channel) handleSpeak(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	if token, ok := c.audioTokenForMessage(body.MessageID); ok {
+	if token, ok := c.audioTokenForMessage(0, body.MessageID); ok {
 		writeSpeakResult(w, body.MessageID, token)
 		return
 	}
-	if _, ok := c.host.(synthesizerHost); !ok {
+	token, err := c.speakNow(r, 0, body.MessageID, text)
+	switch {
+	case r.Context().Err() != nil: // the viewer went away: no one to answer
+	case errors.Is(err, errSpeechBusy):
+		writeSendError(w, http.StatusServiceUnavailable, "speech busy")
+	case err != nil:
 		writeSendError(w, http.StatusServiceUnavailable, "speech unavailable")
-		return
+	default:
+		writeSpeakResult(w, body.MessageID, token)
+	}
+}
+
+var errSpeechBusy = errors.New("speech queue full")
+
+// speakNow synthesizes a message's text as an explicit job, which runs even
+// with spoken replies off, and returns its audio token once cached. It ends
+// with the request.
+func (c *Channel) speakNow(r *http.Request, board, messageID int64, text string) (string, error) {
+	if _, ok := c.host.(synthesizerHost); !ok {
+		return "", c3types.ErrNoSynthesizer
 	}
 	result := make(chan speechResult, 1)
 	if !c.enqueueSpeech(speechJob{
-		messageID: body.MessageID, text: text, explicit: true,
+		board: board, messageID: messageID, text: text, explicit: true,
 		requestContext: r.Context(), result: result,
 	}) {
-		writeSendError(w, http.StatusServiceUnavailable, "speech busy")
-		return
+		return "", errSpeechBusy
 	}
 	select {
 	case outcome := <-result:
-		if outcome.err != nil || outcome.token == "" {
-			writeSendError(w, http.StatusServiceUnavailable, "speech unavailable")
-			return
+		if outcome.err == nil && outcome.token == "" {
+			outcome.err = errors.New("speech synthesis returned no audio")
 		}
-		writeSpeakResult(w, body.MessageID, outcome.token)
+		return outcome.token, outcome.err
 	case <-r.Context().Done():
-		return
+		return "", r.Context().Err()
 	}
 }
 
@@ -397,7 +414,7 @@ func shortSpeechError(err error) string {
 	}
 }
 
-func (c *Channel) cacheSpeech(messageID int64, audio []byte) (string, error) {
+func (c *Channel) cacheSpeech(board, messageID int64, audio []byte) (string, error) {
 	if len(audio) > audioCacheBytes {
 		return "", errors.New("synthesized audio exceeds cache limit")
 	}
@@ -415,7 +432,7 @@ func (c *Channel) cacheSpeech(messageID int64, audio []byte) (string, error) {
 		}
 	}
 	copy := append([]byte(nil), audio...)
-	c.audioCache[token] = cachedAudio{audio: copy, messageID: messageID, created: now}
+	c.audioCache[token] = cachedAudio{audio: copy, board: board, messageID: messageID, created: now}
 	c.audioBytes += int64(len(copy))
 	return token, nil
 }
@@ -450,22 +467,24 @@ func (c *Channel) evictOldestAudioLocked() bool {
 	return true
 }
 
-func (c *Channel) audioForToken(token string) (cachedAudio, bool) {
+// audioForToken is the cached audio a token names, only for the board (0: the
+// web chat) that asked for it.
+func (c *Channel) audioForToken(board int64, token string) (cachedAudio, bool) {
 	c.audioMu.Lock()
 	defer c.audioMu.Unlock()
 	c.evictExpiredAudioLocked(c.now())
 	audio, ok := c.audioCache[token]
-	return audio, ok
+	return audio, ok && audio.board == board
 }
 
-func (c *Channel) audioTokenForMessage(messageID int64) (string, bool) {
+func (c *Channel) audioTokenForMessage(board, messageID int64) (string, bool) {
 	c.audioMu.Lock()
 	defer c.audioMu.Unlock()
 	c.evictExpiredAudioLocked(c.now())
 	token := ""
 	var newest time.Time
 	for candidate, audio := range c.audioCache {
-		if audio.messageID != messageID || (!newest.IsZero() && audio.created.Before(newest)) {
+		if audio.board != board || audio.messageID != messageID || (!newest.IsZero() && audio.created.Before(newest)) {
 			continue
 		}
 		token = candidate
@@ -480,7 +499,7 @@ func (c *Channel) handleAudio(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "authentication required", status)
 		return
 	}
-	audio, ok := c.audioForToken(r.PathValue("token"))
+	audio, ok := c.audioForToken(0, r.PathValue("token"))
 	if !ok {
 		http.NotFound(w, r)
 		return

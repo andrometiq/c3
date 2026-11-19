@@ -1,6 +1,7 @@
 package web
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
@@ -559,7 +560,8 @@ func (host *harnessHost) control(line string) {
 // until that file is removed or C3_BOARD_HARNESS_SECONDS (default 300) pass.
 // C3_BOARD_HARNESS_PAGE is the first page of each board (default: the
 // starter); C3_BOARD_HARNESS_ASSETS a directory holding the page files to use
-// instead of the embedded ones.
+// instead of the embedded ones; C3_BOARD_HARNESS_SPEECH an MP3 file the fake
+// synthesizer returns for every reply, after 300 ms.
 func TestBoardBrowserHarness(t *testing.T) {
 	infoPath := os.Getenv("C3_BOARD_HARNESS")
 	if infoPath == "" {
@@ -571,6 +573,16 @@ func TestBoardBrowserHarness(t *testing.T) {
 		t.Fatal(err)
 	}
 	host := &harnessHost{fakeBoardHost: newFakeBoardHost(), t: t, ended: map[int64][]*c3types.Inbound{}, isDown: map[int64]bool{}}
+	if path := os.Getenv("C3_BOARD_HARNESS_SPEECH"); path != "" {
+		speech, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		host.synthesize = func(context.Context, c3types.SpeechRequest) (c3types.SpeechResult, error) {
+			time.Sleep(300 * time.Millisecond)
+			return c3types.SpeechResult{Audio: speech, MIME: "audio/mpeg", Provider: "harness"}, nil
+		}
+	}
 	c := New()
 	host.c = c
 	c.host, c.operatorID, c.baseURL = host, 42, "http://"+listener.Addr().String()

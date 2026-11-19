@@ -82,10 +82,13 @@ not the approved message's (418).
 | `GET /board/<name>/events` | SSE `message`, `edit`, `reaction`, `action`, `page`, `status`, `notice`; `id:` is the log seq, `Last-Event-ID` replays after it |
 | `POST /board/<name>/act` | `{client_id, op, …}`, op `comment`, `approve`, `tap` or `react`; or a voice act (below); 202 `{id}` |
 | `POST /board/<name>/close` | empty body; 204, or 500 `close_failed` (repeat to retry) |
+| `POST /board/<name>/speak` | `{id}`: the session's message `id` on this board, read aloud; 200 `{token}` (cached audio first), else 404, 429 `rate`, 503 `unavailable` |
+| `GET /board/<name>/audio/<token>` | that audio as MP3, under this board only; `…/audio/unlock` is C3's silent clip |
 
 Shell assets are under `/board/assets/`. Errors are `{"error": <rule>}`: `invalid` 400,
 `unauthorized` 401, `forbidden` 403, `not_found` 404, `closed` or `conflict` 409, `too_big` 413,
-`unreadable` 422, `rate` 429, `offline` 503 with `Retry-After`.
+`unreadable` 422, `rate` 429, `offline` 503 with `Retry-After`, `unavailable` 503 (no speech: none set
+up, the provider failed or its queue is full).
 
 ## Voice
 
@@ -126,6 +129,24 @@ it): whatever the session's reply says, it is the session's message. The shell t
 upload's own status (`sending`, `sent` with the entry's `id`, `not_sent` with the rule), and the SDK
 passes all of it as events.
 
+**Spoken replies.** The shell reads the session's messages aloud; the frame can't, having no network.
+Each answer in `c3.threads()` has a play button: ▶, then … while C3 makes the audio, ⏸ while it plays
+(a tap stops it). A page asks with `c3.speak(id)` (`c3.speak(null)` stops) and follows
+`c3.on("speech", e => …)`: `{id, state, error}`, state `loading`, `playing`, `ended` or `failed`.
+**Read replies aloud** in the circle's panel (off until turned on; the browser remembers it in the
+shell's own storage) reads each new message as it arrives, in order; after a reconnect, only the newest
+one missed. There is one player: a tap on a reply takes the place of what plays and waits, starting the
+mic stops it, a reply that comes while the mic is on waits for the recording to end, and `c3.speak`
+while recording is refused (`recording`). A phone plays sound only after a tap. In Chromium a tap in
+the page counts for the shell too; otherwise (and before any tap) the reply waits, fails as `blocked`
+for the page, and a notice asks for a tap on the circle, which plays C3's silent clip and then the reply.
+
+The shell asks `POST /board/<name>/speak` and plays `/board/<name>/audio/<token>`. Synthesis is the
+web chat's (its provider, its two-worker, eight-waiting bound and its 15-minute in-memory audio
+cache), with each board's audio kept apart from the web chat's and other boards'. A reply C3 must
+synthesize counts against 12 a minute per board; one already cached is free. A board made read-only
+can still be heard.
+
 ## Trust
 
 - **Frame.** The page loads by `src` into `<iframe sandbox="allow-scripts">` with the document CSP
@@ -147,6 +168,13 @@ passes all of it as events.
   isn't four finite numbers is refused; the mic is a 44–56 px circle centred on the spot, kept inside
   the frame's visible box with its row below the status circle, and the recording bar takes the
   roomier side of that row, so no spot hides the circle, the mic or the recording state.
+- **Speech.** Only the shell plays, on its own `<audio>`; the page names only a message id, a positive
+  integer. C3 speaks it only when it is the session's message on that board (its latest edit), never
+  an owner's act, a page or another board's message, and a refused id costs no synthesis. The speak
+  route checks sign-in (the front included), same origin and board like an act. The shell plays only
+  a 32-hex token C3 gave it, under its own board's path, or the unlock clip; a token plays only under
+  the board that asked for it, never under another board or the web chat's `/audio/`. The page's
+  script can ask for any of the session's messages without a tap, within the board's 12 a minute.
 - **Acts.** Each re-checks sign-in, same origin and board; the body is decoded strictly per op and
   can't name a sender. Part `^[A-Za-z0-9._:-]{1,64}$`, text and note 16,000 runes, quote 2,000,
   tap value 64 bytes, 30 new acts a minute per board; a `ref` must name a session message; a
@@ -165,7 +193,8 @@ directories 0700, files 0600: `capability.key` (the cap key) and per board `boar
 owner, title, rev, closed), `pages/<rev>.html` (the last 5; `rev` picks the served one) and
 `log.jsonl` (append-only: seq, at, dir, id, op, part, text, ref, reply_to, from, and for voice
 segment, has_more, status). Held actions sit in the broker's queue. Voice recordings are the web
-chat's: `voice/` under the web state directory, the newest 200 kept for both. An unreadable `board.json` stops the board channel from starting.
+chat's: `voice/` under the web state directory, the newest 200 kept for both. Spoken replies' audio
+is kept in memory only; **Read replies aloud** is the browser's, in the shell origin's storage. An unreadable `board.json` stops the board channel from starting.
 
 ## The authenticated HTTPS front
 
@@ -219,6 +248,6 @@ prefetch, which it could not observe):
 So a page could leak what it holds plus the viewer's IP address. Today only the owner views a
 board, and a page holds only what its agent already has; this must be closed before others view.
 
-**Not yet:** others watching (and, if the owner allows, typing), spoken replies, a C3-drawn Approve the
+**Not yet:** others watching (and, if the owner allows, typing), a C3-drawn Approve the
 page can't press, boards for CLIs whose host turns C3's tools off, handing a board to a new
 conversation, page history past 500 entries, a list across machines.

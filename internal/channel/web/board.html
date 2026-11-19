@@ -36,6 +36,8 @@ button { font: inherit; color: inherit; cursor: pointer; -webkit-tap-highlight-c
 #panel .session { display: flex; align-items: center; gap: 8px; color: var(--ink); }
 #session-dot { flex: none; width: 8px; height: 8px; border-radius: 50%; background: var(--ended); }
 #waiting:empty, #notice:empty { display: none; }
+#aloud-row { display: flex; align-items: center; gap: 8px; min-height: 40px; margin-top: 2px; }
+#aloud { flex: none; width: 18px; height: 18px; margin: 0; accent-color: var(--accent); }
 #close { justify-self: start; min-height: 40px; margin-top: 6px; padding: 2px 14px; border: 1px solid var(--line); border-radius: 8px; background: none; }
 /* The mic: drawn by C3 where the page's Send sits while its composer is empty; while recording, the bar beside it
    shows the time, the part and Cancel. */
@@ -60,8 +62,9 @@ button { font: inherit; color: inherit; cursor: pointer; -webkit-tap-highlight-c
 <div id="recorder" hidden><span id="clock"></span><span id="about"></span><button id="cancel" type="button">Cancel</button></div>
 <button id="mic" type="button" aria-pressed="false" aria-label="Record a voice note" hidden><svg class="idle" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 14a3 3 0 0 0 3-3V5a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3Zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.93V21h2v-3.07A7 7 0 0 0 19 11h-2Z"/></svg><svg class="busy" viewBox="0 0 24 24" aria-hidden="true"><path d="M11 20V7.83l-5.6 5.6L4 12l8-8 8 8-1.4 1.43-5.6-5.6V20h-2Z"/></svg></button>
 <button id="status" type="button" popovertarget="panel" aria-label="Board status"><span id="dot"></span><span id="badge" hidden></span></button>
-<div id="panel" popover><strong id="title">Board</strong><p class="session"><span id="session-dot"></span><span id="session">Connecting…</span></p><p id="waiting"></p><p id="typing" hidden>Typing…</p><p id="notice"></p><button id="close" type="button" hidden>Make read-only</button></div>
+<div id="panel" popover><strong id="title">Board</strong><p class="session"><span id="session-dot"></span><span id="session">Connecting…</span></p><p id="waiting"></p><p id="typing" hidden>Typing…</p><p id="notice"></p><label id="aloud-row"><input id="aloud" type="checkbox"> Read replies aloud</label><button id="close" type="button" hidden>Make read-only</button></div>
 <p id="toast" role="status" hidden></p>
+<audio id="player" preload="auto" hidden></audio>
 <script src="/board/assets/board.js"></script>
 </body>
 </html>

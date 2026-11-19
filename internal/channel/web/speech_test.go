@@ -229,7 +229,7 @@ func TestSpeakEndpointAuthUnknownCachedAndSynthesized(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		token, err := c.cacheSpeech(messageID, []byte("ID3-cached"))
+		token, err := c.cacheSpeech(0, messageID, []byte("ID3-cached"))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -267,7 +267,7 @@ func TestSpeakEndpointAuthUnknownCachedAndSynthesized(t *testing.T) {
 			t.Fatalf("synthesized result/calls=%+v/%d", result, host.synthCallCount())
 		}
 		token := strings.TrimPrefix(result.URL, "/audio/")
-		if cached, ok := c.audioForToken(token); !ok || cached.messageID != messageID || string(cached.audio) != "ID3-explicit" {
+		if cached, ok := c.audioForToken(0, token); !ok || cached.messageID != messageID || string(cached.audio) != "ID3-explicit" {
 			t.Fatalf("synthesized cache=%+v/%v", cached, ok)
 		}
 	})

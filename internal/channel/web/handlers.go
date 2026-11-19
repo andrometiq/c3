@@ -46,6 +46,9 @@ func (c *Channel) routes() http.Handler {
 	mux.HandleFunc("GET /board/{name}/events", c.handleBoardEvents)
 	mux.HandleFunc("POST /board/{name}/act", c.handleBoardAct)
 	mux.HandleFunc("POST /board/{name}/close", c.handleBoardClose)
+	mux.HandleFunc("POST /board/{name}/speak", c.handleBoardSpeak)
+	mux.HandleFunc("GET /board/{name}/audio/unlock", c.handleAudioUnlock)
+	mux.HandleFunc("GET /board/{name}/audio/{token}", c.handleBoardAudio)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if c.isOffFrontAlias(r) || c.isFrontRequest(r) && !c.isFrontRoute(r) {
 			http.NotFound(w, r)
