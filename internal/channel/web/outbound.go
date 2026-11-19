@@ -32,6 +32,15 @@ type streamPayload struct {
 	SessionID       string      `json:"session_id,omitempty"`
 	Since           string      `json:"since,omitempty"`
 	Attachment      *attachment `json:"attachment,omitempty"`
+	// A voice note's place in a longer recording, why a part of it never
+	// reached C3 (voiceUnsent*), and C3's status for it (c3types.VoiceStatus*).
+	Segment     int    `json:"segment,omitempty"`
+	HasMore     bool   `json:"has_more,omitempty"`
+	Unsent      string `json:"unsent,omitempty"`
+	VoiceStatus string `json:"voice_status,omitempty"`
+	// IsFrontViewer tells the page it was signed in by the authenticated
+	// front, which signs the operator out too: C3's logout isn't there.
+	IsFrontViewer bool `json:"front_viewer,omitempty"`
 }
 
 type attachment struct {
@@ -66,13 +75,6 @@ func (c *Channel) SendReply(args c3types.ReplyArgs) (int64, error) {
 	}
 	if len(args.Media) != 0 {
 		return c.sendDocument(args)
-	}
-	if args.ReplyTo != nil && *args.ReplyTo > 0 && isVoiceReadbackNotice(args.Text) {
-		voice := true
-		c.publish(streamEvent{kind: "edit", payload: streamPayload{
-			MessageID: *args.ReplyTo, Text: args.Text, Voice: &voice,
-		}})
-		return *args.ReplyTo, nil
 	}
 	messageID := c.nextReplyMessageID()
 	payload := streamPayload{MessageID: messageID, Text: args.Text, Timestamp: streamTimestamp(c.now())}
@@ -180,11 +182,6 @@ func (c *Channel) checkDestination(channelName string, chatID int64, topicID *in
 
 func isStatusText(text string) bool {
 	return strings.HasPrefix(text, "📨 Held") || strings.HasPrefix(text, "⏸ Permission") || strings.HasPrefix(text, "⚠️")
-}
-
-func isVoiceReadbackNotice(text string) bool {
-	return strings.HasPrefix(text, c3types.VoiceTranscriptionFailureNoticePrefix) ||
-		strings.HasPrefix(text, c3types.VoiceDownloadFailureNoticePrefix)
 }
 
 func streamTimestamp(value time.Time) *time.Time { return &value }

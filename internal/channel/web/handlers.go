@@ -400,7 +400,7 @@ func (c *Channel) handleEvents(w http.ResponseWriter, r *http.Request) {
 	voiceFlag := c.voiceFlagLocked(viewer)
 	voice := voiceFlag != nil && *voiceFlag
 	c.authMu.Unlock()
-	if err := writeSSE(w, streamEvent{kind: "prefs", payload: streamPayload{Voice: &voice}}); err != nil {
+	if err := writeSSE(w, prefsEvent(viewer, voice)); err != nil {
 		return
 	}
 	if err := writeSSE(w, c.presenceEvent(true)); err != nil {

@@ -102,7 +102,7 @@ func (c *Channel) handleVoicePreference(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	voice := *body.Enabled
-	c.broadcastSession(viewer.id, streamEvent{kind: "prefs", payload: streamPayload{Voice: &voice}})
+	c.broadcastSession(viewer.id, prefsEvent(viewer, voice))
 	c.emitVoicePreferenceNotice(voice)
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -127,6 +127,12 @@ func (c *Channel) emitVoicePreferenceNotice(enabled bool) {
 			c.host.Logf("web: dropped %q system event before worker admission", title)
 		}
 	}
+}
+
+// prefsEvent is the viewer's preferences frame: spoken replies on or off, and
+// whether the authenticated front signed the viewer in (and so out).
+func prefsEvent(viewer boardViewer, voice bool) streamEvent {
+	return streamEvent{kind: "prefs", payload: streamPayload{Voice: &voice, IsFrontViewer: viewer.isFront}}
 }
 
 // voiceFlagLocked is the viewer's spoken-replies preference: the front
