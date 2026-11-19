@@ -94,6 +94,7 @@ func TestShellAndSDKUseTheContractLimits(t *testing.T) {
 	want := map[string]int{
 		"textRunes": channel.BoardTextMaxRunes, "quoteRunes": channel.BoardQuoteMaxRunes, "valueBytes": channel.BoardTapValueMaxBytes,
 		"keepBytes": channel.BoardKeepMaxBytes, "logEntries": channel.BoardLogHistoryEntries, "fileBytes": boardFileLimit,
+		"captionBytes": boardFileCaptionBytes,
 	}
 	for name, limit := range want {
 		match := regexp.MustCompile(name + `: (\d+)(?: << (\d+))?`).FindStringSubmatch(shell)

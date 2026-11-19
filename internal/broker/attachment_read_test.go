@@ -113,7 +113,7 @@ func TestAttachmentReadAllowedOnlyForTheSessionThatDownloadedIt(t *testing.T) {
 			`"tool_use_id":"toolu_r","tool_input":`+string(input)+`}`), &out, socketPath, dir)
 		return out.String()
 	}
-	const allowed = "C3: Telegram attachment this session downloaded"
+	const allowed = "C3: attachment this session downloaded"
 
 	if output := read("session-fixture", photo); output != "" {
 		t.Fatalf("allowed before any download: %q", output)
@@ -337,5 +337,51 @@ func TestAttachmentAllowComesOnlyFromTheAdaptersOwnRecord(t *testing.T) {
 	secondWindow.SetStableSessionID("session-fixture")
 	if resp := attachmentCheck(t, f, "session-fixture", "Read", photo); resp.Allow {
 		t.Fatalf("allowed through another connection's record: %+v", resp)
+	}
+}
+
+// A board's file goes through the same record: download_attachment on a board
+// route returns a copy in the boards' attachment cache, and only the session
+// it was returned to reads it without a prompt, through the real hook.
+func TestBoardAttachmentReadAllowedOnlyForTheSessionThatDownloadedIt(t *testing.T) {
+	f, _, telegramDir := newAttachmentFixture(t)
+	boardDir, err := channel.AttachmentCacheDir(channel.BoardChannelName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(boardDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	boardFiles := &downloadChannel{autoTestChannel: f.ch}
+	f.b.chMu.Lock()
+	f.b.channels[channel.BoardChannelName] = &channelRegistration{Channel: boardFiles}
+	f.b.chMu.Unlock()
+	reader := f.b.Stubs.Register("claude", 4646, "/boards", struct{}{})
+	reader.SetStableSessionID("session-board")
+	claimConfirmed(t, f.b, reader, RouteKey{Channel: channel.BoardChannelName, ChatID: 1})
+	other := f.b.Stubs.Register("claude", 4747, "/other", struct{}{})
+	other.SetStableSessionID("session-other-board")
+	claimConfirmed(t, f.b, other, RouteKey{Channel: channel.BoardChannelName, ChatID: 2})
+	socketPath := listenAuto(t, f)
+	mine, _ := writeAttachment(t, boardDir, "0123456789abcdef0123456789abcdef.png")
+	theirs, _ := writeAttachment(t, boardDir, "fedcba9876543210fedcba9876543210.pdf")
+	read := func(sessionID, path string) string {
+		input, _ := json.Marshal(map[string]string{"file_path": path})
+		var out bytes.Buffer
+		autohook.RunPreToolUse(strings.NewReader(`{"session_id":"`+sessionID+`","cwd":"/boards","tool_name":"Read",`+
+			`"tool_use_id":"toolu_b","tool_input":`+string(input)+`}`), &out, socketPath, telegramDir, boardDir)
+		return out.String()
+	}
+
+	download(t, f, reader, boardFiles, mine)
+	download(t, f, other, boardFiles, theirs)
+	if output := read("session-board", mine); !strings.Contains(output, "C3: attachment this session downloaded") {
+		t.Fatalf("the downloading session's read of its board file printed %q", output)
+	}
+	if output := read("session-board", theirs); output != "" {
+		t.Fatalf("a board file another session downloaded printed %q", output)
+	}
+	if output := read("session-other-board", mine); output != "" {
+		t.Fatalf("another session's read of this session's board file printed %q", output)
 	}
 }

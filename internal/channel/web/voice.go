@@ -488,12 +488,16 @@ func (c *Channel) mintedFilePath(directoryName, fileID, extension string, requir
 	return path, nil
 }
 
-func (c *Channel) pruneVoiceFiles() {
+func (c *Channel) pruneVoiceFiles() { c.pruneStateFiles("voice", ".oga") }
+
+// pruneStateFiles keeps the newest voiceRetention files with extension in the
+// named state directory.
+func (c *Channel) pruneStateFiles(directoryName, extension string) {
 	keep := c.voiceRetention
 	if keep < 0 {
 		return
 	}
-	directory, err := c.voiceDirectoryPath()
+	directory, err := c.stateSubdirectory(directoryName)
 	if err != nil {
 		return
 	}
@@ -508,7 +512,7 @@ func (c *Channel) pruneVoiceFiles() {
 	}
 	files := make([]retainedFile, 0, len(entries))
 	for _, entry := range entries {
-		if entry.IsDir() || filepath.Ext(entry.Name()) != ".oga" {
+		if entry.IsDir() || filepath.Ext(entry.Name()) != extension {
 			continue
 		}
 		info, err := entry.Info()
@@ -530,7 +534,7 @@ func (c *Channel) pruneVoiceFiles() {
 	}
 	for _, file := range files[keep:] {
 		if err := os.Remove(file.path); err != nil && c.host != nil {
-			c.host.Logf("web: prune retained voice %s: %v", file.name, err)
+			c.host.Logf("web: prune retained %s %s: %v", directoryName, file.name, err)
 		}
 	}
 }

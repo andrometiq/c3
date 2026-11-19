@@ -4,9 +4,11 @@
 (() => {
   "use strict";
 
-  const LIMITS = { textRunes: 16000, quoteRunes: 2000, valueBytes: 64, keepBytes: 64 << 10, logEntries: 500, fileBytes: 20 << 20 };
+  const LIMITS = { textRunes: 16000, quoteRunes: 2000, valueBytes: 64, keepBytes: 64 << 10, logEntries: 500, fileBytes: 20 << 20,
+    captionBytes: 6 << 10 }; // a file's caption travels percent-encoded in a header, which a fronting proxy refuses when large
   const PART = /^[A-Za-z0-9._:-]{1,64}$/;
   const ACT_FIELDS = { comment: ["part", "text", "quote", "ref"], approve: ["ref", "part", "note"], tap: ["part", "value", "ref"], react: ["ref", "emoji"] };
+  const PAGE_ACT_FIELDS = { ...ACT_FIELDS, comment: ["part", "text", "quote"] }; // the page's comment answers no message
   const RULES = { 409: "closed", 413: "too_big", 429: "rate", 503: "offline" };
   const STREAM_KINDS = ["message", "edit", "reaction", "action", "page", "status", "notice"];
   const REFUSALS = { 401: "Signed out. Reload to sign in.", 403: "This board can't be opened.", 404: "This board can't be opened." };
@@ -51,9 +53,8 @@
   const GENERAL = "general"; // the board-level chat: the circle's "Talk to the agent"
   const GENERAL_TITLE = "General";
   const THREAD_OPS = new Set(["comment", "tap", "approve", "voice", "voice_ended", "message", "page", "file"]);
-  // Replies: on touch a message is picked by a swipe right of swipePx or a press held holdMs (a move past slopPx is no
-  // press); the owner's acts that may answer one.
-  const REPLY = { swipePx: 48, holdMs: 500, slopPx: 10 };
+  // Replies: on touch a message is picked by a swipe right of swipePx; the owner's acts that may answer one.
+  const REPLY = { swipePx: 48 };
   const REPLY_OPS = new Set(["comment", "voice", "file"]);
   // An agent message whose last line is "[apply: <label>]" is a proposal: that line is drawn as its Approve button.
   const PROPOSAL = /(?:^|\n)\[apply: ([^\]\n]{1,24})\]$/u;
@@ -350,7 +351,7 @@
     const started = performance.now();
     const type = VOICE_TYPES.find((candidate) => MediaRecorder.isTypeSupported?.(candidate)) ?? "";
     const stopListening = listen(stream);
-    const ref = replies.get(part); // every part answers the message picked when it started
+    const ref = answering(part); // every part answers the message picked when it started
     let segment = 1;
     let finished = null; // finish()'s promise: settled once C3 has answered the recording's last act
     let current = startSegment();
@@ -750,7 +751,8 @@
     controls.chatMic.ariaPressed = String(isRecording);
     controls.chatSend.disabled = controls.chatAttach.disabled = pendingActs.has(chat.part);
     controls.chatAttach.hidden = isRecording || state.closed;
-    controls.chatReplyText.textContent = replies.has(chat.part) ? firstLineOf(replies.get(chat.part)) : "";
+    const answered = answering(chat.part);
+    controls.chatReplyText.textContent = answered ? firstLineOf(answered) : "";
     controls.chatReplyRow.hidden = !controls.chatReplyText.textContent || state.closed;
     controls.chatText.disabled = state.closed;
     controls.chatText.placeholder = state.closed ? "This board is read-only." : chat.part === GENERAL ? "Message the agent" : "Message";
@@ -837,7 +839,7 @@
   const fileLabel = ({ name: fileName, size }) => element("span", "label",
     `📎 ${fileName} · ${size < 1 << 20 ? `${Math.ceil(size / 1024)} KB` : `${(size / (1 << 20)).toFixed(1)} MB`}`);
 
-  /** A message's row takes the owner's reply (its Reply button on a mouse; a swipe or a long press on touch, onRowPress) and,
+  /** A message's row takes the owner's reply (its Reply button on a mouse; a swipe on touch, onRowPress) and,
    *  when it answers another message, opens with that message's first line: an owner's reply always, the agent's answer only
    *  when it answers something other than the line right before it. */
   function answerable(row, entry, previous) {
@@ -882,18 +884,25 @@
     if (!isTouch()) controls.chatText.focus();
   }
 
-  /** A finger on a message: moved REPLY.swipePx to the right, or held REPLY.holdMs, it picks that message to answer. */
+  /** The message the owner answers on part, while the log still holds it: one that left the log is dropped, so nothing
+   *  sends a ref C3 would refuse. */
+  function answering(part) {
+    if (!state.log.some((line) => line.id === replies.get(part) && line.op !== "edit")) replies.delete(part);
+    return replies.get(part);
+  }
+
+  /** A finger on a message, moved REPLY.swipePx to the right, picks it to answer; a long press stays the browser's (text
+   *  selection). */
   function onRowPress(event) {
     const id = rowIds.get(event.target.closest(".msg"));
     if (!id || !event.isTrusted || event.pointerType === "mouse") return;
     const start = { x: event.clientX, y: event.clientY }, done = new AbortController();
-    const pick = () => { done.abort(); replyTo(id); };
-    const timer = setTimeout(pick, REPLY.holdMs);
-    done.signal.addEventListener("abort", () => clearTimeout(timer));
     addEventListener("pointermove", (moved) => {
       const [dx, dy] = [moved.clientX - start.x, moved.clientY - start.y];
-      if (dx >= REPLY.swipePx && Math.abs(dy) < dx) pick();
-      else if (Math.hypot(dx, dy) > REPLY.slopPx) clearTimeout(timer); // it moves: no long press
+      if (dx >= REPLY.swipePx && Math.abs(dy) < dx) {
+        done.abort();
+        replyTo(id);
+      }
     }, { signal: done.signal });
     for (const end of ["pointerup", "pointercancel"]) addEventListener(end, () => done.abort(), { signal: done.signal });
   }
@@ -938,7 +947,7 @@
   async function sendText() {
     const part = chat.part, text = controls.chatText.value.trim();
     if (!text || state.closed || pendingActs.has(part)) return;
-    const quote = quotes.get(part), ref = replies.get(part);
+    const quote = quotes.get(part), ref = answering(part);
     drafts.delete(part);
     quotes.delete(part);
     replies.delete(part);
@@ -950,9 +959,10 @@
   /** The file the owner picked goes with the box's text as its caption and the reply bar's message; one over the limit never
    *  leaves the browser. */
   async function sendFile(file) {
-    const part = chat.part, text = controls.chatText.value.trim(), ref = replies.get(part);
+    const part = chat.part, text = controls.chatText.value.trim(), ref = answering(part);
     if (state.closed || pendingActs.has(part)) return;
     if (file.size > LIMITS.fileBytes) return showChatError(`Not sent: ${file.name} is over 20 MB.`);
+    if (encodeURIComponent(text).length > LIMITS.captionBytes) return showChatError("Caption too long for a file; send it as a message after it.");
     drafts.delete(part);
     replies.delete(part);
     controls.chatText.value = "";
@@ -960,10 +970,11 @@
     if (error) giveBack(part, { text, ref }, error);
   }
 
-  /** An act C3 refused: its text, quote and reply go back where they were, and the sheet says why. */
+  /** An act C3 refused: its text, quote and reply go back where they were (not a reply C3 found invalid), and the sheet
+   *  says why. */
   function giveBack(part, { text, quote, ref }, error) {
     if (quote && !quotes.has(part)) quotes.set(part, quote);
-    if (ref && !replies.has(part)) replies.set(part, ref);
+    if (ref && error !== "invalid" && !replies.has(part)) replies.set(part, ref);
     if (chat?.part === part && !controls.chatText.value) controls.chatText.value = text;
     else if (text && !drafts.has(part)) drafts.set(part, text);
     showChatError(`Not sent: ${CHAT_REASONS[error] ?? error}.${text ? " Your text is back in the box." : ""}`);
@@ -1065,8 +1076,8 @@
   }
 
   /** An act body: the op's own fields only, each of its type and within its limit. */
-  function checkAct(body) {
-    const fields = body && Object.hasOwn(ACT_FIELDS, body.op) ? ACT_FIELDS[body.op] : null;
+  function checkAct(body, actFields = ACT_FIELDS) {
+    const fields = body && Object.hasOwn(actFields, body.op) ? actFields[body.op] : null;
     if (!fields || Object.keys(body).some((key) => key !== "op" && !fields.includes(key))) return "invalid";
     const { part, ref, ...texts } = body;
     if (part !== undefined && !(typeof part === "string" && PART.test(part))) return "invalid";
@@ -1168,7 +1179,7 @@
       return toFrame({ c3: "result", call, ...(isKept ? {} : { error: "too_big" }) });
     }
     if (op !== "act") return undefined;
-    const problem = checkAct(body); // refuses a from_page of the page's own
+    const problem = checkAct(body, PAGE_ACT_FIELDS); // refuses a from_page of the page's own, and a reply
     return toFrame({ c3: "result", call, ...(problem ? { error: problem } : await postAct({ ...body, from_page: true })) });
   }
 

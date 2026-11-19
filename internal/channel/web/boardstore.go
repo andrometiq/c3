@@ -3,10 +3,14 @@ package web
 import (
 	"bytes"
 	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"mime"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -226,13 +230,74 @@ func dropExpiredBoardRevision(directory string, rev int64) {
 	}
 }
 
-// storeBoardFile keeps a file act's bytes in board-files/<id>, for good.
-func (c *Channel) storeBoardFile(fileID string, body []byte) error {
+// receiveBoardFile streams a file act's body into a temporary file beside the
+// kept ones, hashing it on the way: its id is the hash's first 16 bytes.
+func (c *Channel) receiveBoardFile(body io.Reader) (temporary, fileID string, size int64, err error) {
 	directory, err := c.ensurePrivateDirectory(boardFilesDirectory)
 	if err != nil {
-		return err
+		return "", "", 0, err
 	}
-	return writeAtomic(filepath.Join(directory, fileID), body)
+	file, err := channel.CreateTemp(directory, "upload-*")
+	if err != nil {
+		return "", "", 0, err
+	}
+	hash := sha256.New()
+	size, err = io.Copy(io.MultiWriter(file, hash), body)
+	if err == nil {
+		err = file.Sync()
+	}
+	if closeErr := file.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		_ = os.Remove(file.Name())
+		return "", "", 0, err
+	}
+	return file.Name(), hex.EncodeToString(hash.Sum(nil)[:16]), size, nil
+}
+
+// keepBoardFile puts a received file in place as board-files/<id> and keeps
+// only the newest files, as voice audio is kept.
+func (c *Channel) keepBoardFile(temporary, fileID string) error {
+	directory, err := c.stateSubdirectory(boardFilesDirectory)
+	if err == nil {
+		err = os.Rename(temporary, filepath.Join(directory, fileID))
+	}
+	if err == nil {
+		err = syncDirectory(directory)
+	}
+	if err == nil {
+		c.pruneStateFiles(boardFilesDirectory, "")
+	}
+	return err
+}
+
+// boardFileExtensions name a file copied out for the agent by its sniffed type,
+// so an image or a PDF opens as one.
+var boardFileExtensions = map[string]string{"image/png": ".png", "image/jpeg": ".jpg", "image/gif": ".gif", "image/webp": ".webp",
+	"application/pdf": ".pdf", "application/zip": ".zip", "text/plain": ".txt", "text/html": ".html", "text/xml": ".xml"}
+
+// copyBoardFile copies a stored file into dir as <id><extension>, the
+// extension from the type its first 512 bytes show.
+func copyBoardFile(stored, dir string) (string, error) {
+	file, err := os.Open(stored)
+	if err != nil {
+		return "", err
+	}
+	head := make([]byte, 512)
+	read, _ := io.ReadFull(file, head)
+	_ = file.Close()
+	mediaType, _, _ := mime.ParseMediaType(http.DetectContentType(head[:read]))
+	temporary, _, err := channel.CopyToTemp(stored, dir, "*.part")
+	if err != nil {
+		return "", err
+	}
+	path := filepath.Join(dir, filepath.Base(stored)+boardFileExtensions[mediaType])
+	if err := os.Rename(temporary, path); err != nil {
+		_ = os.Remove(temporary)
+		return "", err
+	}
+	return path, nil
 }
 
 // readBoardPage loads the one HTML file an agent sends as a board's page.

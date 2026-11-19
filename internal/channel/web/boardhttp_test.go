@@ -221,6 +221,7 @@ func TestActTrustBoundary(t *testing.T) {
 			`{"client_id":"x","op":"comment","part":"1 5","text":"hi"}`,
 			`{"client_id":"x","op":"comment","part":"1","text":"  "}`,
 			`{"client_id":"x","op":"comment","part":"1","text":"hi","ref":999}`,
+			`{"client_id":"x","op":"comment","part":"1","text":"hi","ref":` + itoa(answer) + `,"from_page":true}`,
 			`{"client_id":"x","op":"approve","ref":999}`,
 			`{"client_id":"x","op":"approve","ref":` + itoa(ownComment) + `}`,
 			`{"client_id":"x","op":"react","ref":` + itoa(answer) + `,"emoji":"👍 extra"}`,
@@ -519,7 +520,7 @@ type harnessHost struct {
 	isDown map[int64]bool
 }
 
-var harnessLine = regexp.MustCompile(`^\[board ([a-z0-9-]+)(?: · ([A-Za-z0-9._:-]+))? · msg (\d+)(?: · reply to msg \d+ "(?:[^"\\]|\\.)*")?\] ?(Approved)?`)
+var harnessLine = regexp.MustCompile(`^\[board ([a-z0-9-]+)(?: · ([A-Za-z0-9._:-]+))? · msg (\d+)(?: · reply to (?:the page's )?msg \d+ "(?:[^"\\]|\\.)*")?\] ?(Approved)?`)
 
 func (host *harnessHost) Emit(inbound *c3types.Inbound, _ ...*intake.Source) bool {
 	copy := *inbound
@@ -575,11 +576,19 @@ func (host *harnessHost) answer(inbound *c3types.Inbound) {
 	}
 }
 
-// control applies "end <board>" and "resume <board>" lines a driver writes.
+// control applies "end <board>", "resume <board>" and "flood <board>" (as
+// many answers to no part as the log keeps, pushing every older line out of
+// it) lines a driver writes.
 func (host *harnessHost) control(line string) {
 	verb, name, _ := strings.Cut(strings.TrimSpace(line), " ")
 	board, ok := host.c.board.BoardByName(name)
 	if !ok {
+		return
+	}
+	if verb == "flood" {
+		for index := range channel.BoardLogHistoryEntries {
+			_, _ = host.c.board.SendReply(c3types.ReplyArgs{Channel: channel.BoardChannelName, ChatID: board.Number, Text: fmt.Sprintf("Filler %d.", index)})
+		}
 		return
 	}
 	host.mu.Lock()
@@ -614,6 +623,7 @@ func TestBoardBrowserHarness(t *testing.T) {
 		t.Skip("set C3_BOARD_HARNESS to an info file path to serve boards for a browser driver")
 	}
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)

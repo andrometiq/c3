@@ -68,10 +68,13 @@ A quote comes first as `> ` lines; a ref also arrives as the reply context. Owne
 starting `[board ` is refused, invisible characters ignored.
 
 A comment, voice note or file the owner sends as a reply names the message it answers (any on the
-board, the owner's own included) after C3's id, with that message's first 80 characters as it now
-reads. A file comes as an attachment (`photo` for an image, else `document`, with its MIME type, size
-and name) under a line naming it, its caption below; `download_attachment` with its `file_id` gives
-the stored file's path. The c3 plugin pre-approves only Telegram's downloads, so reading it may ask.
+board, the owner's own included; `the page's msg M` when the page's script sent it) after C3's id,
+with that message's first 80 characters as it now reads, its brackets turned into parentheses. The
+page's own comment never answers a message. A file comes as an attachment (`photo` for an image, else
+`document`, with its MIME type, size and name) under a line naming it, its caption below.
+`download_attachment` with its `file_id` (and `channel="board:<name>"` unless the board is the
+session's output route) copies it to `$XDG_CACHE_HOME/c3/board/attachments/<id>.<ext>`, the extension
+from the type its bytes show, and the c3 plugin lets that session `Read` the copy without a prompt.
 
 ```text
 [board plan · 1.5 · msg 432 · reply to msg 418 "Shorter, and the risk moved to the top."] why the top?
@@ -100,7 +103,7 @@ not the approved message's (418).
 | `GET /board/<name>/page?cap=…` | the page with the SDK inlined; `&rev=N&raw=1` gives a stored revision as `text/plain` |
 | `GET /board/<name>/events` | SSE `message`, `edit`, `reaction`, `action`, `page`, `status`, `notice`; `id:` is the log seq, `Last-Event-ID` replays after it |
 | `POST /board/<name>/act` | `{client_id, op, …}`, op `comment`, `approve`, `tap` or `react`; or a voice act (below); 202 `{id}` |
-| `POST /board/<name>/file` | the owner's file from C3's chat as the body (at most 20 MB), with headers `X-Client-Id`, `X-Board-Part`, `X-File-Name` and optionally `X-Caption` (both percent-encoded UTF-8) and `X-Reply-To`; an act's checks and `client_id` retry; 202 `{id}` |
+| `POST /board/<name>/file` | the owner's file from C3's chat as the body (at most 20 MB), with headers `X-Client-Id`, `X-Board-Part`, `X-File-Name` and optionally `X-Caption` (both percent-encoded UTF-8; the caption at most 6 KB as sent, since a fronting proxy refuses large headers) and `X-Reply-To`; an act's checks and `client_id` retry (a reused id with other bytes is 409 before anything is kept); 202 `{id}` |
 | `POST /board/<name>/close` | empty body; 204, or 500 `close_failed` (repeat to retry) |
 | `POST /board/<name>/speak` | `{id}`: the session's message `id` on this board, read aloud; 200 `{token}` (cached audio first), else 404, 429 `rate`, 503 `unavailable` |
 | `GET /board/<name>/audio/<token>` | that audio as MP3, under this board only; `…/audio/unlock` is C3's silent clip |
@@ -133,7 +136,8 @@ breaks the line on a touch screen. The paperclip opens the browser's own file pi
 type, at most 20 MB (what a Telegram bot can fetch, so the agent meets one ceiling on both routes; the
 shell says so before sending a bigger one), with the box's text as its caption. Its row shows the
 upload's progress, then its time; the shell never serves a file back. Any message in the thread can be
-answered: a swipe right or a long press on touch, its Reply button on hover with a mouse. A bar over
+answered: a swipe right on touch (a long press stays the browser's, for selecting text), its Reply
+button on hover with a mouse. A bar over
 the composer shows its first line with ×, and the next comment, voice note or file answers it. A row
 that answers another opens with that message's first line, and a tap there scrolls to it and flashes
 it; the agent's answer to the line right before it needs none. The page
@@ -263,7 +267,8 @@ can still be heard.
 - **Acts.** Each re-checks sign-in, same origin and board; the body is decoded strictly per op and
   can't name a sender. Part `^[A-Za-z0-9._:-]{1,64}$`, text and note 16,000 runes, quote 2,000,
   tap value 64 bytes, 30 new acts a minute per board; an approve's, tap's or reaction's `ref` must
-  name a session message, a reply's any message on the board; a `client_id` retry is delivered once
+  name a session message, the owner's reply's any message on the board, and the page's comment takes
+  none; a `client_id` retry is delivered once
   (not across a broker restart).
 - **Files.** Only the shell sends one: the owner's pick in the browser's own picker, opened by a real
   tap on its paperclip. The page has no file call, `/act` takes no file op, and the frame has no
@@ -284,8 +289,9 @@ directories 0700, files 0600: `capability.key` (the cap key) and per board `boar
 owner, title, rev, closed), `pages/<rev>.html` (the last 5; `rev` picks the served one) and
 `log.jsonl` (append-only: seq, at, dir, id, op, part, text, ref, reply_to, from, for voice
 segment, has_more, recording, status, and for a file name, mime, size). Held actions sit in the broker's queue.
-Files the owner sends are `board-files/<id>` under the web state directory, kept for good (boards are
-never deleted); the log never holds their id. Voice recordings are the web
+Files the owner sends are `board-files/<id>` under the web state directory (the id from their
+contents), the newest 200 kept as voice recordings are; their log entries stay, and the log never
+holds the id. The upload streams into a temporary file there, which is renamed into place. Voice recordings are the web
 chat's: `voice/` under the web state directory, the newest 200 kept for both. Spoken replies' audio
 is kept in memory only; **Read replies aloud** and the read marks are the browser's, in the shell origin's storage. An unreadable `board.json` stops the board channel from starting.
 

@@ -144,7 +144,7 @@ func TestPreToolUseNamesOnlyAReadOfAFileInTheAttachmentCache(t *testing.T) {
 			}
 			fake, _ := attachmentBroker(t, `{"op":"grant_check_result","allow":false}`)
 			env := testEnv(time.Second)
-			env.attachmentDir = c.dir
+			env.attachmentDirs = []string{c.dir}
 			if output, _ := runPreWith(t, c.stdin, fake.path, env); output != "" {
 				t.Fatalf("printed %q with no allow", output)
 			}
@@ -152,6 +152,32 @@ func TestPreToolUseNamesOnlyAReadOfAFileInTheAttachmentCache(t *testing.T) {
 				t.Fatalf("attachment_path %q, want %q", got, c.want)
 			}
 		})
+	}
+}
+
+// With Telegram's cache and the boards' configured, a Read is named in either,
+// and in no other directory.
+func TestPreToolUseNamesAReadInAnyConfiguredAttachmentCache(t *testing.T) {
+	root := t.TempDir()
+	telegram, board := filepath.Join(root, "telegram", "attachments"), filepath.Join(root, "board", "attachments")
+	cases := map[string]string{"telegram": filepath.Join(telegram, "AQADunique_photo.jpg"),
+		"board": filepath.Join(board, "0123456789abcdef0123456789abcdef.png"), "elsewhere": filepath.Join(root, "web", "notes.txt")}
+	for name, path := range cases {
+		writeTestFile(t, path)
+		resolved, err := filepath.EvalSymlinks(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if name == "elsewhere" {
+			resolved = ""
+		}
+		fake, _ := attachmentBroker(t, `{"op":"grant_check_result","allow":false}`)
+		env := testEnv(time.Second)
+		env.attachmentDirs = []string{telegram, board}
+		_, _ = runPreWith(t, readPayload(t, path), fake.path, env)
+		if got := sentAttachmentPath(t, fake); got != resolved {
+			t.Errorf("%s: attachment_path %q, want %q", name, got, resolved)
+		}
 	}
 }
 
@@ -185,7 +211,7 @@ func TestPreToolUsePrintsTheAttachmentAllowOnlyForANamedAttachment(t *testing.T)
 		t.Run(c.name, func(t *testing.T) {
 			fake, followUps := attachmentBroker(t, c.reply)
 			env := testEnv(time.Second)
-			env.attachmentDir = cache
+			env.attachmentDirs = []string{cache}
 			output, _ := runPreWith(t, c.stdin, fake.path, env)
 			if output != c.want {
 				t.Fatalf("printed %q, want %q", output, c.want)

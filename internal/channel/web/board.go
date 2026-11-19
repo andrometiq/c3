@@ -411,9 +411,19 @@ func (b *boardChannel) LocalAudioPath(fileID string) (string, error) {
 	return b.web.LocalAudioPath(fileID)
 }
 
-// DownloadAttachment is an owner's file act's stored file, by C3's id for it.
+// DownloadAttachment copies an owner's file act's stored file, by C3's id for
+// it, into the board's attachment cache, where the c3 plugin lets the session
+// it was returned to read it without a prompt.
 func (b *boardChannel) DownloadAttachment(fileID string) (string, error) {
-	return b.web.mintedFilePath(boardFilesDirectory, fileID, "", true)
+	stored, err := b.web.mintedFilePath(boardFilesDirectory, fileID, "", true)
+	if err != nil {
+		return "", err
+	}
+	cache, err := channel.AttachmentCacheDir(channel.BoardChannelName)
+	if err != nil {
+		return "", err
+	}
+	return copyBoardFile(stored, cache)
 }
 
 func (b *boardChannel) StopPoll(int64, int64) (*c3types.PollResult, error) {

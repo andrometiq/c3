@@ -99,6 +99,7 @@ func startBoardChannel(t *testing.T, host *fakeBoardHost, options ...func(*Chann
 func newBoardTest(t *testing.T) (*Channel, *fakeBoardHost, *http.Cookie) {
 	t.Helper()
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("XDG_CACHE_HOME", t.TempDir()) // DownloadAttachment's copies
 	host := newFakeBoardHost()
 	c := startBoardChannel(t, host)
 	return c, host, loginCookie(t, c)

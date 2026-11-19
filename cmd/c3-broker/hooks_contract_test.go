@@ -128,10 +128,11 @@ func TestPreToolUseHookBinaryAsksTheBrokerAboutAttachmentReads(t *testing.T) {
 	cache := filepath.Join(dir, "cache")
 	attachment := filepath.Join(cache, "c3", "telegram", "attachments", "AQADunique_photo.jpg")
 	beside := filepath.Join(cache, "c3", "telegram", "photo.jpg")
-	if err := os.MkdirAll(filepath.Dir(attachment), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	for _, path := range []string{attachment, beside} {
+	boardFile := filepath.Join(cache, "c3", "board", "attachments", "0123456789abcdef0123456789abcdef.png")
+	for _, path := range []string{attachment, beside, boardFile} {
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
 		if err := os.WriteFile(path, []byte("jpeg"), 0o600); err != nil {
 			t.Fatal(err)
 		}
@@ -141,7 +142,7 @@ func TestPreToolUseHookBinaryAsksTheBrokerAboutAttachmentReads(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer listener.Close()
-	requests := make(chan ipc.GrantCheckReq, 2)
+	requests := make(chan ipc.GrantCheckReq, 3)
 	go func() {
 		for {
 			raw, err := listener.Accept()
@@ -181,13 +182,14 @@ func TestPreToolUseHookBinaryAsksTheBrokerAboutAttachmentReads(t *testing.T) {
 			return "", ipc.GrantCheckReq{}
 		}
 	}
-	resolved, err := filepath.EvalSymlinks(attachment)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if output, request := run(attachment); request.AttachmentPath != resolved ||
-		!strings.Contains(output, "C3: Telegram attachment this session downloaded") {
-		t.Fatalf("attachment read: attachment_path %q, stdout %q", request.AttachmentPath, output)
+	for _, path := range []string{attachment, boardFile} { // Telegram's cache and the boards'
+		resolved, err := filepath.EvalSymlinks(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if output, request := run(path); request.AttachmentPath != resolved || !strings.Contains(output, "C3: attachment this session downloaded") {
+			t.Fatalf("attachment read of %s: attachment_path %q, stdout %q", path, request.AttachmentPath, output)
+		}
 	}
 	if output, request := run(beside); request.AttachmentPath != "" || output != "" {
 		t.Fatalf("read beside the cache: attachment_path %q, stdout %q", request.AttachmentPath, output)

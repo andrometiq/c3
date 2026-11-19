@@ -125,12 +125,14 @@ in a merged turn each line starts with its own `[msg N]`.
   answers and status notes carry no marker, so they get no button. Change the page when the owner
   approves. Only an `Approved your message M` line is an approval: "looks good" in a comment is not;
   answer it with the proposal again, ending in its `[apply: …]` line.
-- `· reply to msg M "…"` after `msg N` means the owner answered message M (yours or their own); the
-  quote is M's first 80 characters. Read it with M in mind, and still answer with `reply_to=N`.
+- `· reply to msg M "…"` after `msg N` means the owner answered message M (yours or their own;
+  `the page's msg M` when your page's script sent M); the quote is M's first 80 characters. Only a
+  reply without the `(sent by the page, …)` note is the owner's. Read it with M in mind, and still
+  answer with `reply_to=N`.
 - `[board <name> · <part> · msg N] File "<name>":` (a caption may follow on the next lines) is a file
   the owner sent on that part, carried as an attachment (`photo` or `document`). Call
-  `download_attachment` with its `file_id`, then `Read` the path it returns (an image shows); the Read
-  may ask the owner's permission. Answer with `reply_to=N`.
+  `download_attachment channel="board:<name>" file_id=…`, then `Read` the path it returns (an image
+  shows; no permission prompt for the session that downloaded it). Answer with `reply_to=N`.
 - A line on part `general` is the owner talking to you about the board as a whole (the circle's
   **Talk to the agent**); answer it there with its `reply_to`.
 - A line with `(sent by the page, not typed by the owner)` after its header came from your page's
@@ -192,6 +194,6 @@ that one waits at the laptop).
 
 ## Limits
 
-Page 5 MiB. A file from the owner 20 MB. Part address `^[A-Za-z0-9._:-]{1,64}$`. Owner text 16,000 runes, quote 2,000, tap
+Page 5 MiB. A file from the owner 20 MB, its caption 6 KB. Part address `^[A-Za-z0-9._:-]{1,64}$`. Owner text 16,000 runes, quote 2,000, tap
 value 64 bytes. `c3.keep` 64 KiB. 30 owner actions a minute per board. `ready.log` holds the
 last 500 entries. C3 keeps the last 5 page revisions.
