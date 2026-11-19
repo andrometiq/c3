@@ -4,7 +4,7 @@
 (() => {
   "use strict";
 
-  const KINDS = ["message", "edit", "reaction", "action", "update", "status", "voice"];
+  const KINDS = ["message", "edit", "reaction", "action", "update", "status", "voice", "speech"];
   const CONTROLS = "a[href], button, input, select, textarea, label, summary, [contenteditable]";
   const QUOTE_RUNES = 2000;
   const REASONS = { closed: "the board is read-only", rate: "too many this minute, wait a moment", too_big: "too long",
@@ -40,6 +40,9 @@
   });
   const comment = (part, text, { quote } = {}) => act({ op: "comment", part, text, quote });
   const approve = (ref, { part, note } = {}) => act({ op: "approve", ref, part, note });
+  // c3.speak(id): C3's shell reads your message id aloud (the frame has no network), in place of whatever it was reading;
+  // c3.speak(null) stops. c3.on("speech") follows it: {id, state: "loading" | "playing" | "ended" | "failed", error}.
+  const speak = (id) => request("speak", { value: id ?? null });
 
   // c3.focus(part, {dock, hasText}): the part the owner is on, where the page's Send sits (an element C3 follows, or
   // {x, y, width, height} in frame CSS pixels) and whether its composer has text. While it is empty, C3 draws its mic
@@ -113,6 +116,12 @@
       voices.set(message.voice.key, message.voice);
       draw();
       emit("voice", { ...message.voice });
+    } else if (message.c3 === "speech") {
+      const { id, state } = message.speech;
+      if (state === "loading" || state === "playing") speeches.set(id, state);
+      else speeches.delete(id);
+      draw();
+      emit("speech", { ...message.speech });
     }
   });
 
@@ -201,6 +210,7 @@
   const drafts = new Map();
   const quotes = new Map();
   const voices = new Map(); // the shell's uploads by key, shown until their voice act is in the log
+  const speeches = new Map(); // message id -> "loading" or "playing" while the shell reads it aloud
   const approving = new Set();
   let isThreaded = false;
   let sheet = null;
@@ -280,6 +290,10 @@
     parts.lines.addEventListener("click", (event) => {
       const button = event.target.closest("[data-approve]");
       if (button) approveAnswer(Number(button.getAttribute("data-approve")));
+      const play = event.target.closest("[data-speak]");
+      const id = play && Number(play.getAttribute("data-speak"));
+      // A refusal (the mic is on) is the shell's to say, under its circle.
+      if (play) speak(speeches.has(id) ? null : id).catch(() => {});
     });
     (document.body ?? document.documentElement).append(host);
     return { host, ...parts };
@@ -413,8 +427,16 @@
     const mark = isAnswer && (approved.has(entry.id) ? el("span", { class: "approved" }, "Approved ✓")
       : !board.closed && el("button", { type: "button", "data-approve": String(entry.id), ...(approving.has(entry.id) && { disabled: "" }) },
         approving.has(entry.id) ? "Approving…" : "Approve"));
-    return el("li", { class: entry.dir }, el("span", { class: "who" }, who), el("span", { class: "text" }, text),
+    const head = isAnswer ? el("span", { class: "head" }, el("span", { class: "who" }, who), playButton(entry.id)) : el("span", { class: "who" }, who);
+    return el("li", { class: entry.dir }, head, el("span", { class: "text" }, text),
       reactions.has(entry.id) && el("span", { class: "reactions" }, reactions.get(entry.id)), mark);
+  }
+
+  /** An answer's play button, as the web chat's: ▶ reads it aloud, … while C3 makes the audio, ⏸ while it plays (a tap stops). */
+  function playButton(id) {
+    const state = speeches.get(id);
+    const [glyph, label] = { loading: ["…", "Preparing spoken reply"], playing: ["⏸", "Stop spoken reply"] }[state] ?? ["▶", "Play spoken reply"];
+    return el("button", { type: "button", class: "play", "data-speak": String(id), "aria-label": label, "aria-busy": String(state === "loading") }, glyph);
   }
 
   const FOLD_CSS = "content:'✓ Settled · tap for its thread';display:block;width:fit-content;margin:0 0 .5em;padding:.2em .6em;" +
@@ -438,6 +460,8 @@ header { display: flex; align-items: center; gap: 10px; }
 li { max-width: 85%; padding: 6px 10px; border-radius: 10px; background: var(--soft); white-space: pre-wrap; overflow-wrap: anywhere; }
 li.in { align-self: flex-end; background: var(--mine); }
 .who { display: block; font-size: 12px; color: var(--muted); }
+.head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+li .play { flex: none; width: 32px; min-height: 32px; height: 32px; margin: -4px -6px 0 0; padding: 0; border-radius: 50%; font-size: 13px; line-height: 1; }
 .reactions { margin-left: 6px; }
 .approved { display: block; margin-top: 4px; color: var(--good); font-weight: 600; font-size: 13px; }
 li button { display: block; margin-top: 6px; }
@@ -465,7 +489,7 @@ textarea { flex: 1; min-width: 0; box-sizing: border-box; resize: vertical; padd
   const SEND_ICON = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M11 20V7.83l-5.6 5.6L4 12l8-8 8 8-1.4 1.43-5.6-5.6V20h-2Z"/></svg>';
 
   window.c3 = Object.freeze({
-    ready, comment, approve, on, threads, focus,
+    ready, comment, approve, on, threads, focus, speak,
     tap: (part, value, { ref } = {}) => act({ op: "tap", part, value, ref }),
     react: (ref, emoji) => act({ op: "react", ref, emoji }),
     keep: (value) => request("keep", { value: JSON.stringify(value) }),

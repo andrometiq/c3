@@ -59,6 +59,7 @@ type boardState struct {
 	holder  *channel.RouteHolder
 	waiting int
 	acts    []time.Time // when each act with a new client_id came, in the last minute
+	spoken  []time.Time // when each reply C3 synthesized for this board was asked for, in the last minute
 	streams map[*boardStream]struct{}
 
 	recordings map[string]*boardRecording // waiting for a next part, by board part and the shell's recording id

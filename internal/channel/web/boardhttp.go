@@ -549,22 +549,30 @@ func (b *boardChannel) admit(name string, act boardAct, isNewClientID bool) (boa
 		if !isNewClientID {
 			return nil
 		}
-		now := b.web.now()
-		recent := board.acts[:0]
-		for _, at := range board.acts {
-			if now.Sub(at) < time.Minute {
-				recent = append(recent, at)
-			}
-		}
-		board.acts = recent
-		if len(recent) >= channel.BoardActsPerMinute {
-			retryAfter = int((time.Minute - now.Sub(recent[0]) + time.Second - 1) / time.Second)
+		if retryAfter = chargeMinute(&board.acts, b.web.now(), channel.BoardActsPerMinute); retryAfter > 0 {
 			return errBoardRate
 		}
-		board.acts = append(board.acts, now)
 		return nil
 	})
 	return act, number, retryAfter, err
+}
+
+// chargeMinute counts one use at now in uses, which keeps the last minute's,
+// unless limit are there already: then it counts nothing and returns the
+// seconds until the oldest leaves the minute.
+func chargeMinute(uses *[]time.Time, now time.Time, limit int) int {
+	recent := (*uses)[:0]
+	for _, at := range *uses {
+		if now.Sub(at) < time.Minute {
+			recent = append(recent, at)
+		}
+	}
+	*uses = recent
+	if len(recent) >= limit {
+		return int((time.Minute - now.Sub(recent[0]) + time.Second - 1) / time.Second)
+	}
+	*uses = append(recent, now)
+	return 0
 }
 
 var (

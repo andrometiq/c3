@@ -23,12 +23,17 @@
   const VOICE_TYPES = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4"];
   const VOICE_REASONS = { closed: "the board is read-only", rate: "too many this minute", too_big: "too long",
     unreadable: "C3 couldn't read the recording", unauthorized: "signed out, reload to sign in", not_found: "this board can't be opened" };
+  // Spoken replies: why one wasn't read, and the setting's key in this shell's own storage (the frame has none).
+  const SPEECH_REASONS = { not_found: "it is no longer on the board", rate: "too many this minute", unavailable: "speech is unavailable",
+    offline: "C3 can't be reached", unauthorized: "signed out, reload to sign in", unplayable: "the audio didn't play" };
+  const SPEECH_BLOCKED = "Tap the circle at the top right to hear replies.";
+  const READ_ALOUD_KEY = "c3.board.readAloud";
 
   const name = location.pathname.split("/")[2] ?? "";
   const base = `/board/${name}`;
   const frame = document.getElementById("page");
   const controls = Object.fromEntries(["status", "badge", "panel", "title", "session", "waiting", "typing", "notice", "close", "toast",
-    "mic", "recorder", "clock", "about", "cancel"].map((id) => [id, document.getElementById(id)]));
+    "mic", "recorder", "clock", "about", "cancel", "aloud", "player"].map((id) => [id, document.getElementById(id)]));
   const early = [];
   let state = null; // /state, kept current from the stream: the one copy this shell holds
   let lastSeq = 0;
@@ -52,6 +57,14 @@
   let isClosing = false; // Make read-only is waiting for the voice acts on their way
   const uploads = new Map(); // key -> the frame's view of a recording on its way to C3
   const sending = new Set(); // every voice act's promise until C3 answers it
+  // Spoken replies play here, through one reusable player: the frame has no network. A phone lets a page play sound
+  // only after a tap; Chromium counts a tap in the frame for this shell too, and a tap on the shell's circle always counts.
+  const speechQueue = []; // replies waiting to be read: {id, audio}, audio a promise of {token} or {error}
+  let speaking = null; // the queue entry the player is on
+  let speechState = null; // {id, state, error}: the last one the frame heard, told again after a frame reload
+  let isReadingAloud = readSetting(); // "Read replies aloud": each new agent message is read as it arrives
+  let isAudioBlocked = false; // the browser refused to play until a tap: the reply waits at the queue's head
+  let isAudioUnlocked = false; // the shell's silent clip played from a tap on it
 
   const sleep = (ms) => new Promise((resolve) => { setTimeout(resolve, ms); });
   const toFrame = (message) => frame.contentWindow.postMessage(message, "*");
@@ -156,6 +169,7 @@
   async function startRecording() {
     const part = composer.part;
     if (recording || !part || state.closed || isClosing) return;
+    stopSpeech(); // recording and speaking never overlap
     let isCancelled = false;
     recording = { part, started: performance.now(), isOpening: true, stop: () => { isCancelled = true; } };
     drawVoice();
@@ -165,6 +179,7 @@
       stream?.getTracks().forEach((track) => track.stop());
       recording = null;
       if (!stream) notify("Microphone unavailable: check the browser's permission.");
+      playNext();
       return drawVoice();
     }
     recording = record(part, stream);
@@ -219,6 +234,7 @@
       const outcome = isTooShort && !isCancelled ? "Too short: nothing sent." : isCancelled && last.segment ? `Recording cancelled after part ${segment - 1}.` : "";
       if (outcome) notify(outcome, false);
       drawVoice();
+      playNext(); // replies that came while the mic was on
       return finished;
     }
     return { part, started, isOpening: false, stop: finish };
@@ -271,6 +287,121 @@
     if (isFrameReady) toFrame({ c3: "voice", voice });
   }
 
+  /** Reply id's audio from C3: {token}, or {error} with C3's rule. */
+  async function fetchSpeech(id) {
+    const response = await fetch(`${base}/speak`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id }) })
+      .catch(() => null);
+    const body = (await response?.json().catch(() => null)) ?? {};
+    if (response?.ok && /^[0-9a-f]{32}$/.test(body.token)) return { token: body.token };
+    return { error: response ? body.error || "unavailable" : "offline" };
+  }
+
+  /** Queues reply id and asks C3 for its audio at once, so it is ready when its turn comes. While the browser waits for a
+   *  tap, only the newest reply waits with it. */
+  function queueSpeech(id) {
+    if (isAudioBlocked) speechQueue.splice(0);
+    speechQueue.push({ id, audio: fetchSpeech(id) });
+    playNext();
+  }
+
+  /** Plays the next queued reply, unless one plays, the mic is on or the browser wants a tap first. */
+  async function playNext() {
+    if (speaking || recording || isAudioBlocked || !speechQueue.length) return;
+    const entry = speechQueue.shift();
+    speaking = entry;
+    tellSpeech(entry.id, "loading");
+    const { token, error } = await entry.audio;
+    if (speaking !== entry) return; // stopped meanwhile
+    if (error) return endSpeech(error);
+    playAudio(token).then(() => {
+      if (speaking !== entry) return;
+      tellSpeech(entry.id, "playing");
+      if (controls.notice.textContent === SPEECH_BLOCKED) notify(""); // the browser plays again
+    }, (problem) => {
+      if (speaking !== entry) return;
+      if (problem.name !== "NotAllowedError") return endSpeech("unplayable");
+      speaking = null;
+      speechQueue.unshift(entry);
+      isAudioBlocked = true;
+      tellSpeech(entry.id, "failed", "blocked");
+      notify(SPEECH_BLOCKED);
+    });
+  }
+
+  /** Plays name on the shell's one player: a token C3 gave for this board's audio (fetchSpeech checks it), or "unlock",
+   *  C3's silent clip. */
+  function playAudio(name) {
+    controls.player.src = `${base}/audio/${name}`;
+    return controls.player.play();
+  }
+
+  /** The player is done with the reply (error: why it wasn't read); the next one plays. */
+  function endSpeech(error = "") {
+    const { id } = speaking;
+    speaking = null;
+    tellSpeech(id, error ? "failed" : "ended", error);
+    if (error) notify(`Couldn't read the reply aloud: ${SPEECH_REASONS[error] ?? "C3 refused it"}.`, false);
+    playNext();
+  }
+
+  /** Stops the player and empties the queue: a tap on a reply, c3.speak(null), the mic or "Read replies aloud" off. */
+  function stopSpeech() {
+    speechQueue.splice(0);
+    if (!speaking) return;
+    const { id } = speaking;
+    speaking = null;
+    controls.player.pause();
+    tellSpeech(id, "ended");
+  }
+
+  /** A reply's place in the player, for the page (c3.on("speech")): loading, playing, ended, or failed with C3's rule
+   *  (blocked: the browser waits for a tap). */
+  function tellSpeech(id, phase, error) {
+    speechState = { id, state: phase, ...(error && { error }) };
+    if (isFrameReady) toFrame({ c3: "speech", speech: speechState });
+  }
+
+  /** c3.speak(id) from the page: id plays now, in place of whatever played or waited; null stops. Not while the mic is
+   *  on. Returns the rule refusing it, or "". */
+  function speakForPage(id) {
+    if (id !== null && !(Number.isSafeInteger(id) && id > 0)) return "invalid";
+    if (id !== null && recording) {
+      notify("Stop recording to listen.", false);
+      return "recording";
+    }
+    stopSpeech();
+    if (id === null) return "";
+    isAudioBlocked = false; // the tap that asked may have let the shell play: try
+    queueSpeech(id);
+    return "";
+  }
+
+  /** A new agent message, read aloud when the owner turned that on. */
+  function readAloud(id) {
+    if (isReadingAloud) queueSpeech(id);
+  }
+
+  /** A real tap on the shell lets its player play on a phone: the silent clip plays, then the reply that waited. Only when
+   *  sound is wanted, since any sound pauses the owner's own music. */
+  function unlockAudio(event) {
+    const isWanted = isAudioBlocked || isReadingAloud && !isAudioUnlocked;
+    if (!event.isTrusted || speaking || !isWanted) return;
+    playAudio("unlock").then(() => {
+      isAudioUnlocked = true;
+      isAudioBlocked = false;
+      playNext();
+    }, () => {});
+  }
+
+  /** "Read replies aloud" is this browser's, kept in the shell's storage; off where storage fails. */
+  function readSetting() {
+    try { return localStorage.getItem(READ_ALOUD_KEY) === "on"; } catch { return false; }
+  }
+
+  function saveSetting(isOn) {
+    try { localStorage.setItem(READ_ALOUD_KEY, isOn ? "on" : "off"); } catch { /* this tab keeps it */ }
+  }
+
   function setTyping(isTyping, isStatusNew = false) {
     clearTimeout(typingTimer);
     if (isTyping) typingTimer = setTimeout(() => setTyping(false), TYPING_MS);
@@ -280,7 +411,8 @@
     if (isFrameReady) toFrame({ c3: "status", status: frameStatus() });
   }
 
-  function receive(kind, data) {
+  /** A stream event; isLive is false for the lines a reconnect catches up on. */
+  function receive(kind, data, isLive = true) {
     if (!isSynced) return early.push([kind, data]);
     if (kind === "notice") {
       notify(data.text); // the shell only: never the frame
@@ -298,6 +430,7 @@
       state.log.push(data);
       state.log.splice(0, state.log.length - LIMITS.logEntries);
       if (data.dir === "out" && (kind === "message" || kind === "page")) setTyping(false);
+      if (isLive && data.dir === "out" && kind === "message") readAloud(data.id);
       if (kind === "page") {
         state.rev = data.rev;
         pages = pages.then(() => showPage(data));
@@ -334,6 +467,7 @@
     toFrame({ c3: "ready", ready: { board, title, rev, viewer, live, waiting, closed, log, kept } });
     toFrame({ c3: "status", status: frameStatus() });
     for (const voice of uploads.values()) toFrame({ c3: "voice", voice });
+    if (speaking && speechState) toFrame({ c3: "speech", speech: speechState });
   }
 
   /** An act body from the frame: the op's own fields only, each of its type and within its limit. */
@@ -385,6 +519,10 @@
       drawVoice();
       return toFrame({ c3: "result", call, ...(next ? {} : { error: "invalid" }) });
     }
+    if (op === "speak") {
+      const problem = speakForPage(value);
+      return toFrame({ c3: "result", call, ...(problem ? { error: problem } : {}) });
+    }
     if (op === "keep") {
       const isKept = typeof value === "string" && new TextEncoder().encode(value).length <= LIMITS.keepBytes;
       if (isKept) kept = value;
@@ -433,6 +571,18 @@
     else startRecording();
   });
   controls.cancel.addEventListener("click", () => recording?.stop(true));
+  controls.status.addEventListener("click", unlockAudio);
+  controls.aloud.checked = isReadingAloud;
+  controls.aloud.addEventListener("change", (event) => {
+    isReadingAloud = controls.aloud.checked;
+    saveSetting(isReadingAloud);
+    if (isReadingAloud) unlockAudio(event);
+    else stopSpeech();
+  });
+  // Only a reply that is playing ends here: the unlock clip may end while the next reply still loads.
+  const isReplyPlaying = () => Boolean(speaking) && speechState.state === "playing";
+  controls.player.addEventListener("ended", () => { if (isReplyPlaying()) endSpeech(); });
+  controls.player.addEventListener("error", () => { if (isReplyPlaying()) endSpeech("unplayable"); });
   addEventListener("resize", drawVoice);
   addEventListener("beforeunload", (event) => { if (recording || sending.size) event.preventDefault(); });
 
@@ -494,7 +644,10 @@
   /** After a reconnect: the lines and status the stream missed, through receive(), which drops lines already held. */
   function catchUp(fresh) {
     Object.assign(state, { cap: fresh.cap, title: fresh.title });
-    for (const entry of fresh.log) receive(entry.dir === "in" && entry.op !== "edit" ? "action" : entry.op, entry);
+    const seen = lastSeq;
+    for (const entry of fresh.log) receive(entry.dir === "in" && entry.op !== "edit" ? "action" : entry.op, entry, false);
+    const missed = fresh.log.findLast((entry) => entry.seq > seen && entry.dir === "out" && entry.op === "message");
+    if (missed) readAloud(missed.id); // of the replies missed while away, only the newest is read
     receive("status", fresh);
     if (fresh.rev === state.rev) return;
     const { rev } = fresh; // its page line fell out of the history: show that revision from scratch

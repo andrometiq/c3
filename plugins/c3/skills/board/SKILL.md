@@ -62,8 +62,8 @@ The page API (C3 inlines it as the page's first script, as `window.c3`):
   {ref})`, `c3.react(ref, emoji)` return a Promise of `{id}` and reject with an Error whose
   message is the rule (`closed`, `rate`, `too_big`, `offline`, `invalid`, …). A `ref` names
   one of your messages. A tap is how the page's own buttons speak ("pick option B").
-- `c3.on(kind, fn)` for `message`, `edit`, `reaction`, `action`, `update`, `status`, `voice`; it
-  returns an unsubscribe function.
+- `c3.on(kind, fn)` for `message`, `edit`, `reaction`, `action`, `update`, `status`, `voice`,
+  `speech`; it returns an unsubscribe function.
 - A page that draws its own threads calls `c3.focus(part, {dock: sendButton, hasText})` when one
   opens and whenever its box gains or loses text, and `c3.focus(null)` when it closes. Hide Send
   with `visibility: hidden` (not `display: none`) while the box is empty: C3 draws its mic in that
@@ -72,8 +72,10 @@ The page API (C3 inlines it as the page's first script, as `window.c3`):
   with `status` `heard` (`text` is the transcript), `slow`, `no_speech` or `failed`; a part that
   never reached C3 has its own `status`, `cancelled` or `refused`, and no edits. Before C3 has
   it, `voice` events carry the upload: `{key, part, status: "sending" | "sent" | "not_sent", id,
-  error}`. `c3.keep(value)` (JSON, at most 64 KiB) returns as `ready.kept` after
-  a frame reload (not after the owner reloads the browser tab).
+  error}`. Give each of your answers a play button that calls `c3.speak(id)` (C3 reads it aloud;
+  `c3.speak(null)` stops) and shows `c3.on("speech")`'s `{id, state}`: ▶ for `ended` or `failed`, …
+  for `loading`, ⏸ for `playing` (a tap then stops). `c3.keep(value)` (JSON, at most 64 KiB) returns
+  as `ready.kept` after a frame reload (not after the owner reloads the browser tab).
 
 ## 3. Publish and share
 
@@ -95,6 +97,8 @@ in a merged turn each line starts with its own `[msg N]`.
 
 - Answer with `reply channel="board:<name>" reply_to=N text="…"`, where N is the line's own
   `msg N` (its `message_id`). Without `reply_to` the answer shows in no thread.
+- The owner may hear answers read aloud (a play button, or "Read replies aloud"): lead with the
+  answer in a plain sentence, and never make them listen to code or a table.
 - Keep it short and plain: the thread shows text as typed, so markdown stays literal (the reply
   result notes that boards take no rich text; that is expected). One part
   per answer; answer each line of a merged turn separately, each with its own N. Stay under
