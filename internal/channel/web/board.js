@@ -32,7 +32,12 @@
   const VOICE_STATES = { sending: "Sending…", sent: "Transcribing…", transcribing: "Transcribing…",
     slow: "Transcribing… taking longer, C3 keeps trying.", no_speech: "No speech heard.", failed: "Couldn't transcribe it.",
     cancelled: "Cancelled, not sent.", refused: "Not sent: C3 refused it." };
-  const WAVE = { stepMs: 70, barPx: 3, gapPx: 2, levels: 200 }; // the recording wave: one bar per step, newest on the right
+  // The recording wave, as Telegram draws a voice note: one bar per stepMs (its loudest moment), newest on the right; a
+  // bar is a dot in silence and grows with the voice. Loudness is RMS in dB, from gateDb above a noise floor that
+  // follows the quiet level (down at once, up slowly, never above floorMaxDb) to ceilingDb at full height. It starts at
+  // floorMaxDb, so the first pause sets it: a phone's gain lifts room noise well above -60 dB.
+  const WAVE = { stepMs: 100, barPx: 3, gapPx: 2, levels: 200, ceilingDb: -10, gateDb: 6, floorStartDb: -30, floorMinDb: -90,
+    floorMaxDb: -30, floorRise: 0.01, ringEase: 0.35 };
   // Spoken replies: why one wasn't read, and the setting's key in this shell's own storage (the frame has none).
   const SPEECH_REASONS = { not_found: "it is no longer on the board", rate: "too many this minute", unavailable: "speech is unavailable",
     offline: "C3 can't be reached", unauthorized: "signed out, reload to sign in", unplayable: "the audio didn't play" };
@@ -169,6 +174,10 @@
     }
     return [...byPart.values()].sort((a, b) => b.newest.id - a.newest.id);
   }
+
+  /** The id of part's first reply after its read mark, or null when it has none unread. */
+  const firstUnread = (part) => state.log.find((entry) => isReply(entry) && entry.part === part
+    && entry.id > Math.max(marks.from, marks.parts.get(part) ?? 0))?.id ?? null;
 
   /** A reply's first line as it now reads (its latest edit, without a proposal's marker line). */
   function snippetOf(reply) {
@@ -383,8 +392,8 @@
     return { part, started, isOpening: false, stop: finish };
   }
 
-  /** The wave: the mic's loudness every WAVE.stepMs, drawn as bars moving left, so the owner sees at a glance that the
-   *  mic hears them. Returns what stops it. */
+  /** The wave and the ring: the mic's loudness, as a bar every WAVE.stepMs moving left and as a ring around the mic
+   *  that swells with the voice, so the owner sees at a glance that the mic hears them. Returns what stops it. */
   function listen(stream) {
     if (!audioContext) return () => {};
     const analyser = audioContext.createAnalyser();
@@ -392,24 +401,46 @@
     source.connect(analyser);
     const samples = new Float32Array(analyser.fftSize);
     const levels = [];
-    let lastStep = 0;
+    let floorDb = WAVE.floorStartDb, loudestDb = -Infinity, ring = 0, barStarted = performance.now();
     let request = requestAnimationFrame(function step(now) {
       request = requestAnimationFrame(step);
-      if (now - lastStep < WAVE.stepMs) return;
-      lastStep = now;
       analyser.getFloatTimeDomainData(samples);
-      const loudness = Math.sqrt(samples.reduce((sum, sample) => sum + sample * sample, 0) / samples.length);
-      levels.push(Math.min(1, Math.sqrt(loudness) * 1.6)); // a square root, so quiet speech still shows
+      const decibels = decibelsOf(samples);
+      loudestDb = Math.max(loudestDb, decibels);
+      ring += (levelAt(decibels, floorDb) - ring) * WAVE.ringEase; // smoothed over a few frames
+      ringTo(ring);
+      if (now - barStarted < WAVE.stepMs) return;
+      barStarted = now;
+      levels.push(levelAt(loudestDb, floorDb));
       levels.splice(0, levels.length - WAVE.levels);
+      floorDb = clamp(floorDb + (loudestDb - floorDb) * (loudestDb < floorDb ? 1 : WAVE.floorRise), WAVE.floorMinDb, WAVE.floorMaxDb);
+      loudestDb = -Infinity;
       drawWave(levels);
     });
     return () => {
       cancelAnimationFrame(request);
       source.disconnect();
+      ringTo(0);
     };
   }
 
-  /** Draws levels (0 to 1) as centred bars, the newest at the right, on whichever wave canvas shows. */
+  /** The RMS loudness of samples in dB below full scale. */
+  function decibelsOf(samples) {
+    const meanSquare = samples.reduce((sum, sample) => sum + sample * sample, 0) / samples.length;
+    return 10 * Math.log10(Math.max(meanSquare, 1e-12));
+  }
+
+  /** decibels as a level: 0 up to gateDb above the noise floor (silence), 1 at ceilingDb and above. */
+  const levelAt = (decibels, floorDb) => clamp((decibels - floorDb - WAVE.gateDb) / (WAVE.ceilingDb - floorDb - WAVE.gateDb), 0, 1);
+
+  /** The ring behind both mics: a number from 0 (at the button's edge) to 1, never a page value. It doesn't move the
+   *  button or widen what it takes taps on (the ring takes none). */
+  function ringTo(level) {
+    for (const mic of [controls.mic, controls.chatMic]) mic.style.setProperty("--level", level.toFixed(2));
+  }
+
+  /** Draws levels (0 to 1) as round centred bars, the newest at the right, on whichever wave canvas shows: silence is a
+   *  dot as tall as it is wide. */
   function drawWave(levels) {
     for (const canvas of [controls.chatWave, controls.dockWave]) {
       if (!canvas.clientWidth) continue;
@@ -418,12 +449,14 @@
       canvas.height = Math.round(canvas.clientHeight * scale);
       const context = canvas.getContext("2d");
       context.fillStyle = getComputedStyle(canvas).color;
-      const step = (WAVE.barPx + WAVE.gapPx) * scale;
+      const [width, step] = [WAVE.barPx * scale, (WAVE.barPx + WAVE.gapPx) * scale];
       const shown = levels.slice(-Math.floor(canvas.width / step));
+      context.beginPath();
       shown.forEach((level, index) => {
-        const height = Math.max(2 * scale, level * canvas.height);
-        context.fillRect(canvas.width - (shown.length - index) * step, (canvas.height - height) / 2, WAVE.barPx * scale, height);
+        const height = width + level * (canvas.height - width);
+        (context.roundRect ?? context.rect).call(context, canvas.width - (shown.length - index) * step, (canvas.height - height) / 2, width, height, width / 2);
       });
+      context.fill();
     }
   }
 
@@ -595,15 +628,14 @@
   // ---------- the chat sheet ----------
 
   /** Opens (or refreshes) the sheet on part. options are the page's, checked by readChat; null when the shell opens it
-   *  (the panel), which keeps what the page gave last and makes the chat the owner's: the page can't switch it away. A
-   *  recording keeps its own part on screen. Returns the rule refusing it, or "". */
+   *  (the panel), which keeps what the page gave last. A chat that opens marks where its unread replies begin, and the
+   *  mark stays put while it is open. A recording keeps its own part on screen. Returns the rule refusing it, or "". */
   function openChat(part, options) {
     if (!state) return "offline";
     if (recording && part !== recording.part) return "recording";
     const isNew = chat?.part !== part;
     const fields = options ?? (isNew ? { title: "", ask: "", choices: [] } : chat);
-    const isOwners = options === null || !isNew && chat.isOwners;
-    chat = { part, title: fields.title, ask: fields.ask, choices: fields.choices, isOwners };
+    chat = { part, title: fields.title, ask: fields.ask, choices: fields.choices, unreadFrom: isNew ? firstUnread(part) : chat.unreadFrom };
     if (fields.title) chatTitles.set(part, fields.title);
     if (options?.quote) quotes.set(part, options.quote);
     if (isNew) {
@@ -677,7 +709,9 @@
     const rows = threadRows(part);
     controls.chatLines.replaceChildren(...(rows.length ? rows : [element("li", "empty", part === GENERAL ? "Talk to the agent about anything here."
       : "Type, or tap the mic to talk.")]));
-    if (rows.length > shownRows && (isNearBottom || shownRows === 0)) scrollChat();
+    const unreadLine = shownRows === 0 && controls.chatLines.querySelector(".unread-line");
+    if (unreadLine) controls.chatScroll.scrollTop = unreadLine.offsetTop - 8; // opens where the owner stopped reading
+    else if (rows.length > shownRows && (isNearBottom || shownRows === 0)) scrollChat();
     else if (rows.length > shownRows) controls.chatNew.hidden = false;
     shownRows = rows.length;
     const lastLine = state.log.findLast((entry) => entry.part === part && THREAD_OPS.has(entry.op));
@@ -724,7 +758,8 @@
     }
     const lines = state.log.filter((entry) => entry.part === part && THREAD_OPS.has(entry.op));
     const latestReply = lines.findLast(isReply)?.id;
-    const rows = lines.map((entry) => rowOf(entry, folded, latestReply));
+    const rows = lines.flatMap((entry) => (entry.id === chat.unreadFrom ? [element("li", "unread-line", "Unread"), rowOf(entry, folded, latestReply)]
+      : [rowOf(entry, folded, latestReply)]));
     for (const voice of uploads.values()) {
       if (voice.part === part && !(voice.id && folded.logged.has(voice.id))) rows.push(voiceRow({ ...voice, upload: voice }, folded));
     }
@@ -976,8 +1011,7 @@
     if (op === "reload") return reloadFrame();
     if (op === "chat") {
       const request = readChat(message);
-      const problem = !request ? "invalid" : request.part === null ? closeChat()
-        : chat?.isOwners && request.part !== chat.part ? "owner" : openChat(request.part, request);
+      const problem = !request ? "invalid" : request.part === null ? closeChat() : openChat(request.part, request);
       return toFrame({ c3: "result", call, ...(problem ? { error: problem } : {}) });
     }
     if (op === "focus") {

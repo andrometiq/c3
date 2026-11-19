@@ -121,11 +121,13 @@ opens it on a tap on a part, titled by the part's first heading. The page hears 
 it, as Escape does. The sheet stays open across a frame reload, and a page that answers an approve on
 the open part shuts it, so the owner sees the change, unless the owner has a draft there. **Talk to the
 agent** opens the board-level chat, the part `general`, which the page can't open (`invalid`). The page
-can shut any chat, but can't switch away from one the owner opened from the panel (`owner`).
+can shut or switch any chat, the ones the owner opened from the panel included.
 
 A reply is unread until its part's chat has shown for a second in a visible tab: each browser keeps a
 read mark per part in the shell origin's storage (on its first visit, what is already on the board
-counts as read), and a chat shut, switched or hidden sooner marks nothing. A tap on an
+counts as read), and a chat shut, switched or hidden sooner marks nothing. A chat that opens on unread
+replies draws a quiet "Unread" line above the first and opens scrolled to it, else at the bottom; the
+line stays put while the chat is open and moves the next time it opens. A tap on an
 unread part in the panel opens its chat and tells the page `c3.on("reveal", ({part}) => …)`; a handler
 that returns `true` shows the part itself, else C3's SDK scrolls the part's element to the top and
 flashes it. The panel names a part by the title the page last gave its chat, else its markup's (a JSON
