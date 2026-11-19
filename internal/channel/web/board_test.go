@@ -72,8 +72,9 @@ func newFakeBoardHost() *fakeBoardHost {
 }
 
 // startBoardChannel starts web's state and the board channel in the current
-// XDG_STATE_HOME with fixture page files.
-func startBoardChannel(t *testing.T, host *fakeBoardHost) *Channel {
+// XDG_STATE_HOME with fixture page files; each option runs just before the
+// board channel starts.
+func startBoardChannel(t *testing.T, host *fakeBoardHost, options ...func(*Channel)) *Channel {
 	t.Helper()
 	c := New()
 	c.host = host
@@ -85,6 +86,9 @@ func startBoardChannel(t *testing.T, host *fakeBoardHost) *Channel {
 		t.Fatal(err)
 	}
 	c.board.assets = boardFixtures
+	for _, option := range options {
+		option(c)
+	}
 	if err := c.board.Start(context.Background(), host); err != nil {
 		t.Fatal(err)
 	}

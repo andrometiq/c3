@@ -34,6 +34,19 @@ type boardChannel struct {
 	lastNumber int64
 
 	heldCountFailure sync.Once // a held-count error is logged once per run
+
+	after func(wait time.Duration, fire func()) (stop func() bool) // time.AfterFunc; tests fake it
+}
+
+// A recording's parts come one part length apart (board.js VOICE.segmentMs);
+// C3 ends one with no further part after a part length and grace.
+const boardVoiceWait = 5*time.Minute + 2*time.Minute
+
+// boardRecording is a recording waiting for its next part.
+type boardRecording struct {
+	part, from string
+	segment    int // the part it waits after
+	stop       func() bool
 }
 
 // boardState is one board in memory, guarded by boardChannel.mu.
@@ -47,6 +60,8 @@ type boardState struct {
 	waiting int
 	acts    []time.Time // when each act with a new client_id came, in the last minute
 	streams map[*boardStream]struct{}
+
+	recordings map[string]*boardRecording // waiting for a next part, by board part and the shell's recording id
 }
 
 type boardStream struct {
@@ -81,11 +96,12 @@ var (
 )
 
 func newBoardChannel(web *Channel) *boardChannel {
-	return &boardChannel{web: web, assets: pages, boards: make(map[string]*boardState)}
+	return &boardChannel{web: web, assets: pages, boards: make(map[string]*boardState),
+		after: func(wait time.Duration, fire func()) func() bool { return time.AfterFunc(wait, fire).Stop }}
 }
 
 func newBoardState(name string, record boardRecord) *boardState {
-	return &boardState{name: name, record: record, streams: make(map[*boardStream]struct{})}
+	return &boardState{name: name, record: record, streams: make(map[*boardStream]struct{}), recordings: make(map[string]*boardRecording)}
 }
 
 // BoardChannel implements channel.BoardProvider.
@@ -150,6 +166,9 @@ func (b *boardChannel) Stop() error {
 	b.host = nil
 	for _, board := range b.boards {
 		board.closeStreams(func(*boardStream) bool { return true })
+		for _, recording := range board.recordings {
+			recording.stop()
+		}
 	}
 	return nil
 }
@@ -544,7 +563,61 @@ func (b *boardChannel) appendLocked(board *boardState, entry boardLogEntry) erro
 	}
 	board.remember(entry)
 	board.broadcast(entryEvent(entry))
+	if entry.Op == "voice" && entry.Segment > 0 {
+		b.waitForNextPartLocked(board, entry)
+	}
 	return nil
+}
+
+// waitForNextPartLocked restarts the wait of a part's recording while more
+// follows, and ends it at the last part (or the line saying it was cancelled
+// or refused). b.mu held.
+func (b *boardChannel) waitForNextPartLocked(board *boardState, part boardLogEntry) {
+	key, segment := part.Part+" "+part.Recording, part.Segment
+	if previous := board.recordings[key]; previous != nil {
+		previous.stop()
+		segment = max(segment, previous.segment)
+		delete(board.recordings, key)
+	}
+	if part.HasMore {
+		recording, number := &boardRecording{part: part.Part, from: part.From, segment: segment}, board.record.Number
+		recording.stop = b.after(boardVoiceWait, func() { b.endRecording(number, key, recording) })
+		board.recordings[key] = recording
+	}
+}
+
+// endRecording sends C3's line ending a recording to the session, then logs
+// it; on a board made read-only it only logs it (the route is gone, and the
+// session was told the board closed).
+func (b *boardChannel) endRecording(number int64, key string, recording *boardRecording) {
+	var entry boardLogEntry
+	var inbound *c3types.Inbound
+	err := b.withBoard(number, func(board *boardState) error {
+		if board.recordings[key] != recording {
+			return nil // a later part restarted the wait after this timer went off
+		}
+		delete(board.recordings, key)
+		entry = boardLogEntry{Dir: "in", ID: board.nextID(), Op: "voice_ended", Part: recording.part, Segment: recording.segment, From: "C3",
+			Text: fmt.Sprintf("Voice note ended after part %d: no further part arrived.", recording.segment)}
+		if board.record.Closed {
+			return b.appendLocked(board, entry)
+		}
+		inbound = &c3types.Inbound{Channel: channel.BoardChannelName, ChatID: number, MessageID: entry.ID, Timestamp: b.web.now(),
+			Sender: c3types.Sender{UserID: b.web.operatorID, Username: recording.from}, ConvKind: c3types.ConvKindDM, Kind: c3types.InboundMessage,
+			V: c3types.InboundRecordVersion, Text: fmt.Sprintf("[board %s · %s · msg %d] %s", board.name, recording.part, entry.ID, entry.Text)}
+		return nil
+	})
+	if host, _ := b.boardHost(); err == nil && inbound != nil && host != nil {
+		if host.GateInbound(inbound) != channel.GateInboundAllow || !host.Emit(inbound) {
+			err = errors.New("the session's route did not take it")
+		} else {
+			err = b.withBoard(number, func(board *boardState) error { return b.appendLocked(board, entry) })
+			b.refreshWaiting(number)
+		}
+	}
+	if err != nil && !errors.Is(err, errBoardsStopped) {
+		b.logf("board: end recording on board %d part %q: %v", number, recording.part, err)
+	}
 }
 
 func (board *boardState) remember(entry boardLogEntry) {
