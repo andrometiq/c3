@@ -15,6 +15,19 @@ item when it lands and add the commit.
   HTTPS front").
 - The web chat (`docs/WEB.md`) shares the board's voice and speech plumbing.
 
+## 0. Guest access (the owner's priority)
+
+Today the only way to let someone message the bot is the allowlist, and everyone on it is a full
+operator: they can answer any session's permission prompts, run `/status`, `/queue` and `/drain`,
+see broker notices, and get every command C3 adds later. Build a guest role before giving anyone
+else access:
+- The maintainer defines what a guest may do (commands, chats, which sessions they reach, notices,
+  prompts), default deny: a new command is operator-only until the guest policy grants it.
+- Every inbound from a guest is marked as a guest's, in the line the session reads and in the MCP
+  data, so the agent treats it as an outside person, never as the owner's instruction.
+- Design first (roles, where the policy lives in `mappings.json`, how each command and inbound kind
+  checks it, tests), record the ruling in `DECISIONS.md`, then build.
+
 ## 1. Ship boards as a release
 
 The gaps between what runs today and a release, roughly in order:
@@ -78,30 +91,20 @@ and the direct CLI path stays working as the fallback. Nothing is built yet; the
 how T3 hosts a Claude thread and how its approval prompts reach the owner. Boards for T3 threads come
 after it.
 
-## 4. Unmerged work worth knowing about
+## 4. Unfinished work and leftovers
 
-On GitHub:
-- `board/sheet-guard-wip`: the unfinished fix for item 1.2 above (one commit on top of the
-  handover's base; `check-voice.mjs` fails at "run" with it).
-- `fix/stt-safety-fallback`: asks a second speech-to-text model when the first refuses audio for
-  safety. One commit; review and merge or close.
-- The branch whose tip is "fix(broker): Keep broker notices off routes the private holder holds"
-  (2026-11-13): five commits for a DM-holding downstream use; check what is still needed against
-  `master`.
-- `codex`, `fix/codex-native-delivery`, `grok-build`, `feat/swarm-mode`: September work, now far
-  behind `master`; likely superseded. Read before deleting.
-
-Only on the previous maintainer's machine unless pushed (also handed over privately as a git bundle):
-- `feat/xcli-grok`: the cross-CLI test rig for Grok (`docs/TESTING-LIVE-MATRIX.md`). Open, in order:
-  route the host assembler's remaining Claude-shaped reads (`uuid`, `sessionId`, the intake
-  classifier) through the decoder's identity and intake hooks, byte-identical for Claude and needed
-  for Grok's flat records, then full-rig Grok channel fixtures; a Grok host driver with broker
-  observers, offline conformance, then merge; a live probe of Grok's fetch mode (the fetch cells fail
-  closed until a capture with a `fetch_queue` call exists); the rig's live smokes. Deferred: a
-  caller-supplied `evidence` can override observed scope identities in
-  `scripts/live-matrix/collect.py` (inert today; add a fail-closed guard), and Grok adapter
-  regression tests for follow-ups through the forward loop and long busy-retry runs.
-- `fix/stt-ipv4-first`: resolves Telegram's IPv4 addresses before IPv6 for speech-to-text downloads.
+- Branch `board/sheet-guard-wip`: the unfinished fix for item 1.2 above (one commit; `check-voice.mjs`
+  fails at "run" with it). It is the only branch besides `master`; the others were merged or
+  deleted on 2026-11-21.
+- Codex resume delivery: on a resumed Codex TUI, `resolveCodexThreadID`
+  (`cmd/c3-codex-adapter/recover.go`) can't tell the short-lived empty startup thread from the
+  resumed one, so it caches the wrong thread id or treats the two as ambiguous and falls back to
+  pull-only. A September branch fixed it by asking `thread/read` and filtering by history, but as
+  written it broke brand-new sessions (a fresh thread with no turns never qualifies, so the 9 s
+  budget runs out). Rebuild it against current Codex resume behaviour, with a test for a fresh
+  session and one for a resumed one.
+- The Grok cross-CLI rig (September) and a narrower guest-DM branch (November) were dropped; the
+  guest work is item 0 now.
 
 ## Claude Desktop adapter: open probes
 
