@@ -81,6 +81,8 @@ after it.
 ## 4. Unmerged work worth knowing about
 
 On GitHub:
+- `board/sheet-guard-wip`: the unfinished fix for item 1.2 above (one commit on top of the
+  handover's base; `check-voice.mjs` fails at "run" with it).
 - `fix/stt-safety-fallback`: asks a second speech-to-text model when the first refuses audio for
   safety. One commit; review and merge or close.
 - The branch whose tip is "fix(broker): Keep broker notices off routes the private holder holds"
@@ -90,7 +92,6 @@ On GitHub:
   behind `master`; likely superseded. Read before deleting.
 
 Only on the previous maintainer's machine unless pushed (also handed over privately as a git bundle):
-- `board/sheet-guard-wip`: the unfinished fix for item 1.2 above.
 - `feat/xcli-grok`: the cross-CLI test rig for Grok (`docs/TESTING-LIVE-MATRIX.md`). Open, in order:
   route the host assembler's remaining Claude-shaped reads (`uuid`, `sessionId`, the intake
   classifier) through the decoder's identity and intake hooks, byte-identical for Claude and needed

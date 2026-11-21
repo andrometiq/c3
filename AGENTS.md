@@ -14,6 +14,9 @@ and `docs/` for the architecture.
 
 1. `README.md` — what C3 is and the architecture.
 2. `docs/WORKPLAN.md` — what to do next, in order, with known bugs and flaky tests.
+   Unfinished work lives on branches, not on `master`: `board/sheet-guard-wip` holds the
+   half-done fix for the sheet-button redress bug (WORKPLAN item 1.2; Go tests pass, one browser
+   check still fails). WORKPLAN section 4 lists every unmerged branch and what it holds.
 3. `ROADMAP.md` — future and not-yet-built work.
 4. `DECISIONS.md` — decisions taken and their rationale.
 5. If you keep a local, gitignored `WORKLOG.md`: `sed -n 1,12p WORKLOG.md; grep '^## ' WORKLOG.md | tail -5`,
