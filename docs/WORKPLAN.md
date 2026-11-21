@@ -6,7 +6,7 @@ item when it lands and add the commit.
 
 ## Where things stand (2026-11-21)
 
-- `master` is 48 commits past the last release, `v0.4.2`. Everything there is deployed on the
+- `master` is well past the last release, `v0.4.2` (`git rev-list --count v0.4.2..master`). Everything there is deployed on the
   maintainer's own broker and used daily; none of it has been released.
 - The big unreleased feature is **live boards** (`docs/BOARD.md`): an agent-written HTML page served
   by the web channel, with a chat per part that C3 draws itself (typing, voice notes, files, replies to
@@ -42,7 +42,7 @@ The gaps between what runs today and a release, roughly in order:
    only if it began on the mic at least 500 ms after the mic appeared or moved, `MIC_SETTLE_MS`). Fix:
    apply the same rule to every button in the sheet, settle again whenever the page reshapes the sheet,
    and focus the composer only for chats the owner opened. Add a browser check for it. A
-   work-in-progress fix is on branch `board/sheet-guard-wip`: Go tests pass, but `check-voice.mjs`
+   work-in-progress fix is on branch `board/sheet-guard-wip` (section 4): Go tests pass, but `check-voice.mjs`
    then times out at "run" (waiting for the answer in the general chat), probably because the
    check's own taps land inside the new settle window.
 3. **Flaky broker tests** (below). Each one costs a pre-commit rerun.
@@ -89,10 +89,30 @@ On GitHub:
 - `codex`, `fix/codex-native-delivery`, `grok-build`, `feat/swarm-mode`: September work, now far
   behind `master`; likely superseded. Read before deleting.
 
-Only on the maintainer's machine (pushed separately if wanted):
-- `feat/xcli-grok`: the cross-CLI test rig for Grok. It needs a live probe of Grok's fetch mode, then
-  the rig's live smokes.
+Only on the previous maintainer's machine unless pushed (also handed over privately as a git bundle):
+- `board/sheet-guard-wip`: the unfinished fix for item 1.2 above.
+- `feat/xcli-grok`: the cross-CLI test rig for Grok (`docs/TESTING-LIVE-MATRIX.md`). Open, in order:
+  route the host assembler's remaining Claude-shaped reads (`uuid`, `sessionId`, the intake
+  classifier) through the decoder's identity and intake hooks, byte-identical for Claude and needed
+  for Grok's flat records, then full-rig Grok channel fixtures; a Grok host driver with broker
+  observers, offline conformance, then merge; a live probe of Grok's fetch mode (the fetch cells fail
+  closed until a capture with a `fetch_queue` call exists); the rig's live smokes. Deferred: a
+  caller-supplied `evidence` can override observed scope identities in
+  `scripts/live-matrix/collect.py` (inert today; add a fail-closed guard), and Grok adapter
+  regression tests for follow-ups through the forward loop and long busy-retry runs.
 - `fix/stt-ipv4-first`: resolves Telegram's IPv4 addresses before IPv6 for speech-to-text downloads.
+
+## Claude Desktop adapter: open probes
+
+Beyond the real-Windows checklist in `docs/DESKTOP.md`:
+- A Windows node needs its own bot token (a second broker on one token gets 409).
+- When the Code tab rejects `ui/message` because the composer holds a draft, is it an RPC error or
+  `isError` on the result, and can it raise a consent dialog? A short DevTools capture would let the
+  panel tell "composer busy" from a real decline.
+- `ui/request-display-mode {mode: "pip"}` is unverified on the Linux beta.
+- The panel takes a topic name only, so it can't watch the DM route.
+- If Desktop ever calls `prompts/get` more than once per `/fetch-queue`, the consuming default would
+  drop messages; switch it to peek if that is seen on a device.
 
 ## Known flaky tests
 

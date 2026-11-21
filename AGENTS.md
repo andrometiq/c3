@@ -105,7 +105,8 @@ Give the maintainer the full command; never suggest an alias for it.
 ## Conventions
 
 - Discuss non-trivial changes before building; the maintainer makes the final call.
-- Commit style: `c3: <imperative one-line summary>`, then a short body explaining *why*.
+- Commit style: `<area>: <imperative one-line summary>` (`board:`, `broker:`, `web:`, `docs:`, … or
+  `c3:` for a change across areas), then a short body explaining *why*.
 - This is a PUBLIC repository. Never commit secrets, credentials, personal names or home
   paths, or internal infrastructure hostnames/IPs. Keep committed docs generic.
 - Prefer small, reviewable commits that keep the build and tests green at every step.
