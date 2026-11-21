@@ -29,15 +29,22 @@ The gaps between what runs today and a release, roughly in order:
    analyser connected through a zero gain to `destination`; or a meter that doesn't use Web Audio. The
    shell sends one diagnostic line per voice note in the `X-Voice-Meter` header
    (`state=…;rate=…;frames=…;zero=…;peak=…;floor=…;lit=…`), which the broker logs as
-   `board: "<name>" voice meter …`; `zero == frames` with `state=suspended` is the failure. Verify with
-   `scripts/board/check-voice.mjs` (it has a suspended-context case) and one real Android recording.
+   `board: "<name>" voice meter …`; `zero == frames` with `state=suspended` is the failure. Seen on the
+   phone: with the first wave build, `state=suspended … peak=-52 lit=153` (some levels); after the
+   resume fix (`6409ce1`, resume on `statechange` and on every 100 ms bar),
+   `state=suspended;frames=3657;zero=3657;peak=-120;lit=0`. `scripts/board/check-voice.mjs` has a
+   suspended-context case and passes, yet the phone fails, so the check doesn't reproduce Android:
+   only a real Android recording proves a fix.
 2. **Sheet-button redress.** The page chooses when C3's chat sheet opens and can reshape it, so a page
    could open the sheet, or move a quick answer, a proposal's button or Send, just as the owner's finger
    lands, and that tap would count as the owner's (it would not carry the "sent by the page" mark). On a
    desktop a page-opened sheet also takes keyboard focus. The mic already has this guard (a press counts
    only if it began on the mic at least 500 ms after the mic appeared or moved, `MIC_SETTLE_MS`). Fix:
    apply the same rule to every button in the sheet, settle again whenever the page reshapes the sheet,
-   and focus the composer only for chats the owner opened. Add a browser check for it.
+   and focus the composer only for chats the owner opened. Add a browser check for it. A
+   work-in-progress fix is on branch `board/sheet-guard-wip`: Go tests pass, but `check-voice.mjs`
+   then times out at "run" (waiting for the answer in the general chat), probably because the
+   check's own taps land inside the new settle window.
 3. **Flaky broker tests** (below). Each one costs a pre-commit rerun.
 4. **Docs and release notes:** README's board section, `docs/BOARD.md` read through once against the
    code, release notes per `AGENTS.md`, and the `plugins/c3/.claude-plugin/plugin.json` version bump.
@@ -94,7 +101,7 @@ These pass alone and fail under load (timing waits), mostly in `internal/broker`
 `TestVoiceFetch_HandlerUnavailableParksUntilRestored`, `TestHandleObserve_ReservesItsLargerEnvelope`,
 `TestInjectedMidTurnExactlyOnce`, and under `-race`
 `TestSourceSchedulerRestartTargetsKeepOwnOccurrenceInReplacement`.
-`TestWebHeldCopyAndKeyboardlessPermissionNotice` (web channel) fails under `-count>1` because state
+`TestWebHeldCopyAndKeyboardlessPermissionNotice` (`internal/broker/web_plumbing_test.go`) fails under `-count>1` because state
 carries over between runs. When the pre-commit `make ci` fails on one of these, run that test alone
 (`go test ./internal/broker -run '^Name$' -count=5`) before suspecting the change. Fixing the class
 (waiting on conditions, not on time) is item 3 above.

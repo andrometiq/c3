@@ -2,6 +2,10 @@
 
 What's next for C3 after v0.1. Everything here is future or unbuilt; shipped work is in git history. One line per item — details land in the design when each is built.
 
+The sections below are not in priority order. The near-term order (ship boards, then board
+features, then the T3 Code adapter) is `docs/WORKPLAN.md`; the T3 Code adapter ruling is
+`DECISIONS.md` D046.
+
 ## First after v0.1 — agent-to-agent messaging
 
 **One agent can post into another agent's topic, so it can wake it.** Today the human is the

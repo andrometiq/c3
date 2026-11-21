@@ -82,13 +82,17 @@ Keep the tree green: build + `go test ./...` must pass before a change is consid
 ## Where to read
 
 - `docs/WORKPLAN.md` — the near-term plan.
+- `docs/OPERATIONS.md` — running and deploying a broker, inbound that goes missing, tests on a busy
+  machine, the live matrix, speech to text, and the checklist before a push.
 - `docs/BOARD.md` — live boards: routes, the chat C3 draws, voice, trust, storage, the front.
 - `docs/WEB.md` — the web chat (and its voice: push-to-talk, hands-free, spoken replies).
 - `plugins/c3/skills/board/SKILL.md` — what an agent is told about writing and answering a board.
 - `DEBUGGING.md` (root) — where to look when something goes wrong: logs, common flows, past bugs.
   `docs/DEBUGGING.md` — delivery-attempt internals for the broker's legacy and negotiated paths.
 - `docs/TESTING-LIVE-MATRIX.md` — the live cross-CLI matrix (hours long; real CLI sessions).
-- `docs/` — deeper design: `CHANNELS.md`, `PLUGINS.md`, `COMMANDS.md`, `DESKTOP.md`, `INSTALL.md`
+- `docs/` — deeper design: `CHANNELS.md`, `ADAPTERS.md`, `PLUGINS.md`, `COMMANDS.md`, `USAGE.md`,
+  `DESKTOP.md`, `INSTALL.md`, `CODEX-NATIVE-QUEUE.md`; `GROK-INJECT.md` is an early feasibility note.
+  Root `INSTALL.md` is the agent's install playbook; `docs/INSTALL.md` the human walkthrough.
 - `TODO.md` — the v0.1 release record (closed; code comments still cite its item numbers)
 
 ## Launching Claude Code with C3

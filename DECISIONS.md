@@ -5,7 +5,7 @@ rulings and rationale, never private operational details.
 
 ## D046: A T3 Code adapter lives in C3; T3 Code becomes the main path
 
-**Date:** 2026-11-14
+**Date:** 2026-11-21 (ruled 2026-11-14, recorded at the handover)
 
 **Decision:** C3 gets a first-class adapter for T3 Code sessions, in this public
 repository (C3 only talks to T3, so nothing private is needed on C3's side).
