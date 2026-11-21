@@ -24,6 +24,9 @@ import os, json, base64, urllib.request, urllib.error
 # input_modalities includes "audio").
 DEFAULT_MODEL = "google/gemini-3.7-flash"
 MODEL_ID = os.environ.get("C3_STT_GEMINI_MODEL", "").strip() or DEFAULT_MODEL
+# Google's safety filter sometimes blocks ordinary speech (finish reason SAFETY,
+# no text) on one model and not on another: the request is asked once more here.
+FALLBACK_MODEL = os.environ.get("C3_STT_GEMINI_FALLBACK_MODEL", "").strip() or "google/gemini-2.5-flash"
 
 # All-in estimate, USD per minute of audio, for the bake-off cost column.
 # OpenRouter list price for google/gemini-3.7-flash on 2026-08-19:
@@ -126,11 +129,26 @@ def transcribe(audio_path: str, audio_bytes: bytes) -> str:
 
     full_prompt = SYSTEM_PROMPT + _build_vocab_prompt()
 
+    model = MODEL_ID
+    content, finish = _ask(key, model, full_prompt, b64)
+    if _is_safety_block(finish) and FALLBACK_MODEL != MODEL_ID:
+        model = FALLBACK_MODEL
+        content, finish = _ask(key, model, full_prompt, b64)
+    if _is_safety_block(finish):
+        # Not "no speech": say why, so the chain log shows a refusal.
+        raise RuntimeError(f"{model} blocked the audio for safety ({finish})")
+    if _is_no_speech(content):
+        return None
+    return content.strip()
+
+
+def _ask(key: str, model: str, prompt: str, b64: str) -> tuple:
+    """One chat request; returns (content, comma-joined finish reasons)."""
     payload = json.dumps({
-        "model": MODEL_ID,
+        "model": model,
         "temperature": 0,
         "messages": [
-            {"role": "system", "content": full_prompt},
+            {"role": "system", "content": prompt},
             {"role": "user", "content": [
                 {"type": "text", "text": "Transcribe this audio."},
                 {"type": "input_audio", "input_audio": {"data": b64, "format": "ogg"}}
@@ -148,11 +166,17 @@ def transcribe(audio_path: str, audio_bytes: bytes) -> str:
     )
 
     with urllib.request.urlopen(req, timeout=90) as resp:
-        result = json.loads(resp.read())
-        content = result.get("choices", [{}])[0].get("message", {}).get("content", "") or ""
-        if _is_no_speech(content):
-            return None
-        return content.strip() if content.strip() else None
+        choice = json.loads(resp.read()).get("choices", [{}])[0]
+    content = choice.get("message", {}).get("content", "") or ""
+    # OpenRouter normalises finish_reason ("content_filter") and passes
+    # Gemini's own reason ("SAFETY", ...) in native_finish_reason; keep both.
+    finish = [r for r in (choice.get("native_finish_reason"), choice.get("finish_reason")) if r]
+    return content, ",".join(finish)
+
+
+def _is_safety_block(finish: str) -> bool:
+    blocks = {"SAFETY", "CONTENT_FILTER", "PROHIBITED_CONTENT", "BLOCKLIST"}
+    return any(r.strip() in blocks for r in str(finish).upper().split(","))
 
 
 def _is_no_speech(text: str) -> bool:

@@ -201,6 +201,11 @@ stderr is the trace.
 
 - Python 3.8+ (standard library only — no PyPI packages)
 - **Gemini provider:** OPENROUTER_API_KEY (env or `~/.claude/stt.env`)
+  - `C3_STT_GEMINI_MODEL` picks the model (default `google/gemini-3.7-flash`).
+  - `C3_STT_GEMINI_FALLBACK_MODEL` (default `google/gemini-2.5-flash`) is asked
+    once when the first model blocks the audio for safety (finish reason
+    `SAFETY` / `content_filter`, no text). If it blocks too, the provider
+    raises and the chain moves on to the next provider.
 - **Soniox provider:** SONIOX_API_KEY (env or `~/.claude/stt.env`)
 - **ElevenLabs provider:** ELEVENLABS_API_KEY (env or `~/.claude/stt.env`)
 - **Sarvam provider:** SARVAM_API_KEY (env or `~/.claude/stt.env`)
@@ -209,7 +214,7 @@ stderr is the trace.
 ## Tests
 
 ```bash
-python3 -m pytest test_chain_config.py test_sarvam_prompt.py -q
+python3 -m pytest test_chain_config.py test_sarvam_prompt.py test_gemini_safety_fallback.py -q
 python3 test_silence_gate.py     # stdlib-only, runs standalone
 ```
 
