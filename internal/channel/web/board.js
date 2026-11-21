@@ -89,7 +89,9 @@
   let recording = null; // {part, started, isOpening, stop(isCancelled)} while the mic is on
   let voiceKeys = 0;
   let isClosing = false; // Make read-only is waiting for the voice acts on their way
-  let micSettlesAt = 0; // a press on a mic that began before this performance.now() is ignored
+  let micSettlesAt = 0; // a press on a mic, or on the sheet's buttons, that began before this performance.now() is ignored
+  let sheetPress = null; // {key, at}: the last trusted pointerdown in the sheet, which a button's click must follow
+  const pressKeys = new WeakMap(); // a sheet button -> what it does, so a redraw between press and release keeps it
   let micPress = null; // {mic, at}: the last trusted pointerdown on a mic, which its click must follow
   let placedMic = ""; // where the docked mic was last put, to see it move
   let meterLine = ""; // the wave meter's last numbers, sent with a voice note for C3's log
@@ -660,6 +662,9 @@
     if (recording && part !== recording.part) return "recording";
     const isNew = chat?.part !== part;
     const fields = options ?? (isNew ? { title: "", ask: "", choices: [] } : chat);
+    if (!isNew && options && (fields.title !== chat.title || fields.ask !== chat.ask || fields.choices.join("\n") !== chat.choices.join("\n"))) {
+      settleMic(); // the page reshaped the open sheet: its buttons may have moved under a finger
+    }
     chat = { part, title: fields.title, ask: fields.ask, choices: fields.choices, unreadFrom: isNew ? firstUnread(part) : chat.unreadFrom };
     if (fields.title) chatTitles.set(part, fields.title);
     if (options?.quote) quotes.set(part, options.quote);
@@ -674,8 +679,10 @@
     if (isNew) watchReading();
     drawVoice();
     drawChat();
-    if (isNew && !isTouch() && !state.closed) controls.chatText.focus(); // on a keyboard, straight to typing
-    else if (isNew) controls.chatTitle.focus(); // on touch no keyboard pops up; the shell holds the focus
+    // Straight to typing on a keyboard only when the owner opened it from the circle: a sheet the page opens could
+    // otherwise catch keys typed into the page. On touch no keyboard pops up; the shell holds the focus.
+    if (isNew && options === null && !isTouch() && !state.closed) controls.chatText.focus();
+    else if (isNew) controls.chatTitle.focus();
     return "";
   }
 
@@ -725,7 +732,8 @@
     controls.chatChoices.replaceChildren(...chat.choices.map((choice) => {
       const button = element("button", "", choice);
       button.disabled = state.closed || Boolean(pending);
-      button.addEventListener("click", () => choose(part, choice));
+      pressKeys.set(button, `choice:${choice}`);
+      button.addEventListener("click", (event) => { if (isOwnersPress(event)) choose(part, choice); });
       return button;
     }));
     controls.chatChoices.hidden = chat.choices.length === 0;
@@ -830,7 +838,8 @@
     if (proposal && isLatest && !folded.approved.has(entry.id) && !state.closed) {
       const apply = element("button", "apply", approving.has(entry.id) ? "Approving…" : proposal.label);
       apply.disabled = approving.has(entry.id);
-      apply.addEventListener("click", () => approveReply(entry.id));
+      pressKeys.set(apply, `apply:${entry.id}`);
+      apply.addEventListener("click", (event) => { if (isOwnersPress(event)) approveReply(entry.id); });
       row.append(apply);
     }
     row.append(meta(entry, playButton(entry.id), folded.edits.has(entry.id) && "edited"));
@@ -1245,6 +1254,19 @@
     if (recording) recording.stop(false);
     else startRecording();
   }
+  /** A real press on one of the sheet's answer, apply or Send buttons, judged as a mic's is: it began on that same
+   *  button (by what it does, so a redraw between press and release keeps it) once the sheet had sat still for
+   *  MIC_SETTLE_MS, so a page that opens or reshapes the sheet as a finger lands can't answer as the owner. */
+  function isOwnersPress(event) {
+    const press = sheetPress;
+    sheetPress = null;
+    if (!event.isTrusted) return false;
+    return press ? Boolean(press.key) && press.key === pressKeys.get(event.currentTarget) && press.at >= micSettlesAt : event.detail === 0;
+  }
+  controls.chat.addEventListener("pointerdown", (event) => {
+    const button = event.target.closest("button");
+    sheetPress = event.isTrusted ? { key: button && pressKeys.get(button), at: performance.now() } : null;
+  }, true);
   function onMicPress(event) {
     micPress = event.isTrusted ? { mic: event.currentTarget, at: performance.now() } : null;
   }
@@ -1254,7 +1276,8 @@
   controls.cancel.addEventListener("click", () => recording?.stop(true));
   controls.chatCancel.addEventListener("click", () => recording?.stop(true));
   controls.chatClose.addEventListener("click", closeChat);
-  controls.chatSend.addEventListener("click", sendText);
+  pressKeys.set(controls.chatSend, "send");
+  controls.chatSend.addEventListener("click", (event) => { if (isOwnersPress(event)) sendText(); });
   controls.chatNew.addEventListener("click", scrollChat);
   controls.chatScroll.addEventListener("scroll", () => {
     const scroller = controls.chatScroll;
