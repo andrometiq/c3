@@ -13,9 +13,10 @@ and `docs/` for the architecture.
 ## Session start
 
 1. `README.md` — what C3 is and the architecture.
-2. `ROADMAP.md` — future and not-yet-built work.
-3. `DECISIONS.md` — decisions taken and their rationale.
-4. `WORKLOG.md` (local, gitignored) — `sed -n 1,12p WORKLOG.md; grep '^## ' WORKLOG.md | tail -5`,
+2. `docs/WORKPLAN.md` — what to do next, in order, with known bugs and flaky tests.
+3. `ROADMAP.md` — future and not-yet-built work.
+4. `DECISIONS.md` — decisions taken and their rationale.
+5. If you keep a local, gitignored `WORKLOG.md`: `sed -n 1,12p WORKLOG.md; grep '^## ' WORKLOG.md | tail -5`,
    then read only the last entry. Never read the whole file.
 
 ## Build · test · check
@@ -29,10 +30,18 @@ and `docs/` for the architecture.
 
 Keep the tree green: build + `go test ./...` must pass before a change is considered done.
 
+- `make ci` prints a lot: save it to a file and grep for `FAIL`. A few broker tests are flaky under
+  load (`docs/WORKPLAN.md`, "Known flaky tests"); rerun such a test alone before blaming a change.
+- In a git worktree, build with `GOFLAGS=-buildvcs=false`.
+- Boards and the web chat have browser checks against the real routes, with a fake microphone and
+  nobody in the loop: `node scripts/board/check-voice.mjs .` (also `check-speak.mjs`,
+  `check-webchat.mjs`). Run them after any change under `internal/channel/web/`.
+
 - Install with `make install` (or `/c3:build`): it stamps the build identity; a plain `go install`
   stamps `dev`.
-- One broker serves every attached session, so restarting it bounces them all for a few seconds.
-  Ask the maintainer before redeploying a broker that live sessions use.
+- Deploy a local build with `make install && c3-broker restart`. One broker serves every attached
+  session, so restarting it bounces them all for a few seconds. Ask the maintainer before
+  redeploying a broker that live sessions use.
 
 ## Releases
 
@@ -66,13 +75,21 @@ Keep the tree green: build + `go test ./...` must pass before a change is consid
 - Check a release against what users receive (the latest GitHub Release), not the local deploy.
 - Tags and pushes happen only on the maintainer's word.
 - Before any push, besides the secrets scan, grep the push diff and its commit messages for the
-  maintainer's keep-out terms (a local, gitignored list under `local-notes/`). Secret scanners
-  have missed infrastructure strings here.
+  maintainer's keep-out terms (personal names, hosts, accounts and downstream project names; the
+  maintainer keeps the list privately, so ask for it). Secret scanners have missed infrastructure
+  strings here.
 
 ## Where to read
 
+- `docs/WORKPLAN.md` — the near-term plan.
+- `docs/BOARD.md` — live boards: routes, the chat C3 draws, voice, trust, storage, the front.
+- `docs/WEB.md` — the web chat (and its voice: push-to-talk, hands-free, spoken replies).
+- `plugins/c3/skills/board/SKILL.md` — what an agent is told about writing and answering a board.
+- `DEBUGGING.md` (root) — where to look when something goes wrong: logs, common flows, past bugs.
+  `docs/DEBUGGING.md` — delivery-attempt internals for the broker's legacy and negotiated paths.
+- `docs/TESTING-LIVE-MATRIX.md` — the live cross-CLI matrix (hours long; real CLI sessions).
 - `docs/` — deeper design: `CHANNELS.md`, `PLUGINS.md`, `COMMANDS.md`, `DESKTOP.md`, `INSTALL.md`
-- `TODO.md` — the v0.1 release record (closed)
+- `TODO.md` — the v0.1 release record (closed; code comments still cite its item numbers)
 
 ## Launching Claude Code with C3
 

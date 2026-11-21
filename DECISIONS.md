@@ -3,6 +3,20 @@
 Entries are newest first. This is the public architecture record: it records
 rulings and rationale, never private operational details.
 
+## D046: A T3 Code adapter lives in C3; T3 Code becomes the main path
+
+**Date:** 2026-11-14
+
+**Decision:** C3 gets a first-class adapter for T3 Code sessions, in this public
+repository (C3 only talks to T3, so nothing private is needed on C3's side).
+Once it works, T3 is the main way sessions run, and the direct CLI path (a CLI
+started with the C3 plugin) stays working as the fallback.
+
+**Why:** the maintainer runs Claude threads through T3; without an adapter
+those threads load C3's plugin but get no live messages, and boards can't
+reach them. Keeping the direct path means nothing breaks while the adapter is
+young. Not built yet; `docs/WORKPLAN.md` item 3.
+
 ## D045: Boards serve understanding, not a format
 
 **Date:** 2026-11-19
