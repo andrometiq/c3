@@ -518,12 +518,16 @@ type harnessHost struct {
 	mu     sync.Mutex
 	ended  map[int64][]*c3types.Inbound
 	isDown map[int64]bool
+	// inbounds, when set, is a file each inbound is appended to as a JSON
+	// line: what the session would read.
+	inbounds string
 }
 
 var harnessLine = regexp.MustCompile(`^\[board ([a-z0-9-]+)(?: · ([A-Za-z0-9._:-]+))? · msg (\d+)(?: · reply to (?:the page's )?msg \d+ "(?:[^"\\]|\\.)*")?\] ?(Approved)?`)
 
 func (host *harnessHost) Emit(inbound *c3types.Inbound, _ ...*intake.Source) bool {
 	copy := *inbound
+	host.record(&copy)
 	host.mu.Lock()
 	if host.isDown[copy.ChatID] {
 		host.ended[copy.ChatID] = append(host.ended[copy.ChatID], &copy)
@@ -553,6 +557,10 @@ func (host *harnessHost) answer(inbound *c3types.Inbound) {
 	}
 	_ = host.c.board.SendTyping(inbound.ChatID, nil)
 	time.Sleep(400 * time.Millisecond)
+	if strings.Contains(inbound.Text, "\n"+pencilLinePrefix+" (msg ") {
+		host.answerPencil(match[1], inbound)
+		return
+	}
 	if match[4] == "" || match[2] == "" {
 		text := fmt.Sprintf("Answer to msg %d on part %q.", inbound.MessageID, match[2])
 		if strings.Contains(inbound.Text, "propose") {
@@ -574,6 +582,66 @@ func (host *harnessHost) answer(inbound *c3types.Inbound) {
 	if err != nil {
 		host.t.Logf("harness: approve %d: %v", inbound.MessageID, err)
 	}
+}
+
+func (host *harnessHost) record(inbound *c3types.Inbound) {
+	if host.inbounds == "" {
+		return
+	}
+	line, _ := json.Marshal(inbound)
+	file, err := os.OpenFile(host.inbounds, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	if err == nil {
+		_, _ = file.Write(append(line, '\n'))
+		_ = file.Close()
+	}
+}
+
+// harnessIDElement is an element the page names by id, up to its first tag.
+var harnessIDElement = `(id="%s"[^>]*>)[^<]*`
+
+// answerPencil plays the agent on a Magic Pencil command: the first element
+// of the selection that has an id gets new text, the page goes out again
+// answering the command, then one line of narration.
+func (host *harnessHost) answerPencil(name string, inbound *c3types.Inbound) {
+	_, encoded, _ := strings.Cut(inbound.Text, "\n"+pencilLinePrefix+" (msg ")
+	_, encoded, _ = strings.Cut(encoded, "): ")
+	encoded, _, _ = strings.Cut(encoded, "\n")
+	var selection pencilRecord
+	if err := json.Unmarshal([]byte(encoded), &selection); err != nil {
+		host.t.Logf("harness: pencil selection %q: %v", encoded, err)
+		return
+	}
+	page, err := host.c.board.revision(name, "")
+	if err != nil {
+		host.t.Logf("harness: pencil page: %v", err)
+		return
+	}
+	replyTo, changed := inbound.MessageID, ""
+	for _, element := range selection.Elements {
+		id, isID := strings.CutPrefix(element.Selector, "#")
+		if !isID || strings.ContainsAny(id, " >.:[") {
+			continue
+		}
+		pattern := regexp.MustCompile(fmt.Sprintf(harnessIDElement, regexp.QuoteMeta(id)))
+		if pattern.Match(page) {
+			page = pattern.ReplaceAll(page, []byte(fmt.Sprintf("${1}Changed by msg %d", inbound.MessageID)))
+			changed = id
+			break
+		}
+	}
+	path := filepath.Join(host.t.TempDir(), "page.html")
+	if err := os.WriteFile(path, page, 0o600); err == nil && changed != "" {
+		_, err = host.c.board.SendReply(c3types.ReplyArgs{Channel: channel.BoardChannelName, ChatID: inbound.ChatID, ReplyTo: &replyTo,
+			Media: []c3types.MediaItem{{Kind: c3types.MediaFile, Path: path}}})
+		if err != nil {
+			host.t.Logf("harness: pencil page: %v", err)
+		}
+	}
+	narration := fmt.Sprintf("Changed #%s (a %s selection of %d elements).", changed, selection.Shape, len(selection.Elements))
+	if changed == "" {
+		narration = "Nothing under that selection has an id; tell me which part to change."
+	}
+	_, _ = host.c.board.SendReply(c3types.ReplyArgs{Channel: channel.BoardChannelName, ChatID: inbound.ChatID, ReplyTo: &replyTo, Text: narration})
 }
 
 // control applies "end <board>", "resume <board>" and "flood <board>" (as
@@ -616,7 +684,8 @@ func (host *harnessHost) control(line string) {
 // C3_BOARD_HARNESS_PAGE is the first page of each board (default: the
 // starter); C3_BOARD_HARNESS_ASSETS a directory holding the page files to use
 // instead of the embedded ones; C3_BOARD_HARNESS_SPEECH an MP3 file the fake
-// synthesizer returns for every reply, after 300 ms.
+// synthesizer returns for every reply, after 300 ms; C3_BOARD_HARNESS_INBOUNDS
+// a file every inbound the session would read is appended to, one JSON line each.
 func TestBoardBrowserHarness(t *testing.T) {
 	infoPath := os.Getenv("C3_BOARD_HARNESS")
 	if infoPath == "" {
@@ -628,7 +697,8 @@ func TestBoardBrowserHarness(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	host := &harnessHost{fakeBoardHost: newFakeBoardHost(), t: t, ended: map[int64][]*c3types.Inbound{}, isDown: map[int64]bool{}}
+	host := &harnessHost{fakeBoardHost: newFakeBoardHost(), t: t, ended: map[int64][]*c3types.Inbound{}, isDown: map[int64]bool{},
+		inbounds: os.Getenv("C3_BOARD_HARNESS_INBOUNDS")}
 	if path := os.Getenv("C3_BOARD_HARNESS_SPEECH"); path != "" {
 		speech, err := os.ReadFile(path)
 		if err != nil {

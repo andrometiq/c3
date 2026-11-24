@@ -3,6 +3,30 @@
 Entries are newest first. This is the public architecture record: it records
 rulings and rationale, never private operational details.
 
+## D047: Magic Link: a board as a live page the owner changes by pointing
+
+**Date:** 2026-11-24
+
+**Decision:** C3 sends the owner a live board link in place of a static HTML
+file, and the board shell carries a Magic Pencil: the owner draws a freeform or
+rectangle selection over the page and types or speaks a command; the agent
+changes the page, which updates live, and its reply shows as narration over the
+page. The shell draws the shape on its own layer; the page's SDK, the only code
+that can read the frame, names the elements under it (selectors, text, boxes);
+C3 checks the selection and sends it to the session only with the command that
+answers it, on a line of its own. Nothing in the page is wrapped or marked for
+selection. A change outside parts is patched into the live page (three-way,
+against the previous stored text); only a changed script reloads it. The link
+is the front's origin when one is configured, else the listener's address.
+
+**Why:** pointing is faster and more exact than describing where on a page a
+change goes, and a live page shows the change at once. Wrapping sections of
+the page in marker elements was rejected: the page the owner sees would no
+longer be the page the agent wrote, and changes to it become hard to follow.
+Building on boards reuses their sign-in, front, voice, threads and storage
+instead of adding a second live-page path. A selection without a command would
+cost the agent a turn with nothing to do, so it waits for its command.
+
 ## D046: A T3 Code adapter lives in C3; T3 Code becomes the main path
 
 **Date:** 2026-11-21 (ruled 2026-11-14, recorded at the handover)

@@ -4,6 +4,7 @@
 (() => {
   "use strict";
 
+  const SDK_SCRIPT = document.currentScript; // C3's own script, which a live page update never touches
   const KINDS = ["message", "edit", "reaction", "action", "update", "status", "voice", "speech", "chat", "reveal"];
   const CONTROLS = "a[href], button, input, select, textarea, label, summary, [contenteditable]";
   const QUOTE_RUNES = 2000;
@@ -11,7 +12,7 @@
     message: ({ id, reply_to, part, text, at }) => ({ id, reply_to, part, text, ts: at }),
     edit: ({ id, text, status }) => ({ id, text, status }),
     reaction: ({ ref, text, from }) => ({ ref, emoji: text, from }),
-    action: ({ id, op, part, text, ref, from, segment, has_more, status }) => ({ id, op, part, text, ref, from, segment, has_more, status }),
+    action: ({ id, op, part, text, ref, from, segment, has_more, status, selection }) => ({ id, op, part, text, ref, from, segment, has_more, status, selection }),
   };
   const listeners = Object.fromEntries(KINDS.map((kind) => [kind, new Set()]));
   const calls = new Map();
@@ -132,6 +133,8 @@
       emit("chat", { part: chatPart });
     } else if (message.c3 === "reveal") {
       reveal(message.reveal.part);
+    } else if (message.c3 === "pencil") {
+      toShell({ op: "pencil", key: message.pencil.key, value: pencilHits(message.pencil) });
     }
   });
 
@@ -150,23 +153,24 @@
   }
 
   // A new stored revision: the shell hands over the previous and the new text. Parts that changed are
-  // swapped in place; anything else asks the shell to reload the frame, which is always right.
+  // swapped in place; a change outside parts is patched into the live page (morph); anything else asks the shell
+  // to reload the frame, which is always right.
   function applyPage({ entry, previous, next }) {
     board.log.push(entry);
     board.rev = entry.rev;
     draw();
-    if (!updateParts(entry.rev, previous, next)) toShell({ op: "reload" });
-  }
-
-  function updateParts(rev, previous, next) {
     let changes;
     try {
       changes = previous === null ? null : diff(previous, next);
     } catch (error) {
       reportError(error);
-      return false;
+      return toShell({ op: "reload" });
     }
-    if (!changes) return false;
+    const isShown = changes ? updateParts(entry.rev, changes) : previous !== null && morphPage(previous, next);
+    if (!isShown) toShell({ op: "reload" });
+  }
+
+  function updateParts(rev, changes) {
     for (const { part, tag, html, data } of changes) {
       let isHandled = false;
       for (const handler of listeners.update) {
@@ -211,6 +215,250 @@
     live.innerHTML = html;
     flash(live);
     return true;
+  }
+
+  // ---------- live update: a change outside parts patched into the live page ----------
+
+  /** Thrown when a change can't be patched in place: a script changed, moved or came in new (it must run). */
+  class NeedsReload extends Error {}
+  const MORPH_FLASHES = 12;
+  const isDataScript = (node) => node.localName === "script" && /^application\/(?:ld\+)?json$/i.test(node.getAttribute("type") ?? "");
+  const isScript = (node) => node.nodeType === Node.ELEMENT_NODE && node.localName === "script" && !isDataScript(node);
+  /** A node's children the morph works on: never C3's own script or style, nor blank text in head (where C3's inlined
+   *  script makes the parser keep some that the stored text alone doesn't have). */
+  const childrenOf = (node) => [...node.childNodes].filter((child) => child !== SDK_SCRIPT && child !== foldStyle
+    && !(node.localName === "head" && child.nodeType === Node.TEXT_NODE && !child.nodeValue.trim()));
+  const isSameKind = (a, b) => a.nodeType === b.nodeType && (a.nodeType !== Node.ELEMENT_NODE || a.localName === b.localName);
+
+  /** Patches the live document from the previous stored text to the next, three ways: only what the agent changed
+   *  between the two texts moves, so what the page's own scripts drew elsewhere stays, and so do the scroll, the open
+   *  chat and the page's state. The changed elements flash. False when it can't (the shell then reloads the frame). */
+  function morphPage(previous, next) {
+    const [before, after] = [previous, next].map((text) => new DOMParser().parseFromString(text, "text/html"));
+    const changed = new Set();
+    try {
+      morphAttributes(document.documentElement, before.documentElement, after.documentElement, changed);
+      for (const section of ["head", "body"]) {
+        if (!document[section] || !before[section] || !after[section]) throw new NeedsReload();
+        morphAttributes(document[section], before[section], after[section], changed);
+        morphChildren(document[section], before[section], after[section], changed);
+      }
+    } catch (error) {
+      if (!(error instanceof NeedsReload)) reportError(error);
+      return false;
+    }
+    const outermost = [...changed].filter((element) => element.isConnected && element !== document.body && element !== document.documentElement
+      && document.body.contains(element) && ![...changed].some((other) => other !== element && other.contains?.(element)));
+    for (const element of outermost.slice(0, MORPH_FLASHES)) flash(element);
+    return true;
+  }
+
+  function morphAttributes(live, before, after, changed) {
+    const names = new Set([...before.getAttributeNames(), ...after.getAttributeNames()]);
+    for (const name of names) {
+      const value = after.getAttribute(name);
+      if (before.getAttribute(name) === value) continue;
+      if (value === null) live.removeAttribute(name);
+      else live.setAttribute(name, value);
+      changed.add(live);
+    }
+  }
+
+  /** Walks the previous and the next children side by side, the live ones with the previous: one inserted or removed
+   *  node is found as such, a node of the same kind is patched, and anything else replaced. Live children that no longer
+   *  match the previous text (the page's script redrew them) take the next text's whole. */
+  function morphChildren(live, before, after, changed) {
+    const [liveKids, oldKids, newKids] = [childrenOf(live), childrenOf(before), childrenOf(after)];
+    if (oldKids.length === newKids.length && oldKids.every((kid, index) => kid.isEqualNode(newKids[index]))) return;
+    if (liveKids.length !== oldKids.length || liveKids.some((kid, index) => !isSameKind(kid, oldKids[index]))) {
+      for (const kid of [...liveKids, ...oldKids, ...newKids]) if (isScript(kid)) throw new NeedsReload();
+      liveKids.forEach((kid) => kid.remove());
+      live.append(...newKids.map(imported));
+      changed.add(live);
+      return;
+    }
+    const tail = liveKids.at(-1)?.nextSibling ?? null; // appended nodes go before it, in order
+    let [oldAt, newAt] = [0, 0];
+    while (oldAt < oldKids.length || newAt < newKids.length) {
+      const [old, fresh, current] = [oldKids[oldAt], newKids[newAt], liveKids[oldAt]];
+      if (old && fresh && old.isEqualNode(fresh)) {
+        oldAt++; newAt++;
+      } else if (fresh && (!old || newKids[newAt + 1]?.isEqualNode(old))) { // fresh was inserted
+        const node = imported(fresh);
+        live.insertBefore(node, current ?? tail);
+        markChanged(node, changed);
+        newAt++;
+      } else if (old && (!fresh || oldKids[oldAt + 1]?.isEqualNode(fresh))) { // old was removed
+        if (isScript(current)) throw new NeedsReload();
+        markChanged(current.parentNode, changed);
+        current.remove();
+        oldAt++;
+      } else if (isSameKind(old, fresh)) {
+        morphNode(current, old, fresh, changed);
+        oldAt++; newAt++;
+      } else {
+        if (isScript(current)) throw new NeedsReload();
+        const node = imported(fresh);
+        current.replaceWith(node);
+        markChanged(node, changed);
+        oldAt++; newAt++;
+      }
+    }
+  }
+
+  function morphNode(live, before, after, changed) {
+    if (live.nodeType !== Node.ELEMENT_NODE) {
+      if (live.nodeValue !== after.nodeValue) {
+        live.nodeValue = after.nodeValue;
+        markChanged(live.parentNode, changed);
+      }
+      return;
+    }
+    if (isScript(after)) throw new NeedsReload(); // scripts differ: only a reload runs the new one
+    morphAttributes(live, before, after, changed);
+    if (isDataScript(after)) {
+      if (live.textContent !== after.textContent) {
+        live.textContent = after.textContent;
+        changed.add(live);
+      }
+      return;
+    }
+    morphChildren(live, before, after, changed);
+  }
+
+  /** A node from a parsed text, made the live document's; one holding a script refuses (it must run: reload). */
+  function imported(node) {
+    if (isScript(node) || node.querySelector?.("script:not([type='application/json']):not([type='application/ld+json'])")) throw new NeedsReload();
+    return document.importNode(node, true);
+  }
+
+  const markChanged = (node, changed) => {
+    const element = node?.nodeType === Node.ELEMENT_NODE ? node : node?.parentElement;
+    if (element) changed.add(element);
+  };
+
+  // ---------- the Magic Pencil: what lies under the owner's selection ----------
+
+  // The shell draws the shape over the frame and asks what is under it; only this script can read the page. The
+  // answer names the elements mostly inside the shape (the outermost of them, in page order), the innermost element
+  // holding the whole shape, the viewport, scroll and document size, and the location hash. Nothing in the page
+  // changes: the found elements only flash.
+  const PENCIL = { elements: 12, textRunes: 160, coverage: 0.6, grid: 5, selectorDepth: 12, skip: new Set(["script", "style", "head", "meta",
+    "link", "title", "template", "noscript", "br", "wbr"]) };
+
+  function pencilHits({ kind, points }) {
+    if (!Array.isArray(points) || points.length < 3) return null;
+    const bounds = boxOf(points);
+    const isInside = kind === "rectangle" ? (x, y) => x >= bounds.x && x <= bounds.right && y >= bounds.y && y <= bounds.bottom
+      : (x, y) => isInPolygon(x, y, points);
+    const covered = new Map();
+    for (const element of document.body?.querySelectorAll("*") ?? []) {
+      if (PENCIL.skip.has(element.localName)) continue;
+      const box = element.getBoundingClientRect();
+      if (box.width < 1 || box.height < 1 || box.right < bounds.x || box.x > bounds.right || box.bottom < bounds.y || box.y > bounds.bottom) continue;
+      const coverage = coverageOf(box, isInside);
+      if (coverage >= PENCIL.coverage) covered.set(element, coverage);
+    }
+    let elements = [...covered.keys()].filter((element) => !covered.has(element.parentElement)).map((element) => innermost(element, covered));
+    const container = containerOf(bounds);
+    if (!elements.length && container && container !== document.body) elements = [container];
+    for (const element of elements.slice(0, PENCIL.elements)) flash(element);
+    const view = (element) => element && { ...describe(element), ...(covered.has(element) && { coverage: Math.round(covered.get(element) * 100) / 100 }) };
+    const parts = new Set(elements.map((element) => partOf(element)?.getAttribute("data-c3-part") ?? null));
+    return {
+      part: parts.size === 1 && !parts.has(null) ? [...parts][0] : partOf(container)?.getAttribute("data-c3-part") ?? null,
+      viewport: { width: innerWidth, height: innerHeight }, scroll: { x: scrollX, y: scrollY },
+      document: { width: document.documentElement.scrollWidth, height: document.documentElement.scrollHeight },
+      hash: location.hash.slice(0, 200),
+      container: container && container !== document.body && container !== document.documentElement ? view(container) : null,
+      elements: elements.slice(0, PENCIL.elements).map(view),
+    };
+  }
+
+  /** A covered wrapper whose only covered child holds all its content stands for that child: a header around a title
+   *  names the title. */
+  function innermost(element, covered) {
+    for (;;) {
+      const kids = [...element.children].filter((kid) => covered.has(kid));
+      const hasOwnText = [...element.childNodes].some((node) => node.nodeType === Node.TEXT_NODE && node.nodeValue.trim());
+      if (kids.length !== 1 || hasOwnText) return element;
+      element = kids[0];
+    }
+  }
+
+  function boxOf(points) {
+    const xs = points.map(([x]) => x), ys = points.map(([, y]) => y);
+    const [x, y, right, bottom] = [Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys)];
+    return { x, y, right, bottom, width: right - x, height: bottom - y };
+  }
+
+  /** Ray casting: whether (x, y) lies inside the closed polygon. */
+  function isInPolygon(x, y, polygon) {
+    let isIn = false;
+    for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+      const [[xi, yi], [xj, yj]] = [polygon[i], polygon[j]];
+      if ((yi > y) !== (yj > y) && x < (xj - xi) * (y - yi) / (yj - yi) + xi) isIn = !isIn;
+    }
+    return isIn;
+  }
+
+  /** The share of an element's visible box inside the shape, from a grid of sample points. */
+  function coverageOf(box, isInside) {
+    const [left, top] = [Math.max(box.x, 0), Math.max(box.y, 0)];
+    const [right, bottom] = [Math.min(box.right, innerWidth), Math.min(box.bottom, innerHeight)];
+    if (right <= left || bottom <= top) return 0;
+    let inside = 0;
+    for (let row = 0; row < PENCIL.grid; row++) {
+      for (let column = 0; column < PENCIL.grid; column++) {
+        const x = left + (column + 0.5) * (right - left) / PENCIL.grid, y = top + (row + 0.5) * (bottom - top) / PENCIL.grid;
+        if (isInside(x, y)) inside++;
+      }
+    }
+    return inside / PENCIL.grid ** 2;
+  }
+
+  /** The innermost element whose box holds the whole shape. */
+  function containerOf(bounds) {
+    let element = document.elementFromPoint(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2);
+    while (element && element !== document.documentElement) {
+      const box = element.getBoundingClientRect();
+      if (box.x <= bounds.x && box.y <= bounds.y && box.right >= bounds.right && box.bottom >= bounds.bottom) return element;
+      element = element.parentElement;
+    }
+    return element;
+  }
+
+  function describe(element) {
+    const box = element.getBoundingClientRect();
+    const part = partOf(element)?.getAttribute("data-c3-part");
+    return { selector: selectorOf(element), tag: element.localName, text: textOf(element), ...(part && { part }),
+      box: { x: box.x, y: box.y, width: box.width, height: box.height } };
+  }
+
+  /** A selector that finds element: its id when unique, else a path of tags (with up to two classes) and positions
+   *  from the nearest ancestor with a unique id, or from body. */
+  function selectorOf(element) {
+    const unique = (node) => node.id && document.querySelectorAll(`#${CSS.escape(node.id)}`).length === 1;
+    const steps = [];
+    for (let node = element; node && node !== document.body && node !== document.documentElement; node = node.parentElement) {
+      if (unique(node)) {
+        steps.unshift(`#${CSS.escape(node.id)}`);
+        return steps.join(" > ");
+      }
+      const classes = [...node.classList].slice(0, 2).map((name) => `.${CSS.escape(name)}`).join("");
+      const twins = node.parentElement ? [...node.parentElement.children].filter((sibling) => sibling.localName === node.localName) : [node];
+      steps.unshift(`${node.localName}${classes}${twins.length > 1 ? `:nth-of-type(${twins.indexOf(node) + 1})` : ""}`);
+      if (steps.length >= PENCIL.selectorDepth) break;
+    }
+    steps.unshift("body");
+    return steps.join(" > ").slice(0, 300);
+  }
+
+  /** An element's first words as the owner sees them (an image's alt, a field's value or placeholder). */
+  function textOf(element) {
+    const raw = element.innerText || element.getAttribute("alt") || element.getAttribute("aria-label") || element.value || element.getAttribute("placeholder") || "";
+    const runes = [...String(raw).replace(/\s+/g, " ").trim()];
+    return runes.length > PENCIL.textRunes ? `${runes.slice(0, PENCIL.textRunes - 1).join("")}…` : runes.join("");
   }
 
   /** A short outline on a part C3 just changed or brought into view. */

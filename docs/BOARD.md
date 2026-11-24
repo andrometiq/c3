@@ -2,7 +2,9 @@
 
 A board is one HTML page that a CLI session writes and C3 serves on the [web channel](WEB.md)'s
 listener. The owner taps a part, types or talks, reads the answer in that part's thread and
-approves it; the session changes that part and C3 redraws only it. Agents learn the rules from the plugin
+approves it; the session changes that part and C3 redraws only it. Used as a **Magic Link**, a
+board is a live web page the owner changes by drawing around an area with the
+[Magic Pencil](#magic-link-and-the-magic-pencil) and saying or typing what to change. Agents learn the rules from the plugin
 skill (`plugins/c3/skills/board/SKILL.md`) and from each board's attach result.
 
 **Why boards exist.** The owner must grasp the work and decide without a wall of text and without
@@ -103,7 +105,7 @@ not the approved message's (418).
 | `GET /board/<name>/state` | title, rev, frame capability, viewer, live, holder, waiting, closed, last 500 log entries |
 | `GET /board/<name>/page?cap=…` | the page with the SDK inlined; `&rev=N&raw=1` gives a stored revision as `text/plain` |
 | `GET /board/<name>/events` | SSE `message`, `edit`, `reaction`, `action`, `page`, `status`, `notice`; `id:` is the log seq, `Last-Event-ID` replays after it |
-| `POST /board/<name>/act` | `{client_id, op, …}`, op `comment`, `approve`, `tap` or `react`; or a voice act (below); 202 `{id}` |
+| `POST /board/<name>/act` | `{client_id, op, …}`, op `comment`, `approve`, `tap`, `react` or `pencil` (a [selection](#magic-link-and-the-magic-pencil)); or a voice act (below); 202 `{id}` |
 | `POST /board/<name>/file` | the owner's file from C3's chat as the body (at most 20 MB), with headers `X-Client-Id`, `X-Board-Part`, `X-File-Name` and optionally `X-Caption` (both percent-encoded UTF-8; the caption at most 6 KB as sent, since a fronting proxy refuses large headers) and `X-Reply-To`; an act's checks and `client_id` retry (a reused id with other bytes is 409 before anything is kept); 202 `{id}` |
 | `POST /board/<name>/close` | empty body; 204, or 500 `close_failed` (repeat to retry) |
 | `POST /board/<name>/speak` | `{id}`: the session's message `id` on this board, read aloud; 200 `{token}` (cached audio first), else 404, 429 `rate`, 503 `unavailable` |
@@ -165,6 +167,59 @@ the owner is on, where its Send sits (an element the SDK follows through layout,
 or a box in frame pixels) and whether the box has text, and while the box is empty C3 draws its mic in
 that spot (`c3.focus(part)` alone puts it at the frame's bottom-right corner; never while C3's sheet is
 open).
+
+## Magic Link and the Magic Pencil
+
+A Magic Link is a board's link sent in place of a static HTML file: the page is live, and the owner
+changes it by pointing. Any self-contained page works; parts are optional. `/c3:magic-link <name>
+[file]` makes the board, publishes the page and sends the link.
+
+**The link.** The attach result's link uses the authenticated HTTPS front's origin when the web
+stanza has a `front` (for example a tunnel that signs the owner in), else the web listener's own
+address (`listen`, for example a tailnet IP). Nothing else chooses it, so a front added to the
+config moves every board link to it after a broker restart.
+
+**The pencil.** The shell draws a floating pencil at the left edge, over the frame. A tap opens
+**Freeform** (a lasso) and **Rectangle**; a pick covers the page with the shell's drawing layer
+(Escape or the pencil again drops it). The owner draws; the shape stays drawn on the shell's canvas.
+The shell then asks the page's SDK, the only code that can read the frame's DOM, what lies under the
+shape: the outermost elements mostly (60 %) inside it, a wrapper with one such child standing for the
+child, up to 12, each with a CSS selector, tag, first words, board part, box and coverage; the
+innermost element holding the whole shape; the viewport, scroll, document size and location hash.
+The found elements flash; nothing in the page changes, and nothing is wrapped or marked in it.
+
+The shell posts the selection as an act, `{op: "pencil", part, selection: {shape, points, viewport,
+scroll, document, hash, container, elements}}`, the part being the one the elements share, else the
+container's, else `page`. C3 checks every field (shape `freeform` with 3 to 200 points or
+`rectangle` with 4, numbers within ±10⁶, a positive viewport, at most 12 elements, selector 300
+bytes, text 160 runes, tag `^[a-z][a-z0-9-]{0,31}$`, part, coverage 0 to 1, hash starting `#`),
+makes text one line, rounds the numbers, adds the board link (with the hash), the revision and title
+on screen and the shape's bounds, and logs it as `op: "pencil"` with `selection`. A selection reaches
+the session only with the command that answers it, never alone, so the agent never gets a selection
+without a command. Only the owner's shell sends one: a pencil act marked `from_page` is refused.
+
+The part's chat then opens with a reply bar on the selection ("Magic Pencil: freeform around
+“Pricing” and 1 more") and the line "Say or type what to change in the marked area." The owner's
+comment, voice note or file answering it carries the selection on a line of its own after the act's
+line (a voice note's transcript follows it):
+
+```text
+[board site · page · msg 14 · reply to msg 13 "Magic Pencil: freeform around “Pricing” and 1 more"] make this blue
+Magic Pencil selection (msg 13): {"shape":"freeform","url":"https://…/board/site#pricing","rev":3,"title":"Shop","bounds":{"x":10,"y":20,"width":110,"height":70},"points":[[10,20],…],"viewport":{"width":390,"height":844},"scroll":{"x":0,"y":241},"document":{"width":390,"height":2000},"container":{…},"elements":[{"selector":"#pricing > h2","tag":"h2","text":"Pricing","part":"2","box":{"x":12,"y":24,"width":100,"height":30},"coverage":0.88},…]}
+```
+
+Coordinates are the frame's viewport CSS pixels when the shape was drawn; scroll gives document
+coordinates. Once the command is in the log the chat shuts and the shape goes, so the page shows.
+
+**Live update and narration.** The agent changes the page and sends it again answering the command.
+The SDK swaps changed parts in place as before, and now patches a change outside parts into the live
+document too: it compares the previous and the new stored text and moves only what the agent changed
+there (attributes, text, inserted, removed or replaced nodes), so the scroll, the open chat and what
+the page's own script drew stay, and the changed elements flash. A changed, added or moved script
+(other than JSON data) can't run that way, so the shell reloads the frame. The agent's reply to the
+command shows as narration: a note at the bottom left of the page ("Sent. The agent is on it…" until
+it answers), with a play button that reads it aloud and **Open the chat**; it fades after 30 seconds,
+and **Read replies aloud** reads it like any reply.
 
 ## Voice
 
@@ -271,6 +326,10 @@ can still be heard.
   name a session message, the owner's reply's any message on the board, and the page's comment takes
   none; a `client_id` retry is delivered once
   (not across a broker restart).
+- **Pencil.** Only the shell draws and sends a selection, from a trusted tap on its own pencil and
+  its own drawing layer over the frame. The page only answers what lies under a shape the shell
+  names; its answer is checked by the shell and again by C3, made one line, and can name only
+  elements (never C3's words). The page's script can't send a pencil act.
 - **Files.** Only the shell sends one: the owner's pick in the browser's own picker, opened by a real
   tap on its paperclip. The page has no file call, `/act` takes no file op, and the frame has no
   network. The name is shown as text only, clipped to 120 characters with controls and path separators
@@ -289,7 +348,7 @@ can still be heard.
 directories 0700, files 0600: `capability.key` (the cap key) and per board `board.json` (number,
 owner, title, rev, closed), `pages/<rev>.html` (the last 5; `rev` picks the served one) and
 `log.jsonl` (append-only: seq, at, dir, id, op, part, text, ref, reply_to, from, for voice
-segment, has_more, recording, status, and for a file name, mime, size). Held actions sit in the broker's queue.
+segment, has_more, recording, status, for a file name, mime, size, and for a pencil act selection). Held actions sit in the broker's queue.
 Files the owner sends are `board-files/<id>` under the web state directory (the id from their
 contents), the newest 200 kept as voice recordings are; their log entries stay, and the log never
 holds the id. The upload streams into a temporary file there, which is renamed into place. Voice recordings are the web

@@ -73,6 +73,8 @@ type boardLogEntry struct {
 	Name string `json:"name,omitempty"`
 	MIME string `json:"mime,omitempty"`
 	Size int64  `json:"size,omitempty"`
+	// Selection is a pencil act's, as C3 checked and completed it.
+	Selection json.RawMessage `json:"selection,omitempty"`
 }
 
 // loadBoards reads every board. A board whose record is unreadable, or two

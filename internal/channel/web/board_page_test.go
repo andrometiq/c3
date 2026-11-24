@@ -26,7 +26,7 @@ func TestShellWritesAgentStringsOnlyToAllowedSinks(t *testing.T) {
 	shell := readPage(t, "board.js")
 	allowed := map[string]bool{"textContent": true, "title": true, "hidden": true, "mode": true, "src": true, "typing": true, "holder": true, "rev": true,
 		"disabled": true, "ariaPressed": true, "checked": true, "value": true, "placeholder": true, "scrollTop": true, "ariaLabel": true,
-		"ariaBusy": true, "width": true, "height": true, "fillStyle": true}
+		"ariaBusy": true, "width": true, "height": true, "fillStyle": true, "ariaExpanded": true, "lineWidth": true, "lineJoin": true, "strokeStyle": true}
 	for _, match := range regexp.MustCompile(`\.([A-Za-z_$][\w$]*)\s*=[^=]`).FindAllStringSubmatch(shell, -1) {
 		if !allowed[match[1]] {
 			t.Errorf("board.js assigns .%s, which is not an allowed sink", match[1])

@@ -106,7 +106,7 @@ once").
 | `"dm"` / `"DM"` (case-insensitive) | `target = "dm"` (DM disambiguation may fire) |
 | `"web"` / `"telegram"` (case-insensitive) | channel selector |
 | `"+<selector>"` (for example `+web`, `+c3`) | parse `<selector>` normally, set `add = true` |
-| `"+board:<name>"`                  | make or re-hold that live board (prefix in any case), always added ([BOARD.md](BOARD.md)) |
+| `"+board:<name>"`                  | make or re-hold that live board (prefix in any case), always added ([BOARD.md](BOARD.md)); `/c3:magic-link <name> [file]` does this and publishes a page as a Magic Link |
 | `"<int>"`                          | `topic_id = <int>`                           |
 | `"create <name>"`                  | `name = <name>, create = true`               |
 | `"-y <name>"` / `"yes <name>"`     | `name = <name>, create = true`               |

@@ -52,12 +52,20 @@
     offline: "C3 can't be reached, try again", invalid: "C3 refused it" };
   const GENERAL = "general"; // the board-level chat: the circle's "Talk to the agent"
   const GENERAL_TITLE = "General";
-  const THREAD_OPS = new Set(["comment", "tap", "approve", "voice", "voice_ended", "message", "page", "file"]);
+  const THREAD_OPS = new Set(["comment", "tap", "approve", "voice", "voice_ended", "message", "page", "file", "pencil"]);
   // Replies: on touch a message is picked by a swipe right of swipePx; the owner's acts that may answer one.
   const REPLY = { swipePx: 48 };
   const REPLY_OPS = new Set(["comment", "voice", "file"]);
   // An agent message whose last line is "[apply: <label>]" is a proposal: that line is drawn as its Approve button.
   const PROPOSAL = /(?:^|\n)\[apply: ([^\]\n]{1,24})\]$/u;
+  // The Magic Pencil. A freeform stroke keeps a point every stepPx, at most maxPoints; a shape smaller than minPx either
+  // way is a slip. The page has answerMs to name what lies under it. A selection outside any part goes to the part
+  // PAGE. Elements and their strings are clipped to what C3 takes.
+  const PENCIL = { stepPx: 4, maxPoints: 200, minPx: 8, answerMs: 1500, elements: 12, textRunes: 160, selectorBytes: 300, hashBytes: 200,
+    narrationRunes: 1200, narrationMs: 30000 };
+  const PAGE = "page";
+  const PENCIL_HINTS = { freeform: "Draw around the part to change", rectangle: "Drag a box around the part to change" };
+  const TAG = /^[a-z][a-z0-9-]{0,31}$/;
 
   const name = location.pathname.split("/")[2] ?? "";
   const base = `/board/${name}`;
@@ -67,7 +75,8 @@
     "toast", "shield", "mic", "recorder", "clock", "dock-wave", "cancel", "aloud", "player", "chat", "chat-title", "chat-close", "chat-scroll",
     "chat-ask", "chat-choices", "chat-lines", "chat-new", "chat-typing", "chat-error", "chat-quote-row", "chat-quote", "chat-drop-quote",
     "chat-text", "chat-recorder", "chat-cancel", "chat-clock", "chat-wave", "chat-send", "chat-mic", "chat-attach", "chat-file", "chat-reply-row",
-    "chat-reply-text", "chat-drop-reply"]
+    "chat-reply-text", "chat-drop-reply", "pencil", "pencil-menu", "pencil-freeform", "pencil-rectangle", "pencil-layer", "pencil-ink",
+    "pencil-hint", "narration", "narration-text", "narration-close", "narration-play", "narration-open"]
     .map((id) => [id.replace(/-(\w)/g, (_, letter) => letter.toUpperCase()), document.getElementById(id)]));
   const early = [];
   let state = null; // /state, kept current from the stream: the one copy this shell holds
@@ -119,6 +128,13 @@
   let readingPart = null; // the part the sheet has shown for READ_AFTER_MS in a visible tab: its replies are read
   let readTimer = 0;
   let marks = { from: 0, parts: new Map() }; // read marks: the agent's replies on a part after its mark are unread
+  // The Magic Pencil's state: the shape being drawn, the selection waiting for its command, the page's answers to
+  // "what is under this shape", and the narration panel's command and reply.
+  let drawing = null; // {kind, points, isDrawn} from a pick in the menu until the selection is logged or dropped
+  let selected = null; // {id, part}: the logged selection the owner's next command on part answers
+  const pencilAnswers = new Map(); // key -> resolve, until the page answers or answerMs pass
+  let narration = null; // {part, command, reply}: the owner's pencil command and the agent's answer to it
+  let narrationTimer = 0;
 
   const sleep = (ms) => new Promise((resolve) => { setTimeout(resolve, ms); });
   const toFrame = (message) => frame.contentWindow.postMessage(message, "*");
@@ -154,6 +170,8 @@
     controls.waiting.textContent = live && !closed && waiting ? `${messages(waiting)} waiting for the session` : "";
     controls.typing.hidden = !(live && typing);
     controls.close.hidden = closed;
+    controls.pencil.hidden = closed;
+    if (closed) stopPencil();
     drawBadge();
     drawVoice();
     drawChat();
@@ -231,7 +249,7 @@
   }
 
   /** A part's name for the sheet and the panel: the title the page opened its chat with, else its markup's, else its address. */
-  const titleOf = (part) => (part === GENERAL ? GENERAL_TITLE : chatTitles.get(part) || pageTitles.get(part) || part);
+  const titleOf = (part) => (part === GENERAL ? GENERAL_TITLE : chatTitles.get(part) || pageTitles.get(part) || (part === PAGE ? "The page" : part));
 
   /** Each part's title from the stored page: a JSON part's "title", else the part's first heading. Returns the parsed page. */
   function readTitles(text) {
@@ -607,6 +625,7 @@
     speechState = { id, state: phase, ...(error && { error }) };
     if (isFrameReady) toFrame({ c3: "speech", speech: speechState });
     drawChat();
+    if (narration) drawNarrationPlay();
   }
 
   /** c3.speak(id) from the page, or a play button in the chat: id plays now, in place of whatever played or waited; null
@@ -650,6 +669,214 @@
     try { localStorage.setItem(READ_ALOUD_KEY, isOn ? "on" : "off"); } catch { /* this tab keeps it */ }
   }
 
+  // ---------- the Magic Pencil ----------
+
+  /** A pick in the pencil's menu: the drawing layer covers the page (the page never sees the drawing) until a shape is
+   *  drawn, Escape or the pencil again. Not while the mic records. */
+  function startPencil(kind) {
+    controls.pencilMenu.hidden = true;
+    controls.pencil.ariaExpanded = "false";
+    if (recording) return notify("Stop recording first.", false);
+    if (!state || state.closed) return undefined;
+    if (chat) closeChat();
+    hideNarration();
+    drawing = { kind, points: [], isDrawn: false };
+    selected = null;
+    drawInk();
+    controls.pencilLayer.classList.remove("drawn");
+    controls.pencilLayer.hidden = false;
+    controls.pencilHint.textContent = PENCIL_HINTS[kind];
+    controls.pencilHint.hidden = false;
+    controls.pencil.ariaPressed = "true";
+    return undefined;
+  }
+
+  /** Drops the drawing (and the menu); a selection already logged stays in its thread. */
+  function stopPencil() {
+    drawing = null;
+    controls.pencilMenu.hidden = true;
+    controls.pencil.ariaExpanded = "false";
+    controls.pencil.ariaPressed = "false";
+    controls.pencilLayer.hidden = true;
+    controls.pencilHint.hidden = true;
+    drawInk();
+  }
+
+  /** The owner's stroke: freeform keeps the path, rectangle the box from the press to the release. */
+  function onPencilDown(event) {
+    if (!event.isTrusted || !drawing || drawing.isDrawn || !event.isPrimary) return;
+    event.preventDefault();
+    controls.pencilLayer.setPointerCapture?.(event.pointerId);
+    const start = [event.clientX, event.clientY];
+    drawing = { ...drawing, points: [start] };
+    const done = new AbortController();
+    const move = (moved) => {
+      if (!drawing) return done.abort(); // dropped mid-stroke (Escape)
+      const point = [moved.clientX, moved.clientY];
+      const last = drawing.points.at(-1);
+      if (drawing.kind === "rectangle") drawing = { ...drawing, points: [start, point] };
+      else if (Math.hypot(point[0] - last[0], point[1] - last[1]) >= PENCIL.stepPx) drawing.points.push(point);
+      drawInk();
+    };
+    controls.pencilLayer.addEventListener("pointermove", move, { signal: done.signal });
+    controls.pencilLayer.addEventListener("pointerup", (ended) => { move(ended); done.abort(); if (drawing) finishPencil(); }, { signal: done.signal });
+    controls.pencilLayer.addEventListener("pointercancel", () => { done.abort(); if (drawing) drawing = { ...drawing, points: [] }; drawInk(); }, { signal: done.signal });
+  }
+
+  /** The drawing's points as the shape's outline: a rectangle's four corners, else the stroke. */
+  function shapeOf({ kind, points }) {
+    if (kind !== "rectangle" || points.length < 2) return points;
+    const [[x1, y1], [x2, y2]] = [points[0], points.at(-1)];
+    return [[x1, y1], [x2, y1], [x2, y2], [x1, y2]];
+  }
+
+  /** The shape on the layer's canvas, from numbers only: a dashed outline over a light fill. */
+  function drawInk() {
+    const canvas = controls.pencilInk;
+    const scale = devicePixelRatio || 1;
+    canvas.width = Math.round(innerWidth * scale);
+    canvas.height = Math.round(innerHeight * scale);
+    const shape = shapeOf(drawing ?? { points: [] });
+    if (shape.length < 2) return;
+    const context = canvas.getContext("2d");
+    context.scale(scale, scale);
+    context.beginPath();
+    shape.forEach(([x, y], index) => (index ? context.lineTo(x, y) : context.moveTo(x, y)));
+    context.closePath();
+    context.fillStyle = "rgb(9 105 218 / 12%)";
+    context.fill();
+    context.setLineDash([7, 5]);
+    context.lineWidth = 2.5;
+    context.lineJoin = "round";
+    context.strokeStyle = getComputedStyle(canvas).color;
+    context.stroke();
+  }
+
+  /** A drawn shape: the page names what lies under it, C3 logs the selection, and the part's chat opens to take the
+   *  owner's command (typed or spoken) as a reply to it. */
+  async function finishPencil() {
+    const shape = shapeOf(drawing);
+    const xs = shape.map(([x]) => x), ys = shape.map(([, y]) => y);
+    if (shape.length < 3 || Math.max(...xs) - Math.min(...xs) < PENCIL.minPx || Math.max(...ys) - Math.min(...ys) < PENCIL.minPx) {
+      drawing = { ...drawing, points: [] };
+      drawInk();
+      return notify("Too small: draw around the part again.", false);
+    }
+    drawing = { ...drawing, isDrawn: true };
+    controls.pencilLayer.classList.add("drawn");
+    controls.pencilHint.hidden = true;
+    const frameBox = frame.getBoundingClientRect();
+    const step = Math.ceil(shape.length / PENCIL.maxPoints);
+    const points = shape.filter((_, index) => index % step === 0).map(([x, y]) => [x - frameBox.left, y - frameBox.top]);
+    const kind = drawing.kind;
+    const hits = readHits(await askPage(kind, points), frameBox);
+    const part = hits.part;
+    const selection = { shape: kind, points, viewport: hits.viewport, scroll: hits.scroll, document: hits.document, elements: hits.elements,
+      ...(hits.hash && { hash: hits.hash }), ...(hits.container && { container: hits.container }) };
+    const { value, error } = await postAct({ op: "pencil", part, selection });
+    if (!drawing?.isDrawn) return undefined; // dropped meanwhile
+    if (error) {
+      stopPencil();
+      return notify(`Selection not sent: ${CHAT_REASONS[error] ?? error}.`);
+    }
+    for (const end = Date.now() + 5000; !state.log.some((entry) => entry.id === value.id) && Date.now() < end;) await sleep(50); // its line, for the reply bar
+    if (!drawing?.isDrawn) return undefined;
+    selected = { id: value.id, part };
+    controls.pencil.ariaPressed = "false";
+    replies.set(part, value.id);
+    openChat(part, { title: "", ask: "Say or type what to change in the marked area.", choices: [] });
+    return undefined;
+  }
+
+  /** Asks the page what lies under the shape; null if it doesn't answer in time. */
+  function askPage(kind, points) {
+    if (!isFrameReady) return Promise.resolve(null);
+    const key = randomID();
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => { pencilAnswers.delete(key); resolve(null); }, PENCIL.answerMs);
+      pencilAnswers.set(key, (value) => { clearTimeout(timer); pencilAnswers.delete(key); resolve(value); });
+      toFrame({ c3: "pencil", pencil: { key, kind, points } });
+    });
+  }
+
+  /** The page's answer, checked and clipped to what C3 takes; anything malformed is left out (the shape alone still
+   *  goes), and without an answer the frame's own box stands in for its viewport. */
+  function readHits(answer, frameBox) {
+    const isNumber = (value) => typeof value === "number" && Number.isFinite(value) && Math.abs(value) <= 1e6;
+    const size = (value, fallback) => (value && isNumber(value.width) && isNumber(value.height) && value.width > 0 && value.height > 0
+      ? { width: value.width, height: value.height } : fallback);
+    const viewport = size(answer?.viewport, { width: Math.max(frameBox.width, 1), height: Math.max(frameBox.height, 1) });
+    const scroll = answer?.scroll && isNumber(answer.scroll.x) && isNumber(answer.scroll.y) ? { x: answer.scroll.x, y: answer.scroll.y } : { x: 0, y: 0 };
+    const element = (value) => {
+      const box = value?.box;
+      if (!value || typeof value.selector !== "string" || !value.selector.trim() || /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/.test(value.selector)
+        || new TextEncoder().encode(value.selector).length > PENCIL.selectorBytes || typeof value.tag !== "string" || !TAG.test(value.tag)
+        || !box || ![box.x, box.y, box.width, box.height].every(isNumber) || box.width < 0 || box.height < 0) return null;
+      const coverage = isNumber(value.coverage) ? Math.min(Math.max(value.coverage, 0), 1) : undefined;
+      return { selector: value.selector, tag: value.tag, text: clip(typeof value.text === "string" ? value.text : "", PENCIL.textRunes),
+        ...(typeof value.part === "string" && PART.test(value.part) && { part: value.part }),
+        box: { x: box.x, y: box.y, width: box.width, height: box.height }, ...(coverage !== undefined && { coverage }) };
+    };
+    const hash = typeof answer?.hash === "string" && answer.hash.startsWith("#") && new TextEncoder().encode(answer.hash).length <= PENCIL.hashBytes
+      && !/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/.test(answer.hash) ? answer.hash : "";
+    const part = typeof answer?.part === "string" && PART.test(answer.part) && answer.part !== GENERAL ? answer.part : PAGE;
+    return { part, viewport, scroll, document: size(answer?.document, viewport), hash, container: element(answer?.container),
+      elements: (Array.isArray(answer?.elements) ? answer.elements : []).map(element).filter(Boolean).slice(0, PENCIL.elements) };
+  }
+
+  /** Each log line, for the pencil: the owner's command answering the selection shuts the chat and the shape, so the
+   *  page shows; the agent's answer to that command, live, shows as narration. */
+  function followPencil(entry, isLive) {
+    if (selected && entry.dir === "in" && entry.ref === selected.id && entry.op !== "pencil") {
+      narration = { part: entry.part, command: entry.id, reply: null };
+      selected = null;
+      stopPencil();
+      if (chat?.part === entry.part && !recording) closeChat();
+      drawNarration();
+    } else if (narration && isLive && entry.dir === "out" && entry.reply_to === narration.command && (entry.op === "message" || entry.op === "page")) {
+      if (entry.op === "message") narration = { ...narration, reply: entry.id };
+      drawNarration();
+    } else if (narration?.reply && entry.dir === "out" && entry.op === "edit" && entry.id === narration.reply) {
+      drawNarration();
+    }
+  }
+
+  /** The narration panel: the command's state until the agent answers, then the answer as it now reads; it fades after
+   *  narrationMs unless the chat is open on its part (the thread shows it there). */
+  function drawNarration() {
+    clearTimeout(narrationTimer);
+    if (!narration || !state) return hideNarration();
+    const reply = narration.reply && state.log.find((entry) => entry.id === narration.reply && entry.op === "message");
+    const isPage = state.log.some((entry) => entry.dir === "out" && entry.op === "page" && entry.reply_to === narration.command);
+    const text = reply ? snippetText(reply) : isPage ? "The agent updated the page." : "Sent. The agent is on it…";
+    controls.narrationText.textContent = clip(text, PENCIL.narrationRunes);
+    controls.narrationPlay.hidden = !reply;
+    drawNarrationPlay();
+    controls.narration.hidden = chat?.part === narration.part;
+    if (reply) narrationTimer = setTimeout(hideNarration, PENCIL.narrationMs);
+    return undefined;
+  }
+
+  /** A reply's whole text as it now reads, without a proposal's marker line. */
+  function snippetText(reply) {
+    const text = state.log.findLast((entry) => entry.op === "edit" && entry.dir === "out" && entry.id === reply.id)?.text ?? reply.text;
+    return (proposalOf(text)?.body ?? text).trim();
+  }
+
+  const isNarrationPlaying = () => Boolean(narration?.reply) && speechState?.id === narration.reply && ["loading", "playing"].includes(speechState.state);
+  function drawNarrationPlay() {
+    const phase = isNarrationPlaying() ? speechState.state : "idle";
+    controls.narrationPlay.classList.remove("idle", "loading", "playing");
+    controls.narrationPlay.classList.add(phase);
+    controls.narrationPlay.ariaLabel = { loading: "Preparing spoken reply", playing: "Stop spoken reply" }[phase] ?? "Play spoken reply";
+  }
+
+  function hideNarration() {
+    clearTimeout(narrationTimer);
+    narration = null;
+    controls.narration.hidden = true;
+  }
+
   // ---------- the chat sheet ----------
 
   /** Opens (or refreshes) the sheet on part. options are the page's, checked by readChat; null when the shell opens it
@@ -685,6 +912,8 @@
     if (recording) return "recording";
     chat = null;
     controls.chat.hidden = true;
+    if (drawing?.isDrawn) stopPencil(); // the selection's shape goes with its chat; the selection stays in the thread
+    if (narration) controls.narration.hidden = false;
     watchReading();
     if (isFrameReady) toFrame({ c3: "chat", chat: { part: null } });
     drawVoice();
@@ -815,6 +1044,7 @@
     }
     if (entry.op === "page") return element("li", "note", "The agent updated the page.");
     if (entry.op === "voice_ended") return element("li", "note", entry.text);
+    if (entry.op === "pencil") return element("li", "msg mine", element("span", "label", "Magic Pencil"), element("div", "body", entry.text.replace(/^Magic Pencil: /, "")), meta(entry));
     if (entry.op === "file") return element("li", "msg mine", fileLabel(entry), entry.text && element("div", "body", entry.text), meta(entry));
     if (entry.from_page) return element("li", "msg page", element("span", "label", "Sent by the page"), element("div", "body", entry.text), meta(entry));
     return element("li", "msg mine", element("div", "body", entry.text), meta(entry)); // the owner's comment or quick answer
@@ -1045,6 +1275,7 @@
       for (const [key, voice] of uploads) if (voice.id === data.id) uploads.delete(key); // so is a recording's
       if (data.op === "approve") approving.delete(data.ref); // and an approve's: its button is gone for good
       if (chat && isReply(data) && data.part === chat.part) markRead(chat.part); // the owner is looking at it
+      followPencil(data, isLive);
       if (kind === "page" && chat && isApproveOn(data.reply_to, chat.part) && !drafts.get(chat.part)) closeChat(); // show the change
       if (kind === "page") {
         state.rev = data.rev;
@@ -1172,6 +1403,7 @@
   async function onFrameMessage(message) {
     const { op, call, body, value, dock, hasText } = message;
     if (op === "hello") return sendReady();
+    if (op === "pencil") return pencilAnswers.get(message.key)?.(value);
     if (op === "reload") return reloadFrame();
     if (op === "chat") {
       const request = readChat(message);
@@ -1286,7 +1518,27 @@
     event.preventDefault();
     sendText();
   });
-  addEventListener("keydown", (event) => { if (event.key === "Escape" && chat && !isPanelOpen) closeChat(); });
+  addEventListener("keydown", (event) => {
+    if (event.key !== "Escape" || isPanelOpen) return;
+    if (drawing || !controls.pencilMenu.hidden) stopPencil();
+    else if (chat) closeChat();
+  });
+  controls.pencil.addEventListener("click", (event) => {
+    if (!event.isTrusted) return;
+    if (drawing || !controls.pencilMenu.hidden) return stopPencil();
+    controls.pencilMenu.hidden = false;
+    controls.pencil.ariaExpanded = "true";
+  });
+  controls.pencilFreeform.addEventListener("click", (event) => { if (event.isTrusted) startPencil("freeform"); });
+  controls.pencilRectangle.addEventListener("click", (event) => { if (event.isTrusted) startPencil("rectangle"); });
+  controls.pencilLayer.addEventListener("pointerdown", onPencilDown);
+  controls.narrationClose.addEventListener("click", hideNarration);
+  controls.narrationOpen.addEventListener("click", () => {
+    const part = narration?.part;
+    hideNarration();
+    if (part && openChat(part, null)) notify("Stop recording first.", false);
+  });
+  controls.narrationPlay.addEventListener("click", () => { if (narration?.reply) speakForPage(isNarrationPlaying() ? null : narration.reply); });
   document.addEventListener("visibilitychange", watchReading);
   controls.status.addEventListener("click", unlockAudio);
   controls.aloud.checked = isReadingAloud;

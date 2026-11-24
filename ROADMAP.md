@@ -102,8 +102,8 @@ the agent in.
     resend and a full compare in the browser.
   - **A zoomable canvas and slideshow** for screens: pinch or wheel zoom, pan, and step through
     screens one by one.
-  - **Annotation:** circle a region or tap an exact spot on a screen and talk about it; the agent
-    receives the region (coordinates and the element or part it falls on) with the message.
+  - **Annotation:** circling a region is built (the Magic Pencil, D047). Still to come: tapping an
+    exact spot, and a cropped image of the region for the agent.
   - **Point states beyond decided:** open, closed, deferred (and others the agent names), shown on
     the point and in the list.
   - **Sample representations** the board skill can point to: a scroll-through list of points

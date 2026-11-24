@@ -9,7 +9,8 @@
   A C3 board page: one self-contained file (inline CSS, scripts and data: images; no URLs, storage or outside links).
   Mark each part the owner can talk about with data-c3-part="<address>" (letters, digits . _ : -, at most 64) and
   never reuse an address. Keep scripts outside parts and use delegated listeners: C3 swaps an approved part's
-  inner HTML in place. Anything changed outside parts reloads the page. c3.threads() opens C3's chat on a tapped part.
+  inner HTML in place, and patches a change outside parts into the live page; a changed script reloads it.
+  c3.threads() opens C3's chat on a tapped part. C3's Magic Pencil (left) lets the owner draw around any area.
 -->
 <style>
   :root { --ink: #1f2328; --muted: #59636e; --paper: #fff; --card: #f6f8fa; --line: #d1d9e0; }

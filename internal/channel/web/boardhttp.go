@@ -84,6 +84,10 @@ type boardAct struct {
 	// and IsRefFromPage tells that message came from the page's script.
 	RefText       string `json:"-"`
 	IsRefFromPage bool   `json:"-"`
+	// Selection is a pencil act's (the Magic Pencil); RefSelection is the
+	// selection of the pencil act a reply answers, as C3 logged it.
+	Selection    *pencilSelection `json:"selection,omitempty"`
+	RefSelection json.RawMessage  `json:"-"`
 }
 
 // boardFields are the fields an op needs and the ones it may add.
@@ -95,6 +99,7 @@ var boardOpFields = map[string]boardFields{
 	"approve": {required: []string{"ref"}, optional: []string{"part", "note"}},
 	"tap":     {required: []string{"part", "value"}, optional: []string{"ref"}},
 	"react":   {required: []string{"ref", "emoji"}},
+	"pencil":  {required: []string{"part", "selection"}},
 }
 
 var boardFileFields = boardFields{required: []string{"part"}, optional: []string{"text", "ref"}}
@@ -352,6 +357,10 @@ func (c *Channel) handleBoardAct(w http.ResponseWriter, r *http.Request) {
 	}
 	if status, rule := act.check(); status != 0 {
 		writeBoardError(w, status, rule)
+		return
+	}
+	if act.Op == "pencil" {
+		c.handleBoardPencil(w, viewer, name, act)
 		return
 	}
 	content, _ := json.Marshal(act)
@@ -631,11 +640,19 @@ func (act boardAct) voiceFields() string {
 	return fmt.Sprintf("voice part=%s segment=%d more=%t unsent=%s recording=%s ref=%d", act.Part, act.Segment, act.HasMore, act.Unsent, act.Recording, act.Ref)
 }
 
-// check validates a decoded JSON act by its op's fields.
-func (act boardAct) check() (int, string) {
+// check validates a decoded JSON act by its op's fields. Only the owner draws
+// with the pencil: the page never sends a pencil act.
+func (act *boardAct) check() (int, string) {
 	fields, known := boardOpFields[act.Op]
-	if !known || act.FromPage && boardReplyOps[act.Op] && act.Ref != 0 { // the page never answers a message
+	if !known || act.FromPage && (boardReplyOps[act.Op] && act.Ref != 0 || act.Op == "pencil") { // the page never answers a message
 		return http.StatusBadRequest, "invalid"
+	}
+	if act.Selection != nil {
+		selection, ok := act.Selection.check()
+		if !ok {
+			return http.StatusBadRequest, "invalid"
+		}
+		act.Selection = &selection
 	}
 	return act.checkFields(fields)
 }
@@ -648,7 +665,7 @@ func (act boardAct) checkFields(fields boardFields) (int, string) {
 	}
 	present := map[string]bool{
 		"part": act.Part != "", "text": act.Text != "", "quote": act.Quote != "", "ref": act.Ref != 0,
-		"note": act.Note != "", "value": act.Value != "", "emoji": act.Emoji != "",
+		"note": act.Note != "", "value": act.Value != "", "emoji": act.Emoji != "", "selection": act.Selection != nil,
 	}
 	for _, field := range fields.required {
 		if !present[field] {
@@ -700,6 +717,9 @@ func (b *boardChannel) admit(name string, act boardAct, isNewClientID bool) (boa
 			}
 			if boardReplyOps[act.Op] {
 				act.RefText, act.IsRefFromPage = board.replySnippet(answered), answered.FromPage
+			}
+			if boardReplyOps[act.Op] && answered.Op == "pencil" {
+				act.RefSelection = answered.Selection
 			}
 		}
 		if !isNewClientID {
@@ -795,8 +815,18 @@ func (c *Channel) boardInbound(host channel.Host, name string, number int64, act
 const boardPageActNote = "(sent by the page, not typed by the owner)"
 
 // boardLine is what the session reads for one act: C3's header, then the
-// viewer's checked fields.
+// viewer's checked fields. A reply to a Magic Pencil selection carries that
+// selection on a line of its own after the act's own words (a voice note's
+// transcript follows it).
 func boardLine(name string, act boardAct, messageID int64) string {
+	line := actLine(name, act, messageID)
+	if len(act.RefSelection) == 0 {
+		return line
+	}
+	return line + "\n" + pencilLine(act.Ref, act.RefSelection)
+}
+
+func actLine(name string, act boardAct, messageID int64) string {
 	header := "[board " + name
 	if act.Part != "" {
 		header += " · " + act.Part

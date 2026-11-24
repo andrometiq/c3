@@ -161,6 +161,35 @@ svg { fill: currentColor; }
 #recorder { position: fixed; z-index: 1; box-sizing: border-box; display: flex; align-items: center; gap: 8px; padding: 0 4px 0 14px;
   border: 1px solid var(--line); border-radius: 999px; background: var(--paper); box-shadow: var(--shadow); }
 #cancel { flex: none; min-height: 36px; padding: 0 12px; border: 0; border-radius: 999px; background: none; color: var(--accent); font-weight: 600; }
+/* The Magic Pencil: a floating pencil on the left. The owner picks freeform or rectangle and draws over the page on a
+   layer of the shell's own (the page never sees the drawing); the shape stays drawn until its command goes. */
+#pencil { position: fixed; z-index: 1; left: calc(8px + env(safe-area-inset-left)); top: 50%; translate: 0 -50%; width: 44px; height: 44px;
+  padding: 0; display: grid; place-items: center; border: 1px solid var(--line); border-radius: 50%; background: var(--paper); box-shadow: var(--shadow); }
+#pencil svg { width: 22px; height: 22px; }
+#pencil[aria-pressed="true"] { background: var(--accent); color: #fff; border-color: var(--accent); }
+#pencil-menu { position: fixed; z-index: 3; left: calc(60px + env(safe-area-inset-left)); top: 50%; translate: 0 -50%; display: grid; gap: 6px;
+  padding: 8px; border: 1px solid var(--line); border-radius: 12px; background: var(--paper); box-shadow: var(--shadow); }
+#pencil-menu button { display: flex; align-items: center; gap: 8px; min-height: 40px; padding: 0 12px; border: 1px solid var(--line);
+  border-radius: 10px; background: var(--soft); font-weight: 600; text-align: left; }
+#pencil-menu svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 2; }
+#pencil-layer { position: fixed; z-index: 2; inset: 0; cursor: crosshair; touch-action: none; }
+#pencil-layer.drawn { pointer-events: none; cursor: default; }
+#pencil-ink { position: absolute; inset: 0; width: 100%; height: 100%; color: var(--accent); }
+#pencil-hint { position: fixed; z-index: 3; top: calc(8px + env(safe-area-inset-top)); left: 50%; translate: -50% 0; margin: 0; padding: 8px 14px;
+  border-radius: 999px; background: var(--ink); color: var(--paper); font-size: 14px; font-weight: 600; white-space: nowrap; pointer-events: none; }
+/* Narration: what the agent says about a change it made from a pencil command, over the page's bottom left. */
+#narration { position: fixed; z-index: 2; left: calc(8px + env(safe-area-inset-left)); bottom: calc(8px + env(safe-area-inset-bottom));
+  box-sizing: border-box; width: min(380px, calc(100vw - 16px)); display: grid; grid-template-columns: auto 1fr auto; align-items: start; gap: 4px 8px;
+  padding: 10px 6px 10px 12px; border: 1px solid var(--line); border-left: 4px solid var(--accent); border-radius: 12px; background: var(--paper);
+  box-shadow: var(--shadow); }
+@media (prefers-reduced-motion: no-preference) { #narration { animation: rise 0.18s ease-out; } }
+#narration-label { grid-column: 1 / 3; color: var(--accent); font-size: 12px; font-weight: 700; }
+#narration-text { grid-column: 1 / 3; margin: 0; max-height: 9em; overflow-y: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
+#narration-close { grid-column: 3; grid-row: 1 / 3; width: 36px; height: 36px; }
+#narration-close svg { width: 18px; height: 18px; }
+#narration-play { position: relative; grid-column: 1; width: 36px; height: 36px; }
+#narration-open { grid-column: 2; justify-self: start; min-height: 36px; padding: 0 10px; border: 0; border-radius: 999px; background: none;
+  color: var(--accent); font-weight: 650; }
 </style>
 </head>
 <body>
@@ -176,6 +205,11 @@ svg { fill: currentColor; }
 <div id="chat-reply-row" hidden><p id="chat-reply"><strong>Reply to</strong> <span id="chat-reply-text"></span></p><button id="chat-drop-reply" class="round" type="button" aria-label="Don't reply"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6.4 19 5 17.6l5.6-5.6L5 6.4 6.4 5l5.6 5.6L17.6 5 19 6.4 13.4 12l5.6 5.6-1.4 1.4-5.6-5.6L6.4 19Z"/></svg></button></div>
 <div id="chat-compose"><button id="chat-attach" class="round" type="button" aria-label="Send a file"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M16.5 6v11.5a4 4 0 0 1-8 0V5a2.5 2.5 0 0 1 5 0v10.5a1 1 0 0 1-2 0V6H10v9.5a2.5 2.5 0 0 0 5 0V5a4 4 0 0 0-8 0v12.5a5.5 5.5 0 0 0 11 0V6h-1.5Z"/></svg></button><input id="chat-file" type="file" hidden><textarea id="chat-text" rows="1" aria-label="Your message"></textarea><div id="chat-recorder" hidden><button id="chat-cancel" type="button">Cancel</button><span id="chat-clock" class="clock"></span><canvas id="chat-wave" class="wave" aria-hidden="true"></canvas></div><button id="chat-send" class="round" type="button" aria-label="Send" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M11 20V7.83l-5.6 5.6L4 12l8-8 8 8-1.4 1.43-5.6-5.6V20h-2Z"/></svg></button><button id="chat-mic" class="round mic" type="button" aria-pressed="false" aria-label="Record a voice note"><svg class="idle" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 14a3 3 0 0 0 3-3V5a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3Zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.93V21h2v-3.07A7 7 0 0 0 19 11h-2Z"/></svg><svg class="busy" viewBox="0 0 24 24" aria-hidden="true"><path d="M11 20V7.83l-5.6 5.6L4 12l8-8 8 8-1.4 1.43-5.6-5.6V20h-2Z"/></svg></button></div>
 </section>
+<button id="pencil" type="button" aria-pressed="false" aria-expanded="false" aria-label="Magic Pencil: select a part of the page" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25ZM20.71 7.04a1 1 0 0 0 0-1.41l-2.34-2.34a1 1 0 0 0-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83Z"/></svg></button>
+<div id="pencil-menu" role="group" aria-label="Magic Pencil" hidden><button id="pencil-freeform" type="button"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12c0-5 6-8 11-6s4 9-2 11-11 0-9-5"/></svg>Freeform</button><button id="pencil-rectangle" type="button"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="6" width="16" height="12" rx="1" stroke-dasharray="3 2"/></svg>Rectangle</button></div>
+<div id="pencil-layer" hidden><canvas id="pencil-ink" aria-hidden="true"></canvas></div>
+<p id="pencil-hint" role="status" hidden></p>
+<section id="narration" aria-live="polite" hidden><span id="narration-label">The agent</span><p id="narration-text"></p><button id="narration-close" class="round" type="button" aria-label="Close the note"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6.4 19 5 17.6l5.6-5.6L5 6.4 6.4 5l5.6 5.6L17.6 5 19 6.4 13.4 12l5.6 5.6-1.4 1.4-5.6-5.6L6.4 19Z"/></svg></button><button id="narration-play" class="round play idle" type="button" aria-label="Play spoken reply" hidden></button><button id="narration-open" type="button">Open the chat</button></section>
 <div id="shield" hidden></div>
 <button id="status" type="button" popovertarget="panel" aria-label="Board status"><span id="dot"></span><span id="badge" hidden></span></button>
 <div id="panel" popover><strong id="title">Board</strong><p class="session"><span id="session-dot"></span><span id="session">Connecting…</span></p><p id="typing" hidden>Typing…</p><ul id="unread" aria-label="Replies you haven't read" hidden></ul><button id="talk" type="button"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4h16a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H8l-4 4V6a2 2 0 0 1 2-2Z"/></svg>Talk to the agent</button><p id="notice"></p><label id="aloud-row"><input id="aloud" type="checkbox"> Read replies aloud</label><button id="close" type="button" hidden>Make read-only</button><p id="waiting"></p></div>
