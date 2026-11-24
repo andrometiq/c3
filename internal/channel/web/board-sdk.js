@@ -197,6 +197,11 @@
   function diff(previous, next) {
     const [before, after] = [previous, next].map((text) => new DOMParser().parseFromString(text, "text/html"));
     if (skeleton(before.documentElement) !== skeleton(after.documentElement)) return null;
+    return changedParts(before, after);
+  }
+
+  /** The outermost parts whose own content changed between two parsed texts, or null when an address is reused. */
+  function changedParts(before, after) {
     const [oldParts, newParts] = [before, after].map((parsed) => [...parsed.querySelectorAll("[data-c3-part]")]);
     const address = (part) => part.getAttribute("data-c3-part");
     const twins = new Map(oldParts.map((part) => [address(part), part]));
@@ -237,6 +242,13 @@
     const [before, after] = [previous, next].map((text) => new DOMParser().parseFromString(text, "text/html"));
     const changed = new Set();
     try {
+      // A part's change is the page's to draw (c3.on("update")) or a JSON part's script draws it at load: patching the
+      // markup alone would leave such a page stale, so a mixed change touching one reloads. So does a changed
+      // <template> (its content isn't in the node tree the patch walks).
+      const parts = changedParts(before, after);
+      if (!parts || parts.some((part) => part.data !== null) || parts.length && listeners.update.size) throw new NeedsReload();
+      const templates = (parsed) => [...parsed.querySelectorAll("template")].map((template) => template.outerHTML).join("\n");
+      if (templates(before) !== templates(after)) throw new NeedsReload();
       morphAttributes(document.documentElement, before.documentElement, after.documentElement, changed);
       for (const section of ["head", "body"]) {
         if (!document[section] || !before[section] || !after[section]) throw new NeedsReload();

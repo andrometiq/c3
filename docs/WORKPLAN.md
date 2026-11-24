@@ -136,7 +136,7 @@ carries over between runs. When the pre-commit `make ci` fails on one of these, 
   grep for `FAIL`: the output is long.
 - Board and web chat browser checks run the real Go routes against headless Chromium with a fake
   microphone, nobody in the loop: `node scripts/board/check-voice.mjs .`,
-  `node scripts/board/check-speak.mjs .`, `node scripts/board/check-webchat.mjs .`, `node scripts/board/check-pencil.mjs .` from the repository
+  `node scripts/board/check-speak.mjs .`, `node scripts/board/check-webchat.mjs .`, `node scripts/board/check-pencil.mjs .`, `node scripts/board/check-live.mjs .`, `node scripts/board/check-magic-link.mjs .` from the repository
   root (Node 20+, Chromium or `$CHROMIUM`, ffmpeg). Add `--shots <dir>` for screenshots. They start
   `TestBoardBrowserHarness` / `TestWebChatBrowserHarness`, which serve the routes with a fake agent.
 - Building in a git worktree: `GOFLAGS=-buildvcs=false` (the build stamps VCS data and fails in some

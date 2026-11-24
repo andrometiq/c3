@@ -644,13 +644,22 @@ func (host *harnessHost) answerPencil(name string, inbound *c3types.Inbound) {
 	_, _ = host.c.board.SendReply(c3types.ReplyArgs{Channel: channel.BoardChannelName, ChatID: inbound.ChatID, ReplyTo: &replyTo, Text: narration})
 }
 
-// control applies "end <board>", "resume <board>" and "flood <board>" (as
+// control applies "end <board>", "resume <board>", "flood <board>" (as
 // many answers to no part as the log keeps, pushing every older line out of
-// it) lines a driver writes.
+// it) and "page <board> <file>" (the file as the board's next page) lines a
+// driver writes.
 func (host *harnessHost) control(line string) {
 	verb, name, _ := strings.Cut(strings.TrimSpace(line), " ")
+	name, argument, _ := strings.Cut(name, " ")
 	board, ok := host.c.board.BoardByName(name)
 	if !ok {
+		return
+	}
+	if verb == "page" { // the session sends the page file at argument as the board's next revision
+		if _, err := host.c.board.SendReply(c3types.ReplyArgs{Channel: channel.BoardChannelName, ChatID: board.Number,
+			Media: []c3types.MediaItem{{Kind: c3types.MediaFile, Path: argument}}}); err != nil {
+			host.t.Logf("harness: page %s: %v", argument, err)
+		}
 		return
 	}
 	if verb == "flood" {

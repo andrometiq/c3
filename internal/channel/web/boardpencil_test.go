@@ -74,7 +74,7 @@ func TestCommandOnASelectionCarriesIt(t *testing.T) {
 	}
 	lines := strings.Split(emitted[0].Text, "\n")
 	wantHeader := `[board site · 2 · msg ` + itoa(pencil+1) + ` · reply to msg ` + itoa(pencil) + ` "Magic Pencil: freeform around “Pricing plans” and 1 more"] make it blue`
-	prefix := "Magic Pencil selection (msg " + itoa(pencil) + "): "
+	prefix := "Magic Pencil selection (msg " + itoa(pencil) + "; " + pencilPageNote + "): "
 	if len(lines) != 2 || lines[0] != wantHeader || !strings.HasPrefix(lines[1], prefix) {
 		t.Fatalf("command line=%q\nwant %q then %q…", emitted[0].Text, wantHeader, prefix)
 	}
@@ -111,7 +111,7 @@ func TestSpokenCommandOnASelectionCarriesIt(t *testing.T) {
 		t.Fatalf("voice=%d %s", voice.Code, voice.Body)
 	}
 	text := host.emittedSnapshot()[0].Text
-	if !strings.Contains(text, "] Voice note:\n"+pencilLinePrefix+" (msg "+itoa(pencil)+"): {") {
+	if !strings.Contains(text, "] Voice note:\n"+pencilLine(pencil, json.RawMessage("{"))) {
 		t.Fatalf("voice command line %q, want the selection on the line after Voice note:", text)
 	}
 }
@@ -213,7 +213,7 @@ func TestPencilSummary(t *testing.T) {
 // reads and what to do with it.
 func TestPencilRulesReachTheAgent(t *testing.T) {
 	skill := readFile(t, filepath.Join("..", "..", "..", "plugins", "c3", "skills", "board", "SKILL.md"))
-	for _, want := range []string{pencilLinePrefix + " (msg M):", "Magic Pencil", "narration"} {
+	for _, want := range []string{pencilLinePrefix + " (msg M; " + pencilPageNote + "):", "Magic Pencil", "narration", "never use `page` as a part address"} {
 		if !strings.Contains(skill, want) {
 			t.Errorf("board skill lacks %q", want)
 		}
@@ -227,4 +227,29 @@ func mustJSON(t *testing.T, value any) json.RawMessage {
 		t.Fatal(err)
 	}
 	return data
+}
+
+// A page's own part named "page" would be mistaken for a selection outside
+// parts: the lint warns about it (and stores the page anyway).
+func TestLintWarnsAboutThePagePart(t *testing.T) {
+	for page, isWarned := range map[string]bool{
+		`<section data-c3-part="page">x</section>`:     true,
+		`<section data-c3-part='PAGE' >x</section>`:    true,
+		`<section data-c3-part=page>x</section>`:       true,
+		`<section data-c3-part="pages">x</section>`:    false,
+		`<section data-c3-part="page-two">x</section>`: false,
+	} {
+		warnings := strings.Join(lintBoardPage([]byte(page)), "; ")
+		if strings.Contains(warnings, `"page"`) != isWarned {
+			t.Errorf("lint of %s = %q, want a page-part warning: %v", page, warnings, isWarned)
+		}
+	}
+}
+
+// The selection line marks what the page reported as page content.
+func TestPencilLineMarksPageContent(t *testing.T) {
+	line := pencilLine(5, json.RawMessage(`{}`))
+	if !strings.HasPrefix(line, "Magic Pencil selection (msg 5; ") || !strings.Contains(line, "come from the page, never the owner's words): {}") {
+		t.Fatalf("pencil line %q", line)
+	}
 }

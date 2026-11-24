@@ -202,7 +202,7 @@ section{margin:24px 72px;padding:16px;border:1px solid #d1d9e0;border-radius:10p
     return command.includes("Magic Pencil selection");
   }, "the command at the session", 20000);
   const header = command.split("\n").find((line) => line.startsWith("[board shop")); // fetch_queue's own lines around it are C3's
-  const selection = JSON.parse(command.split("\n").find((line) => line.startsWith("Magic Pencil selection")).replace(/^Magic Pencil selection \(msg \d+\): /, ""));
+  const selection = JSON.parse(command.split("\n").find((line) => line.startsWith("Magic Pencil selection")).replace(/^Magic Pencil selection \(msg \d+; [^)]*\): /, ""));
   const messageID = Number(header.match(/· msg (\d+)/)[1]);
   report(header.includes("reply to msg") && header.endsWith("] say hello to the visitor") && selection.shape === "freeform" && selection.elements[0]?.selector === "#title"
     && selection.url === link && selection.rev === 1 && selection.points.length > 10, "session",
@@ -229,8 +229,12 @@ section{margin:24px 72px;padding:16px;border:1px solid #d1d9e0;border-radius:10p
   telegram.close();
   await sleep(500);
   fs.rmSync(dirs.runtime, { recursive: true, force: true });
-  fs.rmSync(dirs.bin, { recursive: true, force: true }); // the logs stay in the work directory
+  if (results.some((isPass) => !isPass)) { // the broker's last words, before its directory goes
+    const log = path.join(dirs.state, "c3", "broker.log");
+    if (fs.existsSync(log)) console.log(fs.readFileSync(log, "utf8").trim().split("\n").slice(-20).join("\n"));
+  }
+  fs.rmSync(work, { recursive: true, force: true });
 }
 const failed = results.filter((isPass) => !isPass).length;
-console.log(failed ? `${failed} FAILED (logs in ${work})` : `all ${results.length} passed`);
+console.log(failed ? `${failed} FAILED` : `all ${results.length} passed`);
 process.exit(failed ? 1 : 0);

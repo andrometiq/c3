@@ -123,6 +123,7 @@
   const approving = new Set(); // proposals whose approve is on its way, until its line is in the log
   const voiceShown = new Map(); // a voice row's key -> the status last drawn, so only a change fades in
   const pageTitles = new Map(); // part -> the title the page's markup gives it
+  const pageParts = new Set(); // every part address in the stored page: a selection's part must be one of them
   const chatTitles = new Map(); // part -> the title the page last opened its chat with
   let shownRows = 0; // rows the open chat had when last drawn: only new ones follow the bottom
   let readingPart = null; // the part the sheet has shown for READ_AFTER_MS in a visible tab: its replies are read
@@ -255,8 +256,10 @@
   function readTitles(text) {
     if (text === null) return null;
     pageTitles.clear();
+    pageParts.clear();
     const parsed = new DOMParser().parseFromString(text, "text/html");
     for (const part of parsed.querySelectorAll("[data-c3-part]")) {
+      pageParts.add(part.getAttribute("data-c3-part"));
       let title = part.querySelector("h1, h2, h3, h4, h5, h6")?.textContent;
       if (part.matches('script[type="application/json"]')) {
         try { title = JSON.parse(part.textContent)?.title; } catch { title = null; }
@@ -763,6 +766,7 @@
       return notify("Too small: draw around the part again.", false);
     }
     drawing = { ...drawing, isDrawn: true };
+    const mine = drawing; // a drawing dropped or replaced meanwhile sends nothing
     controls.pencilLayer.classList.add("drawn");
     controls.pencilHint.hidden = true;
     const frameBox = frame.getBoundingClientRect();
@@ -770,17 +774,18 @@
     const points = shape.filter((_, index) => index % step === 0).map(([x, y]) => [x - frameBox.left, y - frameBox.top]);
     const kind = drawing.kind;
     const hits = readHits(await askPage(kind, points), frameBox);
+    if (drawing !== mine) return undefined; // dropped while the page answered (Escape, the pencil again)
     const part = hits.part;
     const selection = { shape: kind, points, viewport: hits.viewport, scroll: hits.scroll, document: hits.document, elements: hits.elements,
       ...(hits.hash && { hash: hits.hash }), ...(hits.container && { container: hits.container }) };
     const { value, error } = await postAct({ op: "pencil", part, selection });
-    if (!drawing?.isDrawn) return undefined; // dropped meanwhile
+    if (drawing !== mine) return undefined; // dropped meanwhile
     if (error) {
       stopPencil();
       return notify(`Selection not sent: ${CHAT_REASONS[error] ?? error}.`);
     }
     for (const end = Date.now() + 5000; !state.log.some((entry) => entry.id === value.id) && Date.now() < end;) await sleep(50); // its line, for the reply bar
-    if (!drawing?.isDrawn) return undefined;
+    if (drawing !== mine) return undefined;
     selected = { id: value.id, part };
     controls.pencil.ariaPressed = "false";
     replies.set(part, value.id);
@@ -819,7 +824,8 @@
     };
     const hash = typeof answer?.hash === "string" && answer.hash.startsWith("#") && new TextEncoder().encode(answer.hash).length <= PENCIL.hashBytes
       && !/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/.test(answer.hash) ? answer.hash : "";
-    const part = typeof answer?.part === "string" && PART.test(answer.part) && answer.part !== GENERAL ? answer.part : PAGE;
+    // The page names the part, but only one its stored markup has counts; anything else is the whole page's.
+    const part = typeof answer?.part === "string" && pageParts.has(answer.part) && answer.part !== GENERAL ? answer.part : PAGE;
     return { part, viewport, scroll, document: size(answer?.document, viewport), hash, container: element(answer?.container),
       elements: (Array.isArray(answer?.elements) ? answer.elements : []).map(element).filter(Boolean).slice(0, PENCIL.elements) };
   }

@@ -38,7 +38,7 @@ Keep the tree green: build + `go test ./...` must pass before a change is consid
 - In a git worktree, build with `GOFLAGS=-buildvcs=false`.
 - Boards and the web chat have browser checks against the real routes, with a fake microphone and
   nobody in the loop: `node scripts/board/check-voice.mjs .` (also `check-speak.mjs`,
-  `check-webchat.mjs`, `check-pencil.mjs`). Run them after any change under `internal/channel/web/`.
+  `check-webchat.mjs`, `check-pencil.mjs`, `check-live.mjs`, `check-magic-link.mjs`). Run them after any change under `internal/channel/web/`.
 
 - Install with `make install` (or `/c3:build`): it stamps the build identity; a plain `go install`
   stamps `dev`.

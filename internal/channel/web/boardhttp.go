@@ -116,6 +116,7 @@ var boardLintRules = []struct {
 	{regexp.MustCompile(`(?i)\b(?:src|href)\s*=\s*["']?\s*https?://`), "loads or links an outside URL, which a board frame blocks"},
 	{regexp.MustCompile(`(?i)<form\b`), "has a form, which a board frame cannot submit"},
 	{regexp.MustCompile(`(?i)\btarget\s*=\s*["']?_blank`), "opens new windows, which a board frame cannot"},
+	{regexp.MustCompile(`(?i)\bdata-c3-part\s*=\s*["']?page(?:["'\s/>]|$)`), `uses the part address "page", which C3 keeps for Magic Pencil selections outside parts`},
 }
 
 var (

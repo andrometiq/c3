@@ -117,7 +117,7 @@ try {
   const text = (id) => inShell(`document.getElementById(${JSON.stringify(id)}).textContent`);
   const log = () => inShell(`fetch(location.pathname + "/state").then((r) => r.json()).then((s) => s.log)`);
   const received = () => (fs.existsSync(inbounds) ? fs.readFileSync(inbounds, "utf8").trim().split("\n").filter(Boolean).map((line) => JSON.parse(line)) : []);
-  const selectionOf = (line) => JSON.parse(line.split("\n").find((row) => row.startsWith("Magic Pencil selection (msg ")).replace(/^Magic Pencil selection \(msg \d+\): /, ""));
+  const selectionOf = (line) => JSON.parse(line.split("\n").find((row) => row.startsWith("Magic Pencil selection (msg ")).replace(/^Magic Pencil selection \(msg \d+; [^)]*\): /, ""));
   const shot = async (name) => { if (shots) { fs.mkdirSync(shots, { recursive: true }); await sleep(250); fs.writeFileSync(path.join(shots, name), Buffer.from((await send("Page.captureScreenshot", { format: "png" })).data, "base64")); } };
 
   await until(() => inFrame("Boolean(window.c3) && Boolean(window.__boot)"), "the page in its frame");
@@ -186,7 +186,7 @@ try {
   await until(() => received().length >= 2, "the spoken command at the session", 20000);
   const spoken = received()[1];
   const spokenSelection = selectionOf(spoken.Text);
-  report(/\] Voice note:\nMagic Pencil selection \(msg \d+\): /.test(spoken.Text) && spoken.Attachments?.[0]?.Kind === "voice" && spokenSelection.shape === "rectangle"
+  report(/\] Voice note:\nMagic Pencil selection \(msg \d+; [^)]*\): /.test(spoken.Text) && spoken.Attachments?.[0]?.Kind === "voice" && spokenSelection.shape === "rectangle"
     && spokenSelection.points.length === 4 && spokenSelection.elements.some((element) => element.selector === "#basic") && spokenSelection.rev === 2, "voice",
     `line ${JSON.stringify(spoken.Text.split("\n")[0])}, ${spoken.Attachments?.length} attachment, selection ${spokenSelection.shape} ${JSON.stringify(spokenSelection.elements.map((e) => e.selector))}, rev ${spokenSelection.rev}`);
   await until(() => inFrame(`document.getElementById("basic").textContent.startsWith("Changed by msg")`), "the second live change", 15000);
