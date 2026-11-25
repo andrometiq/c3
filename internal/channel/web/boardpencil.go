@@ -35,6 +35,7 @@ const (
 	pencilSelectorBytes  = 300
 	pencilTextRunes      = 160
 	pencilHashBytes      = 200
+	pencilWordsRunes     = 500
 	pencilMaxCoordinate  = 1e6
 	// pencilSummaryRunes is how much of the first element's text the
 	// selection's own line (its thread row and reply quote) shows.
@@ -47,8 +48,8 @@ var pencilTag = regexp.MustCompile(`^[a-z][a-z0-9-]{0,31}$`)
 
 // pencilSelection is what the shell sends as a pencil act's selection,
 // decoded strictly: the shape in the frame's CSS pixels (its viewport), the
-// frame's viewport, scroll and document size, its location hash, and the
-// elements the SDK found under the shape.
+// frame's viewport, scroll and document size, its location hash, the words
+// inside the shape and the elements the SDK found under it.
 type pencilSelection struct {
 	Shape     string          `json:"shape"`
 	Points    [][2]float64    `json:"points"`
@@ -56,6 +57,7 @@ type pencilSelection struct {
 	Scroll    pencilPoint     `json:"scroll"`
 	Document  pencilSize      `json:"document"`
 	Hash      string          `json:"hash,omitempty"`
+	Text      string          `json:"text,omitempty"`
 	Container *pencilElement  `json:"container,omitempty"`
 	Elements  []pencilElement `json:"elements"`
 }
@@ -103,6 +105,7 @@ type pencilRecord struct {
 	Viewport  pencilSize      `json:"viewport"`
 	Scroll    pencilPoint     `json:"scroll"`
 	Document  pencilSize      `json:"document"`
+	Text      string          `json:"text,omitempty"`
 	Container *pencilElement  `json:"container,omitempty"`
 	Elements  []pencilElement `json:"elements"`
 }
@@ -115,7 +118,8 @@ func (selection pencilSelection) check() (pencilSelection, bool) {
 	isShapeValid := selection.Shape == pencilShapeRectangle && points == 4 ||
 		selection.Shape == pencilShapeFreeform && points >= 3 && points <= pencilMaxPoints
 	if !isShapeValid || len(selection.Elements) > pencilMaxElements || len(selection.Hash) > pencilHashBytes ||
-		selection.Hash != "" && (!strings.HasPrefix(selection.Hash, "#") || !isOneLine(selection.Hash)) {
+		selection.Hash != "" && (!strings.HasPrefix(selection.Hash, "#") || !isOneLine(selection.Hash)) ||
+		!utf8.ValidString(selection.Text) || utf8.RuneCountInString(selection.Text) > pencilWordsRunes {
 		return pencilSelection{}, false
 	}
 	numbers := []float64{selection.Scroll.X, selection.Scroll.Y, selection.Document.Width, selection.Document.Height}
@@ -126,6 +130,7 @@ func (selection pencilSelection) check() (pencilSelection, bool) {
 		return pencilSelection{}, false
 	}
 	checked := selection
+	checked.Text = oneLine(selection.Text)
 	checked.Points = make([][2]float64, points)
 	for index, point := range selection.Points {
 		checked.Points[index] = [2]float64{math.Round(point[0]), math.Round(point[1])}
@@ -208,8 +213,8 @@ func (selection pencilSelection) record(link string, rev int64, title string) pe
 	bounds.Width, bounds.Height = right-bounds.X, bottom-bounds.Y
 	return pencilRecord{
 		Shape: selection.Shape, URL: link + selection.Hash, Rev: rev, Title: oneLine(title), Bounds: bounds, Points: selection.Points,
-		Viewport: selection.Viewport, Scroll: selection.Scroll, Document: selection.Document, Container: selection.Container,
-		Elements: selection.Elements,
+		Viewport: selection.Viewport, Scroll: selection.Scroll, Document: selection.Document, Text: selection.Text,
+		Container: selection.Container, Elements: selection.Elements,
 	}
 }
 

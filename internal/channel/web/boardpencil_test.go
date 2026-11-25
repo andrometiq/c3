@@ -16,7 +16,7 @@ func pencilBody(clientID, part, selection string) string {
 }
 
 const freeformSelection = `{"shape":"freeform","points":[[10.4,20],[120,22.6],[118,90],[12,88]],
-	"viewport":{"width":390,"height":844},"scroll":{"x":0,"y":240.5},"document":{"width":390,"height":2000},"hash":"#pricing",
+	"viewport":{"width":390,"height":844},"scroll":{"x":0,"y":240.5},"document":{"width":390,"height":2000},"hash":"#pricing","text":"Pricing\nBasic  plan",
 	"container":{"selector":"#pricing","tag":"section","text":"Pricing Basic plan","part":"2","box":{"x":0,"y":0,"width":390,"height":300}},
 	"elements":[{"selector":"#pricing > h2","tag":"h2","text":"Pricing\nplans","part":"2","box":{"x":12.2,"y":24,"width":100,"height":30},"coverage":0.876},
 	{"selector":"#pricing > p:nth-of-type(1)","tag":"p","text":"Basic plan","part":"2","box":{"x":12,"y":60,"width":100,"height":20},"coverage":1}]}`
@@ -52,7 +52,7 @@ func TestPencilSelectionIsLoggedNotSent(t *testing.T) {
 	if record.URL != board.Link+"#pricing" || record.Rev != 1 || record.Title != "Shop" || record.Shape != "freeform" ||
 		record.Bounds != (pencilBox{10, 20, 110, 70}) || record.Points[0] != [2]float64{10, 20} || record.Scroll.Y != 241 ||
 		len(record.Elements) != 2 || record.Elements[0].Text != "Pricing plans" || record.Elements[0].Coverage != 0.88 ||
-		record.Elements[0].Box.X != 12 || record.Container == nil || record.Container.Selector != "#pricing" {
+		record.Elements[0].Box.X != 12 || record.Container == nil || record.Container.Selector != "#pricing" || record.Text != "Pricing Basic plan" {
 		t.Fatalf("selection record %+v", record)
 	}
 }
@@ -147,7 +147,7 @@ func TestPencilSelectionTrustBoundary(t *testing.T) {
 		"coverage over 1":     element(`"selector":"p","tag":"p","box":{"x":0,"y":0,"width":1,"height":1},"coverage":1.5`),
 		"negative box":        element(`"selector":"p","tag":"p","box":{"x":0,"y":0,"width":-1,"height":1}`),
 		"13 elements":         tooMany,
-	}
+		"long words":          strings.Replace(rectangle, `"elements":[]`, `"elements":[],"text":"`+strings.Repeat("w", pencilWordsRunes+1)+`"`, 1)}
 	for name, selection := range refused {
 		if response := postAct(c, cookie, "site", pencilBody("bad-"+name, "page", selection)); response.Code != http.StatusBadRequest {
 			t.Errorf("%s: %d %s, want 400", name, response.Code, response.Body)

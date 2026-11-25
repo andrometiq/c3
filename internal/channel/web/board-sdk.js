@@ -135,8 +135,22 @@
       reveal(message.reveal.part);
     } else if (message.c3 === "pencil") {
       toShell({ op: "pencil", key: message.pencil.key, value: pencilHits(message.pencil) });
+    } else if (message.c3 === "scroll") {
+      const { x, y } = message.scroll;
+      if (Number.isFinite(x) && Number.isFinite(y)) scrollBy({ left: x, top: y, behavior: "instant" });
     }
   });
+
+  // The shell hears where the page is scrolled to (once a frame), so a shape the owner drew over the page moves with it.
+  let isScrollQueued = false;
+  addEventListener("scroll", () => {
+    if (isScrollQueued || !board) return;
+    isScrollQueued = true;
+    requestAnimationFrame(() => {
+      isScrollQueued = false;
+      toShell({ op: "scroll", value: { x: scrollX, y: scrollY } });
+    });
+  }, { passive: true });
 
   function start(state) {
     board = { ...state, log: [...state.log], typing: false };
@@ -352,11 +366,12 @@
   // ---------- the Magic Pencil: what lies under the owner's selection ----------
 
   // The shell draws the shape over the frame and asks what is under it; only this script can read the page. The
-  // answer names the elements mostly inside the shape (the outermost of them, in page order), the innermost element
-  // holding the whole shape, the viewport, scroll and document size, and the location hash. Nothing in the page
+  // answer names the visible elements mostly inside the shape (the outermost of them, in page order), the innermost
+  // element holding the whole shape, the words inside the shape, the viewport, scroll and document size, and the
+  // location hash. All boxes are the frame's viewport CSS pixels, as the shape's points are. Nothing in the page
   // changes: the found elements only flash.
-  const PENCIL = { elements: 12, textRunes: 160, coverage: 0.6, grid: 5, selectorDepth: 12, skip: new Set(["script", "style", "head", "meta",
-    "link", "title", "template", "noscript", "br", "wbr"]) };
+  const PENCIL = { elements: 12, textRunes: 160, wordsRunes: 500, coverage: 0.6, gridMin: 4, gridMax: 10, gridStepPx: 24, selectorDepth: 12,
+    skip: new Set(["script", "style", "head", "meta", "link", "title", "template", "noscript", "br", "wbr"]) };
 
   function pencilHits({ kind, points }) {
     if (!Array.isArray(points) || points.length < 3) return null;
@@ -368,6 +383,7 @@
       if (PENCIL.skip.has(element.localName)) continue;
       const box = element.getBoundingClientRect();
       if (box.width < 1 || box.height < 1 || box.right < bounds.x || box.x > bounds.right || box.bottom < bounds.y || box.y > bounds.bottom) continue;
+      if (element.checkVisibility?.({ opacityProperty: true, visibilityProperty: true }) === false) continue; // the owner can't see it
       const coverage = coverageOf(box, isInside);
       if (coverage >= PENCIL.coverage) covered.set(element, coverage);
     }
@@ -382,9 +398,35 @@
       viewport: { width: innerWidth, height: innerHeight }, scroll: { x: scrollX, y: scrollY },
       document: { width: document.documentElement.scrollWidth, height: document.documentElement.scrollHeight },
       hash: location.hash.slice(0, 200),
+      text: wordsIn(bounds, isInside),
       container: container && container !== document.body && container !== document.documentElement ? view(container) : null,
       elements: elements.slice(0, PENCIL.elements).map(view),
     };
+  }
+
+  /** The words the owner sees inside the shape, in page order: each word counts when its middle is inside. */
+  function wordsIn(bounds, isInside) {
+    const words = [];
+    let runes = 0;
+    const isOutside = (box) => box.right < bounds.x || box.x > bounds.right || box.bottom < bounds.y || box.y > bounds.bottom;
+    const walker = document.createTreeWalker(document.body ?? document.documentElement, NodeFilter.SHOW_TEXT, { acceptNode: (node) =>
+      (node.nodeValue.trim() && !PENCIL.skip.has(node.parentElement?.localName) ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT) });
+    const range = document.createRange();
+    for (let node = walker.nextNode(); node && runes < PENCIL.wordsRunes; node = walker.nextNode()) {
+      range.selectNodeContents(node);
+      if (isOutside(range.getBoundingClientRect())) continue;
+      for (const match of node.nodeValue.matchAll(/\S+/gu)) {
+        range.setStart(node, match.index);
+        range.setEnd(node, match.index + match[0].length);
+        const box = range.getBoundingClientRect();
+        if (!box.width || !isInside(box.x + box.width / 2, box.y + box.height / 2)) continue;
+        words.push(match[0]);
+        runes += [...match[0]].length + 1;
+        if (runes >= PENCIL.wordsRunes) break;
+      }
+    }
+    const text = words.join(" ");
+    return [...text].length > PENCIL.wordsRunes ? `${[...text].slice(0, PENCIL.wordsRunes - 1).join("")}…` : text;
   }
 
   /** A covered wrapper whose only covered child holds all its content stands for that child: a header around a title
@@ -414,19 +456,20 @@
     return isIn;
   }
 
-  /** The share of an element's visible box inside the shape, from a grid of sample points. */
+  /** The share of an element's visible box inside the shape, from a grid of sample points that is finer on a larger box. */
   function coverageOf(box, isInside) {
     const [left, top] = [Math.max(box.x, 0), Math.max(box.y, 0)];
     const [right, bottom] = [Math.min(box.right, innerWidth), Math.min(box.bottom, innerHeight)];
     if (right <= left || bottom <= top) return 0;
+    const grid = Math.min(Math.max(Math.ceil(Math.max(right - left, bottom - top) / PENCIL.gridStepPx), PENCIL.gridMin), PENCIL.gridMax);
     let inside = 0;
-    for (let row = 0; row < PENCIL.grid; row++) {
-      for (let column = 0; column < PENCIL.grid; column++) {
-        const x = left + (column + 0.5) * (right - left) / PENCIL.grid, y = top + (row + 0.5) * (bottom - top) / PENCIL.grid;
+    for (let row = 0; row < grid; row++) {
+      for (let column = 0; column < grid; column++) {
+        const x = left + (column + 0.5) * (right - left) / grid, y = top + (row + 0.5) * (bottom - top) / grid;
         if (isInside(x, y)) inside++;
       }
     }
-    return inside / PENCIL.grid ** 2;
+    return inside / grid ** 2;
   }
 
   /** The innermost element whose box holds the whole shape. */
