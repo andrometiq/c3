@@ -80,6 +80,10 @@ func TestBoardVoiceActReachesTheSessionAsABoardLine(t *testing.T) {
 	if inbound.Channel != channel.BoardChannelName || inbound.ChatID != plan.Number || inbound.Text != want || len(inbound.Attachments) != 1 || inbound.Attachments[0].Kind != "voice" {
 		t.Fatalf("inbound=%+v, want %q with one voice attachment on board %d", inbound, want, plan.Number)
 	}
+	if source := host.sourcesSnapshot()[0]; source == nil || source.Text != want || source.MessageID != accepted.ID || len(source.Attachments) != 1 ||
+		source.Attachments[0].Kind != "voice" || source.Attachments[0].FileID != inbound.Attachments[0].FileID {
+		t.Fatalf("voice act source %+v, want the line and its voice attachment", source)
+	}
 	if path, err := c.board.LocalAudioPath(inbound.Attachments[0].FileID); err != nil || path == "" {
 		t.Fatalf("board audio path=%q/%v, want the stored recording", path, err)
 	}

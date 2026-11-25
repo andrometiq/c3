@@ -23,6 +23,7 @@ import (
 
 	"github.com/Andrometiq/c3/internal/c3types"
 	"github.com/Andrometiq/c3/internal/channel"
+	"github.com/Andrometiq/c3/internal/intake"
 )
 
 const (
@@ -801,6 +802,7 @@ func (c *Channel) boardInbound(host channel.Host, name string, number int64, act
 			}
 		},
 		checkOpen: func() error { return c.board.withOpenBoard(number, func(*boardState) error { return nil }) },
+		source:    func(inbound *c3types.Inbound) *intake.Source { return boardSource(inbound, act.FromPage) },
 		echo: func(inbound *c3types.Inbound, _ string) {
 			entry := boardLogEntry{Dir: "in", ID: inbound.MessageID, Op: act.Op, Part: act.Part, Text: act.logText(), Ref: act.Ref, From: inbound.Sender.Username,
 				Segment: act.Segment, HasMore: act.HasMore, Recording: act.Recording, Status: act.Unsent, FromPage: act.FromPage,
@@ -810,6 +812,20 @@ func (c *Channel) boardInbound(host channel.Host, name string, number int64, act
 			}
 		},
 	}
+}
+
+// boardSource is a board act's intake source, as a Telegram message has one:
+// the board number as its chat, the act id as its message and update, the
+// viewer as its sender, C3's line as its text, and whether the page sent it.
+func boardSource(inbound *c3types.Inbound, isFromPage bool) *intake.Source {
+	sender := inbound.Sender.UserID
+	source := &intake.Source{Channel: inbound.Channel, ChatID: inbound.ChatID, MessageID: inbound.MessageID, UpdateID: inbound.MessageID,
+		SenderID: &sender, Text: inbound.Text, FromPage: isFromPage, Attachments: make([]intake.SourceAttachment, 0, len(inbound.Attachments))}
+	for _, attachment := range inbound.Attachments {
+		source.Attachments = append(source.Attachments, intake.SourceAttachment{Kind: attachment.Kind, FileID: attachment.FileID,
+			Size: attachment.Size, MIME: attachment.MIME, Name: attachment.Name})
+	}
+	return source
 }
 
 // boardPageActNote follows C3's header on an act the page's script sent.

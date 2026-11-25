@@ -11,6 +11,8 @@ type Source struct {
 	UpdateID    int64              `json:"update_id,string"`
 	Text        string             `json:"text"`
 	Attachments []SourceAttachment `json:"attachments"`
+	// FromPage marks a board act the page's script sent, not the viewer.
+	FromPage bool `json:"from_page,omitempty"`
 }
 
 type SourceAttachment struct {

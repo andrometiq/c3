@@ -269,7 +269,7 @@ func (c *Channel) acceptVoice(ctx context.Context, route inboundRoute, key clien
 	}
 	switch route.host.GateInbound(inbound) {
 	case channel.GateInboundAllow:
-		if !route.host.Emit(inbound) {
+		if !route.emit(inbound) {
 			messageID := record.messageID
 			record.mu.Unlock()
 			if pruned {

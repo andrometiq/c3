@@ -138,6 +138,45 @@ func TestPageActsReachTheSessionAsThePages(t *testing.T) {
 	}
 }
 
+// Every board act carries the intake source a queue-only session fetches with
+// its row, as a Telegram message does: the board as its chat, the act id as its
+// message and update, the viewer, C3's line and whether the page sent it. The
+// web chat's messages carry none.
+func TestBoardActsCarryTheirIntakeSource(t *testing.T) {
+	c, host, cookie := newBoardTest(t)
+	board := createBoard(t, c, "plan")
+	for _, body := range []string{
+		`{"client_id":"s1","op":"comment","part":"1","text":"shorter please"}`,
+		`{"client_id":"s2","op":"comment","part":"1","text":"looks good","from_page":true}`,
+	} {
+		if response := postAct(c, cookie, "plan", body); response.Code != http.StatusAccepted {
+			t.Fatalf("act %s=%d %s", body, response.Code, response.Body)
+		}
+	}
+	png := []byte("\x89PNG\r\n\x1a\nnot really an image")
+	acceptedID(t, postFile(c, cookie, "plan", png, fileHeaders("s3", map[string]string{"X-File-Name": "shot.png"})))
+	emitted, sources := host.emittedSnapshot(), host.sourcesSnapshot()
+	if len(sources) != 3 {
+		t.Fatalf("%d sources for %d inbounds, want 3", len(sources), len(emitted))
+	}
+	for index, source := range sources {
+		inbound := emitted[index]
+		if source == nil || source.Channel != channel.BoardChannelName || source.ChatID != board.Number || source.TopicID != nil ||
+			source.MessageID != inbound.MessageID || source.UpdateID != inbound.MessageID || source.SenderID == nil || *source.SenderID != 42 ||
+			source.Text != inbound.Text || source.FromPage != (index == 1) {
+			t.Fatalf("source %d = %+v for inbound %+v", index, source, inbound)
+		}
+	}
+	file := sources[2].Attachments
+	if len(file) != 1 || file[0].Kind != "photo" || file[0].FileID != emitted[2].Attachments[0].FileID || file[0].Name != "shot.png" || file[0].MIME != "image/png" {
+		t.Fatalf("file act source attachments %+v", file)
+	}
+	encoded, _ := json.Marshal(sources[0])
+	if strings.Contains(string(encoded), "from_page") {
+		t.Fatalf("an owner's act source names from_page: %s", encoded)
+	}
+}
+
 // An act from C3's own chat (the owner's typing, quick answer or approve
 // button) carries no mark: it is the owner's word.
 func TestOwnersActsCarryNoPageMark(t *testing.T) {

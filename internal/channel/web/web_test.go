@@ -32,6 +32,7 @@ type fakeHost struct {
 	gate            channel.GateInboundDecision
 	emitResults     []bool
 	emitted         []*c3types.Inbound
+	sources         []*intake.Source // each emitted inbound's source, nil for none
 	logs            []string
 	queuedMax       int64
 	queuedErr       error
@@ -58,6 +59,7 @@ func (host *fakeHost) Emit(inbound *c3types.Inbound, sources ...*intake.Source) 
 	defer host.mu.Unlock()
 	copy := *inbound
 	host.emitted = append(host.emitted, &copy)
+	host.sources = append(host.sources, intake.Optional(sources).Clone())
 	if len(host.emitResults) == 0 {
 		return true
 	}
@@ -126,6 +128,12 @@ func (host *fakeHost) emittedSnapshot() []*c3types.Inbound {
 	host.mu.Lock()
 	defer host.mu.Unlock()
 	return append([]*c3types.Inbound(nil), host.emitted...)
+}
+
+func (host *fakeHost) sourcesSnapshot() []*intake.Source {
+	host.mu.Lock()
+	defer host.mu.Unlock()
+	return append([]*intake.Source(nil), host.sources...)
 }
 
 func (host *fakeHost) logText() string {
@@ -275,6 +283,9 @@ func TestSendRetryIdempotency(t *testing.T) {
 	rows := host.emittedSnapshot()
 	if len(rows) != 2 || rows[0].MessageID != rows[1].MessageID {
 		t.Fatalf("emits=%+v, want two attempts with same id", rows)
+	}
+	if sources := host.sourcesSnapshot(); sources[0] != nil || sources[1] != nil {
+		t.Fatalf("a web chat message carried an intake source: %+v", sources)
 	}
 }
 

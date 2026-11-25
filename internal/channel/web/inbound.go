@@ -9,6 +9,7 @@ import (
 
 	"github.com/Andrometiq/c3/internal/c3types"
 	"github.com/Andrometiq/c3/internal/channel"
+	"github.com/Andrometiq/c3/internal/intake"
 )
 
 // clientMessageKey names one client message. Scope is "" for the web chat and
@@ -48,6 +49,17 @@ type inboundRoute struct {
 	// is transcoded, just before it is emitted; nil always does.
 	checkOpen func() error
 	echo      func(inbound *c3types.Inbound, clientID string)
+	// source is the intake source a queue-only session fetches with the row;
+	// nil emits none.
+	source func(*c3types.Inbound) *intake.Source
+}
+
+// emit hands the inbound to the broker with its intake source, if any.
+func (r inboundRoute) emit(inbound *c3types.Inbound) bool {
+	if r.source == nil {
+		return r.host.Emit(inbound)
+	}
+	return r.host.Emit(inbound, r.source(inbound))
 }
 
 func (c *Channel) webChatInbound() inboundRoute {
@@ -115,7 +127,7 @@ func (c *Channel) acceptInbound(route inboundRoute, key clientMessageKey, sender
 	}
 	switch route.host.GateInbound(inbound) {
 	case channel.GateInboundAllow:
-		if !route.host.Emit(inbound) {
+		if !route.emit(inbound) {
 			record.mu.Unlock()
 			if pruned {
 				route.persist("stale client-message pruning")
