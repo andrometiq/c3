@@ -62,9 +62,21 @@
   // way is a slip. The page has answerMs to name what lies under it. A selection outside any part goes to the part
   // PAGE. Elements and their strings are clipped to what C3 takes.
   const PENCIL = { stepPx: 4, maxPoints: 200, minPx: 8, answerMs: 1500, elements: 12, textRunes: 160, selectorBytes: 300, hashBytes: 200,
-    narrationRunes: 1200, narrationMs: 30000 };
+    wordsRunes: 500, narrationRunes: 1200, narrationMs: 45000, antsMs: 40 };
   const PAGE = "page";
-  const PENCIL_HINTS = { freeform: "Draw around the part to change", rectangle: "Drag a box around the part to change" };
+  const PENCIL_HINTS = { freeform: "Draw around the area to change", rectangle: "Drag a box around the area to change" };
+  // A press on a mic held this long records until it is let go (hold to talk); a shorter one is a tap (tap to start,
+  // tap again to send).
+  const HOLD_MS = 350;
+  // The camera: a video goes out as one file, so it is recorded at a rate that fits C3's file limit for maxMs, and
+  // stops on its own at either.
+  const CAMERA = { videoBitsPerSecond: 1500000, audioBitsPerSecond: 64000, maxMs: 90000, photoQuality: 0.9,
+    videoTypes: ["video/webm;codecs=vp9,opus", "video/webm;codecs=vp8,opus", "video/webm", "video/mp4"] };
+  // A reply C3 couldn't voice (no synthesizer, offline, busy) is read by the browser's own voice instead.
+  const LOCAL_SPEECH_ERRORS = new Set(["unavailable", "offline", "rate", "unplayable"]);
+  const LOCAL_SPEECH_START_MS = 5000; // a browser voice that hasn't started by then never will
+  const MAGIC_OPEN_KEY = "c3.board.magicOpen";
+  const COMMAND_ASK = "Say or type what to change on the page.";
   const TAG = /^[a-z][a-z0-9-]{0,31}$/;
 
   const name = location.pathname.split("/")[2] ?? "";
@@ -75,8 +87,11 @@
     "toast", "shield", "mic", "recorder", "clock", "dock-wave", "cancel", "aloud", "player", "chat", "chat-title", "chat-close", "chat-scroll",
     "chat-ask", "chat-choices", "chat-lines", "chat-new", "chat-typing", "chat-error", "chat-quote-row", "chat-quote", "chat-drop-quote",
     "chat-text", "chat-recorder", "chat-cancel", "chat-clock", "chat-wave", "chat-send", "chat-mic", "chat-attach", "chat-file", "chat-reply-row",
-    "chat-reply-text", "chat-drop-reply", "pencil", "pencil-menu", "pencil-freeform", "pencil-rectangle", "pencil-layer", "pencil-ink",
-    "pencil-hint", "narration", "narration-text", "narration-close", "narration-play", "narration-open"]
+    "chat-reply-text", "chat-drop-reply", "chat-expand", "chat-camera", "chat-tray", "magic", "pencil", "magic-tools", "pencil-freeform",
+    "pencil-rectangle", "magic-mic", "magic-camera", "magic-attach", "magic-narrate", "magic-chat", "pencil-layer", "pencil-ink", "pencil-picks",
+    "pencil-hint", "narration", "narration-label", "narration-said", "narration-text", "narration-close", "narration-play", "narration-bars",
+    "narration-open", "camera", "camera-view", "camera-clock", "camera-note", "camera-photo", "camera-video", "camera-close", "camera-shutter",
+    "camera-flip", "camera-file"]
     .map((id) => [id.replace(/-(\w)/g, (_, letter) => letter.toUpperCase()), document.getElementById(id)]));
   const early = [];
   let state = null; // /state, kept current from the stream: the one copy this shell holds
@@ -108,7 +123,9 @@
   // Spoken replies play here, through one reusable player: the frame has no network. A phone lets a page play sound
   // only after a tap; Chromium counts a tap in the frame for this shell too, and a tap on the shell's circle always counts.
   const speechQueue = []; // replies waiting to be read: {id, audio}, audio a promise of {token} or {error}
-  let speaking = null; // the queue entry the player is on
+  let speaking = null; // the queue entry the player (or the browser's voice) is on
+  let isSpeakingLocally = false; // the browser's own voice reads `speaking`, not the player
+  let localUtterance = null; // what the browser's voice reads
   let speechState = null; // {id, state, error}: the last one the frame heard, told again after a frame reload
   let isReadingAloud = readSetting(); // "Read replies aloud": each new agent message is read as it arrives
   let isAudioBlocked = false; // the browser refused to play until a tap: the reply waits at the queue's head
@@ -131,11 +148,18 @@
   let marks = { from: 0, parts: new Map() }; // read marks: the agent's replies on a part after its mark are unread
   // The Magic Pencil's state: the shape being drawn, the selection waiting for its command, the page's answers to
   // "what is under this shape", and the narration panel's command and reply.
-  let drawing = null; // {kind, points, isDrawn} from a pick in the menu until the selection is logged or dropped
+  let drawing = null; // {kind, points, isDrawn, scroll} from a tool's pick until the selection is logged or dropped
   let selected = null; // {id, part}: the logged selection the owner's next command on part answers
   const pencilAnswers = new Map(); // key -> resolve, until the page answers or answerMs pass
-  let narration = null; // {part, command, reply}: the owner's pencil command and the agent's answer to it
+  let pageScroll = { x: 0, y: 0 }; // the frame's scroll as the page last told it: a drawn shape follows it
+  let antsTimer = 0;
+  // Narration: the owner's command from the toolbar or the pencil, and the agent's answer to it, over the page.
+  let narration = null; // {part, commands: Set of act ids, reply, phase: "sending" | "waiting" | "error", error}
   let narrationTimer = 0;
+  // Files picked, shot or recorded for a part's chat, shown with a preview until Send: part -> [{file, url}].
+  const trays = new Map();
+  const sendingTrays = new Set(); // parts whose tray is on its way, one file after another
+  let camera = null; // {stream, facing, recorder, mode} while the camera is open
 
   const sleep = (ms) => new Promise((resolve) => { setTimeout(resolve, ms); });
   const toFrame = (message) => frame.contentWindow.postMessage(message, "*");
@@ -171,7 +195,6 @@
     controls.waiting.textContent = live && !closed && waiting ? `${messages(waiting)} waiting for the session` : "";
     controls.typing.hidden = !(live && typing);
     controls.close.hidden = closed;
-    controls.pencil.hidden = closed;
     if (closed) stopPencil();
     drawBadge();
     drawVoice();
@@ -289,6 +312,7 @@
   /** The docked mic shows where the page's Send sits while its composer is empty (not while that spot has no size: the
    *  page hides it), and through a whole recording; never while C3's own chat sheet is open, which has its mic. */
   function drawVoice() {
+    drawMagic();
     if (chat) drawComposer();
     const hasSpot = composer.dock === null || composer.dock.width > 0 && composer.dock.height > 0;
     const isShown = !chat && (Boolean(recording) || composer.part !== null && !composer.hasText && hasSpot && Boolean(state) && !state.closed);
@@ -374,6 +398,7 @@
     const type = VOICE_TYPES.find((candidate) => MediaRecorder.isTypeSupported?.(candidate)) ?? "";
     const stopListening = listen(stream);
     const ref = answering(part); // every part answers the message picked when it started
+    const isCommand = Boolean(chat?.isCommand && chat.part === part); // a command: its answer is narrated
     let segment = 1;
     let finished = null; // finish()'s promise: settled once C3 has answered the recording's last act
     let current = startSegment();
@@ -393,7 +418,7 @@
       const uploaded = new Promise((resolve) => {
         recorder.addEventListener("stop", () => {
           if (ending === null) finish(false); // the microphone went away: what it heard goes out as the last part
-          resolve(ending && upload({ part, ref, blob: new Blob(chunks, { type: recorder.mimeType || type || "audio/webm" }), ...ending }));
+          resolve(ending && upload({ part, ref, isCommand, blob: new Blob(chunks, { type: recorder.mimeType || type || "audio/webm" }), ...ending }));
         }, { once: true });
       });
       recorder.addEventListener("dataavailable", (event) => { if (event.data.size) chunks.push(event.data); });
@@ -415,6 +440,7 @@
         .then(() => isDropped && last.segment && sendUnsent(last, "cancelled")));
       stream.getTracks().forEach((track) => track.stop());
       recording = null;
+      if (isCommand && !isDropped) sentCommand(part);
       const outcome = isTooShort && !isCancelled ? "Too short: nothing sent." : isCancelled && last.segment ? `Recording cancelled after part ${segment - 1}.` : "";
       if (outcome) notify(outcome, false);
       drawVoice();
@@ -533,10 +559,11 @@
   const sendUnsent = (fields, reason) => postVoice({ "Content-Type": "audio/webm", ...voiceHeaders(fields), "X-Voice-Unsent": reason }, "");
 
   /** Sends one recording. A part C3 refuses still reaches the session, as a line saying it was not sent. */
-  async function upload({ part, blob, segment, hasMore, ref }) {
+  async function upload({ part, blob, segment, hasMore, ref, isCommand }) {
     const voice = { key: `voice-${++voiceKeys}`, part, segment, has_more: Boolean(hasMore) };
     const sent = await postVoice({ "Content-Type": blob.type, ...voiceHeaders({ part, segment, hasMore, ref }) }, blob,
       (attempt) => tellVoice({ ...voice, status: "sending", attempt }));
+    if (isCommand) noteCommand(part, sent);
     if (!sent.error) return tellVoice({ ...voice, status: "sent", id: sent.id });
     tellVoice({ ...voice, status: "not_sent", error: sent.error });
     const unsent = segment ? await sendUnsent({ part, segment, hasMore, ref }, "refused") : {};
@@ -580,20 +607,39 @@
     tellSpeech(entry.id, "loading");
     const { token, error } = await entry.audio;
     if (speaking !== entry) return; // stopped meanwhile
-    if (error) return endSpeech(error);
+    if (error) return LOCAL_SPEECH_ERRORS.has(error) && speakLocally(entry) ? undefined : endSpeech(error);
     playAudio(token).then(() => {
       if (speaking !== entry) return;
       tellSpeech(entry.id, "playing");
       if (controls.notice.textContent === SPEECH_BLOCKED) notify(""); // the browser plays again
     }, (problem) => {
       if (speaking !== entry) return;
-      if (problem.name !== "NotAllowedError") return endSpeech("unplayable");
+      if (problem.name !== "NotAllowedError") return speakLocally(entry) || endSpeech("unplayable");
       speaking = null;
       speechQueue.unshift(entry);
       isAudioBlocked = true;
       tellSpeech(entry.id, "failed", "blocked");
       notify(SPEECH_BLOCKED);
     });
+  }
+
+  /** Reads entry's reply with the browser's own voice (speechSynthesis), when C3 couldn't voice it. False when the
+   *  browser has no voice. */
+  function speakLocally(entry) {
+    const reply = state.log.find((line) => line.id === entry.id && line.dir === "out" && line.op === "message");
+    if (!window.speechSynthesis || !window.SpeechSynthesisUtterance || !reply) return false;
+    const utterance = new SpeechSynthesisUtterance(clip(snippetText(reply), PENCIL.narrationRunes));
+    isSpeakingLocally = true;
+    localUtterance = utterance; // held, so the browser keeps it (and its end event) alive
+    const watchdog = setTimeout(() => { if (speaking === entry && speechState?.state !== "playing") endSpeech("unplayable"); }, LOCAL_SPEECH_START_MS);
+    utterance.addEventListener("start", () => { clearTimeout(watchdog); if (speaking === entry) tellSpeech(entry.id, "playing"); });
+    utterance.addEventListener("end", () => { if (speaking === entry) endSpeech(); });
+    utterance.addEventListener("error", (event) => {
+      if (speaking === entry && event.error !== "interrupted" && event.error !== "canceled") endSpeech("unplayable");
+    });
+    speechSynthesis.cancel();
+    speechSynthesis.speak(utterance);
+    return true;
   }
 
   /** Plays name on the shell's one player: a token C3 gave for this board's audio (fetchSpeech checks it), or "unlock",
@@ -607,6 +653,7 @@
   function endSpeech(error = "") {
     const { id } = speaking;
     speaking = null;
+    isSpeakingLocally = false;
     tellSpeech(id, error ? "failed" : "ended", error);
     if (error) notify(`Couldn't read the reply aloud: ${SPEECH_REASONS[error] ?? "C3 refused it"}.`, false);
     playNext();
@@ -618,7 +665,9 @@
     if (!speaking) return;
     const { id } = speaking;
     speaking = null;
-    controls.player.pause();
+    if (isSpeakingLocally) speechSynthesis.cancel();
+    else controls.player.pause();
+    isSpeakingLocally = false;
     tellSpeech(id, "ended");
   }
 
@@ -656,6 +705,7 @@
   function unlockAudio(event) {
     const isWanted = isAudioBlocked || isReadingAloud && !isAudioUnlocked;
     if (!event.isTrusted || speaking || !isWanted) return;
+    if (window.speechSynthesis && window.SpeechSynthesisUtterance) speechSynthesis.speak(new SpeechSynthesisUtterance("")); // a phone's voice too
     playAudio("unlock").then(() => {
       isAudioUnlocked = true;
       isAudioBlocked = false;
@@ -663,49 +713,83 @@
     }, () => {});
   }
 
-  /** "Read replies aloud" is this browser's, kept in the shell's storage; off where storage fails. */
+  /** Narration ("Read replies aloud") is this browser's, kept in the shell's storage: on until the owner turns it off. */
   function readSetting() {
-    try { return localStorage.getItem(READ_ALOUD_KEY) === "on"; } catch { return false; }
+    try { return localStorage.getItem(READ_ALOUD_KEY) !== "off"; } catch { return true; }
   }
 
   function saveSetting(isOn) {
     try { localStorage.setItem(READ_ALOUD_KEY, isOn ? "on" : "off"); } catch { /* this tab keeps it */ }
   }
 
-  // ---------- the Magic Pencil ----------
+  /** Narration on or off, from the toolbar's speaker or the panel's "Read replies aloud": one setting. */
+  function setNarration(isOn, event) {
+    isReadingAloud = isOn;
+    controls.aloud.checked = isOn;
+    saveSetting(isOn);
+    if (isOn) unlockAudio(event);
+    else stopSpeech();
+    drawMagic();
+    notify(isOn ? "Narration on: the agent's replies are read aloud." : "Narration off.", false);
+  }
 
-  /** A pick in the pencil's menu: the drawing layer covers the page (the page never sees the drawing) until a shape is
-   *  drawn, Escape or the pencil again. Not while the mic records. */
+  // ---------- the Magic Link toolbar and the Magic Pencil ----------
+
+  /** The toolbar: shown on a board the owner can still change, out of the way while the chat or the camera is open;
+   *  its tools show what is on. */
+  function drawMagic() {
+    const wasHidden = controls.magic.hidden;
+    controls.magic.hidden = !state || state.closed || Boolean(chat) || Boolean(camera);
+    if (wasHidden && !controls.magic.hidden) settleMic(); // its mic just came into view, perhaps under a finger
+    controls.pencilFreeform.ariaPressed = String(drawing?.kind === "freeform" && !drawing.isDrawn);
+    controls.pencilRectangle.ariaPressed = String(drawing?.kind === "rectangle" && !drawing.isDrawn);
+    controls.magicMic.ariaPressed = String(Boolean(recording));
+    controls.magicNarrate.ariaPressed = String(isReadingAloud);
+    controls.magicNarrate.ariaLabel = isReadingAloud ? "Narration on: tap to stop reading replies aloud" : "Narration off: tap to read replies aloud";
+  }
+
+  /** The pencil folds the toolbar to itself and opens it again; the choice stays in this browser. */
+  function foldMagic(isOpen) {
+    controls.magic.dataset.mode = isOpen ? "open" : "folded";
+    controls.pencil.ariaExpanded = String(isOpen);
+    for (const tool of controls.magicTools.querySelectorAll("button")) tool.disabled = !isOpen;
+    try { localStorage.setItem(MAGIC_OPEN_KEY, isOpen ? "open" : "folded"); } catch { /* this tab keeps it */ }
+  }
+
+  /** A tool's pick: the drawing layer covers the page (the page never sees the drawing) until a shape is drawn, Escape
+   *  or the same tool again. Not while the mic records. */
   function startPencil(kind) {
-    controls.pencilMenu.hidden = true;
-    controls.pencil.ariaExpanded = "false";
     if (recording) return notify("Stop recording first.", false);
     if (!state || state.closed) return undefined;
+    if (drawing?.kind === kind && !drawing.isDrawn) return stopPencil(); // the same tool again puts it down
     if (chat) closeChat();
     hideNarration();
-    drawing = { kind, points: [], isDrawn: false };
+    clearInterval(antsTimer);
+    drawing = { kind, points: [], isDrawn: false, scroll: null };
     selected = null;
     drawInk();
+    controls.pencilPicks.replaceChildren();
     controls.pencilLayer.classList.remove("drawn");
     controls.pencilLayer.hidden = false;
     controls.pencilHint.textContent = PENCIL_HINTS[kind];
     controls.pencilHint.hidden = false;
-    controls.pencil.ariaPressed = "true";
+    drawMagic();
     return undefined;
   }
 
-  /** Drops the drawing (and the menu); a selection already logged stays in its thread. */
+  /** Drops the drawing; a selection already logged stays in its thread. */
   function stopPencil() {
     drawing = null;
-    controls.pencilMenu.hidden = true;
-    controls.pencil.ariaExpanded = "false";
-    controls.pencil.ariaPressed = "false";
+    clearInterval(antsTimer);
     controls.pencilLayer.hidden = true;
     controls.pencilHint.hidden = true;
+    controls.pencilPicks.replaceChildren();
     drawInk();
+    drawMagic();
   }
 
-  /** The owner's stroke: freeform keeps the path, rectangle the box from the press to the release. */
+  /** The owner's stroke, by mouse, pen or finger: freeform keeps the path (every point the browser saw, coalesced ones
+   *  included), rectangle the box from the press to the release. Points are the window's CSS pixels. */
   function onPencilDown(event) {
     if (!event.isTrusted || !drawing || drawing.isDrawn || !event.isPrimary) return;
     event.preventDefault();
@@ -713,83 +797,138 @@
     const start = [event.clientX, event.clientY];
     drawing = { ...drawing, points: [start] };
     const done = new AbortController();
-    const move = (moved) => {
-      if (!drawing) return done.abort(); // dropped mid-stroke (Escape)
-      const point = [moved.clientX, moved.clientY];
+    const add = (point) => {
       const last = drawing.points.at(-1);
       if (drawing.kind === "rectangle") drawing = { ...drawing, points: [start, point] };
       else if (Math.hypot(point[0] - last[0], point[1] - last[1]) >= PENCIL.stepPx) drawing.points.push(point);
-      drawInk();
+    };
+    const move = (moved) => {
+      if (!drawing) return done.abort(); // dropped mid-stroke (Escape)
+      if (moved.pointerId !== event.pointerId) return undefined;
+      for (const point of moved.getCoalescedEvents?.() ?? []) add([point.clientX, point.clientY]);
+      add([moved.clientX, moved.clientY]);
+      return drawInk();
     };
     controls.pencilLayer.addEventListener("pointermove", move, { signal: done.signal });
-    controls.pencilLayer.addEventListener("pointerup", (ended) => { move(ended); done.abort(); if (drawing) finishPencil(); }, { signal: done.signal });
+    controls.pencilLayer.addEventListener("pointerup", (ended) => {
+      if (ended.pointerId !== event.pointerId) return;
+      move(ended);
+      done.abort();
+      if (drawing) finishPencil();
+    }, { signal: done.signal });
     controls.pencilLayer.addEventListener("pointercancel", () => { done.abort(); if (drawing) drawing = { ...drawing, points: [] }; drawInk(); }, { signal: done.signal });
   }
 
-  /** The drawing's points as the shape's outline: a rectangle's four corners, else the stroke. */
+  /** The drawing's points as the shape's outline: a rectangle's four corners (top left first, clockwise), else the stroke. */
   function shapeOf({ kind, points }) {
     if (kind !== "rectangle" || points.length < 2) return points;
     const [[x1, y1], [x2, y2]] = [points[0], points.at(-1)];
-    return [[x1, y1], [x2, y1], [x2, y2], [x1, y2]];
+    const [left, top, right, bottom] = [Math.min(x1, x2), Math.min(y1, y2), Math.max(x1, x2), Math.max(y1, y2)];
+    return [[left, top], [right, top], [right, bottom], [left, bottom]];
   }
 
-  /** The shape on the layer's canvas, from numbers only: a dashed outline over a light fill. */
+  /** How far the page scrolled since the shape was drawn: the drawn shape and its boxes move with the page. */
+  const scrolledBy = () => (drawing?.scroll ? { x: drawing.scroll.x - pageScroll.x, y: drawing.scroll.y - pageScroll.y } : { x: 0, y: 0 });
+
+  /** The shape on the layer's canvas, from numbers only: a light fill and a dashed outline whose dashes march while the
+   *  selection waits for its command. The canvas is the window's size in device pixels, so the line is sharp. */
   function drawInk() {
     const canvas = controls.pencilInk;
     const scale = devicePixelRatio || 1;
-    canvas.width = Math.round(innerWidth * scale);
-    canvas.height = Math.round(innerHeight * scale);
+    const [width, height] = [Math.round(innerWidth * scale), Math.round(innerHeight * scale)];
+    if (canvas.width !== width || canvas.height !== height) [canvas.width, canvas.height] = [width, height]; // a resize clears it too
+    const context = canvas.getContext("2d");
+    context.setTransform(1, 0, 0, 1, 0, 0);
+    context.clearRect(0, 0, width, height);
     const shape = shapeOf(drawing ?? { points: [] });
     if (shape.length < 2) return;
-    const context = canvas.getContext("2d");
+    const offset = scrolledBy();
     context.scale(scale, scale);
+    context.translate(offset.x, offset.y);
     context.beginPath();
     shape.forEach(([x, y], index) => (index ? context.lineTo(x, y) : context.moveTo(x, y)));
     context.closePath();
-    context.fillStyle = "rgb(9 105 218 / 12%)";
+    context.fillStyle = drawing.isDrawn ? "rgb(130 80 223 / 8%)" : "rgb(9 105 218 / 12%)";
     context.fill();
     context.setLineDash([7, 5]);
+    context.lineDashOffset = drawing.isDrawn && !matchMedia("(prefers-reduced-motion: reduce)").matches ? -(performance.now() / PENCIL.antsMs) % 12 : 0;
     context.lineWidth = 2.5;
     context.lineJoin = "round";
     context.strokeStyle = getComputedStyle(canvas).color;
     context.stroke();
   }
 
-  /** A drawn shape: the page names what lies under it, C3 logs the selection, and the part's chat opens to take the
-   *  owner's command (typed or spoken) as a reply to it. */
+  /** A box over each element the page named under the shape (the container, dashed, when it named none), placed from
+   *  the numbers it gave: the owner sees exactly what the agent will be told about. */
+  function drawPicks(hits, frameBox) {
+    const offset = scrolledBy();
+    const boxes = hits.elements.length ? hits.elements.map((element) => ({ ...element.box, isContainer: false }))
+      : hits.container ? [{ ...hits.container.box, isContainer: true }] : [];
+    controls.pencilPicks.replaceChildren(...boxes.map((box) => {
+      const pick = element("div", box.isContainer ? "pick container" : "pick");
+      place(pick, pickBox(box, frameBox, offset));
+      return pick;
+    }));
+  }
+
+  /** Where a found element's box goes over the frame: the page's numbers (checked by readHits) moved by the frame's
+   *  place and the scroll since; the box takes no taps. */
+  function pickBox(box, frameBox, offset) {
+    return { left: frameBox.left + box.x + offset.x, top: frameBox.top + box.y + offset.y, width: box.width, height: box.height };
+  }
+
+  /** The page scrolled (it tells the shell): a drawn shape and its boxes follow it. */
+  function followScroll(scroll) {
+    if (!scroll || !Number.isFinite(scroll.x) || !Number.isFinite(scroll.y)) return;
+    pageScroll = { x: scroll.x, y: scroll.y };
+    if (!drawing?.isDrawn) return;
+    drawInk();
+    if (drawing.hits) drawPicks(drawing.hits, frame.getBoundingClientRect());
+  }
+
+  /** A drawn shape: the page names what lies under it, C3 logs the selection, the found elements are boxed, and the
+   *  chat opens as a command bar to take the owner's command (typed, spoken, shot or a file) as a reply to it. */
   async function finishPencil() {
     const shape = shapeOf(drawing);
     const xs = shape.map(([x]) => x), ys = shape.map(([, y]) => y);
     if (shape.length < 3 || Math.max(...xs) - Math.min(...xs) < PENCIL.minPx || Math.max(...ys) - Math.min(...ys) < PENCIL.minPx) {
       drawing = { ...drawing, points: [] };
       drawInk();
-      return notify("Too small: draw around the part again.", false);
+      return notify("Too small: draw around the area again.", false);
     }
-    drawing = { ...drawing, isDrawn: true };
-    const mine = drawing; // a drawing dropped or replaced meanwhile sends nothing
+    drawing = { ...drawing, isDrawn: true, id: randomID() };
+    const mine = drawing.id; // a drawing dropped or replaced meanwhile sends nothing
+    const isMine = () => drawing?.id === mine;
     controls.pencilLayer.classList.add("drawn");
-    controls.pencilHint.hidden = true;
+    controls.pencilHint.textContent = "Finding what you marked…";
+    drawMagic();
     const frameBox = frame.getBoundingClientRect();
     const step = Math.ceil(shape.length / PENCIL.maxPoints);
     const points = shape.filter((_, index) => index % step === 0).map(([x, y]) => [x - frameBox.left, y - frameBox.top]);
     const kind = drawing.kind;
     const hits = readHits(await askPage(kind, points), frameBox);
-    if (drawing !== mine) return undefined; // dropped while the page answered (Escape, the pencil again)
+    if (!isMine()) return undefined; // dropped while the page answered (Escape, a tool again)
+    pageScroll = hits.scroll;
+    drawing = { ...drawing, scroll: hits.scroll, hits };
+    drawPicks(hits, frameBox);
+    clearInterval(antsTimer);
+    antsTimer = setInterval(() => { if (drawing?.isDrawn && !document.hidden) drawInk(); }, PENCIL.antsMs);
     const part = hits.part;
     const selection = { shape: kind, points, viewport: hits.viewport, scroll: hits.scroll, document: hits.document, elements: hits.elements,
-      ...(hits.hash && { hash: hits.hash }), ...(hits.container && { container: hits.container }) };
+      ...(hits.hash && { hash: hits.hash }), ...(hits.container && { container: hits.container }), ...(hits.text && { text: hits.text }) };
     const { value, error } = await postAct({ op: "pencil", part, selection });
-    if (drawing !== mine) return undefined; // dropped meanwhile
+    if (!isMine()) return undefined; // dropped meanwhile
     if (error) {
       stopPencil();
       return notify(`Selection not sent: ${CHAT_REASONS[error] ?? error}.`);
     }
     for (const end = Date.now() + 5000; !state.log.some((entry) => entry.id === value.id) && Date.now() < end;) await sleep(50); // its line, for the reply bar
-    if (drawing !== mine) return undefined;
+    if (!isMine()) return undefined;
     selected = { id: value.id, part };
-    controls.pencil.ariaPressed = "false";
+    controls.pencilHint.textContent = hits.elements.length ? `Marked ${hits.elements.length === 1 ? "1 element" : `${hits.elements.length} elements`}. Say the change.`
+      : "Marked the area. Say the change.";
     replies.set(part, value.id);
-    openChat(part, { title: "", ask: "Say or type what to change in the marked area.", choices: [] });
+    openCommand(part, "Say or type what to change in the marked area.");
     return undefined;
   }
 
@@ -824,43 +963,95 @@
     };
     const hash = typeof answer?.hash === "string" && answer.hash.startsWith("#") && new TextEncoder().encode(answer.hash).length <= PENCIL.hashBytes
       && !/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/.test(answer.hash) ? answer.hash : "";
+    const text = typeof answer?.text === "string" ? clip(answer.text.replace(/\s+/g, " ").trim(), PENCIL.wordsRunes) : "";
     // The page names the part, but only one its stored markup has counts; anything else is the whole page's.
     const part = typeof answer?.part === "string" && pageParts.has(answer.part) && answer.part !== GENERAL ? answer.part : PAGE;
-    return { part, viewport, scroll, document: size(answer?.document, viewport), hash, container: element(answer?.container),
+    return { part, viewport, scroll, document: size(answer?.document, viewport), hash, text, container: element(answer?.container),
       elements: (Array.isArray(answer?.elements) ? answer.elements : []).map(element).filter(Boolean).slice(0, PENCIL.elements) };
   }
 
-  /** Each log line, for the pencil: the owner's command answering the selection shuts the chat and the shape, so the
-   *  page shows; the agent's answer to that command, live, shows as narration. */
-  function followPencil(entry, isLive) {
-    if (selected && entry.dir === "in" && entry.ref === selected.id && entry.op !== "pencil") {
-      narration = { part: entry.part, command: entry.id, reply: null };
-      selected = null;
-      stopPencil();
-      if (chat?.part === entry.part && !recording) closeChat();
-      drawNarration();
-    } else if (narration && isLive && entry.dir === "out" && entry.reply_to === narration.command && (entry.op === "message" || entry.op === "page")) {
-      if (entry.op === "message") narration = { ...narration, reply: entry.id };
-      drawNarration();
-    } else if (narration?.reply && entry.dir === "out" && entry.op === "edit" && entry.id === narration.reply) {
-      drawNarration();
+  /** The part a toolbar command goes to: the marked selection's, else the board-level chat. */
+  const commandPart = () => selected?.part ?? GENERAL;
+
+  /** The chat as a command bar on part: compact (the page stays in view), the thread a tap away, and what the owner
+   *  sends from it is narrated. Returns the rule refusing it, or "". */
+  function openCommand(part, ask) {
+    const problem = openChat(part, { title: part === GENERAL ? "Talk to the agent" : "", ask, choices: [] });
+    if (!problem && chat) {
+      chat = { ...chat, isCommand: true };
+      drawChat();
     }
+    return problem;
   }
 
-  /** The narration panel: the command's state until the agent answers, then the answer as it now reads; it fades after
-   *  narrationMs unless the chat is open on its part (the thread shows it there). */
+  // ---------- narration ----------
+
+  /** The owner sent a command from the command bar: the bar and the marked shape step aside so the page shows, and the
+   *  narration takes over, saying it is on its way. */
+  function sentCommand(part) {
+    if (narration?.part !== part || narration.phase === "error" || narration.reply) narration = { part, commands: new Set(), reply: null, phase: "sending" };
+    if (chat?.part === part && !recording) closeChat();
+    if (drawing?.isDrawn) stopPencil();
+    selected = null;
+    drawNarration();
+  }
+
+  /** C3 answered a command's act: {id} (the agent's answer to it is narrated) or {error}. */
+  function noteCommand(part, { id, error }) {
+    if (narration?.part !== part) return;
+    if (id) narration = { ...narration, commands: new Set([...narration.commands, id]), phase: "waiting" };
+    else if (!narration.commands.size) narration = { ...narration, phase: "error", error };
+    drawNarration();
+  }
+
+  /** Each log line, for the narration: the agent's answer to a command (a message, or a new page), and the voice
+   *  command's transcript as C3 hears it. */
+  function followNarration(entry, isLive) {
+    if (!narration) return;
+    const isAnswer = entry.dir === "out" && narration.commands.has(entry.reply_to) && (entry.op === "message" || entry.op === "page");
+    if (isAnswer && isLive && entry.op === "message") narration = { ...narration, reply: entry.id };
+    if (isAnswer || entry.op === "edit" && (entry.id === narration.reply || narration.commands.has(entry.id))) drawNarration();
+  }
+
+  /** The command's voice transcript once C3 heard it, else "". */
+  function heardOf(commands) {
+    const heard = state.log.findLast((entry) => entry.op === "edit" && entry.dir === "in" && commands.has(entry.id) && entry.status === "heard");
+    return heard?.text ?? "";
+  }
+
+  /** The narration card: sending, transcribing or thinking (with the dots) until the agent answers, then the answer as
+   *  it now reads, with bars while it is read aloud; it fades narrationMs after the answer unless the chat is open on
+   *  its part (the thread shows it there). */
   function drawNarration() {
     clearTimeout(narrationTimer);
     if (!narration || !state) return hideNarration();
+    const { commands, phase } = narration;
     const reply = narration.reply && state.log.find((entry) => entry.id === narration.reply && entry.op === "message");
-    const isPage = state.log.some((entry) => entry.dir === "out" && entry.op === "page" && entry.reply_to === narration.command);
-    const text = reply ? snippetText(reply) : isPage ? "The agent updated the page." : "Sent. The agent is on it…";
-    controls.narrationText.textContent = clip(text, PENCIL.narrationRunes);
+    const isPage = state.log.some((entry) => entry.dir === "out" && entry.op === "page" && commands.has(entry.reply_to));
+    const isVoice = state.log.some((entry) => entry.dir === "in" && entry.op === "voice" && commands.has(entry.id));
+    const heard = heardOf(commands);
+    const isThinking = !reply && phase === "waiting";
+    controls.narration.dataset.mode = reply ? "answered" : phase;
+    controls.narrationLabel.textContent = reply ? "The agent" : phase === "sending" ? "Sending" : phase === "error" ? "Not sent" : "The agent";
+    controls.narrationSaid.textContent = heard ? `You said: “${clip(heard, 160)}”` : "";
+    const text = reply ? snippetText(reply) : phase === "sending" ? "Sending your command…" : phase === "error"
+      ? `Not sent: ${CHAT_REASONS[narration.error] ?? VOICE_REASONS[narration.error] ?? "C3 refused it"}.`
+      : isPage ? "The agent updated the page." : isVoice && !heard ? "Transcribing your voice" : !state.live ? "The session is away; it answers when it is back."
+        : "Thinking";
+    controls.narrationText.replaceChildren(clip(text, PENCIL.narrationRunes), ...(isThinking && state.live && !isPage
+      ? [element("span", "dots", element("i"), element("i"), element("i"))] : []));
     controls.narrationPlay.hidden = !reply;
     drawNarrationPlay();
     controls.narration.hidden = chat?.part === narration.part;
-    if (reply) narrationTimer = setTimeout(hideNarration, PENCIL.narrationMs);
+    scheduleFade();
     return undefined;
+  }
+
+  /** An answered (or refused) narration fades narrationMs after its last change, never while it is read aloud. */
+  function scheduleFade() {
+    clearTimeout(narrationTimer);
+    const isDone = Boolean(narration?.reply) || narration?.phase === "error";
+    if (isDone && !isNarrationPlaying()) narrationTimer = setTimeout(hideNarration, PENCIL.narrationMs);
   }
 
   /** A reply's whole text as it now reads, without a proposal's marker line. */
@@ -875,12 +1066,208 @@
     controls.narrationPlay.classList.remove("idle", "loading", "playing");
     controls.narrationPlay.classList.add(phase);
     controls.narrationPlay.ariaLabel = { loading: "Preparing spoken reply", playing: "Stop spoken reply" }[phase] ?? "Play spoken reply";
+    controls.narrationBars.hidden = phase !== "playing";
+    scheduleFade();
   }
 
   function hideNarration() {
     clearTimeout(narrationTimer);
     narration = null;
     controls.narration.hidden = true;
+  }
+
+  // ---------- the camera ----------
+
+  const canCapture = () => Boolean(window.isSecureContext && navigator.mediaDevices?.getUserMedia);
+  const isCamera = (id) => camera?.id === id;
+
+  /** The camera, for the open chat's part: a live preview in the shell (the page never sees it). Where the browser
+   *  can't open a camera, the phone's own camera app takes the shot through a file input instead. */
+  async function openCamera() {
+    if (!chat || state.closed) return;
+    if (recording) {
+      notify("Stop recording first.", false);
+      return;
+    }
+    if (!canCapture()) {
+      controls.cameraFile.click(); // in the owner's tap: the phone's camera app
+      return;
+    }
+    stopSpeech();
+    camera = { id: randomID(), stream: null, facing: "environment", recorder: null, mode: "photo", part: chat.part };
+    drawCamera();
+    controls.camera.hidden = false;
+    controls.cameraShutter.focus();
+    drawMagic();
+    await startCameraStream();
+  }
+
+  /** The preview's stream from the camera facing camera.facing; a refusal says why and offers the camera app. */
+  async function startCameraStream() {
+    const { id, facing } = camera;
+    camera.stream?.getTracks().forEach((track) => track.stop());
+    controls.cameraNote.replaceChildren();
+    const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: facing, width: { ideal: 1920 }, height: { ideal: 1080 } } })
+      .catch((problem) => problem);
+    if (!isCamera(id)) return stream instanceof MediaStream && stream.getTracks().forEach((track) => track.stop());
+    if (stream instanceof MediaStream) camera.stream?.getTracks().forEach((track) => track.stop()); // a flip that answered first
+    if (!(stream instanceof MediaStream)) {
+      const fallback = element("button", "", "Use the camera app");
+      fallback.addEventListener("click", (event) => {
+        if (!event.isTrusted) return;
+        closeCamera();
+        controls.cameraFile.click();
+      });
+      controls.cameraNote.replaceChildren(stream?.name === "NotAllowedError" ? "The browser didn't allow the camera." : "No camera could be opened.",
+        element("br"), fallback);
+      return undefined;
+    }
+    camera = { ...camera, stream };
+    controls.cameraView.srcObject = stream;
+    return controls.cameraView.play().catch(() => {});
+  }
+
+  function drawCamera() {
+    if (!camera) return;
+    const isVideo = camera.mode === "video", isRecording = Boolean(camera.recorder);
+    controls.camera.dataset.mode = camera.mode;
+    controls.cameraShutter.ariaPressed = String(isRecording);
+    controls.cameraPhoto.ariaPressed = String(!isVideo);
+    controls.cameraVideo.ariaPressed = String(isVideo);
+    controls.cameraPhoto.disabled = controls.cameraVideo.disabled = controls.cameraFlip.disabled = isRecording;
+    controls.cameraShutter.ariaLabel = !isVideo ? "Take a photo" : isRecording ? "Stop recording the video" : "Record a video";
+    controls.cameraClock.hidden = !isRecording;
+    if (isRecording) controls.cameraClock.textContent = `${clock(performance.now() - camera.recorder.started)} / ${clock(CAMERA.maxMs)}`;
+  }
+
+  function closeCamera() {
+    if (!camera) return;
+    const { recorder, stream } = camera;
+    camera = null;
+    recorder?.stop(false);
+    stream?.getTracks().forEach((track) => track.stop());
+    controls.cameraView.srcObject = null;
+    controls.camera.hidden = true;
+    drawMagic();
+  }
+
+  const stamp = () => new Date().toISOString().slice(0, 19).replace(/[-:]/g, "").replace("T", "-");
+
+  /** The shutter: a photo from the preview's frame, or a video's start and stop. What it took joins the tray. */
+  function onShutter(event) {
+    if (!event.isTrusted || !camera?.stream) return undefined;
+    if (camera.mode === "photo") return takePhoto();
+    if (camera.recorder) return camera.recorder.stop(true);
+    return recordVideo();
+  }
+
+  function takePhoto() {
+    const { videoWidth: width, videoHeight: height } = controls.cameraView;
+    if (!width || !height) return;
+    const canvas = document.createElement("canvas");
+    [canvas.width, canvas.height] = [width, height];
+    canvas.getContext("2d").drawImage(controls.cameraView, 0, 0, width, height);
+    const { part } = camera;
+    canvas.toBlob((blob) => {
+      if (blob) addToTray(part, [new File([blob], `photo-${stamp()}.jpg`, { type: "image/jpeg" })]);
+    }, "image/jpeg", CAMERA.photoQuality);
+    closeCamera();
+  }
+
+  /** A video with sound: the microphone joins the camera's stream for it. It stops at CAMERA.maxMs or before the
+   *  recording outgrows C3's file limit, and what it recorded joins the tray. */
+  async function recordVideo() {
+    const { id, part } = camera;
+    const voice = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } }).catch(() => null);
+    if (!isCamera(id) || camera.recorder) return voice?.getTracks().forEach((track) => track.stop());
+    const type = CAMERA.videoTypes.find((candidate) => MediaRecorder.isTypeSupported?.(candidate)) ?? "";
+    let recorder;
+    try {
+      recorder = new MediaRecorder(new MediaStream([...camera.stream.getVideoTracks(), ...(voice?.getAudioTracks() ?? [])]),
+        { ...(type && { mimeType: type }), videoBitsPerSecond: CAMERA.videoBitsPerSecond, audioBitsPerSecond: CAMERA.audioBitsPerSecond });
+    } catch {
+      voice?.getTracks().forEach((track) => track.stop());
+      notify("This browser can't record video here: take a photo, or use the camera app.", false);
+      return undefined;
+    }
+    const chunks = [];
+    let size = 0, isKept = true;
+    const stop = (keep) => {
+      isKept = keep;
+      if (recorder.state !== "inactive") recorder.stop();
+    };
+    const started = performance.now();
+    const ticker = setInterval(() => {
+      drawCamera();
+      if (performance.now() - started >= CAMERA.maxMs) stop(true);
+    }, 250);
+    recorder.addEventListener("dataavailable", (event) => {
+      if (!event.data.size) return;
+      chunks.push(event.data);
+      size += event.data.size;
+      if (size > LIMITS.fileBytes * 0.95) stop(true);
+    });
+    recorder.addEventListener("stop", () => {
+      clearInterval(ticker);
+      voice?.getTracks().forEach((track) => track.stop());
+      const mimeType = (recorder.mimeType || type || "video/webm").split(";")[0];
+      if (isKept && chunks.length) addToTray(part, [new File(chunks, `video-${stamp()}.${mimeType.endsWith("mp4") ? "mp4" : "webm"}`, { type: mimeType })]);
+      if (isCamera(id)) closeCamera();
+    }, { once: true });
+    camera = { ...camera, recorder: { started, stop } };
+    recorder.start(1000);
+    drawCamera();
+    return undefined;
+  }
+
+  // ---------- the tray: files waiting to be sent ----------
+
+  /** Adds files to part's tray, each with a preview; one over C3's limit is refused here and never leaves the browser. */
+  function addToTray(part, files) {
+    const tray = trays.get(part) ?? [];
+    const refused = [];
+    for (const file of files) {
+      if (file.size > LIMITS.fileBytes) refused.push(file.name);
+      else tray.push({ file, url: /^(image|video|audio)\//.test(file.type) ? URL.createObjectURL(file) : "" });
+    }
+    trays.set(part, tray);
+    if (chat?.part === part) {
+      showChatError(refused.length ? `Not added: ${refused.join(", ")} ${refused.length === 1 ? "is" : "are"} over 20 MB.` : "");
+      drawChat();
+    }
+  }
+
+  function dropFromTray(part, item) {
+    const tray = (trays.get(part) ?? []).filter((kept) => kept !== item);
+    if (item.url) URL.revokeObjectURL(item.url);
+    if (tray.length) trays.set(part, tray);
+    else trays.delete(part);
+    drawChat();
+  }
+
+  /** A picture or a video's first frame for the tray, from url: always a blob: URL the shell made of the owner's own
+   *  file (addToTray). */
+  function preview(tag, url) {
+    const media = document.createElement(tag);
+    media.muted = media.playsInline = true; // a video's thumbnail: its first frame, silent and in place
+    media.preload = "metadata";
+    media.src = url;
+    return media;
+  }
+
+  /** The open part's tray: a thumbnail per file (the picture, a still of the video, else its kind) and its remove button. */
+  function drawTray() {
+    const tray = trays.get(chat.part) ?? [];
+    controls.chatTray.hidden = tray.length === 0;
+    controls.chatTray.replaceChildren(...tray.map((item) => {
+      const kind = ["image", "video", "audio"].find((known) => item.file.type.startsWith(`${known}/`)) ?? "file";
+      const thumb = element("span", `thumb ${kind}`, item.url && (kind === "image" || kind === "video") ? preview(kind === "image" ? "img" : "video", item.url)
+        : (item.file.name.split(".").pop() || "file").slice(0, 5));
+      const drop = element("button", "drop", "×");
+      drop.ariaLabel = `Remove ${item.file.name}`;
+      drop.addEventListener("click", () => dropFromTray(chat.part, item));
+      return element("li", "", thumb, element("span", "name", item.file.name), drop);
+    }));
   }
 
   // ---------- the chat sheet ----------
@@ -893,7 +1280,8 @@
     if (recording && part !== recording.part) return "recording";
     const isNew = chat?.part !== part;
     const fields = options ?? (isNew ? { title: "", ask: "", choices: [] } : chat);
-    chat = { part, title: fields.title, ask: fields.ask, choices: fields.choices, unreadFrom: isNew ? firstUnread(part) : chat.unreadFrom };
+    chat = { part, title: fields.title, ask: fields.ask, choices: fields.choices, unreadFrom: isNew ? firstUnread(part) : chat.unreadFrom,
+      isCommand: isNew ? false : chat.isCommand, isExpanded: isNew ? false : chat.isExpanded };
     if (fields.title) chatTitles.set(part, fields.title);
     if (options?.quote) quotes.set(part, options.quote);
     if (isNew) {
@@ -919,6 +1307,7 @@
     chat = null;
     controls.chat.hidden = true;
     if (drawing?.isDrawn) stopPencil(); // the selection's shape goes with its chat; the selection stays in the thread
+    selected = null;
     if (narration) controls.narration.hidden = false;
     watchReading();
     if (isFrameReady) toFrame({ c3: "chat", chat: { part: null } });
@@ -954,7 +1343,8 @@
     if (!chat || !state) return;
     const { part } = chat;
     const pending = pendingActs.get(part);
-    controls.chatTitle.textContent = titleOf(part);
+    controls.chat.dataset.mode = chat.isCommand && !chat.isExpanded ? "command" : "thread";
+    controls.chatTitle.textContent = chat.isCommand && part !== GENERAL && selected?.part === part ? "Change the marked area" : titleOf(part);
     controls.chatAsk.textContent = chat.ask;
     controls.chatAsk.hidden = !chat.ask;
     controls.chatChoices.replaceChildren(...chat.choices.map((choice) => {
@@ -978,6 +1368,7 @@
     controls.chatTyping.hidden = !(state.typing && (pending || lastLine?.dir === "in"));
     controls.chatQuote.textContent = quotes.get(part) ?? "";
     controls.chatQuoteRow.hidden = !quotes.has(part);
+    drawTray();
     drawComposer();
   }
 
@@ -989,7 +1380,7 @@
   /** As in Telegram: the paperclip picks a file, an empty box has the mic, text turns it into Send, and the reply bar shows the
    *  message the owner answers; while recording, the box gives way to Cancel, the time and the wave, and the mic sends. */
   function drawComposer() {
-    const hasText = controls.chatText.value.trim() !== "";
+    const hasText = controls.chatText.value.trim() !== "" || trays.has(chat.part);
     const isRecording = Boolean(recording);
     const wasMicHidden = controls.chatMic.hidden;
     controls.chatText.hidden = isRecording;
@@ -999,13 +1390,14 @@
     if (wasMicHidden && !controls.chatMic.hidden) settleMic();
     controls.chatMic.disabled = recording ? recording.isOpening : isClosing;
     controls.chatMic.ariaPressed = String(isRecording);
-    controls.chatSend.disabled = controls.chatAttach.disabled = pendingActs.has(chat.part);
-    controls.chatAttach.hidden = isRecording || state.closed;
+    controls.chatSend.disabled = controls.chatAttach.disabled = controls.chatCamera.disabled = pendingActs.has(chat.part);
+    controls.chatAttach.hidden = controls.chatCamera.hidden = isRecording || state.closed;
     const answered = answering(chat.part);
     controls.chatReplyText.textContent = answered ? firstLineOf(answered) : "";
     controls.chatReplyRow.hidden = !controls.chatReplyText.textContent || state.closed;
     controls.chatText.disabled = state.closed;
-    controls.chatText.placeholder = state.closed ? "This board is read-only." : chat.part === GENERAL ? "Message the agent" : "Message";
+    controls.chatText.placeholder = state.closed ? "This board is read-only." : chat.isCommand && chat.ask ? chat.ask
+      : chat.part === GENERAL ? "Message the agent" : "Message";
     controls.chatClose.disabled = isRecording;
   }
 
@@ -1195,35 +1587,74 @@
     return error ?? "";
   }
 
+  /** Send: the files in the tray (the box's text as the first one's caption), else the box's text as a comment. From
+   *  the command bar the sheet steps aside at once and the narration follows the command. */
   async function sendText() {
     const part = chat.part, text = controls.chatText.value.trim();
+    if (trays.has(part)) return sendTray(part, text);
     if (!text || state.closed || pendingActs.has(part)) return;
-    const quote = quotes.get(part), ref = answering(part);
+    const quote = quotes.get(part), ref = answering(part), isCommand = chat.isCommand;
     drafts.delete(part);
     quotes.delete(part);
     replies.delete(part);
     controls.chatText.value = "";
-    const error = await deliver(part, { text, ref }, () => postChecked({ op: "comment", part, text, ...(quote && { quote }), ...(ref && { ref }) }));
-    if (error) giveBack(part, { text, quote, ref }, error);
+    if (isCommand) sentCommand(part);
+    const error = await deliver(part, { text, ref }, () => tracked(part, isCommand,
+      postChecked({ op: "comment", part, text, ...(quote && { quote }), ...(ref && { ref }) })));
+    if (error) giveBack(part, { text, quote, ref }, error, isCommand);
   }
 
-  /** The file the owner picked goes with the box's text as its caption and the reply bar's message; one over the limit never
-   *  leaves the browser. */
-  async function sendFile(file) {
-    const part = chat.part, text = controls.chatText.value.trim(), ref = answering(part);
-    if (state.closed || pendingActs.has(part)) return;
-    if (file.size > LIMITS.fileBytes) return showChatError(`Not sent: ${file.name} is over 20 MB.`);
-    if (encodeURIComponent(text).length > LIMITS.captionBytes) return showChatError("Caption too long for a file; send it as a message after it.");
+  /** An act's outcome, told to the narration first when it is a command. */
+  async function tracked(part, isCommand, posted) {
+    const result = await posted;
+    if (isCommand) noteCommand(part, { id: result.value?.id, error: result.error });
+    return result;
+  }
+
+  /** The tray's files, one act each, in order; each answers the reply bar's message. A caption too long for a file
+   *  header goes first as a comment. */
+  async function sendTray(part, text) {
+    if (state.closed || pendingActs.has(part) || sendingTrays.has(part)) return;
+    sendingTrays.add(part);
+    try {
+      await sendTrayItems(part, text);
+    } finally {
+      sendingTrays.delete(part);
+    }
+  }
+
+  async function sendTrayItems(part, text) {
+    const items = trays.get(part) ?? [], ref = answering(part), isCommand = chat.isCommand;
+    trays.delete(part);
     drafts.delete(part);
     replies.delete(part);
     controls.chatText.value = "";
-    const error = await deliver(part, { text, ref, file: { name: file.name, size: file.size } }, () => postFile(part, file, text, ref));
-    if (error) giveBack(part, { text, ref }, error);
+    if (isCommand) sentCommand(part);
+    let caption = text;
+    const giveBackFrom = (index, error) => {
+      trays.set(part, [...items.slice(index), ...(trays.get(part) ?? [])]); // what didn't go waits in the tray again
+      giveBack(part, { text: caption, ref }, error, isCommand);
+    };
+    if (encodeURIComponent(caption).length > LIMITS.captionBytes) {
+      const { error } = await tracked(part, isCommand, postChecked({ op: "comment", part, text: caption, ...(ref && { ref }) }));
+      if (error) return giveBackFrom(0, error);
+      caption = "";
+    }
+    for (const [index, item] of items.entries()) {
+      const { file } = item;
+      const error = await deliver(part, { text: caption, ref, file: { name: file.name, size: file.size } },
+        () => tracked(part, isCommand, postFile(part, file, caption, ref)));
+      if (error) return giveBackFrom(index, error);
+      if (item.url) URL.revokeObjectURL(item.url);
+      caption = "";
+    }
+    return undefined;
   }
 
   /** An act C3 refused: its text, quote and reply go back where they were (not a reply C3 found invalid), and the sheet
    *  says why. */
-  function giveBack(part, { text, quote, ref }, error) {
+  function giveBack(part, { text, quote, ref }, error, isCommand = false) {
+    if (isCommand && !chat) openCommand(part, "");
     if (quote && !quotes.has(part)) quotes.set(part, quote);
     if (ref && error !== "invalid" && !replies.has(part)) replies.set(part, ref);
     if (chat?.part === part && !controls.chatText.value) controls.chatText.value = text;
@@ -1281,7 +1712,7 @@
       for (const [key, voice] of uploads) if (voice.id === data.id) uploads.delete(key); // so is a recording's
       if (data.op === "approve") approving.delete(data.ref); // and an approve's: its button is gone for good
       if (chat && isReply(data) && data.part === chat.part) markRead(chat.part); // the owner is looking at it
-      followPencil(data, isLive);
+      followNarration(data, isLive);
       if (kind === "page" && chat && isApproveOn(data.reply_to, chat.part) && !drafts.get(chat.part)) closeChat(); // show the change
       if (kind === "page") {
         state.rev = data.rev;
@@ -1311,6 +1742,8 @@
   }
 
   function reloadFrame() {
+    if (drawing) stopPencil(); // a shape and its boxes belong to the page they were drawn on
+    pageScroll = { x: 0, y: 0 };
     isFrameReady = false;
     composer = { ...composer, part: null, hasText: false }; // the new page names its part again
     drawVoice();
@@ -1410,6 +1843,7 @@
     const { op, call, body, value, dock, hasText } = message;
     if (op === "hello") return sendReady();
     if (op === "pencil") return pencilAnswers.get(message.key)?.(value);
+    if (op === "scroll") return followScroll(value);
     if (op === "reload") return reloadFrame();
     if (op === "chat") {
       const request = readChat(message);
@@ -1472,23 +1906,55 @@
   });
 
   /** A real press on one of the shell's own mics, judged when it went down: it must have begun on this mic once the mic
-   *  had sat still for MIC_SETTLE_MS. A keyboard or assistive click (no press, detail 0) needs the shell's focus on the mic,
-   *  which the page can't give it. */
+   *  had sat still (or come into view) for MIC_SETTLE_MS. A keyboard or assistive click (no press, detail 0)
+   *  needs the shell's focus on the mic, which the page can't give it. A tap starts a recording and the next one sends
+   *  it; a press held HOLD_MS records until it is let go (onMicRelease). */
   function onMicTap(event) {
     const press = micPress;
     micPress = null;
-    if (!event.isTrusted) return;
+    clearTimeout(press?.timer);
+    if (!event.isTrusted || press?.isHold) return; // a hold started (and sent) it already
     if (press ? press.mic !== event.currentTarget || press.at < micSettlesAt : event.detail !== 0) return;
     if (!canRecord) return notify("Voice needs the HTTPS link.", false);
     if (recording) recording.stop(false);
-    else startRecording();
+    else beginTalk(event.currentTarget);
   }
   function onMicPress(event) {
+    clearTimeout(micPress?.timer);
     micPress = event.isTrusted ? { mic: event.currentTarget, at: performance.now() } : null;
+    if (!micPress || event.button > 0 || recording || micPress.at < micSettlesAt || !canRecord) return; // while recording, a press is a tap: it sends
+    const { mic, at } = micPress;
+    micPress = { ...micPress, pointerId: event.pointerId };
+    const timer = setTimeout(() => {
+      if (micPress?.at !== at) return;
+      micPress = { ...micPress, isHold: true };
+      beginTalk(mic);
+    }, HOLD_MS);
+    micPress = { ...micPress, timer };
   }
-  for (const mic of [controls.mic, controls.chatMic]) mic.addEventListener("pointerdown", onMicPress);
-  controls.mic.addEventListener("click", onMicTap);
-  controls.chatMic.addEventListener("click", onMicTap);
+  /** A held mic let go: what it heard goes out. */
+  function onMicRelease(event) {
+    const press = micPress;
+    if (!press || !event.isTrusted || press.pointerId !== undefined && event.pointerId !== press.pointerId) return; // another finger
+    clearTimeout(press.timer);
+    if (!press.isHold) return; // a tap: its click decides
+    micPress = null; // done: a click that may follow is not a keyboard one (its detail isn't 0), so it is ignored
+    if (recording?.isOpening) notify("Hold the mic a little longer: it was still opening.", false);
+    recording?.stop(false);
+  }
+  /** The toolbar's mic talks as a command (on the marked area, else to the agent about the page); a chat's or the
+   *  docked mic records for its part. */
+  function beginTalk(mic) {
+    if (mic === controls.magicMic && openCommand(commandPart(), selected ? "Say or type what to change in the marked area." : COMMAND_ASK)) return;
+    startRecording();
+  }
+  for (const mic of [controls.mic, controls.chatMic, controls.magicMic]) {
+    mic.addEventListener("pointerdown", onMicPress);
+    mic.addEventListener("click", onMicTap);
+    mic.addEventListener("contextmenu", (event) => event.preventDefault()); // a long press is a hold, not a menu
+  }
+  addEventListener("pointerup", onMicRelease);
+  addEventListener("pointercancel", onMicRelease);
   controls.cancel.addEventListener("click", () => recording?.stop(true));
   controls.chatCancel.addEventListener("click", () => recording?.stop(true));
   controls.chatClose.addEventListener("click", closeChat);
@@ -1507,13 +1973,47 @@
     drawComposer();
   });
   controls.chatLines.addEventListener("pointerdown", onRowPress);
-  // Only the owner's tap on the paperclip opens the browser's own file picker, and only its pick is sent.
+  // Only the owner's tap on the paperclip or the camera opens the browser's own picker or the camera, and only what
+  // they pick or take joins the tray, to be sent with Send.
   controls.chatAttach.addEventListener("click", (event) => { if (event.isTrusted) controls.chatFile.click(); });
-  controls.chatFile.addEventListener("change", () => {
-    const [file] = controls.chatFile.files;
-    controls.chatFile.value = ""; // the same file can be picked again
-    if (file && chat) sendFile(file);
+  controls.chatCamera.addEventListener("click", (event) => { if (event.isTrusted) openCamera(); });
+  for (const input of [controls.chatFile, controls.cameraFile]) {
+    input.addEventListener("change", () => {
+      const files = [...input.files];
+      input.value = ""; // the same file can be picked again
+      if (files.length && chat) addToTray(chat.part, files);
+    });
+  }
+  controls.chatExpand.addEventListener("click", () => {
+    if (!chat) return;
+    chat = { ...chat, isExpanded: true };
+    drawChat();
+    scrollChat();
   });
+  controls.magicAttach.addEventListener("click", (event) => {
+    if (event.isTrusted && !openCommand(commandPart(), COMMAND_ASK)) controls.chatFile.click();
+  });
+  controls.magicCamera.addEventListener("click", (event) => {
+    if (event.isTrusted && !openCommand(commandPart(), COMMAND_ASK)) openCamera();
+  });
+  controls.magicChat.addEventListener("click", () => {
+    if (openChat(selected?.part ?? GENERAL, null)) notify("Stop recording first.", false);
+  });
+  controls.magicNarrate.addEventListener("click", (event) => setNarration(!isReadingAloud, event));
+  controls.cameraClose.addEventListener("click", closeCamera);
+  controls.cameraShutter.addEventListener("click", onShutter);
+  controls.cameraFlip.addEventListener("click", () => {
+    if (!camera || camera.recorder) return;
+    camera = { ...camera, facing: camera.facing === "environment" ? "user" : "environment" };
+    startCameraStream();
+  });
+  for (const [button, mode] of [[controls.cameraPhoto, "photo"], [controls.cameraVideo, "video"]]) {
+    button.addEventListener("click", () => {
+      if (!camera || camera.recorder) return;
+      camera = { ...camera, mode };
+      drawCamera();
+    });
+  }
   controls.chatText.addEventListener("input", () => {
     drafts.set(chat.part, controls.chatText.value);
     drawComposer();
@@ -1526,19 +2026,28 @@
   });
   addEventListener("keydown", (event) => {
     if (event.key !== "Escape" || isPanelOpen) return;
-    if (drawing || !controls.pencilMenu.hidden) stopPencil();
+    if (camera) closeCamera();
+    else if (drawing) stopPencil();
     else if (chat) closeChat();
   });
   controls.pencil.addEventListener("click", (event) => {
     if (!event.isTrusted) return;
-    if (drawing || !controls.pencilMenu.hidden) return stopPencil();
-    controls.pencilMenu.hidden = false;
-    controls.pencil.ariaExpanded = "true";
+    if (drawing) stopPencil();
+    foldMagic(controls.magic.dataset.mode === "folded");
   });
   controls.pencilFreeform.addEventListener("click", (event) => { if (event.isTrusted) startPencil("freeform"); });
   controls.pencilRectangle.addEventListener("click", (event) => { if (event.isTrusted) startPencil("rectangle"); });
   controls.pencilLayer.addEventListener("pointerdown", onPencilDown);
-  controls.narrationClose.addEventListener("click", hideNarration);
+  // While a tool is out the layer covers the page, so a wheel scrolls the page through the shell.
+  controls.pencilLayer.addEventListener("wheel", (event) => {
+    event.preventDefault();
+    const scale = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? innerHeight : 1;
+    if (isFrameReady) toFrame({ c3: "scroll", scroll: { x: event.deltaX * scale, y: event.deltaY * scale } });
+  }, { passive: false });
+  controls.narrationClose.addEventListener("click", () => {
+    if (isNarrationPlaying()) stopSpeech();
+    hideNarration();
+  });
   controls.narrationOpen.addEventListener("click", () => {
     const part = narration?.part;
     hideNarration();
@@ -1546,18 +2055,16 @@
   });
   controls.narrationPlay.addEventListener("click", () => { if (narration?.reply) speakForPage(isNarrationPlaying() ? null : narration.reply); });
   document.addEventListener("visibilitychange", watchReading);
+  // Any tap on the shell lets a phone play the narration that follows it.
+  document.addEventListener("pointerdown", unlockAudio, true);
   controls.status.addEventListener("click", unlockAudio);
   controls.aloud.checked = isReadingAloud;
-  controls.aloud.addEventListener("change", (event) => {
-    isReadingAloud = controls.aloud.checked;
-    saveSetting(isReadingAloud);
-    if (isReadingAloud) unlockAudio(event);
-    else stopSpeech();
-  });
+  controls.aloud.addEventListener("change", (event) => setNarration(controls.aloud.checked, event));
+  try { foldMagic(localStorage.getItem(MAGIC_OPEN_KEY) !== "folded"); } catch { foldMagic(true); }
   // Only a reply that is playing ends here: the unlock clip may end while the next reply still loads.
   const isReplyPlaying = () => Boolean(speaking) && speechState.state === "playing";
-  controls.player.addEventListener("ended", () => { if (isReplyPlaying()) endSpeech(); });
-  controls.player.addEventListener("error", () => { if (isReplyPlaying()) endSpeech("unplayable"); });
+  controls.player.addEventListener("ended", () => { if (isReplyPlaying() && !isSpeakingLocally) endSpeech(); });
+  controls.player.addEventListener("error", () => { if (isReplyPlaying() && !isSpeakingLocally) endSpeech("unplayable"); });
   addEventListener("resize", drawVoice);
   addEventListener("beforeunload", (event) => { if (recording || sending.size) event.preventDefault(); });
 

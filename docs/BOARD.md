@@ -156,10 +156,16 @@ caption under it), a play button on each answer,
 the page's own acts labelled "Sent by the page", and a button for a proposal (an answer whose last line is `[apply: <label>]`, while it is the agent's
 latest word there) that approves it. Under it is the composer, as in Telegram: a paperclip, then a box
 that has the mic while empty and turns it into Send as the owner types; Enter sends on a keyboard and
-breaks the line on a touch screen. The paperclip opens the browser's own file picker: one file of any
-type, at most 20 MB (what a Telegram bot can fetch, so the agent meets one ceiling on both routes; the
-shell says so before sending a bigger one), with the box's text as its caption. Its row shows the
-upload's progress, then its time; the shell never serves a file back. Any message in the thread can be
+breaks the line on a touch screen. The mic records on a tap (a second tap sends) or while it is held
+(letting go sends), with Cancel, the time and a wave. The paperclip opens the browser's own file
+picker (files of any type, several at once) and the camera button opens the shell's camera (a photo,
+or a video with sound of at most 90 seconds; where the browser can't open a camera, the phone's own
+camera app through `<input capture>`). Picked and taken files wait in a tray over the composer, each
+with a preview and ×, until Send; each is at most 20 MB (what a Telegram bot can fetch, so the agent
+meets one ceiling on both routes; the shell refuses a bigger one before it joins the tray). Each file
+goes as its own act, the box's text as the first one's caption (a caption too long for a header goes
+first as a message). Its row shows the upload's progress, then its time; the shell never serves a file
+back. Any message in the thread can be
 answered: a swipe right on touch (a long press stays the browser's, for selecting text), its Reply
 button on hover with a mouse. A bar over
 the composer shows its first line with ×, and the next comment, voice note or file answers it. A row
@@ -200,17 +206,28 @@ stanza has a `front` (for example a tunnel that signs the owner in), else the we
 address (`listen`, for example a tailnet IP). Nothing else chooses it, so a front added to the
 config moves every board link to it after a broker restart.
 
-**The pencil.** The shell draws a floating pencil at the left edge, over the frame. A tap opens
-**Freeform** (a lasso) and **Rectangle**; a pick covers the page with the shell's drawing layer
-(Escape or the pencil again drops it). The owner draws; the shape stays drawn on the shell's canvas.
-The shell then asks the page's SDK, the only code that can read the frame's DOM, what lies under the
-shape: the outermost elements mostly (60 %) inside it, a wrapper with one such child standing for the
-child, up to 12, each with a CSS selector, tag, first words, board part, box and coverage; the
-innermost element holding the whole shape; the viewport, scroll, document size and location hash.
-The found elements flash; nothing in the page changes, and nothing is wrapped or marked in it.
+**The toolbar.** The shell draws a floating toolbar at the bottom centre, over the frame: the Magic
+Pencil's **Freeform** (a lasso) and **Rectangle**, the mic, the camera, files, narration on or off,
+and the chat. The pencil at its left folds it to one button (the browser remembers). It steps aside
+while the chat or the camera is open, and its mic takes a press only 500 ms after it comes into view.
+The mic, camera and files open the chat as a compact command bar (the page stays in view; its thread
+is one tap away) on the marked selection's part, else the board-level chat.
+
+**The pencil.** A tool's pick covers the page with the shell's drawing layer (Escape or the same tool
+again drops it; a mouse wheel still scrolls the page). The owner draws with a mouse, pen or finger; the
+shape stays drawn on the shell's canvas with marching dashes. The shell then asks the page's SDK, the
+only code that can read the frame's DOM, what lies under the shape: the visible outermost elements
+mostly (60 %, sampled on a grid finer for a larger box) inside it, a wrapper with one such child
+standing for the child, up to 12, each with a CSS selector, tag, first words, board part, box and
+coverage; the innermost element holding the whole shape; the words inside the shape (each word whose
+middle is in it, up to 500 runes); the viewport, scroll, document size and location hash. Points and
+boxes are the frame's viewport CSS pixels, so the window's scroll, zoom and pixel ratio don't move
+them. The shell draws a box over each found element (the container, dashed, when there is none), so
+the owner sees exactly what the agent will be told about; the shape and the boxes follow the page's
+scroll. Nothing in the page changes, and nothing is wrapped or marked in it.
 
 The shell posts the selection as an act, `{op: "pencil", part, selection: {shape, points, viewport,
-scroll, document, hash, container, elements}}`, the part being the one the elements share, else the
+scroll, document, hash, text, container, elements}}`, the part being the one the elements share, else the
 container's, else `page`. C3 checks every field (shape `freeform` with 3 to 200 points or
 `rectangle` with 4, numbers within ±10⁶, a positive viewport, at most 12 elements, selector 300
 bytes, text 160 runes, tag `^[a-z][a-z0-9-]{0,31}$`, part, coverage 0 to 1, hash starting `#`),
@@ -243,9 +260,12 @@ when that can't be right: a changed, added or moved script (other than JSON data
 `<template>` (its content is outside the node tree), and a change outside parts that also changes a
 JSON part or any part of a page with a `c3.on("update")` handler (the page draws those itself, so a
 patch of the markup alone would leave it stale). The agent's reply to the
-command shows as narration: a note at the bottom left of the page ("Sent. The agent is on it…" until
-it answers), with a play button that reads it aloud and **Open the chat**; it fades after 30 seconds,
-and **Read replies aloud** reads it like any reply.
+command shows as narration: a card over the page above the toolbar. It says the command is being
+sent, then shows a voice command's transcript ("You said: …") and thinking dots until the agent
+answers, then the answer, with a play button, moving bars while it is read and **Open the chat**; it
+fades 45 seconds after the answer, never while it is read. Any command from the command bar (typed,
+spoken, a photo, video or file) is narrated the same way. With narration on, the answer is read aloud
+in C3's voice, or in the browser's own voice (`speechSynthesis`) when C3 has none or can't be reached.
 
 ## Voice
 
@@ -294,8 +314,9 @@ the shell's next part or the owner's next message moves it on.
 Each answer in C3's chat has a play button, a filled disc as Telegram draws a voice note's: a play
 triangle, a spinner while C3 makes the audio, two bars while it plays (a tap stops it). A page asks with `c3.speak(id)` (`c3.speak(null)` stops) and follows
 `c3.on("speech", e => …)`: `{id, state, error}`, state `loading`, `playing`, `ended` or `failed`.
-**Read replies aloud** in the circle's panel (off until turned on; the browser remembers it in the
-shell's own storage) reads each new message as it arrives, in order; after a reconnect, only the newest
+Narration, **Read replies aloud** in the circle's panel and the toolbar's speaker (one setting, on
+until turned off; the browser remembers it in the shell's own storage), reads each new message as it
+arrives, in order, in C3's voice or, when C3 has no voice for it, the browser's; after a reconnect, only the newest
 one missed. There is one player: a tap on a reply takes the place of what plays and waits, starting the
 mic stops it, a reply that comes while the mic is on waits for the recording to end, and `c3.speak`
 while recording is refused (`recording`). A phone plays sound only after a tap. In Chromium a tap in

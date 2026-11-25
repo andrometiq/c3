@@ -230,8 +230,8 @@ func TestAFileOverTwentyMegabytesIsRefused(t *testing.T) {
 	}
 	acceptedID(t, postFile(c, cookie, "plan", make([]byte, 20<<20), fileHeaders("limit", nil)))
 	shell := readPage(t, "board.js")
-	if !strings.Contains(shell, "fileBytes: 20 << 20") || !strings.Contains(functionBody(t, shell, "async function sendFile("), "if (file.size > LIMITS.fileBytes)") {
-		t.Error("the shell doesn't refuse a file over 20 MB before uploading it")
+	if !strings.Contains(shell, "fileBytes: 20 << 20") || !strings.Contains(functionBody(t, shell, "function addToTray("), "if (file.size > LIMITS.fileBytes) refused.push(file.name);") {
+		t.Error("the shell doesn't refuse a file over 20 MB before it joins the tray")
 	}
 }
 
@@ -272,11 +272,24 @@ func TestThePageCanNeverSendAFile(t *testing.T) {
 	if acts := regexp.MustCompile(`const ACT_FIELDS = \{[^\n]*`).FindString(shell); acts == "" || strings.Contains(acts, "file") {
 		t.Errorf("the page's acts include a file: %q", acts)
 	}
-	if strings.Count(shell, "postFile(") != 2 || strings.Count(shell, "sendFile(") != 2 || strings.Count(shell, "controls.chatFile.click()") != 1 ||
-		!strings.Contains(functionBody(t, shell, "async function sendFile("), "postFile(") ||
-		!strings.Contains(shell, `controls.chatAttach.addEventListener("click", (event) => { if (event.isTrusted) controls.chatFile.click(); });`) ||
-		!regexp.MustCompile(`controls\.chatFile\.addEventListener\("change", [^\n]*\n[^\n]*\n[^\n]*\n\s*if \(file && chat\) sendFile\(file\);`).MatchString(shell) {
-		t.Error("the shell's upload is reached from something other than its own picker after a trusted tap")
+	// A file goes up only from the tray (sendTray, on Send), and joins the tray only from the shell's own pickers (opened
+	// by a trusted tap) or from its own camera.
+	if strings.Count(shell, "postFile(") != 2 || strings.Count(shell, "sendTray(") != 2 || !strings.Contains(functionBody(t, shell, "async function sendTrayItems("), "postFile(") || strings.Count(shell, "sendTrayItems(") != 2 ||
+		!strings.Contains(functionBody(t, shell, "async function sendText("), "if (trays.has(part)) return sendTray(part, text);") {
+		t.Error("the shell's upload is reached from something other than the tray's Send")
+	}
+	if calls := regexp.MustCompile(`[^\n]*\.(?:chatFile|cameraFile)\.click\(\)[^\n]*`).FindAllString(shell, -1); len(calls) != 4 {
+		t.Errorf("the shell's pickers open from %d places, want 4", len(calls))
+	} else {
+		for _, call := range calls {
+			if !strings.Contains(call, "event.isTrusted") && !strings.Contains(call, "// in the owner's tap") && strings.TrimSpace(call) != "controls.cameraFile.click();" {
+				t.Errorf("a picker opens without a trusted tap: %q", strings.TrimSpace(call))
+			}
+		}
+	}
+	if adds := regexp.MustCompile(`\baddToTray\([^,]*`).FindAllString(shell, -1); strings.Join(adds, " ") != "addToTray(part addToTray(part addToTray(part addToTray(chat.part" ||
+		!regexp.MustCompile(`for \(const input of \[controls\.chatFile, controls\.cameraFile\]\) \{\n\s*input\.addEventListener\("change", \(\) => \{\n\s*const files = \[\.\.\.input\.files\];`).MatchString(shell) {
+		t.Errorf("files join the tray from %q, want only the camera's photo and video and the shell's own pickers", adds)
 	}
 	handler := functionBody(t, shell, "async function onFrameMessage(")
 	for _, upload := range []string{"File", "chatFile", "XMLHttpRequest"} {
@@ -284,8 +297,9 @@ func TestThePageCanNeverSendAFile(t *testing.T) {
 			t.Errorf("a frame message reaches %q", upload)
 		}
 	}
-	if !strings.Contains(readPage(t, "board.html"), `<input id="chat-file" type="file" hidden>`) {
-		t.Error("board.html has no file picker of the shell's own")
+	if html := readPage(t, "board.html"); !strings.Contains(html, `<input id="chat-file" type="file" multiple hidden>`) ||
+		!strings.Contains(html, `<input id="camera-file" type="file" accept="image/*,video/*" capture="environment" hidden>`) {
+		t.Error("board.html has no file picker or camera input of the shell's own")
 	}
 }
 

@@ -123,15 +123,16 @@ try {
   await until(() => inFrame("Boolean(window.c3) && Boolean(window.__boot)"), "the page in its frame");
   await until(() => shown("pencil"), "the pencil");
   const boot = await inFrame("window.__boot");
-  const pencilBox = await inShell(`(() => { const r = document.getElementById("pencil").getBoundingClientRect(); return { x: r.x, y: r.y, width: r.width }; })()`);
-  report(pencilBox.x < 40 && pencilBox.width >= 40, "pencil", `floating on the left at x=${Math.round(pencilBox.x)}, ${Math.round(pencilBox.width)} px wide`);
+  await sleep(600); // the toolbar's entrance
+  const toolbar = await inShell(`(() => { const r = document.getElementById("magic").getBoundingClientRect(); return { x: r.x, bottom: innerHeight - r.bottom, width: r.width }; })()`);
+  report(Math.abs(toolbar.x + toolbar.width / 2 - 195) < 2 && toolbar.bottom > 0 && toolbar.bottom < 40, "pencil",
+    `toolbar at the bottom centre, ${Math.round(toolbar.width)} px wide, ${Math.round(toolbar.bottom)} px up`);
 
   // 1. Freeform around the title, a typed command.
-  await click(await center("#pencil"));
-  const isMenu = await shown("pencil-menu");
+  const isMenu = await shown("pencil-freeform");
   await click(await center("#pencil-freeform"));
   const isLayer = await shown("pencil-layer");
-  report(isMenu && isLayer && (await text("pencil-hint")).includes("Draw around"), "menu", `menu ${isMenu}, drawing layer ${isLayer}, hint "${await text("pencil-hint")}"`);
+  report(isMenu && isLayer && (await text("pencil-hint")).includes("Draw around"), "menu", `tools ${isMenu}, drawing layer ${isLayer}, hint "${await text("pencil-hint")}"`);
   const title = await frameBox("#title");
   const [cx, cy, rx, ry] = [title.x + title.width / 2, title.y + title.height / 2, title.width / 2 + 24, title.height / 2 + 22];
   const loop = Array.from({ length: 41 }, (_, index) => [cx + rx * Math.cos(index * Math.PI / 20), cy + ry * Math.sin(index * Math.PI / 20)]);
@@ -173,7 +174,7 @@ try {
     `"${await text("narration-text")}" with a play button`);
 
   // 2. Rectangle around the basic plan, a spoken command.
-  await click(await center("#pencil"));
+
   await click(await center("#pencil-rectangle"));
   const basic = await frameBox("#basic");
   await stroke([[basic.x - 10, basic.y - 8], [basic.x + basic.width / 2, basic.y + 4], [basic.x + basic.width + 10, basic.y + basic.height + 8]]);
@@ -197,7 +198,7 @@ try {
 
   // 3. Escape drops a drawing in progress; nothing is logged.
   const before = (await log()).length;
-  await click(await center("#pencil"));
+
   await click(await center("#pencil-freeform"));
   await send("Input.dispatchKeyEvent", { type: "keyDown", key: "Escape", code: "Escape", windowsVirtualKeyCode: 27 });
   await send("Input.dispatchKeyEvent", { type: "keyUp", key: "Escape", code: "Escape", windowsVirtualKeyCode: 27 });

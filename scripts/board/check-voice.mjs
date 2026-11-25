@@ -77,6 +77,8 @@ try {
   await send("Target.setAutoAttach", { autoAttach: true, waitForDebuggerOnStart: false, flatten: true });
   await send("Emulation.setDeviceMetricsOverride", { width: 390, height: 844, deviceScaleFactor: 2, mobile: true });
   await send("Network.setCookie", { ...cookies[0], url });
+  // Narration is on by default; this check plays replies only from their play buttons, so it starts with it off.
+  await send("Page.addScriptToEvaluateOnNewDocument", { source: `try { localStorage.setItem("c3.board.readAloud", "off"); } catch { /* the sandboxed frame */ }` });
   await send("Page.navigate", { url: boards.plan });
 
   async function evaluate(expression, sessionId = session) {
@@ -386,6 +388,8 @@ try {
   await inShell(`window.__fileMeta = []; new MutationObserver(() => { const row = [...document.querySelectorAll("#chat-lines .msg.mine")].findLast((r) => r.querySelector(".label")?.textContent.startsWith("📎"));
     const text = row?.querySelector(".meta").textContent; if (text && __fileMeta.at(-1) !== text) __fileMeta.push(text); }).observe(document.getElementById("chat-lines"), { childList: true, subtree: true }); true`);
   await pickFile(notes);
+  await until(() => inShell(`document.querySelectorAll("#chat-tray li").length === 1`), "the file in the tray");
+  await click(await center("#chat-send"));
   const boxAfterPick = (await ui()).box;
   await until(async () => (await log()).some((entry) => entry.op === "file"), "the file act in the log");
   const fileAct = (await log()).find((entry) => entry.op === "file");
@@ -411,11 +415,12 @@ try {
   await pickFile(big);
   await sleep(400);
   const tooBig = { error: (await ui()).error, acts: await fileActs() };
-  await typeInSheet("long ".repeat(1300)); // 6.5 KB as sent: too much for a header
+  const trayAfterBig = await inShell(`document.querySelectorAll("#chat-tray li").length`);
+  await typeInSheet("long ".repeat(1300)); // 6.5 KB as sent: too much for a header, so it goes first as a message
   await pickFile(notes);
-  await sleep(400);
-  const longCaption = { error: (await ui()).error, acts: await fileActs(), kept: (await ui()).box.length };
-  await inShell(`(() => { const box = document.getElementById("chat-text"); box.value = ""; box.dispatchEvent(new Event("input")); return true; })()`);
+  await click(await center("#chat-send"));
+  await until(async () => (await fileActs()) === 2, "the file after its long caption");
+  const longCaption = { comment: (await log()).findLast((entry) => entry.op === "comment")?.text.length ?? 0, file: (await log()).findLast((entry) => entry.op === "file") };
   let isPickerOpened = false;
   const stopWatching = browser.onEvent(({ method }) => { if (method === "Page.fileChooserOpened") isPickerOpened = true; });
   await inFrame(`window.__results = []; addEventListener("message", (e) => { if (e.data?.c3 === "result" && e.data.call >= 960) __results.push(e.data); });
@@ -426,10 +431,10 @@ try {
   stopWatching();
   const pageResults = await inFrame("__results");
   const pageReply = (await log()).some((entry) => entry.text === "page reply");
-  report(tooBig.error === "Not sent: big.bin is over 20 MB." && tooBig.acts === 1 && longCaption.error === "Caption too long for a file; send it as a message after it."
-    && longCaption.acts === 1 && longCaption.kept > 6000 && !isPickerOpened && await fileActs() === 1 && !pageReply
+  report(tooBig.error === "Not added: big.bin is over 20 MB." && tooBig.acts === 1 && trayAfterBig === 0 && longCaption.comment > 6000
+    && longCaption.file?.text === "" && !isPickerOpened && await fileActs() === 2 && !pageReply
     && JSON.stringify(pageResults.map(({ call, error }) => [call, error])) === '[[961,"invalid"],[962,"invalid"]]', "files",
-    `a 20 MB + 1 file -> "${tooBig.error}"; a 6.5 KB caption -> "${longCaption.error}" (caption kept in the box); file acts still ${longCaption.acts}; `
+    `a 20 MB + 1 file -> "${tooBig.error}", tray ${trayAfterBig}; a 6.5 KB caption -> sent first as a ${longCaption.comment}-rune message, then the file without one; `
     + `the page's "file" and file-act messages and a script click on the paperclip -> picker ${isPickerOpened ? "OPENED" : "never opened"}, file acts ${await fileActs()}; `
     + `the page's comment answering msg ${fileAct.id} -> ${JSON.stringify(pageResults)}, logged ${pageReply}`);
 

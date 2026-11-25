@@ -26,14 +26,23 @@ func TestShellWritesAgentStringsOnlyToAllowedSinks(t *testing.T) {
 	shell := readPage(t, "board.js")
 	allowed := map[string]bool{"textContent": true, "title": true, "hidden": true, "mode": true, "src": true, "typing": true, "holder": true, "rev": true,
 		"disabled": true, "ariaPressed": true, "checked": true, "value": true, "placeholder": true, "scrollTop": true, "ariaLabel": true,
-		"ariaBusy": true, "width": true, "height": true, "fillStyle": true, "ariaExpanded": true, "lineWidth": true, "lineJoin": true, "strokeStyle": true}
+		"ariaBusy": true, "width": true, "height": true, "fillStyle": true, "ariaExpanded": true, "lineWidth": true, "lineJoin": true, "strokeStyle": true,
+		"lineDashOffset": true, "srcObject": true, "muted": true, "playsInline": true, "preload": true}
 	for _, match := range regexp.MustCompile(`\.([A-Za-z_$][\w$]*)\s*=[^=]`).FindAllStringSubmatch(shell, -1) {
 		if !allowed[match[1]] {
 			t.Errorf("board.js assigns .%s, which is not an allowed sink", match[1])
 		}
 	}
-	if sources := regexp.MustCompile(`\.src\s*=[^=][^\n]*`).FindAllString(shell, -1); strings.Join(sources, " ") != ".src = `${base}/audio/${name}`; .src = pageURL();" {
-		t.Errorf("board.js .src assignments = %q, want only the player's board audio and the frame's own page URL", sources)
+	if sources := regexp.MustCompile(`\.src\s*=[^=][^\n]*`).FindAllString(shell, -1); strings.Join(sources, " ") != ".src = `${base}/audio/${name}`; .src = url; .src = pageURL();" {
+		t.Errorf("board.js .src assignments = %q, want only the player's board audio, a tray preview and the frame's own page URL", sources)
+	}
+	// A tray preview's URL is a blob: URL of the owner's own file, made by the shell; a stream comes only from the camera.
+	if calls := regexp.MustCompile(`\bpreview\([^)]*\)`).FindAllString(shell, -1); strings.Join(calls, " ") != `preview(tag, url) preview(kind === "image" ? "img" : "video", item.url)` ||
+		!strings.Contains(functionBody(t, shell, "function addToTray("), `url: /^(image|video|audio)\//.test(file.type) ? URL.createObjectURL(file) : ""`) {
+		t.Errorf("board.js previews %q, want only the tray's blob: URLs of the owner's files", calls)
+	}
+	if streams := regexp.MustCompile(`\.srcObject\s*=[^=][^\n]*`).FindAllString(shell, -1); strings.Join(streams, " ") != ".srcObject = stream; .srcObject = null;" {
+		t.Errorf("board.js .srcObject assignments = %q, want only the camera's stream", streams)
 	}
 	for _, sink := range []string{"inner" + "HTML", "outer" + "HTML", "insertAdjacent", "document.write", "eval(", "Function(", "srcdoc", "href", "setAttribute", "location.assign", "location.replace", "location.reload", "location.href", "window.open", "createContextualFragment", "setTimeout(\"", "setTimeout('", "setTimeout(`"} {
 		if strings.Contains(shell, sink) {
@@ -43,8 +52,8 @@ func TestShellWritesAgentStringsOnlyToAllowedSinks(t *testing.T) {
 	if regexp.MustCompile(`\blocation\s*=[^=]`).MatchString(shell) {
 		t.Error("board.js navigates by assigning location")
 	}
-	// Its two style sinks take numbers only: place() puts its own mic and recording bar, ringTo() sizes the ring
-	// behind its mics from the recording's loudness.
+	// Its two style sinks take numbers only: place() puts its own mic and recording bar and the boxes over what the
+	// pencil found (which take no taps), ringTo() sizes the ring behind its mics from the recording's loudness.
 	place := functionBody(t, shell, "function place(")
 	if strings.Count(shell, ".style") != 2 || !strings.Contains(place, ".style.setProperty(side, `${Math.round(box[side])}px`)") ||
 		!strings.Contains(functionBody(t, shell, "function ringTo("), `mic.style.setProperty("--level", level.toFixed(2));`) {
@@ -53,9 +62,12 @@ func TestShellWritesAgentStringsOnlyToAllowedSinks(t *testing.T) {
 	if calls := regexp.MustCompile(`\bringTo\([^)]*\)`).FindAllString(shell, -1); strings.Join(calls, " ") != "ringTo(ring) ringTo(0) ringTo(level)" {
 		t.Errorf("board.js ringTo() calls = %q, want only the smoothed loudness and 0", calls)
 	}
-	if calls := regexp.MustCompile(`\bplace\([^)]*\)?\)`).FindAllString(shell, -1); strings.Join(calls, " ") != "place(controls.mic, mic) place(controls.recorder, recorderBox(frameBox, mic)) place(element, box)" ||
+	if calls := regexp.MustCompile(`\bplace\([^)]*\)?\)`).FindAllString(shell, -1); strings.Join(calls, " ") != "place(controls.mic, mic) place(controls.recorder, recorderBox(frameBox, mic)) place(element, box) place(pick, pickBox(box, frameBox, offset))" ||
 		!strings.Contains(functionBody(t, shell, "function drawVoice("), "const mic = micBox(frameBox);") {
-		t.Errorf("board.js place() calls = %q, want only the mic at micBox and the bar at recorderBox", calls)
+		t.Errorf("board.js place() calls = %q, want only the mic at micBox, the bar at recorderBox and the pencil's boxes at pickBox", calls)
+	}
+	if html := readPage(t, "board.html"); !strings.Contains(html, "#pencil-ink, #pencil-picks {") || !regexp.MustCompile(`#pencil-ink, #pencil-picks \{[^}]*pointer-events: none;`).MatchString(html) {
+		t.Error("the pencil's boxes take taps")
 	}
 
 	html := readPage(t, "board.html")
@@ -157,25 +169,51 @@ func TestStarterIsPartsAndOneThreadsCall(t *testing.T) {
 	}
 }
 
-// Only the shell opens the microphone, and only from a real tap on one of its
-// own mic buttons: the frame gets no microphone, and no frame message reaches
-// the recorder (the page can only name the part it is on).
+// Only the shell opens the microphone and the camera, and only from a real
+// tap (or hold) on one of its own buttons: the frame gets neither, and no
+// frame message reaches the recorder or the camera (the page can only name
+// the part it is on).
 func TestOnlyTheShellsOwnButtonOpensTheMicrophone(t *testing.T) {
 	shell := readPage(t, "board.js")
-	if strings.Count(shell, "getUserMedia(") != 1 || !strings.Contains(functionBody(t, shell, "async function startRecording("), "getUserMedia(") {
-		t.Fatal("board.js opens the microphone outside startRecording")
+	if strings.Count(shell, "getUserMedia(") != 3 || !strings.Contains(functionBody(t, shell, "async function startRecording("), "getUserMedia(") ||
+		!strings.Contains(functionBody(t, shell, "async function startCameraStream("), "getUserMedia({ video:") ||
+		!strings.Contains(functionBody(t, shell, "async function recordVideo("), "getUserMedia({ audio:") {
+		t.Fatal("board.js opens the microphone or the camera outside startRecording, startCameraStream and recordVideo")
 	}
-	tap := functionBody(t, shell, "function onMicTap(")
-	trusted := strings.Index(tap, "if (!event.isTrusted) return;")
-	if starts := regexp.MustCompile(`startRecording\(\)`).FindAllStringIndex(shell, -1); len(starts) != 2 || trusted < 0 || strings.Index(tap, "startRecording()") < trusted {
-		t.Fatalf("startRecording is called %d times; want once, from onMicTap after its isTrusted check", len(starts)-1)
+	// startRecording runs only from beginTalk, which runs from onMicTap after its isTrusted check, or from a hold
+	// that onMicPress times only for a trusted press.
+	tap, press := functionBody(t, shell, "function onMicTap("), functionBody(t, shell, "function onMicPress(")
+	trusted := strings.Index(tap, "if (!event.isTrusted || press?.isHold) return;")
+	if starts := regexp.MustCompile(`startRecording\(\)`).FindAllStringIndex(shell, -1); len(starts) != 2 || !strings.Contains(functionBody(t, shell, "function beginTalk("), "startRecording()") {
+		t.Fatalf("startRecording is called %d times; want once, from beginTalk", len(starts)-1)
 	}
-	if strings.Count(shell, "onMicTap") != 3 || !strings.Contains(shell, `controls.mic.addEventListener("click", onMicTap);`) ||
-		!strings.Contains(shell, `controls.chatMic.addEventListener("click", onMicTap);`) {
-		t.Error("onMicTap is reached from something other than the shell's two mic buttons' clicks")
+	if talks := regexp.MustCompile(`beginTalk\([^)]*\)`).FindAllString(shell, -1); strings.Join(talks, " ") != "beginTalk(event.currentTarget) beginTalk(mic) beginTalk(mic)" ||
+		trusted < 0 || strings.Index(tap, "beginTalk(event.currentTarget)") < trusted ||
+		!strings.Contains(press, "micPress = event.isTrusted ? { mic: event.currentTarget, at: performance.now() } : null;") ||
+		!strings.Contains(press, "if (!micPress || event.button > 0 || recording || micPress.at < micSettlesAt || !canRecord) return;") {
+		t.Fatalf("beginTalk calls %q: want only a trusted tap (onMicTap) or a trusted, settled hold (onMicPress)", talks)
+	}
+	if strings.Count(shell, "onMicTap") != 2 || !strings.Contains(shell, `for (const mic of [controls.mic, controls.chatMic, controls.magicMic]) {
+    mic.addEventListener("pointerdown", onMicPress);
+    mic.addEventListener("click", onMicTap);`) {
+		t.Error("onMicTap is reached from something other than the shell's three mic buttons' clicks")
+	}
+	// The camera opens only from a trusted tap on the shell's own camera buttons, and the shutter takes only a trusted click.
+	if calls := regexp.MustCompile(`[^\n]*\bopenCamera\(\)[^\n]*`).FindAllString(shell, -1); len(calls) != 3 {
+		t.Errorf("openCamera() appears %d times, want its definition and two trusted taps", len(calls))
+	} else {
+		for _, call := range calls[1:] {
+			if !strings.Contains(call, "if (event.isTrusted") {
+				t.Errorf("the camera opens without a trusted tap: %q", strings.TrimSpace(call))
+			}
+		}
+	}
+	if !strings.Contains(functionBody(t, shell, "function onShutter("), "if (!event.isTrusted || !camera?.stream) return undefined;") ||
+		strings.Count(shell, "onShutter") != 2 {
+		t.Error("the shutter takes an untrusted click, or is reached from elsewhere")
 	}
 	handler := functionBody(t, shell, "async function onFrameMessage(")
-	for _, recorder := range []string{"startRecording", "recording", "getUserMedia", "MediaRecorder", "upload("} {
+	for _, recorder := range []string{"startRecording", "recording", "getUserMedia", "MediaRecorder", "upload(", "Camera", "camera", "beginTalk", "Tray"} {
 		if strings.Contains(handler, recorder) {
 			t.Errorf("a frame message reaches %q", recorder)
 		}
@@ -289,8 +327,12 @@ func TestAMicPressCountsOnlyIfItBeganOnTheSettledMic(t *testing.T) {
 		t.Fatal("board.js has no 500 ms settle time for its mic")
 	}
 	if !strings.Contains(functionBody(t, shell, "function onMicPress("), "micPress = event.isTrusted ? { mic: event.currentTarget, at: performance.now() } : null;") ||
-		!strings.Contains(shell, `for (const mic of [controls.mic, controls.chatMic]) mic.addEventListener("pointerdown", onMicPress);`) {
+		!strings.Contains(shell, `for (const mic of [controls.mic, controls.chatMic, controls.magicMic]) {
+    mic.addEventListener("pointerdown", onMicPress);`) {
 		t.Error("a mic press isn't timed when it goes down")
+	}
+	if !strings.Contains(functionBody(t, shell, "function drawMagic("), "if (wasHidden && !controls.magic.hidden) settleMic();") {
+		t.Error("the toolbar's mic takes a tap right after the toolbar comes into view")
 	}
 	if !strings.Contains(functionBody(t, shell, "function onMicTap("), "if (press ? press.mic !== event.currentTarget || press.at < micSettlesAt : event.detail !== 0) return;") {
 		t.Error("a tap on the mic is judged by something other than where and when its press began")

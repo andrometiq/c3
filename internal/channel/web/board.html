@@ -7,9 +7,11 @@
 <title>Board</title>
 <style>
 :root { --ink: #1f2328; --muted: #59636e; --paper: #fff; --soft: #f0f2f4; --mine: #ddf4ff; --line: #d1d9e0; --accent: #0969da;
-  --live: #1a7f37; --ended: #9a6700; --closed: #818b98; --shadow: 0 1px 6px rgb(0 0 0 / 18%); }
+  --live: #1a7f37; --ended: #9a6700; --closed: #818b98; --shadow: 0 1px 6px rgb(0 0 0 / 18%); --magic: #8250df; --danger: #cf222e; --bubble: #0969da;
+  --glass: rgb(255 255 255 / 82%); --glass-line: rgb(31 35 40 / 12%); --lift: 0 10px 30px rgb(0 0 0 / 16%), 0 2px 6px rgb(0 0 0 / 10%); }
 @media (prefers-color-scheme: dark) { :root { --ink: #e6edf3; --muted: #9198a1; --paper: #151b23; --soft: #212830; --mine: #0c2d6b;
-  --line: #3d444d; --accent: #4493f8; --live: #3fb950; --ended: #d29922; --closed: #656c76; --shadow: 0 1px 8px rgb(0 0 0 / 60%); } }
+  --line: #3d444d; --accent: #4493f8; --live: #3fb950; --ended: #d29922; --closed: #656c76; --shadow: 0 1px 8px rgb(0 0 0 / 60%); --magic: #ab7df8; --bubble: #1f6feb;
+  --danger: #f85149; --glass: rgb(21 27 35 / 84%); --glass-line: rgb(240 246 252 / 12%); --lift: 0 10px 30px rgb(0 0 0 / 55%), 0 2px 6px rgb(0 0 0 / 40%); } }
 html, body { margin: 0; height: 100%; background: var(--paper); color: var(--ink); font: 15px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; }
 body { height: 100dvh; overflow: hidden; }
 [hidden] { display: none !important; }
@@ -60,10 +62,10 @@ svg { fill: currentColor; }
    panel at the bottom right on a wide screen). The page names the part, a title and a line; everything else is C3's. */
 #chat { position: fixed; z-index: 2; left: 0; right: 0; bottom: 0; box-sizing: border-box; display: flex; flex-direction: column;
   max-height: min(78dvh, 680px); padding-bottom: env(safe-area-inset-bottom); border-top: 1px solid var(--line);
-  border-radius: 16px 16px 0 0; background: var(--paper); box-shadow: 0 -6px 24px rgb(0 0 0 / 18%); }
+  border-radius: 20px 20px 0 0; background: var(--paper); box-shadow: 0 -10px 30px rgb(0 0 0 / 18%); }
 @media (min-width: 720px) { #chat { left: auto; right: 16px; bottom: 16px; width: 420px; max-height: min(72dvh, 680px);
   border: 1px solid var(--line); border-radius: 16px; } }
-@media (prefers-reduced-motion: no-preference) { #chat { animation: rise 0.18s ease-out; } }
+@media (prefers-reduced-motion: no-preference) { #chat { animation: rise 0.26s cubic-bezier(0.2, 0.9, 0.3, 1.1); } }
 @keyframes rise { from { transform: translateY(24px); opacity: 0; } }
 #chat-head { display: flex; align-items: center; gap: 8px; padding: 8px 6px 6px 16px; }
 #chat-title { flex: 1; min-width: 0; margin: 0; overflow: hidden; font-size: 16px; font-weight: 650; white-space: nowrap; text-overflow: ellipsis;
@@ -78,9 +80,13 @@ svg { fill: currentColor; }
   color: var(--accent); font-weight: 600; }
 #chat-lines { display: flex; flex-direction: column; gap: 6px; margin: 0; padding: 0; list-style: none; }
 #chat-lines .empty { align-self: center; padding: 8px 0; color: var(--muted); font-size: 14px; }
-.msg { max-width: 85%; box-sizing: border-box; padding: 7px 10px 4px; border-radius: 14px 14px 14px 4px; background: var(--soft);
-  overflow-wrap: anywhere; }
-.msg.mine { align-self: flex-end; border-radius: 14px 14px 4px 14px; background: var(--mine); }
+.msg { max-width: 85%; box-sizing: border-box; padding: 8px 12px 5px; border-radius: 18px 18px 18px 6px; background: var(--soft);
+  overflow-wrap: anywhere; box-shadow: 0 1px 1px rgb(0 0 0 / 6%); }
+.msg.mine { align-self: flex-end; border-radius: 18px 18px 6px 18px; background: var(--bubble); color: #fff; }
+.msg.mine :is(.label, .meta, .state) { color: rgb(255 255 255 / 80%); }
+.msg.mine .quoted { border-left-color: #fff; background: rgb(255 255 255 / 18%); color: rgb(255 255 255 / 88%); }
+@media (prefers-reduced-motion: no-preference) { .msg.enter { animation: bubble 0.26s cubic-bezier(0.2, 0.9, 0.3, 1.2); } }
+@keyframes bubble { from { opacity: 0; translate: 0 10px; scale: 0.96; } }
 .msg.page { align-self: flex-end; border: 1px dashed var(--line); background: none; color: var(--muted); }
 .msg .body { white-space: pre-wrap; }
 .msg .label { display: block; color: var(--muted); font-size: 12px; font-weight: 650; }
@@ -161,35 +167,122 @@ svg { fill: currentColor; }
 #recorder { position: fixed; z-index: 1; box-sizing: border-box; display: flex; align-items: center; gap: 8px; padding: 0 4px 0 14px;
   border: 1px solid var(--line); border-radius: 999px; background: var(--paper); box-shadow: var(--shadow); }
 #cancel { flex: none; min-height: 36px; padding: 0 12px; border: 0; border-radius: 999px; background: none; color: var(--accent); font-weight: 600; }
-/* The Magic Pencil: a floating pencil on the left. The owner picks freeform or rectangle and draws over the page on a
-   layer of the shell's own (the page never sees the drawing); the shape stays drawn until its command goes. */
-#pencil { position: fixed; z-index: 1; left: calc(8px + env(safe-area-inset-left)); top: 50%; translate: 0 -50%; width: 44px; height: 44px;
-  padding: 0; display: grid; place-items: center; border: 1px solid var(--line); border-radius: 50%; background: var(--paper); box-shadow: var(--shadow); }
-#pencil svg { width: 22px; height: 22px; }
-#pencil[aria-pressed="true"] { background: var(--accent); color: #fff; border-color: var(--accent); }
-#pencil-menu { position: fixed; z-index: 3; left: calc(60px + env(safe-area-inset-left)); top: 50%; translate: 0 -50%; display: grid; gap: 6px;
-  padding: 8px; border: 1px solid var(--line); border-radius: 12px; background: var(--paper); box-shadow: var(--shadow); }
-#pencil-menu button { display: flex; align-items: center; gap: 8px; min-height: 40px; padding: 0 12px; border: 1px solid var(--line);
-  border-radius: 10px; background: var(--soft); font-weight: 600; text-align: left; }
-#pencil-menu svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 2; }
+/* The Magic Link toolbar: a floating pill at the bottom centre with the Magic Pencil's two tools, the mic, the camera,
+   files, narration and the chat. The pencil at its left folds it to one button. It steps aside while the chat is open. */
+#magic { position: fixed; z-index: 3; left: 50%; bottom: calc(14px + env(safe-area-inset-bottom)); translate: -50% 0; display: flex;
+  align-items: center; gap: 2px; padding: 5px; border: 1px solid var(--glass-line); border-radius: 999px; background: var(--glass);
+  -webkit-backdrop-filter: blur(14px) saturate(1.6); backdrop-filter: blur(14px) saturate(1.6); box-shadow: var(--lift); }
+#magic[hidden] { display: flex !important; visibility: hidden; translate: -50% calc(100% + 40px); opacity: 0; pointer-events: none; }
+#magic-tools { display: flex; align-items: center; gap: 2px; max-width: 360px; margin: -3px; padding: 3px; overflow: hidden; }
+#magic[data-mode="folded"] #magic-tools { max-width: 0; opacity: 0; }
+#magic .sep { flex: none; width: 1px; height: 24px; margin: 0 3px; background: var(--line); }
+.tool { position: relative; flex: none; display: grid; place-items: center; width: 40px; height: 40px; padding: 0; border: 0; border-radius: 50%;
+  background: none; color: var(--ink); }
+.tool svg { width: 22px; height: 22px; }
+.tool.line svg { fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.tool:hover { background: var(--soft); }
+.tool:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.tool[aria-pressed="true"] { background: var(--accent); color: #fff; }
+#pencil { background: linear-gradient(135deg, var(--accent), var(--magic)); color: #fff; }
+#pencil svg { width: 20px; height: 20px; }
+#magic-narrate[aria-pressed="false"] .on, #magic-narrate[aria-pressed="true"] .off { display: none; }
+#magic-narrate[aria-pressed="true"] { background: none; color: var(--accent); }
+#magic-mic[aria-pressed="true"] { background: var(--danger); }
+@media (prefers-reduced-motion: no-preference) {
+  #magic { transition: translate 0.28s cubic-bezier(0.2, 0.9, 0.3, 1.2), opacity 0.2s, visibility 0.28s; animation: dock 0.42s cubic-bezier(0.2, 0.9, 0.3, 1.2); }
+  #magic-tools { transition: max-width 0.32s cubic-bezier(0.2, 0.9, 0.3, 1), opacity 0.2s; }
+  .tool { transition: background-color 0.15s, color 0.15s, transform 0.12s; }
+  .tool:active { transform: scale(0.9); }
+  #pencil-freeform[aria-pressed="true"], #pencil-rectangle[aria-pressed="true"] { animation: glow 1.6s ease-in-out infinite; }
+}
+@keyframes dock { from { translate: -50% 120%; opacity: 0; } }
+@keyframes glow { 50% { box-shadow: 0 0 0 6px color-mix(in srgb, var(--accent) 25%, transparent); } }
 #pencil-layer { position: fixed; z-index: 2; inset: 0; cursor: crosshair; touch-action: none; }
 #pencil-layer.drawn { pointer-events: none; cursor: default; }
-#pencil-ink { position: absolute; inset: 0; width: 100%; height: 100%; color: var(--accent); }
-#pencil-hint { position: fixed; z-index: 3; top: calc(8px + env(safe-area-inset-top)); left: 50%; translate: -50% 0; margin: 0; padding: 8px 14px;
-  border-radius: 999px; background: var(--ink); color: var(--paper); font-size: 14px; font-weight: 600; white-space: nowrap; pointer-events: none; }
-/* Narration: what the agent says about a change it made from a pencil command, over the page's bottom left. */
-#narration { position: fixed; z-index: 2; left: calc(8px + env(safe-area-inset-left)); bottom: calc(8px + env(safe-area-inset-bottom));
-  box-sizing: border-box; width: min(380px, calc(100vw - 16px)); display: grid; grid-template-columns: auto 1fr auto; align-items: start; gap: 4px 8px;
-  padding: 10px 6px 10px 12px; border: 1px solid var(--line); border-left: 4px solid var(--accent); border-radius: 12px; background: var(--paper);
-  box-shadow: var(--shadow); }
-@media (prefers-reduced-motion: no-preference) { #narration { animation: rise 0.18s ease-out; } }
-#narration-label { grid-column: 1 / 3; color: var(--accent); font-size: 12px; font-weight: 700; }
-#narration-text { grid-column: 1 / 3; margin: 0; max-height: 9em; overflow-y: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
-#narration-close { grid-column: 3; grid-row: 1 / 3; width: 36px; height: 36px; }
+#pencil-ink, #pencil-picks { position: absolute; inset: 0; width: 100%; height: 100%; color: var(--accent); pointer-events: none; }
+/* What the page named under the shape: a box per element, from numbers only. */
+.pick { position: absolute; box-sizing: border-box; border: 2px solid var(--magic); border-radius: 6px;
+  background: color-mix(in srgb, var(--magic) 12%, transparent); }
+.pick.container { border-style: dashed; background: none; }
+@media (prefers-reduced-motion: no-preference) {
+  .pick { animation: pick 0.38s cubic-bezier(0.2, 0.9, 0.3, 1.3) backwards; }
+  .pick:nth-child(2) { animation-delay: 45ms; } .pick:nth-child(3) { animation-delay: 90ms; } .pick:nth-child(n+4) { animation-delay: 135ms; }
+}
+@keyframes pick { from { opacity: 0; scale: 1.08; } }
+#pencil-hint { position: fixed; z-index: 3; top: calc(10px + env(safe-area-inset-top)); left: 50%; translate: -50% 0; max-width: calc(100vw - 124px);
+  margin: 0; padding: 9px 16px; overflow: hidden; border-radius: 999px; background: var(--ink); color: var(--paper); font-size: 14px; font-weight: 600;
+  white-space: nowrap; text-overflow: ellipsis; box-shadow: var(--lift); pointer-events: none; }
+@media (prefers-reduced-motion: no-preference) { #pencil-hint { animation: drop 0.25s ease-out; } }
+@keyframes drop { from { translate: -50% -12px; opacity: 0; } }
+/* Narration: what the agent says about a command, over the page above the toolbar: sending, the transcript, thinking,
+   then the answer, read aloud while narration is on. */
+#narration { position: fixed; z-index: 3; left: 50%; translate: -50% 0; bottom: calc(72px + env(safe-area-inset-bottom)); box-sizing: border-box;
+  width: min(440px, calc(100vw - 16px)); display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 2px 10px;
+  padding: 10px 6px 8px 14px; border: 1px solid var(--glass-line); border-radius: 18px; background: var(--glass);
+  -webkit-backdrop-filter: blur(14px) saturate(1.6); backdrop-filter: blur(14px) saturate(1.6); box-shadow: var(--lift); }
+#narration[data-mode="error"] { border-color: var(--ended); }
+@media (prefers-reduced-motion: no-preference) { #narration { animation: lift 0.3s cubic-bezier(0.2, 0.9, 0.3, 1.2); } }
+@keyframes lift { from { translate: -50% 24px; opacity: 0; } }
+#narration-face { grid-row: 1 / 3; width: 32px; height: 32px; border-radius: 50%; display: grid; place-items: center; color: #fff;
+  background: linear-gradient(135deg, var(--accent), var(--magic)); }
+#narration-face svg { width: 18px; height: 18px; }
+#narration-label { color: var(--muted); font-size: 12px; font-weight: 700; letter-spacing: 0.02em; }
+#narration-text { grid-column: 2 / 4; margin: 0; max-height: 9em; overflow-y: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
+#narration-said { grid-column: 2 / 4; margin: 0; color: var(--muted); font-size: 13px; font-style: italic; overflow: hidden; white-space: nowrap;
+  text-overflow: ellipsis; }
+#narration-said:empty { display: none; }
+#narration-close { grid-column: 3; grid-row: 1; width: 36px; height: 36px; }
 #narration-close svg { width: 18px; height: 18px; }
-#narration-play { position: relative; grid-column: 1; width: 36px; height: 36px; }
-#narration-open { grid-column: 2; justify-self: start; min-height: 36px; padding: 0 10px; border: 0; border-radius: 999px; background: none;
-  color: var(--accent); font-weight: 650; }
+#narration-foot { grid-column: 1 / 4; display: flex; align-items: center; gap: 6px; min-height: 0; }
+#narration-play { position: relative; width: 40px; height: 40px; }
+#narration-open { min-height: 36px; padding: 0 10px; border: 0; border-radius: 999px; background: none; color: var(--accent); font-weight: 650; }
+/* Thinking: three dots; speaking: bars that move while the reply is read. */
+.dots { display: inline-flex; gap: 4px; margin-left: 6px; vertical-align: middle; }
+.dots i { width: 6px; height: 6px; border-radius: 50%; background: currentColor; opacity: 0.35; }
+@media (prefers-reduced-motion: no-preference) { .dots i { animation: bob 1.1s ease-in-out infinite; } .dots i:nth-child(2) { animation-delay: 0.15s; }
+  .dots i:nth-child(3) { animation-delay: 0.3s; } }
+@keyframes bob { 30% { opacity: 1; translate: 0 -3px; } }
+#narration-bars { display: inline-flex; align-items: center; gap: 3px; height: 18px; color: var(--accent); }
+#narration-bars i { width: 3px; height: 30%; border-radius: 2px; background: currentColor; }
+@media (prefers-reduced-motion: no-preference) { #narration-bars i { animation: talk 0.9s ease-in-out infinite; }
+  #narration-bars i:nth-child(2) { animation-delay: 0.2s; } #narration-bars i:nth-child(3) { animation-delay: 0.4s; } #narration-bars i:nth-child(4) { animation-delay: 0.1s; } }
+@keyframes talk { 50% { height: 100%; } }
+/* The camera: a live preview over everything, a shutter for a photo, a record button for a video, and a flip. */
+#camera { position: fixed; z-index: 5; inset: 0; display: flex; flex-direction: column; background: #000; color: #fff; }
+#camera-view { flex: 1; min-height: 0; width: 100%; object-fit: contain; background: #000; }
+#camera-note { position: absolute; top: calc(16px + env(safe-area-inset-top)); left: 16px; right: 16px; margin: 0; text-align: center; font-weight: 600; }
+#camera-note:empty { display: none; }
+#camera-note button { margin-top: 10px; min-height: 40px; padding: 0 16px; border: 0; border-radius: 999px; background: #fff; color: #000; font-weight: 650; }
+#camera-clock { position: absolute; top: calc(16px + env(safe-area-inset-top)); left: 50%; translate: -50% 0; padding: 4px 12px; border-radius: 999px;
+  background: var(--danger); font-variant-numeric: tabular-nums; font-weight: 700; }
+#camera-bar { display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; padding: 14px 20px calc(18px + env(safe-area-inset-bottom)); }
+#camera-modes { grid-column: 1 / 4; display: flex; justify-content: center; gap: 6px; margin-bottom: 12px; }
+#camera-modes button { min-height: 32px; padding: 0 14px; border: 0; border-radius: 999px; background: none; color: rgb(255 255 255 / 70%); font-weight: 650; }
+#camera-modes button[aria-pressed="true"] { background: rgb(255 255 255 / 18%); color: #fff; }
+#camera .round { color: #fff; }
+#camera-close { justify-self: start; }
+#camera-flip { justify-self: end; }
+#camera-shutter { width: 72px; height: 72px; padding: 0; border: 4px solid #fff; border-radius: 50%; background: none; }
+#camera-shutter::after { content: ""; display: block; width: 56px; height: 56px; margin: auto; border-radius: 50%; background: #fff; }
+#camera[data-mode="video"] #camera-shutter::after { background: var(--danger); }
+#camera-shutter[aria-pressed="true"]::after { width: 26px; height: 26px; border-radius: 6px; }
+@media (prefers-reduced-motion: no-preference) { #camera { animation: fade 0.2s ease-out; } #camera-shutter::after { transition: all 0.2s; } }
+/* Files picked, shot or recorded wait here, each with a preview and a remove button, until Send. */
+#chat-tray { display: flex; gap: 8px; margin: 0; padding: 8px 12px 2px; overflow-x: auto; list-style: none; }
+#chat-tray li { position: relative; flex: none; width: 76px; }
+#chat-tray .thumb { display: grid; place-items: center; width: 76px; height: 76px; overflow: hidden; border: 1px solid var(--line); border-radius: 12px;
+  background: var(--soft); color: var(--muted); font-size: 11px; font-weight: 700; text-transform: uppercase; }
+#chat-tray .thumb :is(img, video) { width: 100%; height: 100%; object-fit: cover; }
+#chat-tray .thumb.video::after { content: "▶"; position: absolute; top: 28px; left: 30px; color: #fff; text-shadow: 0 1px 4px #000; }
+#chat-tray .name { display: block; margin-top: 2px; overflow: hidden; color: var(--muted); font-size: 11px; white-space: nowrap; text-overflow: ellipsis; }
+#chat-tray .drop { position: absolute; top: -6px; right: -6px; width: 24px; height: 24px; padding: 0; border: 2px solid var(--paper); border-radius: 50%;
+  background: var(--ink); color: var(--paper); font: 700 14px/1 system-ui, sans-serif; }
+@media (prefers-reduced-motion: no-preference) { #chat-tray li { animation: pick 0.25s ease-out; } }
+/* A command: the sheet as a compact bar over the page (the marked area stays in view), its thread a tap away. */
+#chat[data-mode="command"] #chat-scroll, #chat[data-mode="command"] #chat-typing { display: none; }
+#chat-expand { display: none; }
+#chat[data-mode="command"] #chat-expand { display: grid; }
+#chat-expand svg { width: 20px; height: 20px; }
 </style>
 </head>
 <body>
@@ -197,22 +290,24 @@ svg { fill: currentColor; }
 <div id="recorder" hidden><span id="clock" class="clock"></span><canvas id="dock-wave" class="wave" aria-hidden="true"></canvas><button id="cancel" type="button">Cancel</button></div>
 <button id="mic" class="mic" type="button" aria-pressed="false" aria-label="Record a voice note" hidden><svg class="idle" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 14a3 3 0 0 0 3-3V5a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3Zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.93V21h2v-3.07A7 7 0 0 0 19 11h-2Z"/></svg><svg class="busy" viewBox="0 0 24 24" aria-hidden="true"><path d="M11 20V7.83l-5.6 5.6L4 12l8-8 8 8-1.4 1.43-5.6-5.6V20h-2Z"/></svg></button>
 <section id="chat" role="dialog" aria-labelledby="chat-title" hidden>
-<div id="chat-head"><h2 id="chat-title" tabindex="-1"></h2><button id="chat-close" class="round" type="button" aria-label="Close the chat"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6.4 19 5 17.6l5.6-5.6L5 6.4 6.4 5l5.6 5.6L17.6 5 19 6.4 13.4 12l5.6 5.6-1.4 1.4-5.6-5.6L6.4 19Z"/></svg></button></div>
+<div id="chat-head"><h2 id="chat-title" tabindex="-1"></h2><button id="chat-expand" class="round" type="button" aria-label="Show the conversation"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4h16a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H8l-4 4V6a2 2 0 0 1 2-2Z"/></svg></button><button id="chat-close" class="round" type="button" aria-label="Close the chat"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6.4 19 5 17.6l5.6-5.6L5 6.4 6.4 5l5.6 5.6L17.6 5 19 6.4 13.4 12l5.6 5.6-1.4 1.4-5.6-5.6L6.4 19Z"/></svg></button></div>
 <div id="chat-scroll"><p id="chat-ask" hidden></p><div id="chat-choices" role="group" aria-label="Quick answers" hidden></div><ol id="chat-lines" aria-live="polite"></ol><button id="chat-new" type="button" aria-label="Scroll to new messages" hidden>↓ new</button></div>
 <p id="chat-typing" hidden>The agent is typing…</p>
 <p id="chat-error" role="alert" hidden></p>
 <div id="chat-quote-row" hidden><blockquote id="chat-quote"></blockquote><button id="chat-drop-quote" class="round" type="button" aria-label="Drop the quote"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6.4 19 5 17.6l5.6-5.6L5 6.4 6.4 5l5.6 5.6L17.6 5 19 6.4 13.4 12l5.6 5.6-1.4 1.4-5.6-5.6L6.4 19Z"/></svg></button></div>
 <div id="chat-reply-row" hidden><p id="chat-reply"><strong>Reply to</strong> <span id="chat-reply-text"></span></p><button id="chat-drop-reply" class="round" type="button" aria-label="Don't reply"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6.4 19 5 17.6l5.6-5.6L5 6.4 6.4 5l5.6 5.6L17.6 5 19 6.4 13.4 12l5.6 5.6-1.4 1.4-5.6-5.6L6.4 19Z"/></svg></button></div>
-<div id="chat-compose"><button id="chat-attach" class="round" type="button" aria-label="Send a file"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M16.5 6v11.5a4 4 0 0 1-8 0V5a2.5 2.5 0 0 1 5 0v10.5a1 1 0 0 1-2 0V6H10v9.5a2.5 2.5 0 0 0 5 0V5a4 4 0 0 0-8 0v12.5a5.5 5.5 0 0 0 11 0V6h-1.5Z"/></svg></button><input id="chat-file" type="file" hidden><textarea id="chat-text" rows="1" aria-label="Your message"></textarea><div id="chat-recorder" hidden><button id="chat-cancel" type="button">Cancel</button><span id="chat-clock" class="clock"></span><canvas id="chat-wave" class="wave" aria-hidden="true"></canvas></div><button id="chat-send" class="round" type="button" aria-label="Send" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M11 20V7.83l-5.6 5.6L4 12l8-8 8 8-1.4 1.43-5.6-5.6V20h-2Z"/></svg></button><button id="chat-mic" class="round mic" type="button" aria-pressed="false" aria-label="Record a voice note"><svg class="idle" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 14a3 3 0 0 0 3-3V5a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3Zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.93V21h2v-3.07A7 7 0 0 0 19 11h-2Z"/></svg><svg class="busy" viewBox="0 0 24 24" aria-hidden="true"><path d="M11 20V7.83l-5.6 5.6L4 12l8-8 8 8-1.4 1.43-5.6-5.6V20h-2Z"/></svg></button></div>
+<ul id="chat-tray" aria-label="Files to send" hidden></ul>
+<div id="chat-compose"><button id="chat-attach" class="round" type="button" aria-label="Send a file"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M16.5 6v11.5a4 4 0 0 1-8 0V5a2.5 2.5 0 0 1 5 0v10.5a1 1 0 0 1-2 0V6H10v9.5a2.5 2.5 0 0 0 5 0V5a4 4 0 0 0-8 0v12.5a5.5 5.5 0 0 0 11 0V6h-1.5Z"/></svg></button><button id="chat-camera" class="round" type="button" aria-label="Take a photo or video"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 3 7.17 5H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-3.17L15 3H9Zm3 15a5 5 0 1 1 0-10 5 5 0 0 1 0 10Zm0-2a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z"/></svg></button><input id="chat-file" type="file" multiple hidden><textarea id="chat-text" rows="1" aria-label="Your message"></textarea><div id="chat-recorder" hidden><button id="chat-cancel" type="button">Cancel</button><span id="chat-clock" class="clock"></span><canvas id="chat-wave" class="wave" aria-hidden="true"></canvas></div><button id="chat-send" class="round" type="button" aria-label="Send" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M11 20V7.83l-5.6 5.6L4 12l8-8 8 8-1.4 1.43-5.6-5.6V20h-2Z"/></svg></button><button id="chat-mic" class="round mic" type="button" aria-pressed="false" aria-label="Record a voice note"><svg class="idle" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 14a3 3 0 0 0 3-3V5a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3Zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.93V21h2v-3.07A7 7 0 0 0 19 11h-2Z"/></svg><svg class="busy" viewBox="0 0 24 24" aria-hidden="true"><path d="M11 20V7.83l-5.6 5.6L4 12l8-8 8 8-1.4 1.43-5.6-5.6V20h-2Z"/></svg></button></div>
 </section>
-<button id="pencil" type="button" aria-pressed="false" aria-expanded="false" aria-label="Magic Pencil: select a part of the page" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25ZM20.71 7.04a1 1 0 0 0 0-1.41l-2.34-2.34a1 1 0 0 0-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83Z"/></svg></button>
-<div id="pencil-menu" role="group" aria-label="Magic Pencil" hidden><button id="pencil-freeform" type="button"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12c0-5 6-8 11-6s4 9-2 11-11 0-9-5"/></svg>Freeform</button><button id="pencil-rectangle" type="button"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="6" width="16" height="12" rx="1" stroke-dasharray="3 2"/></svg>Rectangle</button></div>
-<div id="pencil-layer" hidden><canvas id="pencil-ink" aria-hidden="true"></canvas></div>
+<nav id="magic" aria-label="Magic Link" data-mode="open" hidden><button id="pencil" class="tool" type="button" aria-expanded="true" aria-controls="magic-tools" aria-label="Magic Pencil: show or hide the tools"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25ZM20.71 7.04a1 1 0 0 0 0-1.41l-2.34-2.34a1 1 0 0 0-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83Z"/></svg></button><div id="magic-tools"><button id="pencil-freeform" class="tool line" type="button" aria-pressed="false" aria-label="Freeform: draw around an area" title="Freeform"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 15.5C3.2 12.8 4.4 6.6 10.6 5.3c5.7-1.2 9.6 1.9 8.6 5.6-1 3.9-7.2 5.7-11.7 4.3"/><path d="M8 15.6c-.6 1.6-.3 3.2 1.1 4.4"/></svg></button><button id="pencil-rectangle" class="tool line" type="button" aria-pressed="false" aria-label="Rectangle: drag a box around an area" title="Rectangle"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="6" width="16" height="12" rx="2" stroke-dasharray="3.2 2.4"/></svg></button><span class="sep"></span><button id="magic-mic" class="tool" type="button" aria-pressed="false" aria-label="Talk: tap to record, or hold to talk" title="Talk"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 14a3 3 0 0 0 3-3V5a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3Zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.93V21h2v-3.07A7 7 0 0 0 19 11h-2Z"/></svg></button><button id="magic-camera" class="tool" type="button" aria-label="Take a photo or video" title="Camera"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 3 7.17 5H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-3.17L15 3H9Zm3 15a5 5 0 1 1 0-10 5 5 0 0 1 0 10Zm0-2a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z"/></svg></button><button id="magic-attach" class="tool" type="button" aria-label="Send files" title="Files"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M16.5 6v11.5a4 4 0 0 1-8 0V5a2.5 2.5 0 0 1 5 0v10.5a1 1 0 0 1-2 0V6H10v9.5a2.5 2.5 0 0 0 5 0V5a4 4 0 0 0-8 0v12.5a5.5 5.5 0 0 0 11 0V6h-1.5Z"/></svg></button><span class="sep"></span><button id="magic-narrate" class="tool" type="button" aria-pressed="true" aria-label="Narration: read the agent's replies aloud" title="Narration"><svg class="on" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 9v6h4l5 5V4L7 9H3Zm13.5 3A4.5 4.5 0 0 0 14 7.97v8.05A4.47 4.47 0 0 0 16.5 12ZM14 3.23v2.06a7 7 0 0 1 0 13.42v2.06A9 9 0 0 0 14 3.23Z"/></svg><svg class="off" viewBox="0 0 24 24" aria-hidden="true"><path d="M16.5 12A4.5 4.5 0 0 0 14 7.97v2.21l2.45 2.45c.03-.2.05-.41.05-.63ZM19 12c0 .94-.2 1.82-.54 2.64l1.51 1.51A8.8 8.8 0 0 0 21 12a9 9 0 0 0-7-8.77v2.06A7 7 0 0 1 19 12ZM4.27 3 3 4.27 7.73 9H3v6h4l5 5v-6.73l4.25 4.25c-.67.52-1.42.93-2.25 1.18v2.06a9 9 0 0 0 3.69-1.81L19.73 21 21 19.73l-9-9L4.27 3ZM12 4 9.91 6.09 12 8.18V4Z"/></svg></button><button id="magic-chat" class="tool" type="button" aria-label="Open the chat" title="Chat"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4h16a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H8l-4 4V6a2 2 0 0 1 2-2Z"/></svg></button></div></nav>
+<div id="pencil-layer" hidden><canvas id="pencil-ink" aria-hidden="true"></canvas><div id="pencil-picks" aria-hidden="true"></div></div>
 <p id="pencil-hint" role="status" hidden></p>
-<section id="narration" aria-live="polite" hidden><span id="narration-label">The agent</span><p id="narration-text"></p><button id="narration-close" class="round" type="button" aria-label="Close the note"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6.4 19 5 17.6l5.6-5.6L5 6.4 6.4 5l5.6 5.6L17.6 5 19 6.4 13.4 12l5.6 5.6-1.4 1.4-5.6-5.6L6.4 19Z"/></svg></button><button id="narration-play" class="round play idle" type="button" aria-label="Play spoken reply" hidden></button><button id="narration-open" type="button">Open the chat</button></section>
+<section id="narration" aria-live="polite" hidden><span id="narration-face" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M19 9l1.25-2.75L23 5l-2.75-1.25L19 1l-1.25 2.75L15 5l2.75 1.25L19 9Zm-7.5.5L9 4 6.5 9.5 1 12l5.5 2.5L9 20l2.5-5.5L17 12l-5.5-2.5ZM19 15l-1.25 2.75L15 19l2.75 1.25L19 23l1.25-2.75L23 19l-2.75-1.25L19 15Z"/></svg></span><span id="narration-label">The agent</span><button id="narration-close" class="round" type="button" aria-label="Close the note"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6.4 19 5 17.6l5.6-5.6L5 6.4 6.4 5l5.6 5.6L17.6 5 19 6.4 13.4 12l5.6 5.6-1.4 1.4-5.6-5.6L6.4 19Z"/></svg></button><p id="narration-said"></p><p id="narration-text"></p><div id="narration-foot"><button id="narration-play" class="round play idle" type="button" aria-label="Play spoken reply" hidden></button><span id="narration-bars" aria-hidden="true" hidden><i></i><i></i><i></i><i></i></span><button id="narration-open" type="button">Open the chat</button></div></section>
+<section id="camera" role="dialog" aria-modal="true" aria-label="Camera" data-mode="photo" hidden><video id="camera-view" playsinline muted autoplay></video><span id="camera-clock" hidden></span><p id="camera-note"></p><div id="camera-bar"><div id="camera-modes" role="group" aria-label="Camera mode"><button id="camera-photo" type="button" aria-pressed="true">Photo</button><button id="camera-video" type="button" aria-pressed="false">Video</button></div><button id="camera-close" class="round" type="button" aria-label="Close the camera"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6.4 19 5 17.6l5.6-5.6L5 6.4 6.4 5l5.6 5.6L17.6 5 19 6.4 13.4 12l5.6 5.6-1.4 1.4-5.6-5.6L6.4 19Z"/></svg></button><button id="camera-shutter" type="button" aria-pressed="false" aria-label="Take a photo"></button><button id="camera-flip" class="round" type="button" aria-label="Switch camera"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 5h-3.17L15 3H9L7.17 5H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2Zm-5 11.5V14H9v2.5L5.5 13 9 9.5V12h6V9.5l3.5 3.5-3.5 3.5Z"/></svg></button></div></section>
+<input id="camera-file" type="file" accept="image/*,video/*" capture="environment" hidden>
 <div id="shield" hidden></div>
 <button id="status" type="button" popovertarget="panel" aria-label="Board status"><span id="dot"></span><span id="badge" hidden></span></button>
-<div id="panel" popover><strong id="title">Board</strong><p class="session"><span id="session-dot"></span><span id="session">Connecting…</span></p><p id="typing" hidden>Typing…</p><ul id="unread" aria-label="Replies you haven't read" hidden></ul><button id="talk" type="button"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4h16a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H8l-4 4V6a2 2 0 0 1 2-2Z"/></svg>Talk to the agent</button><p id="notice"></p><label id="aloud-row"><input id="aloud" type="checkbox"> Read replies aloud</label><button id="close" type="button" hidden>Make read-only</button><p id="waiting"></p></div>
+<div id="panel" popover><strong id="title">Board</strong><p class="session"><span id="session-dot"></span><span id="session">Connecting…</span></p><p id="typing" hidden>Typing…</p><ul id="unread" aria-label="Replies you haven't read" hidden></ul><button id="talk" type="button"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4h16a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H8l-4 4V6a2 2 0 0 1 2-2Z"/></svg>Talk to the agent</button><p id="notice"></p><label id="aloud-row"><input id="aloud" type="checkbox"> Narration: read replies aloud</label><button id="close" type="button" hidden>Make read-only</button><p id="waiting"></p></div>
 <p id="toast" role="status" hidden></p>
 <audio id="player" preload="auto" hidden></audio>
 <script src="/board/assets/board.js"></script>

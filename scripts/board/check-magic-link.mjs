@@ -177,7 +177,7 @@ section{margin:24px 72px;padding:16px;border:1px solid #d1d9e0;border-radius:10p
   await until(() => evaluate(`!document.getElementById("pencil").hidden`), "the pencil");
   const boot = await inFrame("window.__boot");
 
-  await click("#pencil");
+  await sleep(600); // the toolbar settles in
   await click("#pencil-freeform");
   const box = await inFrame(`(() => { const r = document.getElementById("title").getBoundingClientRect(); return [r.x + r.width / 2, r.y + r.height / 2, r.width / 2 + 24, r.height / 2 + 22]; })()`);
   const loop = Array.from({ length: 41 }, (_, index) => [box[0] + box[2] * Math.cos(index * Math.PI / 20), box[1] + box[3] * Math.sin(index * Math.PI / 20)]);
