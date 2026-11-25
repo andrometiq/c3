@@ -375,12 +375,19 @@
     if (!audioContext && window.AudioContext) audioContext = new AudioContext(); // in the tap, so a phone lets it run
     audioContext?.resume().catch(() => {});
     let isCancelled = false;
-    recording = { part, started: performance.now(), isOpening: true, stop: () => { isCancelled = true; } };
+    const opening = { part, started: performance.now(), isOpening: true, stop: () => {
+      isCancelled = true;
+      recording = null; // Cancel frees the shell at once, not when the browser opens the mic
+      drawVoice();
+      playNext();
+    } };
+    recording = opening;
     drawVoice();
     const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } })
       .catch(() => null);
     if (!stream || isCancelled) {
       stream?.getTracks().forEach((track) => track.stop());
+      if (recording !== opening) return; // cancelled: a later recording may hold the mic now
       recording = null;
       if (!stream) notify("Microphone unavailable: check the browser's permission.");
       playNext();

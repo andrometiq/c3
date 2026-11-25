@@ -49,6 +49,9 @@ try {
   const send = (method, params) => browser.send(method, params, session);
   for (const domain of ["Page", "Runtime", "Network"]) await send(`${domain}.enable`);
   await send("Target.setAutoAttach", { autoAttach: true, waitForDebuggerOnStart: false, flatten: true });
+  // window.__micDelayMs holds the mic's opening back, as a phone's permission prompt does.
+  await send("Page.addScriptToEvaluateOnNewDocument", { source: `(() => { const media = navigator.mediaDevices; if (!media) return; const open = media.getUserMedia.bind(media);
+    media.getUserMedia = (constraints) => new Promise((resolve) => setTimeout(resolve, window.__micDelayMs ?? 0)).then(() => open(constraints)); })();` });
   await send("Emulation.setDeviceMetricsOverride", { width: 390, height: 844, deviceScaleFactor: 2, mobile: true });
   await send("Network.setCookie", { ...cookies[0], url });
 
@@ -201,6 +204,20 @@ try {
   await until(async () => (await statesOf(held.answer)).includes("playing"), "the held reply after the recording");
   report(duringRecording.length === 0, "held", `reply ${held.answer} while recording -> ${JSON.stringify(duringRecording)}; after Cancel -> ${JSON.stringify(await statesOf(held.answer))}`);
   await inFrame("c3.speak(null)");
+
+  // Cancel while the mic still opens frees the shell at once, and the mic that opens late is let go.
+  await inShell("window.__micDelayMs = 2000, true");
+  await click(await center("#chat-mic"));
+  await until(async () => (await inShell(`document.getElementById("chat-mic").ariaPressed`)) === "true", "the mic opening");
+  await click(await center("#chat-cancel"));
+  const afterCancel = await inShell(`document.getElementById("chat-mic").ariaPressed`);
+  const listen = await inFrame(`c3.speak(${held.answer}).then(() => "taken", (error) => error.message)`);
+  await inFrame("c3.speak(null)");
+  await sleep(2300);
+  const afterOpen = await inShell(`document.getElementById("chat-mic").ariaPressed`);
+  await inShell("window.__micDelayMs = 0, true");
+  report(afterCancel === "false" && listen === "taken" && afterOpen === "false", "opening",
+    `Cancel while the mic opened -> mic pressed ${afterCancel}, c3.speak ${listen}; once the mic opened -> pressed ${afterOpen}`);
 
   // A fresh load (no tap yet) with the setting on: the reply waits for a tap, and a tap on the circle, the shell's own
   // control (what a phone that ignores a tap in the frame needs), plays it.
