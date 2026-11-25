@@ -738,6 +738,10 @@ type AttachedMsg struct {
 	// omitempty: nil on failures and for older brokers.
 	Capabilities *c3types.Capabilities `json:"capabilities,omitempty"`
 
+	// Link is a board's own link, the one its notice names. Set only on a
+	// successful board attach (additive + omitempty).
+	Link string `json:"link,omitempty"`
+
 	// QueuedCount is the number of held inbound waiting on the just-claimed
 	// route at attach time; QueuedSummary is a compact preview of the oldest few
 	// (the adapter renders it and instructs the agent to call fetch_queue).

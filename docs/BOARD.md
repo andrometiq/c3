@@ -96,6 +96,27 @@ An agent sends a page with `text=""`: a reply with text and a file splits, and `
 only the first part. After an approve, its `reply_to` is the approve line's own id (413 above),
 not the approved message's (418).
 
+## Boards for service clients
+
+A long-running program that speaks C3's socket protocol (not a CLI behind an adapter) can hold
+boards too, for example to serve live pages for many chats from one process:
+
+1. `hello` as a queue-only client that negotiates fetch receipts and `intake_metadata:1`.
+2. `recover_session` with a fixed stable session id, before the first attach. The board's owner is
+   (cli, stable id, cwd), so the same three values hold its boards again after a reconnect or a
+   broker restart; a changed id loses them for good.
+3. One `attach expr="+board:<name>"` per board. The result's `link` field is the board's link (the
+   one its notice names).
+4. `reply channel="board:<name>"` with a page file to publish; `fetch_queue channel="board:<name>"`
+   to read the owner's acts.
+
+A board act's row carries the same intake source as a Telegram message: `channel` `board`, the
+board number as `chat_id`, the act id as `message_id` and `update_id`, the viewer as `sender_id`,
+C3's line as `text`, a file or voice note as `attachments`, and `from_page: true` for an act the
+page's script sent. When the owner makes a board read-only, the holder gets an `inbound` frame of kind
+`system` titled "Board closed", and later attaches and replies to it fail; a holder that still needs a
+live page attaches a board under a new name.
+
 ## URLs
 
 | Route | What it is |

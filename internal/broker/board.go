@@ -139,6 +139,7 @@ func (b *Broker) attachBoard(conn *ipc.Conn, stub *Stub, name string, steal, rep
 		Op: ipc.OpAttached, OK: true, Status: ipc.AttachStatusOK,
 		Channel: channel.BoardChannelName, ChatID: board.Number, Name: selector,
 		Capabilities: b.capsForChannel(output.Channel),
+		Link:         board.Link,
 		Notice:       boardAttachNotice(board, stub.StableSessionIDValue() == "", starter),
 	})))
 }

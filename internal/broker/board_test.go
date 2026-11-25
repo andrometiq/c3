@@ -236,7 +236,7 @@ func TestBoardAttachBindsTheBoardToTheCallingSession(t *testing.T) {
 	if holder, held := b.Routes.Holder(boardRouteKey(board.Number)); !held || holder != stub {
 		t.Fatalf("board route holder=%v held=%v, want the calling session", holder, held)
 	}
-	if attached.Channel != channel.BoardChannelName || attached.Name != "board:plan" || len(attached.Routes) != 1 || attached.Routes[0].Name != "board:plan" {
+	if attached.Channel != channel.BoardChannelName || attached.Name != "board:plan" || attached.Link != board.Link || len(attached.Routes) != 1 || attached.Routes[0].Name != "board:plan" {
 		t.Fatalf("attach result=%+v", attached)
 	}
 	for _, want := range []string{board.Link, `reply channel="board:plan"`, "[board plan · <part> · msg N]", "Approved your message M", "never their word for a push", testStarterHTML,
@@ -251,12 +251,14 @@ func TestBoardAttachBindsTheBoardToTheCallingSession(t *testing.T) {
 	}
 
 	again := mustAttach(t, peer, ipc.AttachReq{Expr: "+board:plan", CWD: boardCWD})
-	if strings.Contains(again.Notice, testStarterHTML) || !strings.Contains(again.Notice, board.Link) || boards.boardCount() != 1 {
+	if strings.Contains(again.Notice, testStarterHTML) || !strings.Contains(again.Notice, board.Link) || again.Link != board.Link || boards.boardCount() != 1 {
 		t.Fatalf("re-attach notice=%q boards=%d, want the link without a starter and no second board", again.Notice, boards.boardCount())
 	}
 
-	// A topic attach greets its topic; a board attach writes nothing into the board.
-	mustAttach(t, peer, ipc.AttachReq{Expr: "+c3"})
+	// A topic attach greets its topic and names no link; a board attach writes nothing into the board.
+	if topic := mustAttach(t, peer, ipc.AttachReq{Expr: "+c3"}); topic.Link != "" {
+		t.Fatalf("a topic attach named a link: %q", topic.Link)
+	}
 	waitForReply(t, telegram, "Attached")
 	if replies := boards.sendRepliesSnapshot(); len(replies) != 0 {
 		t.Fatalf("board attach wrote into the board: %+v", replies)
