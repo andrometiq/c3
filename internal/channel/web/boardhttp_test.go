@@ -438,12 +438,20 @@ func TestShellPinsTheFrameAndCutsTheOpener(t *testing.T) {
 	createBoard(t, c, "plan")
 	w := httptest.NewRecorder()
 	c.routes().ServeHTTP(w, request(http.MethodGet, "/board/plan", "", cookie, false))
-	shellCSP := "default-src 'self'; script-src 'self'; style-src 'unsafe-inline'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'"
+	shellCSP := "default-src 'self'; script-src 'self'; style-src 'unsafe-inline'; img-src 'self' blob:; media-src 'self' blob:; " +
+		"object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'"
 	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "<iframe") {
 		t.Fatalf("shell=%d %q", w.Code, w.Body.String())
 	}
 	if got := w.Header().Get("Content-Security-Policy"); got != shellCSP+"; frame-src http://127.0.0.1:8371/board/plan/page" {
 		t.Fatalf("shell CSP %q", got)
+	}
+	// The shell records voice and opens the camera; the frame's sandbox and its own policy get neither.
+	if got := w.Header().Get("Permissions-Policy"); got != "microphone=(self), camera=(self)" {
+		t.Fatalf("shell Permissions-Policy %q", got)
+	}
+	if strings.Contains(w.Body.String(), `allow="`) {
+		t.Fatal("the shell delegates a permission to the page's frame")
 	}
 	if w.Header().Get("Cross-Origin-Opener-Policy") != "same-origin" || w.Header().Get("X-Frame-Options") != "DENY" {
 		t.Fatalf("shell headers %v", w.Header())

@@ -32,10 +32,15 @@ const (
 	boardEmojiMaxBytes = 32
 	boardPageCSP       = documentContentSecurityPolicy + "; connect-src 'none'"
 	// The shell holds the cookie and shows agent strings, so it runs only its
-	// own script file: no inline script or event handlers.
-	boardShellCSP       = "default-src 'self'; script-src 'self'; style-src 'unsafe-inline'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'"
-	boardRawCSP         = "default-src 'none'; sandbox"
-	boardRetryAfterBusy = "2"
+	// own script file: no inline script or event handlers. blob: images and
+	// media are the owner's own files, previewed before they are sent.
+	boardShellCSP = "default-src 'self'; script-src 'self'; style-src 'unsafe-inline'; img-src 'self' blob:; media-src 'self' blob:; " +
+		"object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'"
+	// The shell records voice and opens the camera for the owner's photos and
+	// videos; the page's frame gets neither.
+	boardShellPermissions = "microphone=(self), camera=(self)"
+	boardRawCSP           = "default-src 'none'; sandbox"
+	boardRetryAfterBusy   = "2"
 	// A long recording comes as numbered parts of a few minutes each.
 	boardVoiceMaxSegment = 999
 	// Why a part of a recording never reached C3 (X-Voice-Unsent), also its
@@ -162,6 +167,7 @@ func (c *Channel) handleBoardShell(w http.ResponseWriter, r *http.Request) {
 	}
 	setPageHeaders(w)
 	w.Header().Set("Content-Security-Policy", boardShellCSP+"; frame-src "+c.requestOrigin(r)+"/board/"+name+"/page")
+	w.Header().Set("Permissions-Policy", boardShellPermissions)
 	w.Header().Set("Cross-Origin-Opener-Policy", "same-origin")
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_, _ = w.Write(shell)
